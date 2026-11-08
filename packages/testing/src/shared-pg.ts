@@ -1258,6 +1258,8 @@ export async function grantDeferredRuntimeAccess(
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.list_uncompacted_recording_tracks_v1(integer, text)
       TO ${grantee};
+    GRANT EXECUTE ON FUNCTION opengeni_private.end_agent_call_rings_v1(uuid)
+      TO ${grantee};
   `);
 }
 

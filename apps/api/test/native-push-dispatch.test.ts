@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import type { ClaimedNativePushDelivery } from "@opengeni/db";
 import {
+  createApnsSender,
   createFcmSender,
   nativeCallPushBody,
   nativePushAlert,
@@ -9,6 +10,7 @@ import {
   nativePushCategory,
   nativePushData,
   nativeFcmMessage,
+  nativePushEndsCall,
   nativePushRingsCall,
 } from "../src/native-push-dispatch";
 import {
@@ -227,6 +229,43 @@ describe("native push presentation", () => {
     const notice = nativeFcmMessage({ token: "fcm-token-123", payload });
     expect(notice.android).toEqual({ priority: "HIGH", collapse_key: payload.sessionId });
     expect(notice.data.opengeniCall).toBeUndefined();
+  });
+
+  test("the end of a ring settled elsewhere is a silent Android message that replaces the ring", () => {
+    const ended = {
+      ...payload,
+      body: undefined,
+      rule: "call" as const,
+      callId: "44444444-4444-4444-8444-444444444444",
+      callEnded: "answeredElsewhere" as const,
+      ringUntil: "2026-10-26T18:00:40.000Z",
+    };
+    expect(nativePushEndsCall(ended)).toBe(true);
+    expect(nativePushRingsCall(ended)).toBe(false);
+    expect(nativePushEndsCall({ ...ended, callEnded: undefined })).toBe(false);
+    const message = nativeFcmMessage(
+      { token: "fcm-token-123", payload: ended },
+      Date.parse("2026-10-26T18:00:20.000Z"),
+    );
+    // Same collapse key as the ring, so FCM swaps a ring it has not delivered.
+    expect(message.android).toEqual({ priority: "HIGH", collapse_key: ended.callId, ttl: "20s" });
+    // No title or message: expo-notifications presents nothing for it.
+    expect(Object.keys(message.data)).toEqual(["opengeniCall"]);
+    expect(JSON.parse(message.data.opengeniCall!)).toEqual({
+      type: "ended",
+      callId: ended.callId,
+      reason: "answeredElsewhere",
+    });
+    // iOS hears a call's outcome from the app; the sender never sends one.
+    const { privateKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const apns = createApnsSender({
+      keyId: "KEY",
+      teamId: "TEAM",
+      privateKey: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    });
+    return apns({ ...delivery(), platform: "ios", voipToken: null, payload: ended }).then(
+      (result) => expect(result.outcome).toBe("failed"),
+    );
   });
 });
 

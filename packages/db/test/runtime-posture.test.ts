@@ -37,7 +37,11 @@ import {
 // Namespace access for the owner-routine lists, which other open PRs import
 // by name in the list above: a merge must not duplicate an imported binding.
 import * as runtimePosture from "../src/runtime-posture";
-import { postureBeforeMigration, publicTablesCreatedAfter } from "./predecessor-runtime-posture";
+import {
+  postureBeforeMigration,
+  privateRoutinesCreatedAfter,
+  publicTablesCreatedAfter,
+} from "./predecessor-runtime-posture";
 
 /** Write-allowed probes pin a fixed search path without the target schema. */
 const FIXED_SEARCH_PATH_PRIVATE_ROUTINES: ReadonlySet<string> = new Set([
@@ -966,8 +970,17 @@ describe("runtime database posture evaluator", () => {
     expect(postureBeforeMigration(automation)).toEqual({
       rlsStrategy: "force",
       tablesCreatedByLaterMigrations: publicTablesCreatedAfter(automation, true),
+      routinesCreatedByLaterMigrations: privateRoutinesCreatedAfter(automation, true),
     });
     expect(() => postureBeforeMigration("9999_missing.sql")).toThrow("unknown migration");
+  });
+
+  test("predecessor definer lists come from the private functions later migration files create", () => {
+    const ringEnd = "1344_agent_call_ring_end.sql";
+    expect(privateRoutinesCreatedAfter(ringEnd, true)).toContain("end_agent_call_rings_v1");
+    expect(privateRoutinesCreatedAfter(ringEnd, false)).not.toContain("end_agent_call_rings_v1");
+    // A function an earlier file created is never excused, even if a later file replaces it.
+    expect(privateRoutinesCreatedAfter(ringEnd, true)).not.toContain("ring_agent_call_v1");
   });
 
   test("retiring tables retain their exact privileges, ownership and RLS while present", () => {
@@ -4369,6 +4382,7 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 gr
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
       "list_uncompacted_recording_tracks_v1(integer, text)",
+      "end_agent_call_rings_v1(uuid)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -4376,6 +4390,7 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 gr
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
+      "end_agent_call_rings_v1(uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
@@ -4456,6 +4471,7 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 gr
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
       "list_uncompacted_recording_tracks_v1(integer, text)",
+      "end_agent_call_rings_v1(uuid)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
@@ -4469,7 +4485,8 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 gr
     beforeOutbox.privateRoutines = beforeOutbox.privateRoutines.filter(
       (entry) =>
         entry.name !== "claim_native_push_deliveries_v2(uuid, integer, integer)" &&
-        entry.name !== "ring_agent_call_v1(uuid, boolean)",
+        entry.name !== "ring_agent_call_v1(uuid, boolean)" &&
+        entry.name !== "end_agent_call_rings_v1(uuid)",
     );
     expect(eventViolations(beforeOutbox)).toEqual([]);
     const beforeRecordings = eventPosture(false);
@@ -4483,5 +4500,24 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 gr
         entry.name !== "list_uncompacted_recording_tracks_v1(integer, text)",
     );
     expect(eventViolations(beforeRecordings)).toEqual([]);
+    // A predecessor check excuses an absent definer that a later migration
+    // creates over tables that already exist; a present one is still checked.
+    const beforeRingEnd = eventPosture(false);
+    beforeRingEnd.privateRoutines = beforeRingEnd.privateRoutines.filter(
+      (entry) => entry.name !== "end_agent_call_rings_v1(uuid)",
+    );
+    const laterRingEnd = {
+      ...eventOptions,
+      routinesCreatedByLaterMigrations: ["end_agent_call_rings_v1"],
+    };
+    expect(eventViolations(beforeRingEnd, laterRingEnd)).toEqual([]);
+    const presentRingEnd = eventPosture(false);
+    const ringEnd = presentRingEnd.privateRoutines.find(
+      (entry) => entry.name === "end_agent_call_rings_v1(uuid)",
+    )!;
+    Object.assign(ringEnd, { securityDefiner: false });
+    expect(eventViolations(presentRingEnd, laterRingEnd)).toContain(
+      "runtime definer end_agent_call_rings_v1(uuid) is not SECURITY DEFINER",
+    );
   });
 });

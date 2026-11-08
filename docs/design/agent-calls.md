@@ -41,8 +41,16 @@ saying why the agent called, and the conversation lands in that chat.
      to the same `incoming` adapter as on iOS. An older app, or one without
      system calls, shows the plain notification instead. The setting shows on
      Android only in an app with system calls and push. While the app runs it
-     follows the call's state, as on iOS; a ring that was settled elsewhere
-     while the app is not running stops at its deadline.
+     follows the call's state, as on iOS. When the call is answered or
+     declined on another phone, or the agent cancels it, each Android phone
+     that rang gets one more data message, `opengeniCall` with
+     `type: "ended"` and the reason (`answeredElsewhere`,
+     `declinedElsewhere`, `remoteEnded`), with nothing to show; it stops the
+     ring even when the app is not running. It shares the ring's collapse key,
+     so FCM swaps a ring it has not delivered yet, and it expires with the
+     ring. A ring the server has not sent yet is withdrawn instead
+     (`end_agent_call_rings_v1`, migration 1344, which stays inactive until a
+     later migration grants it to the runtime).
 3. The tool waits while the phone rings, like `session_wait`, and returns the
    outcome directly: `answered`, `declined`, `missed`, or `cancelled` when the
    turn stopped. There is no background sweeper: the waiting tool, or the next

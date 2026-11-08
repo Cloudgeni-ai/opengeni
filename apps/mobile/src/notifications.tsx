@@ -441,6 +441,16 @@ let pendingOpen: { accountId: string; data: PushData } | null = null;
 Notifications.setNotificationHandler({
   handleNotification: async (notification) => {
     const data = notification.request.content.data as PushData | undefined;
+    // A data message with nothing to show, such as the end of a call's ring
+    // on a phone that cannot ring, stays silent.
+    if (!notification.request.content.title && !notification.request.content.body) {
+      return {
+        shouldShowBanner: false,
+        shouldShowList: false,
+        shouldPlaySound: false,
+        shouldSetBadge: false,
+      };
+    }
     const quiet = Boolean(data?.sessionId && data.sessionId === visibleSessionId);
     return {
       shouldShowBanner: !quiet,

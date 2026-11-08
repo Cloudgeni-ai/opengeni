@@ -5,20 +5,31 @@ import type { RuntimeDatabasePostureOptions } from "../src/runtime-posture";
 const migrationsDirectory = join(import.meta.dir, "../drizzle");
 const createTablePattern =
   /\bcreate\s+(?:unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?((?:"[^"]+"|[a-z_][a-z0-9_$]*)(?:\s*\.\s*(?:"[^"]+"|[a-z_][a-z0-9_$]*))?)/gi;
+const createPrivateFunctionPattern =
+  /\bcreate\s+(?:or\s+replace\s+)?function\s+"?opengeni_private"?\s*\.\s*("[^"]+"|[a-z_][a-z0-9_$]*)\s*\(/gi;
 
 function unquote(identifier: string): string {
   return identifier.startsWith('"') ? identifier.slice(1, -1) : identifier.toLowerCase();
 }
 
+function withoutComments(sql: string): string {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+}
+
 function publicTablesCreatedBy(sql: string): string[] {
-  const withoutComments = sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
   const tables: string[] = [];
-  for (const match of withoutComments.matchAll(createTablePattern)) {
+  for (const match of withoutComments(sql).matchAll(createTablePattern)) {
     const parts = match[1]!.split(/\s*\.\s*/).map(unquote);
     const [schema, name] = parts.length === 2 ? parts : ["public", parts[0]!];
     if (schema === "public") tables.push(name!);
   }
   return tables;
+}
+
+function privateFunctionsCreatedBy(sql: string): string[] {
+  return [...withoutComments(sql).matchAll(createPrivateFunctionPattern)].map((match) =>
+    unquote(match[1]!),
+  );
 }
 
 function migrationFiles(): string[] {
@@ -28,39 +39,58 @@ function migrationFiles(): string[] {
 }
 
 /**
- * Public tables first created by migration files that sort after `boundary` (or at it, when
- * `inclusive`). A table some earlier file already creates is never included.
+ * Objects first created by migration files that sort after `boundary` (or at it, when
+ * `inclusive`). An object some earlier file already creates is never included.
  */
-export function publicTablesCreatedAfter(boundary: string, inclusive: boolean): string[] {
+function createdAfter(
+  boundary: string,
+  inclusive: boolean,
+  createdBy: (sql: string) => string[],
+): string[] {
   const files = migrationFiles();
   if (!files.includes(boundary)) throw new Error(`unknown migration ${boundary}`);
   const earlier = new Set<string>();
   const later = new Set<string>();
   for (const file of files) {
     const isLater = inclusive ? file >= boundary : file > boundary;
-    for (const table of publicTablesCreatedBy(
-      readFileSync(join(migrationsDirectory, file), "utf8"),
-    )) {
+    for (const name of createdBy(readFileSync(join(migrationsDirectory, file), "utf8"))) {
       if (isLater) {
-        if (!earlier.has(table)) later.add(table);
+        if (!earlier.has(name)) later.add(name);
       } else {
-        earlier.add(table);
+        earlier.add(name);
       }
     }
   }
   return [...later].sort();
 }
 
+/** Public tables first created by migration files after `boundary` (or at it, when `inclusive`). */
+export function publicTablesCreatedAfter(boundary: string, inclusive: boolean): string[] {
+  return createdAfter(boundary, inclusive, publicTablesCreatedBy);
+}
+
+/**
+ * `opengeni_private` functions (names without arguments) first created by migration files after
+ * `boundary` (or at it, when `inclusive`).
+ */
+export function privateRoutinesCreatedAfter(boundary: string, inclusive: boolean): string[] {
+  return createdAfter(boundary, inclusive, privateFunctionsCreatedBy);
+}
+
 /**
  * Current runtime contract for a database migrated up to, but not including, `migration`.
- * Only contract tables that `migration` or a later file creates may be absent; every table that
- * exists at that point is still checked.
+ * Only contract tables and runtime definers that `migration` or a later file creates may be
+ * absent; every one that exists at that point is still checked.
  */
 export function postureBeforeMigration(
   migration: string,
   options: RuntimeDatabasePostureOptions = { rlsStrategy: "force" },
 ): RuntimeDatabasePostureOptions {
-  return { ...options, tablesCreatedByLaterMigrations: publicTablesCreatedAfter(migration, true) };
+  return {
+    ...options,
+    tablesCreatedByLaterMigrations: publicTablesCreatedAfter(migration, true),
+    routinesCreatedByLaterMigrations: privateRoutinesCreatedAfter(migration, true),
+  };
 }
 
 /** Current runtime contract for a database migrated up to and including `migration`. */
@@ -68,5 +98,9 @@ export function postureThroughMigration(
   migration: string,
   options: RuntimeDatabasePostureOptions = { rlsStrategy: "force" },
 ): RuntimeDatabasePostureOptions {
-  return { ...options, tablesCreatedByLaterMigrations: publicTablesCreatedAfter(migration, false) };
+  return {
+    ...options,
+    tablesCreatedByLaterMigrations: publicTablesCreatedAfter(migration, false),
+    routinesCreatedByLaterMigrations: privateRoutinesCreatedAfter(migration, false),
+  };
 }
