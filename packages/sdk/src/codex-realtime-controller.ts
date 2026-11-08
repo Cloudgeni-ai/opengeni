@@ -26,6 +26,7 @@ import type {
   CodexRealtimeWebrtcSession,
 } from "./codex-realtime";
 import { OpenGeniApiError } from "./errors";
+import { prepareRealtimeWebrtc, type PreparedRealtimeWebrtc } from "./realtime-webrtc-preparation";
 import { watchRealtimeAudioFlow } from "./realtime-audio-flow";
 import type { RealtimeAudioFlowIssue, RealtimeAudioFlowWatch } from "./realtime-audio-flow";
 import type {
@@ -303,6 +304,8 @@ export type CreateCodexRealtimeControllerOptions = {
   model?: SessionRealtimeModel | undefined;
   ownerStorageNamespace?: string | undefined;
   startTransport?: RealtimeControllerTransportStarter | undefined;
+  /** Alternate WebRTC transports can share local offer preparation. */
+  prepareWebrtc?: boolean | undefined;
   /** Model-visible application context captured with each durable realtime message. */
   getModelContext?: (() => string | undefined) | undefined;
   /**
@@ -322,6 +325,7 @@ export type CreateCodexRealtimeControllerOptions = {
 };
 
 export type RealtimeControllerTransportStarter = (input: {
+  prepared?: PreparedRealtimeWebrtc | undefined;
   client: CodexRealtimeControllerClient;
   workspaceId: string;
   sessionId: string;
@@ -345,6 +349,8 @@ export type RealtimeControllerTransportStarter = (input: {
 }) => Promise<CodexRealtimeWebrtcSession>;
 
 export type CodexRealtimeController = {
+  /** Prepare local transport only. Does not capture audio or begin a server/provider call. */
+  prepare?(): Promise<void>;
   snapshot(): CodexRealtimeControllerSnapshot;
   subscribe(listener: (snapshot: CodexRealtimeControllerSnapshot) => void): () => void;
   start(): Promise<void>;
@@ -616,7 +622,34 @@ export function createCodexRealtimeController(
     publish({ bridge: null, audibleOutput: "inactive" });
   };
 
+  let preparation: { abort: AbortController; task: Promise<PreparedRealtimeWebrtc> } | null = null;
+  const prepare = async (): Promise<void> => {
+    if (closed || stopping || active) return;
+    if (preparation) {
+      await preparation.task;
+      return;
+    }
+    if (options.startTransport && !options.prepareWebrtc) return;
+    const abort = new AbortController();
+    const entry = {
+      abort,
+      task: prepareRealtimeWebrtc({
+        createPeerConnection: options.createPeerConnection ?? (() => new RTCPeerConnection()),
+        signal: abort.signal,
+      }),
+    };
+    preparation = entry;
+    try {
+      await entry.task;
+    } catch (error) {
+      if (preparation === entry) preparation = null;
+      throw error;
+    }
+  };
+
   const closeBrowserResources = (releaseMedia = true): void => {
+    preparation?.abort.abort(new DOMException("Realtime preparation retired", "AbortError"));
+    preparation = null;
     stopTimers();
     pendingAbort?.abort(new DOMException("Codex realtime browser owner closed", "AbortError"));
     pendingAbort = null;
@@ -1093,9 +1126,23 @@ export function createCodexRealtimeController(
       if (closed || stopping || abort.signal.aborted || pendingGeneration !== targetGeneration) {
         throw abort.signal.reason ?? new DOMException("Aborted", "AbortError");
       }
-      const media = await ensureMicrophone(replaceMicrophone, abort.signal);
+      const localPreparation = preparation;
+      const [media, prepared] = await Promise.all([
+        ensureMicrophone(replaceMicrophone, abort.signal),
+        localPreparation
+          ? abortable(localPreparation.task, abort.signal).catch((error) => {
+              localPreparation.abort.abort(error);
+              return undefined;
+            })
+          : undefined,
+      ]);
+      if (closed || stopping || abort.signal.aborted || pendingGeneration !== targetGeneration) {
+        throw abort.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
+      if (preparation === localPreparation) preparation = null;
       const operationId = randomUUID();
       const commonTransportInput = {
+        prepared,
         client: options.client,
         workspaceId: options.workspaceId,
         sessionId: options.sessionId,
@@ -1422,6 +1469,7 @@ export function createCodexRealtimeController(
   };
 
   const controller: CodexRealtimeController = {
+    prepare,
     snapshot: () => ({ ...state }),
     subscribe: (listener) => {
       listeners.add(listener);
@@ -1450,6 +1498,8 @@ export function createCodexRealtimeController(
       storage?.setItem(storageKey, JSON.stringify(record));
       publish({ status: "starting", error: null, diagnostic: null, refusal: null });
       const microphoneWarmup = new AbortController();
+      // Offer creation overlaps admission and microphone permission/capture.
+      void prepare().catch(() => undefined);
       void ensureMicrophone(false, microphoneWarmup.signal, true).catch(() => undefined);
       try {
         await begin(record, false);
@@ -1487,6 +1537,9 @@ export function createCodexRealtimeController(
         if (recoveryTerminal && state.mode?.state === "active") return;
         const record = readOwnerRecord(storage, storageKey, options);
         if (!record) {
+          // A read-only ring preparation has no owner to end. Keep its local
+          // offer when the first lifecycle observation arrives at Answer.
+          if (state.status === "idle" && !state.mode) return;
           // Keep a terminal failure readable after the server records the end.
           if (state.status === "error" && !state.mode) return;
           transitionEnded();
@@ -1511,6 +1564,7 @@ export function createCodexRealtimeController(
       }
       if (lifecycle.state === "ended") {
         const record = readOwnerRecord(storage, storageKey, options);
+        if (!record && state.status === "idle" && !state.mode) return;
         if (record && record.operationId !== lifecycle.operationId) {
           // An earlier call's end is not news while this browser is starting
           // its own call (for example, waiting on the microphone prompt):

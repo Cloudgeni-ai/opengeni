@@ -2,6 +2,7 @@ import { createAzureLiveTransportStarter } from "../src/azure-live-transport";
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
 import { CodexRealtimeMicrophoneError, startCodexRealtimeWebrtc } from "../src/codex-realtime";
+import { prepareRealtimeWebrtc } from "../src/realtime-webrtc-preparation";
 import type { CodexRealtimeWebrtcResponse } from "../src/types";
 import { SESSION_ID, WORKSPACE_ID } from "./helpers";
 
@@ -142,6 +143,85 @@ function browserFixture() {
 }
 
 describe("Codex realtime browser negotiation", () => {
+  test("prepares without a microphone, then consumes the same offer once on Answer", async () => {
+    const fixture = browserFixture();
+    const tracks: (MediaStreamTrack | null)[] = [];
+    Object.defineProperty(fixture.peer, "addTransceiver", {
+      value: (kind: string, init: RTCRtpTransceiverInit) => {
+        expect(kind).toBe("audio");
+        expect(init.direction).toBe("sendrecv");
+        return {
+          sender: {
+            replaceTrack: async (track: MediaStreamTrack | null) => {
+              tracks.push(track);
+            },
+          },
+        };
+      },
+    });
+    const abort = new AbortController();
+    const prepared = await prepareRealtimeWebrtc({
+      createPeerConnection: () => fixture.peer,
+      signal: abort.signal,
+    });
+    expect(fixture.calls).toEqual(["data:oai-events", "createOffer", "setLocalDescription"]);
+    expect(tracks).toEqual([]);
+    const session = await startCodexRealtimeWebrtc({
+      ...lifecycleProof,
+      prepared,
+      getUserMedia: async () => fixture.media,
+      negotiate: async (request) => {
+        expect(request.sdp).toBe(offer);
+        return negotiated;
+      },
+    });
+    expect(tracks).toEqual([fixture.track]);
+    expect(fixture.calls.filter((call) => call === "createOffer")).toHaveLength(1);
+    expect(fixture.calls).not.toContain("addTrack");
+    expect(() => prepared.claim()).toThrow("retired");
+    abort.abort(); // Preparation no longer owns the live transport.
+    expect(fixture.calls).not.toContain("peer.close");
+    session.stop();
+    expect(fixture.calls.filter((call) => call === "peer.close")).toHaveLength(1);
+  });
+
+  test("declining closes the prepared peer/channel without ever acquiring audio", async () => {
+    const fixture = browserFixture();
+    const abort = new AbortController();
+    const prepared = await prepareRealtimeWebrtc({
+      createPeerConnection: () => fixture.peer,
+      signal: abort.signal,
+    });
+    abort.abort();
+    prepared.stop();
+    expect(fixture.calls).toEqual(["data:oai-events", "events.close", "peer.close"]);
+    expect(() => prepared.claim()).toThrow("retired");
+  });
+
+  test("retiring preparation while createOffer is pending closes it and never sets SDP", async () => {
+    const fixture = browserFixture();
+    let finish!: (offer: RTCSessionDescriptionInit) => void;
+    const delayedPeer = Object.create(fixture.peer) as RTCPeerConnection;
+    Object.defineProperties(delayedPeer, {
+      addTransceiver: { value: () => ({ sender: { replaceTrack: async () => undefined } }) },
+      createOffer: {
+        value: () =>
+          new Promise<RTCSessionDescriptionInit>((resolve) => {
+            finish = resolve;
+          }),
+      },
+    });
+    const abort = new AbortController();
+    const task = prepareRealtimeWebrtc({
+      createPeerConnection: () => delayedPeer,
+      signal: abort.signal,
+    });
+    abort.abort();
+    finish({ type: "offer", sdp: offer });
+    await expect(task).rejects.toThrow();
+    expect(fixture.calls).toEqual(["data:oai-events", "events.close", "peer.close"]);
+  });
+
   test("adds microphone audio and oai-events, applies the server answer, and stops cleanly", async () => {
     const fixture = browserFixture();
     let capturedSignal: AbortSignal | undefined;

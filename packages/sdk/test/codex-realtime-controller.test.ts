@@ -335,6 +335,29 @@ function dispatchProviderMessage(events: RTCDataChannel, payload: string): void 
 }
 
 describe("Codex realtime browser controller", () => {
+  test("ring preparation owns only one local peer and survives an empty lifecycle until disposal", async () => {
+    const browser = rotatingBrowserFixture();
+    const controller = createCodexRealtimeController({
+      client: {} as Parameters<typeof createCodexRealtimeController>[0]["client"],
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      storage: storageFixture(),
+      createPeerConnection: browser.createPeerConnection,
+      getUserMedia: browser.getUserMedia,
+      ...noIntervals(),
+    });
+    await Promise.all([controller.prepare?.(), controller.prepare?.()]);
+    expect(browser.peers).toHaveLength(1);
+    expect(browser.media).toHaveLength(0);
+    expect(controller.snapshot().status).toBe("idle");
+    await controller.observeLifecycle(null);
+    expect(browser.calls).not.toContain("peer.0.close");
+    controller.close();
+    expect(browser.calls).toContain("peer.0.close");
+    expect(browser.calls).toContain("events.0.close");
+    expect(browser.media).toHaveLength(0);
+  });
+
   test("drives normal -> realtime -> normal with real WebRTC/V3 bridge semantics", async () => {
     const browser = browserFixture();
     const storage = storageFixture();

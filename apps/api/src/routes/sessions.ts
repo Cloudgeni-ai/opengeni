@@ -2042,6 +2042,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               { accountId: grant.accountId, workspaceId, sessionId },
               deps.codexFetch,
               {
+                onTiming: (realtimeSetupPhase, durationMs) =>
+                  deps.observability?.info("Realtime setup phase completed", {
+                    realtimeSetupPhase,
+                    durationMs: Math.round(durationMs),
+                  }),
                 onConnectionRefused: (refusal) =>
                   deps.observability?.warn(
                     "Realtime WebRTC connection refused; trying the next connected subscription",

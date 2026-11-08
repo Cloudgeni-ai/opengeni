@@ -620,6 +620,9 @@ export function useSessionRealtime(options: {
     }
     await controller.start();
   }, [model, t]);
+  const prepare = useCallback(async () => {
+    await controllerRef.current?.prepare?.();
+  }, []);
   const stop = useCallback(async () => {
     await controllerRef.current?.stop();
   }, []);
@@ -663,6 +666,7 @@ export function useSessionRealtime(options: {
     codexConnected: options.codexConnected,
     /** @deprecated Replies play without a mounted element; rendering this ref has no effect. */
     audioRef,
+    prepare,
     start,
     stop,
     retry,

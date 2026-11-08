@@ -92,6 +92,7 @@ export function createSessionRealtimeController(
             remoteAudio: options.remoteAudio ?? defaultRealtimeRemoteAudio(),
             createPeerConnection: options.createPeerConnection,
           }),
+          prepareWebrtc: true,
         }
       : transport === "codex"
         ? {}
