@@ -729,7 +729,7 @@ struct WorkspaceLink<P: Platform> {
     platform: Arc<P>,
     creds: StoredCredentials,
     /// Refreshed login credential for the next dial; never tears down a live socket.
-    nats_bearer: std::sync::RwLock<String>,
+    nats_bearer: tokio::sync::watch::Sender<String>,
     relay_credential: Option<RelayCredential>,
     api_url: Option<String>,
     authentication_state: Option<crate::config::AuthenticationState>,
@@ -756,7 +756,7 @@ impl<P: Platform> WorkspaceLink<P> {
         Self {
             connection_id: definition.connection_id,
             platform: definition.platform,
-            nats_bearer: std::sync::RwLock::new(definition.credentials.nats_bearer.clone()),
+            nats_bearer: tokio::sync::watch::channel(definition.credentials.nats_bearer.clone()).0,
             relay_credential: definition.relay_credential,
             creds: definition.credentials,
             api_url: definition.api_url,
@@ -829,10 +829,13 @@ impl<P: Platform> WorkspaceLink<P> {
         {
             return false;
         }
-        self.nats_bearer
-            .write()
-            .expect("NATS bearer lock")
-            .clone_from(&candidate.credentials.nats_bearer);
+        self.nats_bearer.send_if_modified(|bearer| {
+            if *bearer == candidate.credentials.nats_bearer {
+                return false;
+            }
+            bearer.clone_from(&candidate.credentials.nats_bearer);
+            true
+        });
         if let Some(relay) = &self.relay_credential {
             relay.set(opengeni_agent_stream::RelayEndpoint {
                 url: candidate.credentials.relay_url.clone(),
@@ -1408,6 +1411,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         }
         let mut backoff = Backoff::standard();
         let mut reconnect = self.reconnect.subscribe();
+        let mut credentials = link.nats_bearer.subscribe();
         info!(
             connection_id = %link.connection_id,
             agent_id = %link.creds.agent_id,
@@ -1430,12 +1434,18 @@ impl<P: Platform + 'static> Supervisor<P> {
 
             // The dial that follows answers every reconnect asked for so far.
             reconnect.mark_unchanged();
+            credentials.mark_unchanged();
             match self
                 .serve_one_connection(link, &mut backoff, &mut reconnect)
                 .await
             {
                 ConnectionOutcome::CleanShutdown => return,
                 ConnectionOutcome::AuthenticationRejected(bearer) => {
+                    // Renewal may have completed while this dial was rejected.
+                    // Never suspend a newer bearer or wait for another file edit.
+                    if *credentials.borrow() != bearer {
+                        continue;
+                    }
                     // The file watcher adopts recovery state and later renewed
                     // credentials without discarding retained work. If the disk
                     // is temporarily unwritable, retry only that local write,
@@ -1454,8 +1464,10 @@ impl<P: Platform + 'static> Supervisor<P> {
                             () = tokio::time::sleep(backoff.next_delay()) => {}
                         }
                     }
-                    self.link_stop_notified(link).await;
-                    return;
+                    tokio::select! {
+                        () = self.link_stop_notified(link) => return,
+                        Ok(()) = credentials.changed() => {}
+                    }
                 }
                 ConnectionOutcome::CredentialRotation => {
                     info!(
@@ -2593,7 +2605,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         link: &WorkspaceLink<P>,
         reconnect: &mut tokio::sync::watch::Receiver<u64>,
     ) -> Result<(Result<ConnectedNats, SupervisorError>, String), ConnectionOutcome> {
-        let bearer = link.nats_bearer.read().expect("NATS bearer lock").clone();
+        let bearer = link.nats_bearer.borrow().clone();
         tokio::select! {
             biased;
             () = self.link_stop_notified(link) => Err(ConnectionOutcome::CleanShutdown),
@@ -2729,7 +2741,7 @@ impl<P: Platform + 'static> Supervisor<P> {
 
     #[cfg(test)]
     async fn connect(&self, link: &WorkspaceLink<P>) -> Result<ConnectedNats, SupervisorError> {
-        let bearer = link.nats_bearer.read().expect("NATS bearer lock").clone();
+        let bearer = link.nats_bearer.borrow().clone();
         self.connect_with_bearer(link, &bearer).await
     }
 
@@ -6672,14 +6684,17 @@ mod tests {
         let relay = RelayCredential::fixed("http://127.0.0.1:9", "old");
         definition.relay_credential = Some(relay.clone());
         let link = WorkspaceLink::from_definition(definition.clone());
+        let mut credential_updates = link.nats_bearer.subscribe();
         let mut renewed = definition.clone();
         renewed.credentials.nats_bearer = renewal_test_bearer(1, 200);
         renewed.credentials.relay_token = "new".into();
         assert!(link.refresh_credentials(&renewed));
-        assert_eq!(
-            *link.nats_bearer.read().unwrap(),
-            renewed.credentials.nats_bearer
-        );
+        // A login refusal waiting on the old bearer must wake even if renewal
+        // arrived before it registered its wait; repeated snapshots do not wake.
+        credential_updates.changed().await.unwrap();
+        assert!(link.refresh_credentials(&renewed));
+        assert!(!credential_updates.has_changed().unwrap());
+        assert_eq!(*link.nats_bearer.borrow(), renewed.credentials.nats_bearer);
         assert_eq!(relay.current().await.unwrap().token, "new");
         assert!(!link.shutdown.is_requested());
 
@@ -6713,10 +6728,7 @@ mod tests {
         ] {
             assert!(!link.refresh_credentials(&candidate));
         }
-        assert_eq!(
-            *link.nats_bearer.read().unwrap(),
-            renewed.credentials.nats_bearer
-        );
+        assert_eq!(*link.nats_bearer.borrow(), renewed.credentials.nats_bearer);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
