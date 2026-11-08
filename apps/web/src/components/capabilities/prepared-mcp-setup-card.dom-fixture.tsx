@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { StrictMode } from "react";
 import type { ConnectAttempt, ConnectTransport } from "@opengeni/connect";
 import type { AuthNeededItem } from "@opengeni/react";
@@ -120,7 +121,7 @@ function fixture(ownership: "personal" | "workspace" = "personal") {
       toolPolicyVersion: 7,
     })),
     updateSessionToolPolicy: update,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   return {
     transport,
     update,

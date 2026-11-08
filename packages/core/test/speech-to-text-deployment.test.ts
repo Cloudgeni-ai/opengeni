@@ -590,6 +590,34 @@ describe("dictation over the shared providers", () => {
     expect(result).toMatchObject({ text: "Hello, there", providerId: "second" });
   });
 
+  test("client readiness projects providers, models and preferences from one live read", async () => {
+    const settings = testSettings({ voiceInputProviderOrder: "openai" });
+    let checks = 0;
+    let ready = true;
+    const deployment = createSpeechToTextDeployment({ settings }, { isEuOnly: async () => false });
+    deployment.available = async () => {
+      checks++;
+      return ready;
+    };
+    const service = createTranscriptionService({ settings, db: {} as never, deployment });
+    const context = { workspaceId: "w", preferredProvider: "openai", fallbackEnabled: false };
+    const snapshot = await service.availability!(context);
+    const snapshotChecks = checks;
+    expect(snapshot.providers).toEqual(await service.availableProviderIds!(context));
+    expect(checks - snapshotChecks).toBe(snapshotChecks);
+    expect(snapshot.models).toEqual(await service.availableModels!(context));
+    expect(snapshot.available).toBe(await service.available(context));
+    expect(
+      (await service.availability!({ ...context, preferredProvider: "missing" })).available,
+    ).toBe(false);
+    ready = false;
+    expect(await service.availability!(context)).toEqual({
+      available: false,
+      providers: [],
+      models: [],
+    });
+  });
+
   test("a pinned deployment never sends dictation elsewhere", async () => {
     const settings = testSettings({
       ...azure,
@@ -601,6 +629,13 @@ describe("dictation over the shared providers", () => {
       deployment: createSpeechToTextDeployment({ settings }, { isEuOnly: async () => false }),
     });
     expect(await service.availableProviderIds?.({ workspaceId: "w" })).toEqual(["azure-speech"]);
+    expect(
+      await service.availability?.({
+        workspaceId: "w",
+        preferredProvider: "openai",
+        fallbackEnabled: false,
+      }),
+    ).toMatchObject({ available: true, providers: ["azure-speech"] });
     expect(await service.selectProvider?.({ workspaceId: "w", preferredProvider: "openai" })).toBe(
       "azure-speech",
     );

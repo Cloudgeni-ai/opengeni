@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 import { capabilityLogoFallback } from "../capability-logo-fallback";
 import { browserConnectWindowHost } from "../connect-window-host";
@@ -10,7 +11,7 @@ import { connectionCardSubtitle, showsMcpServerLabel } from "./mcp-server-label"
 import { SessionCapabilityFrame } from "./session-capability-frame";
 
 export type SessionMcpCapabilityCardProps = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   capabilityId: string;

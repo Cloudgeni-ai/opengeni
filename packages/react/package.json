@@ -245,6 +245,10 @@
       "types": "./src/session-list-model.ts",
       "default": "./src/session-list-model.ts"
     },
+    "./automation-model": {
+      "types": "./src/automation-model.ts",
+      "default": "./src/automation-model.ts"
+    },
     "./session-admin-access-model": {
       "types": "./src/session-admin-access-model.ts",
       "default": "./src/session-admin-access-model.ts"

@@ -8,7 +8,7 @@ import {
   rankLabel,
   sessionDisplayTitle,
 } from "@opengeni/react/session-list-model";
-import type { Session, Workspace } from "@opengeni/sdk";
+import type { ChatSession as Session, Workspace } from "@opengeni/sdk";
 
 /** Other workspaces whose titles the server searches too. */
 export const OTHER_WORKSPACES_SEARCHED = 9;

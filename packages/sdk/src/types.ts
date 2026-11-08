@@ -1932,6 +1932,14 @@ export type CancelSessionBackgroundCommandResult = {
   accepted: boolean;
 };
 
+/** Full configuration, requested explicitly with sessions:control permission. */
+export type SessionConfiguration = Session;
+
+/** Chat rendering projection. Older servers may still include configuration. */
+export type ChatSession = Omit<Session, "instructions" | "skills" | "effectiveTools"> &
+  Partial<Pick<Session, "instructions" | "skills" | "effectiveTools">>;
+export type SessionResponseMode = "full" | "chat";
+
 /** Why the runtime refused to start a session's next turn. */
 export type SessionAdmissionBlock = {
   reason:
@@ -1989,8 +1997,6 @@ export type Session = {
   description?: string | null | undefined;
   /** Display-only avatar. Never sent to the model. */
   avatar?: SessionAvatar | null | undefined;
-  // Per-session agent persona/system instructions supplied at create; null when
-  // the session carried none. Org-visible metadata, never a timeline event.
   instructions: string | null;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
@@ -2034,7 +2040,7 @@ export type Session = {
    * behavior). Omitted by older servers.
    */
   agent?: ResolvedAgentConfig | null | undefined;
-  /** Capability-level view of what a configured session can use; null for legacy. */
+  /** Capability-level catalog; absent on compact chat responses, null for legacy. */
   effectiveTools?: AgentEffectiveTools | null | undefined;
   mcpServers: SessionMcpServerMetadata[];
   mcpApprovalPolicies?: Record<string, SessionMcpApprovalPolicy> | undefined;
@@ -2158,7 +2164,7 @@ export type Session = {
 };
 
 /** Additive receipt returned by POST /sessions. */
-export type CreateSessionResponse = Session & {
+export type CreateSessionResponse<S extends ChatSession = Session> = S & {
   initialTurnId: string | null;
 };
 
@@ -2289,7 +2295,7 @@ export type SiteConversationGroup = {
   pinnedAt?: string | null;
 };
 
-export type SessionListResponse = {
+export type SessionListResponse<S extends ChatSession = Session> = {
   totals?: SessionListTotals;
   needsYouOnly?: true;
   /** Receipt for the read-only (archived idle session) filter. */
@@ -2298,7 +2304,7 @@ export type SessionListResponse = {
   mineOnly?: true;
   /** Receipt for the `sessionIds` selection; older servers ignore that filter. */
   sessionIdsApplied?: true;
-  pinned: Session[];
+  pinned: S[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
   /** Present only when the server recognized and applied additive list filters. */
@@ -2317,7 +2323,7 @@ export type SessionListResponse = {
   siteGroups?: SiteConversationGroup[];
   /** True when Site rows beyond the server bound were omitted. */
   siteGroupsTruncated?: true;
-  sessions: Session[];
+  sessions: S[];
   nextCursor: string | null;
 };
 
@@ -2489,21 +2495,26 @@ export type UpdateSessionArchiveRequest = {
   expectedVersion?: number;
 };
 
-export type LineageNode = {
-  session: SessionSummary;
-  children: LineageNode[];
+export type LineageNode<S extends ChatSession = Session> = {
+  session: S;
+  children: LineageNode<S>[];
 };
 
-export type SessionLineageResponse = {
+export type SessionLineageResponse<S extends ChatSession = Session> = {
   sessionHasSchedules?: boolean | undefined;
   sessionHasUpcomingSchedules?: boolean | undefined;
   sessionWaitingForEvents?: boolean | undefined;
   /** What the automations continuing the requested session are waiting for. */
   sessionAutomationWait?: SessionAutomationWaitSummary | null | undefined;
-  ancestors: SessionSummary[];
-  children: LineageNode[];
+  ancestors: S[];
+  children: LineageNode<S>[];
   truncated: boolean;
 };
+
+export type ChatCreateSessionResponse = CreateSessionResponse<ChatSession>;
+export type ChatSessionListResponse = SessionListResponse<ChatSession>;
+export type ChatSessionLineageResponse = SessionLineageResponse<ChatSession>;
+export type ChatLineageNode = LineageNode<ChatSession>;
 
 export type SessionTurnStatus =
   | "queued"
@@ -4180,8 +4191,10 @@ export type CreateSessionRequest = {
   // double-submit/retry of the same logical create collapse to one session.
   // Distinct from the per-call clientEventId.
   idempotencyKey?: string | undefined;
-  // Exact actor-private pre-session draft revision represented by this create.
-  // The server consumes only this revision after durable initialization.
+  // The caller's new-chat draft revision this create was composed from. The
+  // create is never refused over it: once the session is accepted, the server
+  // clears that draft only while it is still at this revision or holds exactly
+  // what was sent, so a newer draft saved on another device stays.
   expectedNewSessionDraftRevision?: number | undefined;
   agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   maxNestedAgentDepth?: number | undefined;
@@ -5903,6 +5916,9 @@ export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
  */
 export const OPENGENI_SDK_VERSION_HEADER = "x-opengeni-sdk-version" as const;
 
+/** JSON content negotiation for the chat projection, using the existing CORS-safe Accept header. */
+export const OPENGENI_SESSION_CHAT_ACCEPT = "application/json; opengeni-session=chat" as const;
+
 /**
  * Every request header the SDK's browser clients may send to Opengeni, lower-cased.
  * A host that serves the Opengeni API or its session proxy from a different origin
@@ -5927,6 +5943,8 @@ export const OPENGENI_BROWSER_REQUEST_HEADERS = [
   // The chat a session-scoped client acts on (`SESSION_SCOPE_HEADER`).
   "x-opengeni-session-id",
 ] as const;
+
+export { OPENGENI_BROWSER_RESPONSE_HEADERS } from "@opengeni/contracts/browser-response-headers";
 
 /**
  * Public, unauthenticated-by-default client bootstrap config returned by
@@ -10632,6 +10650,8 @@ export const KNOWN_USAGE_EVENT_TYPES = [
   "agent_run.completed",
   "model.tokens",
   "model.cost",
+  "model.provider_cost",
+  "model.estimated_provider_cost",
   "file.uploaded",
   "file.deleted",
   "document.indexed",
@@ -10651,6 +10671,8 @@ export type KnownUsageEventType = (typeof KNOWN_USAGE_EVENT_TYPES)[number];
 export type UsageEventType = KnownUsageEventType | (string & {});
 
 export type UsageEvent = {
+  /** Caller attribution only; does not select the payer or workspace. */
+  tenantLabel?: string | undefined;
   id: string;
   workspaceId: string;
   accountId: string;

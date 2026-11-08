@@ -14,6 +14,9 @@
 //   request to the same start path as Phone recents and the home-screen action.
 // - Optionally (`call.control`), a WidgetKit extension with a "Call <agent>"
 //   control for Control Center, the Lock Screen and the Action button.
+// - Optionally (`call.androidSystemCall`), Android system calls: a
+//   self-managed Telecom call with a call notification, and agents' calls
+//   ringing the phone with a full-screen ring screen (with-android-call.cjs).
 const fs = require("node:fs");
 const path = require("node:path");
 const {
@@ -26,6 +29,7 @@ const {
 const { SWIFT_FILE, intentsSource, pluginFeatures, resolveOptions } = require("./call-intents.cjs");
 const { withRecording } = require("./with-recording.cjs");
 const { withAudioImport } = require("./with-audio-import.cjs");
+const { withAndroidSystemCall } = require("./with-android-call.cjs");
 const {
   CONTROL_TARGET,
   CONTROL_SWIFT_FILE,
@@ -108,6 +112,7 @@ function withNativeCall(config, props) {
     }
     config = withCallControl(config, options, control);
   }
+  if (options.call.androidSystemCall === true) config = withAndroidSystemCall(config);
   return config;
 }
 

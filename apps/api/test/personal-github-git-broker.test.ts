@@ -93,6 +93,7 @@ function liveRepositoryResponse(): Response {
       html_url: repository.canonicalUrl,
       archived: false,
       disabled: false,
+      default_branch: "main",
       permissions: { pull: true, triage: false, push: true, maintain: false, admin: false },
     }),
     { status: 200, headers: { "content-type": "application/json" } },
@@ -671,6 +672,7 @@ describe("personal GitHub Git broker", () => {
       execFileSync("git", ["init", "--bare", "--initial-branch=main", bareRepository]);
       execFileSync("git", ["-C", bareRepository, "config", "http.receivepack", "true"]);
       const decisions: string[] = [];
+      const alwaysAsks: boolean[] = [];
       let answer: "wait" | "allow" = "wait";
       const completed: string[] = [];
       const providerFetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -704,10 +706,11 @@ describe("personal GitHub Git broker", () => {
           },
         }),
         authorizeProviderRequest: async () => "Bearer provider-secret",
-        inspectPush: async (authority, body, gzip) =>
+        inspectPush: async (authority, body, gzip, defaultBranch) =>
           await inspectPersonalGitHubPush({
             body,
             gzip,
+            defaultBranch,
             repositoryFullName: authority.repository.fullName,
             identity: authority.identity!,
             isAncestor: async (base, head) => {
@@ -719,6 +722,7 @@ describe("personal GitHub Git broker", () => {
             },
             decide: async (_identity, input) => {
               decisions.push(input.title);
+              alwaysAsks.push(input.action.alwaysAsk);
               return answer === "allow"
                 ? { kind: "run", requestId: `request-${decisions.length}` }
                 : {
@@ -817,6 +821,9 @@ describe("personal GitHub Git broker", () => {
         "Force-push main on Cloudgeni-ai/opengeni",
         "Delete topic on Cloudgeni-ai/opengeni",
       ]);
+      // GitHub's default branch: rewriting main always asks; deleting another
+      // branch follows the person's policy.
+      expect(alwaysAsks).toEqual([true, false]);
 
       answer = "allow";
       expect((await push(["--force", "main"])).exitCode).toBe(0);

@@ -199,6 +199,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     integrationsEnabled: false,
     integrationsStateSecret: undefined,
     integrationsAllowPrivateNetworkTargets: false,
+    integrationsPrivateNetworkAllowedHosts: [],
     privacyOnlyMeAllowed: true,
     privacyWorkspaceDefaultRequired: false,
     privacyAdminScheduleSummariesRequired: false,

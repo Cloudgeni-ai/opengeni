@@ -1,4 +1,5 @@
 import type { ConnectAccount, ConnectController, ConnectProvider } from "@opengeni/connect";
+import type { ChatClient } from "@opengeni/sdk";
 import { deploymentCannotConnect } from "@opengeni/contracts/personal-integration-setup";
 import { ConnectChooser } from "./connect-chooser";
 import {
@@ -18,7 +19,7 @@ import { useOpenGeniText } from "./messages/runtime";
 import { useNobodyToShareWith } from "./workspace-sharing";
 
 export type ConnectionDiscoveryProps = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   controller?: ConnectController | undefined;
   workspaceId: string;
   returnUrl: string;

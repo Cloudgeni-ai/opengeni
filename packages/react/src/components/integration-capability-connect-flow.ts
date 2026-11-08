@@ -9,6 +9,7 @@ import {
   type ConnectPopup,
   type ConnectTransport,
 } from "@opengeni/connect";
+import type { ChatClient } from "@opengeni/sdk";
 import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
@@ -18,7 +19,7 @@ import { useOpenGeniText } from "../messages/runtime";
 import { attachSessionCapability } from "../session-capability-policy";
 
 export type IntegrationCapabilityConnectInput = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   /** `api:integration:<definition id>` from the agent's recommendation. */
@@ -39,7 +40,7 @@ export type IntegrationCapabilityAvailability =
   | { kind: "error" };
 
 type ListedIntegration = Awaited<
-  ReturnType<OpenGeniClient["listApiIntegrations"]>
+  ReturnType<ChatClient<OpenGeniClient>["listApiIntegrations"]>
 >["integrations"][number];
 
 const RESTARTABLE = new Set<ConnectAttempt["state"]>(["failed", "cancelled", "expired"]);

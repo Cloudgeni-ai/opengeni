@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { beginModelConnectJourney } from "@opengeni/react/app/lib/integration-connect-analytics";
 import type {
   CodexAccount,
@@ -35,7 +36,7 @@ export function useOrganizationCodexSubscriptions({
   enabled = true,
 }: {
   organizationId: string;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   /** False for people who can't read the organization's accounts: nothing is read. */
   enabled?: boolean;
 }) {

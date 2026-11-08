@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   SandboxCommandOutputDeltaPayload,
   SessionEvent,
@@ -33,7 +34,7 @@ export type TerminalChunk = {
   seq: number;
 };
 
-export type UseSandboxTerminalOptions = ClientOverride & {
+export type UseSandboxTerminalOptions = ClientOverride<ChatClient> & {
   /** The live session event log (usually `useSessionEvents().events`). */
   events: SessionEvent[];
   /** Restrict to one PTY (by ptyId). Omit to interleave the agent firehose +
@@ -479,7 +480,7 @@ type EventPageClient = {
   listEventPage?: (
     workspaceId: string,
     sessionId: string,
-    options: Parameters<SessionClientLike["listEvents"]>[2],
+    options: Parameters<SessionClientLike<ChatClient>["listEvents"]>[2],
   ) => Promise<SessionEventPage>;
 };
 
@@ -488,7 +489,7 @@ type EventPageClient = {
  * when the client has it (it says whether older rows remain).
  */
 async function readTerminalHistory(
-  client: SessionClientLike,
+  client: SessionClientLike<ChatClient>,
   workspaceId: string,
   sessionId: string,
   includeTypes: SessionEventType[],
@@ -502,7 +503,7 @@ async function readTerminalHistory(
     payloadMode: "full" as const,
     limit: SANDBOX_TERMINAL_HISTORY_ROWS,
   };
-  const pageClient = client as SessionClientLike & EventPageClient;
+  const pageClient = client as SessionClientLike<ChatClient> & EventPageClient;
   const page =
     typeof pageClient.listEventPage === "function"
       ? await pageClient.listEventPage(workspaceId, sessionId, options)

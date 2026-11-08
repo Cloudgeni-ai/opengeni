@@ -1,4 +1,5 @@
 import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
 import { ConnectSetup } from "../connect-setup";
@@ -12,8 +13,10 @@ export { reconnectCandidate } from "./integration-capability-connect-flow";
 
 /** The client methods the card uses. Session proxies that do not forward
  * Connect and integration routes cannot render it. */
-export function supportsIntegrationCapabilityCard(client: unknown): client is OpenGeniClient {
-  const candidate = client as Partial<Record<keyof OpenGeniClient, unknown>> | null;
+export function supportsIntegrationCapabilityCard(
+  client: unknown,
+): client is ChatClient<OpenGeniClient> {
+  const candidate = client as Partial<Record<keyof ChatClient<OpenGeniClient>, unknown>> | null;
   return (
     !!candidate &&
     typeof candidate.connectTransport === "function" &&
@@ -24,7 +27,7 @@ export function supportsIntegrationCapabilityCard(client: unknown): client is Op
 }
 
 export type SessionIntegrationCapabilityCardProps = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   /** `api:integration:<definition id>` from the agent's recommendation. */

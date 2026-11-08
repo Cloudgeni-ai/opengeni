@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   SiteAbuseReport,
   SiteHostnameAvailability,
@@ -75,7 +76,7 @@ import { useWorkspaceModelCatalog } from "../../lib/use-workspace-model-catalog"
 import { cn } from "../../lib/utils";
 
 export type SitePublishingClient = Pick<
-  OpenGeniBrowserClient,
+  ChatClient<OpenGeniBrowserClient>,
   | "getSitePublication"
   | "updateSitePublication"
   | "unpublishSite"

@@ -1,3 +1,5 @@
+export * from "./model-inference";
+export type * from "./decision-types";
 export * from "./billing-credit-notifications";
 import { BillingCreditNotification } from "./billing-credit-notifications";
 import * as primitives from "./primitives";
@@ -5470,6 +5472,8 @@ export const UsageEventType = /* @__PURE__ */ defineSchema(() =>
     "agent_run.completed",
     "model.tokens",
     "model.cost",
+    "model.provider_cost",
+    "model.estimated_provider_cost",
     "file.uploaded",
     "file.deleted",
     "document.indexed",
@@ -5508,6 +5512,8 @@ export const UsageEvent = /* @__PURE__ */ defineSchema(() =>
     recordedAt: primitives.string,
     exportedToBillingAt: primitives.nullableString,
     billingProviderEventId: primitives.nullableString,
+    /** Caller attribution only; does not select the payer or workspace. */
+    tenantLabel: z.string().optional(),
   }),
 );
 export type UsageEvent = z.infer<typeof UsageEvent>;
@@ -10882,7 +10888,12 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
       // A draft that follows the chat's settings is submitted without them.
       .partial({ model: true, reasoningEffort: true, latencyMode: true })
       .extend({
-        expectedDraftRevision: primitives.positiveInteger,
+        // The draft revision this message was composed from. The message is
+        // never refused over the draft; once it is accepted the draft is
+        // cleared only while it is still at this revision or holds exactly what
+        // was sent. At this revision a withdrawn queued message is replaced.
+        // 0 means the sender saw no saved draft.
+        expectedDraftRevision: primitives.nonnegativeInteger,
         clientEventId: SessionOperationKey,
         delivery: SessionPromptDelivery,
         controlEtag: z.string().min(1).optional(),
@@ -20696,11 +20707,13 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         // creation of a brand-new session. Absent means no create-dedup (each call
         // is an independent create).
         idempotencyKey: z.string().min(1).max(200).optional(),
-        // The exact actor-private pre-session draft revision represented by this
-        // create. An ordinary create consumes only this revision. A realtime create
-        // preserves the editable draft and atomically updates only successful-create
-        // selection history. A newer sibling draft survives, while every failed
-        // pre-initialization create leaves the submitted draft intact.
+        // The caller's new-chat draft revision this create was composed from. The
+        // create carries its own content and is never refused over the draft.
+        // Once an ordinary create is accepted, the draft is cleared only while it
+        // is still at this revision or holds exactly what was sent; a newer draft
+        // saved on another device stays. A realtime create keeps the editable
+        // draft and updates only successful-create selection history. A failed
+        // create leaves the draft intact.
         expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
         agentLearning: AgentLearningOverrides.optional(),
         // A child may lower its inherited limit freely; an increase requires

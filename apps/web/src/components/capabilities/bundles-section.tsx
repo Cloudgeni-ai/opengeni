@@ -1,4 +1,5 @@
 import { CatalogHeader } from "./catalog-header";
+import type { ChatClient } from "@opengeni/sdk";
 import { PluginDiscovery } from "./plugin-discovery";
 import { SkillDiscovery } from "./skill-discovery";
 
@@ -73,7 +74,7 @@ export function BundlesSection({
   onShowCategory?: (category: "skills" | "plugins") => void;
   onSearchSkills?: (() => void) | undefined;
   section?: "skills" | "plugins" | "all";
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   connections: ConnectionMetadata[] | null;
   /** Skill authority: install, update and remove imported Skills (documents:manage). */

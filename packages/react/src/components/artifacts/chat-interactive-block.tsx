@@ -1,4 +1,5 @@
 import type { OpenGeniClient, ToolGatewayIdentity } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useMemo, useState } from "react";
 
 import { loadSiteSnapshot } from "../../sites-ui";
@@ -27,10 +28,10 @@ const PREVIEW_CHROME_HEIGHT = 50;
 
 /** Reads a Site needs to render; the console client, the SDK client, or a proxy. */
 export type SiteSnapshotClient = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   "getWorkspaceArtifact" | "getWorkspaceArtifactHtml"
 > &
-  Partial<Pick<OpenGeniClient, "getWorkspaceArtifactContent">>;
+  Partial<Pick<ChatClient<OpenGeniClient>, "getWorkspaceArtifactContent">>;
 
 /** The exact saved Site a tool bridge is pinned to (absent for inline HTML). */
 export type SiteToolScope = {

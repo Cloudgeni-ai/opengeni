@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type { CapabilityCatalogItem, ConnectionMetadata, SkillUninstallPreview } from "../../types";
 import type { ConnectAction } from "./capability-detail-sheet";
 import {
@@ -94,7 +95,7 @@ async function connectedAutomatically({
   workspaceId,
   item,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   item: CapabilityCatalogItem;
 }): Promise<boolean> {
@@ -126,7 +127,7 @@ async function performCapabilityActionUntracked(
     connectReturnUrl,
     redirect,
   }: {
-    client: OpenGeniBrowserClient;
+    client: ChatClient<OpenGeniBrowserClient>;
     workspaceId: string;
     item: CapabilityCatalogItem;
     registry?: boolean | undefined;

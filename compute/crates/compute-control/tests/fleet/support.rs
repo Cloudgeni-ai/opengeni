@@ -595,6 +595,7 @@ pub fn roomy() -> Capacity {
         cpu_millis: 64_000,
         cpu_free_millis: 64_000,
         disk_free_mib: 1 << 20,
+        disk_available_mib: None,
         disk_reclaimable_mib: 0,
         ready: Vec::new(),
         awake: 0,

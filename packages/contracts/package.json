@@ -22,6 +22,10 @@
       "types": "./src/machine-access.ts",
       "default": "./src/machine-access.ts"
     },
+    "./browser-response-headers": {
+      "types": "./src/browser-response-headers.ts",
+      "default": "./src/browser-response-headers.ts"
+    },
     "./billing-credit-notifications": {
       "types": "./src/billing-credit-notifications.ts",
       "default": "./src/billing-credit-notifications.ts"

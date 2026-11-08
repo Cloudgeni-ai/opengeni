@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { ResourceRefConflictError, type ResourceRef } from "@opengeni/contracts";
+import {
+  NewSessionDraftOptions,
+  ResourceRefConflictError,
+  type ResourceRef,
+} from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import {
   buildCreateSessionRequest,
@@ -14,6 +18,7 @@ import {
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
   workspaceDefaultRigOptionLabel,
+  type SessionDraft,
 } from "./session-create";
 import { newSessionProjectSelection } from "../routes/sessions-index-hydration";
 
@@ -483,6 +488,65 @@ describe("buildCreateSessionRequest", () => {
       freshIdempotencyKey: "fresh-reconfirmed",
     });
     expect(reconfirmed.request.idempotencyKey).toBe("fresh-reconfirmed");
+  });
+});
+
+// The server accepts a new-chat Send only when its options are the ones saved
+// in the draft, so every option the composer saves must reach the create
+// request with the same value (Agent learning once did not: every Send with it
+// set was refused as a draft conflict).
+describe("a saved new-chat draft is what its Send carries", () => {
+  // Saved by the tool-policy path rather than from the SessionDraft form.
+  const SAVED_OUTSIDE_THE_FORM = ["excludedMcpServerIds"];
+  const machineId = "00000000-0000-4000-8000-0000000000e5";
+  const everything: SessionDraft = {
+    ...emptySessionDraft(),
+    agentLearning: { knowledge: "off", skills: "review_first" },
+    visibility: "workspace",
+    rigId: "00000000-0000-4000-8000-0000000000f6",
+    compute: { kind: "sandbox", backend: "modal" },
+    goalText: "Ship the release notes",
+    goalSuccessCriteria: "Notes merged",
+    goalMaxAutoContinuations: "3",
+    customMcpPermissions: true,
+    mcpPermissions: new Set(["sessions:read"]),
+    firstPartyMcpTools: new Set(["knowledge_search"]),
+    agentInstructions: "Answer in one paragraph.",
+    vaultPolicy: { mode: "selected", vaultIds: ["8d6f1d3e-4c1b-4b8f-9a55-1f0c9f0d2a11"] },
+  };
+  const onMachine: SessionDraft = {
+    ...everything,
+    compute: { kind: "machine", sandboxId: machineId, folder: { kind: "path", path: "app" } },
+  };
+
+  function sendOf(draft: SessionDraft) {
+    const submission = submissionFromSessionDraft(draft);
+    return build([], [], {
+      submission: { text: "start", resources: [], ...submission.extras },
+      targetSandboxId: submission.options.targetSandboxId,
+      workingDir: submission.options.workingDir,
+      visibility: submission.options.visibility,
+      agentLearning: draft.agentLearning,
+    }) as unknown as Record<string, unknown>;
+  }
+
+  test("each saved option is sent with the same value", () => {
+    for (const draft of [everything, onMachine]) {
+      const saved = newSessionDraftOptionsFromSessionDraft(draft) as Record<string, unknown>;
+      const sent = sendOf(draft);
+      for (const [key, value] of Object.entries(saved)) {
+        expect({ [key]: sent[key] }).toEqual({ [key]: value });
+      }
+    }
+  });
+
+  test("the form saves every draft option the contract defines", () => {
+    const saved = new Set([
+      ...Object.keys(newSessionDraftOptionsFromSessionDraft(everything)),
+      ...Object.keys(newSessionDraftOptionsFromSessionDraft(onMachine)),
+      ...SAVED_OUTSIDE_THE_FORM,
+    ]);
+    expect([...saved].sort()).toEqual(Object.keys(NewSessionDraftOptions.shape).sort());
   });
 });
 

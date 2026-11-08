@@ -26,9 +26,29 @@ async function finalize(mode: string) {
 }
 
 describe("completed turn physical finalization", () => {
+  for (const mode of [
+    "secret-cleanup-pending",
+    "secret-cleanup-rejects",
+    "secret-cleanup-throws",
+  ]) {
+    test(`attempt-private ${mode} cannot contain a finished turn`, async () => {
+      const result = await finalize(mode);
+      expect(result.stderr).toBe("");
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain("secret_cleanup_started");
+      expect(result.stdout).toContain("finalizer_returned false");
+      expect(result.stdout).toContain('worker_activity {"activity":"runAgentTurn","status":"idle"');
+      expect(result.stdout).not.toContain("graceful_drain_requested");
+      expect(result.stdout).not.toContain("host_exit_backstop");
+      if (mode !== "secret-cleanup-pending") {
+        expect(result.stdout).toContain("attempt secret file cleanup failed");
+      }
+    }, 30_000);
+  }
   for (const [mode, stage] of [
     ["writers", "tool_writers"],
     ["snapshot", "workspace_snapshot"],
+    ["run-credentials", "credential_cleanup"],
     ["claude-observations", "provider_leases"],
     ["claude-observations-cancelled", "provider_leases"],
   ]) {

@@ -1,4 +1,5 @@
 import type { NativeAppPlatform } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { createContext, useContext, type ReactNode } from "react";
 
@@ -8,7 +9,7 @@ import { createContext, useContext, type ReactNode } from "react";
  * device can be signed in before the person has any organization.
  */
 export type NativeSignInContextValue = {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   email: string;
   handleManagedSignOut: () => Promise<void>;
 };

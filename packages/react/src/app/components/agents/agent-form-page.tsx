@@ -409,7 +409,7 @@ export function NewAgentPage({
       return;
     }
     let live = true;
-    client.getSession(workspaceId, sourceSessionId).then(
+    client.getSessionConfiguration(workspaceId, sourceSessionId).then(
       (session) => {
         if (!live) return;
         setSourceTitle(session.title?.trim() || undefined);

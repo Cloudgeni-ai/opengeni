@@ -3,6 +3,7 @@ import {
   classifyGitHubGraphqlRequest,
   classifyGitHubRestRequest,
   GITHUB_GATEWAY_ROUTINE_TOOLS,
+  refRewriteFollowsPolicy,
 } from "../src/integrations/github-gateway-requests";
 
 function rest(method: string, path: string, body: unknown = null) {
@@ -257,5 +258,137 @@ describe("GitHub gateway review fixes", () => {
       { owner: "acme", name: "widgets" },
       { owner: null, name: "mine" },
     ]);
+  });
+});
+
+describe("GitHub gateway force updates and deletions of refs", () => {
+  test("only a branch other than the default branch follows the policy", () => {
+    expect(refRewriteFollowsPolicy("refs/heads/feature/x", "main")).toBe(true);
+    expect(refRewriteFollowsPolicy("refs/heads/main", "main")).toBe(false);
+    expect(refRewriteFollowsPolicy("refs/heads/MAIN", "main")).toBe(false);
+    expect(refRewriteFollowsPolicy("refs/tags/v1", "main")).toBe(false);
+    expect(refRewriteFollowsPolicy("refs/notes/commits", "main")).toBe(false);
+    expect(refRewriteFollowsPolicy("refs/heads/feature", null)).toBe(false);
+    expect(refRewriteFollowsPolicy("refs/heads/", "main")).toBe(false);
+    expect(refRewriteFollowsPolicy("refs/heads/a/../main", "main")).toBe(false);
+    expect(refRewriteFollowsPolicy("refs/heads/.hidden", "main")).toBe(false);
+  });
+
+  test("REST deletions and force updates name their ref and still ask until confirmed", () => {
+    expect(rest("DELETE", "/repos/acme/widgets/git/refs/heads/feature/x").action).toEqual({
+      kind: "write",
+      tools: ["ref_create"],
+      alwaysAsk: true,
+      title: "Delete branch or tag",
+      refRewrites: {
+        targets: [{ kind: "name", ref: "refs/heads/feature/x" }],
+        alwaysAskOtherwise: false,
+      },
+    });
+    expect(
+      rest("PATCH", "/repos/acme/widgets/git/refs/heads/feature", { sha: "a", force: true }).action,
+    ).toMatchObject({
+      alwaysAsk: true,
+      refRewrites: { targets: [{ kind: "name", ref: "refs/heads/feature" }] },
+    });
+    // No ref to confirm.
+    expect(rest("DELETE", "/repos/acme/widgets/git/refs").action).not.toHaveProperty("refRewrites");
+    // Only a path under heads/ names a branch.
+    expect(
+      rest("DELETE", "/repos/acme/widgets/git/refs/refs/heads/feature").action,
+    ).not.toHaveProperty("refRewrites");
+    // A force that is present and not exactly false counts.
+    expect(
+      rest("PATCH", "/repos/acme/widgets/git/refs/heads/feature", { sha: "a", force: "true" })
+        .action,
+    ).toMatchObject({ alwaysAsk: true, title: "Force-update branch" });
+  });
+
+  test("GraphQL variable defaults count, as GitHub applies them", () => {
+    const forcedByDefault = classifyGitHubGraphqlRequest({
+      query:
+        'mutation($f: Boolean = true) { updateRef(input: {refId: "REF_kwDOAbCdEf", oid: "abc", force: $f}) { clientMutationId } }',
+    }).action;
+    expect(forcedByDefault).toMatchObject({
+      title: "Force-update branch",
+      alwaysAsk: true,
+      refRewrites: { targets: [{ kind: "node", refNodeId: "REF_kwDOAbCdEf" }] },
+    });
+    expect(
+      classifyGitHubGraphqlRequest({
+        query:
+          'mutation($i: UpdateRefInput! = {refId: "REF_kwDOAbCdEf", oid: "abc", force: true}) { updateRef(input: $i) { clientMutationId } }',
+      }).action,
+    ).toMatchObject({ title: "Force-update branch", alwaysAsk: true });
+    // A variable the request sets wins over its default.
+    expect(
+      classifyGitHubGraphqlRequest({
+        query:
+          'mutation($f: Boolean = true) { updateRef(input: {refId: "REF_kwDOAbCdEf", oid: "abc", force: $f}) { clientMutationId } }',
+        variables: { f: false },
+      }).action,
+    ).toMatchObject({ title: "Update branch", alwaysAsk: false });
+    // An input the gateway can't read asks, and names no ref.
+    const unreadable = classifyGitHubGraphqlRequest({
+      query: "mutation($i: UpdateRefInput!) { updateRef(input: $i) { clientMutationId } }",
+    }).action;
+    expect(unreadable).toMatchObject({ title: "Force-update branch", alwaysAsk: true });
+    expect(unreadable).not.toHaveProperty("refRewrites");
+  });
+
+  test("GraphQL deleteRef, forced updateRef and updateRefs name their refs", () => {
+    expect(
+      classifyGitHubGraphqlRequest({
+        query: 'mutation { deleteRef(input: {refId: "REF_kwDOAbCdEf"}) { clientMutationId } }',
+      }).action,
+    ).toMatchObject({
+      tools: ["ref_create"],
+      alwaysAsk: true,
+      refRewrites: { targets: [{ kind: "node", refNodeId: "REF_kwDOAbCdEf" }] },
+    });
+    expect(
+      classifyGitHubGraphqlRequest({
+        query:
+          'mutation { updateRef(input: {refId: "REF_kwDOAbCdEf", oid: "abc"}) { clientMutationId } }',
+      }).action,
+    ).toMatchObject({ alwaysAsk: false, title: "Update branch" });
+    const refs = classifyGitHubGraphqlRequest({
+      query: "mutation($i: UpdateRefsInput!) { updateRefs(input: $i) { clientMutationId } }",
+      variables: {
+        i: {
+          repositoryId: "R_kgDOAbCdEf",
+          refUpdates: [
+            { name: "refs/heads/x", afterOid: "a", force: true },
+            { name: "refs/heads/y", afterOid: "0".repeat(40) },
+            { name: "refs/heads/z", afterOid: "b" },
+          ],
+        },
+      },
+    }).action;
+    expect(refs).toMatchObject({
+      title: "Delete branch or tag",
+      alwaysAsk: true,
+      refRewrites: {
+        targets: [
+          { kind: "name", ref: "refs/heads/x", repositoryNodeId: "R_kgDOAbCdEf" },
+          { kind: "name", ref: "refs/heads/y", repositoryNodeId: "R_kgDOAbCdEf" },
+        ],
+        alwaysAskOtherwise: false,
+      },
+    });
+    // With another mutation that always asks, confirming the refs is not enough.
+    expect(
+      classifyGitHubGraphqlRequest({
+        query:
+          'mutation { deleteRef(input: {refId: "REF_kwDOAbCdEf"}) { clientMutationId } deleteIssue(input: {issueId: "I_kwDOAbCdEf"}) { clientMutationId } }',
+      }).action,
+    ).toMatchObject({ alwaysAsk: true, refRewrites: { alwaysAskOtherwise: true } });
+    // A ref it cannot name always asks.
+    expect(
+      classifyGitHubGraphqlRequest({
+        query: "mutation($i: UpdateRefsInput!) { updateRefs(input: $i) { clientMutationId } }",
+        variables: { i: { refUpdates: [{ name: "refs/heads/x", afterOid: "0" }] } },
+      }).action,
+    ).not.toHaveProperty("refRewrites");
   });
 });

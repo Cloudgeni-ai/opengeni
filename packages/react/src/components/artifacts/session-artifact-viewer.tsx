@@ -1,4 +1,5 @@
 import { SESSION_SCOPE_HEADER, type ClientConfig, type OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { createEditableArtifactReplicaId } from "@opengeni/sdk/editable-artifacts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -29,7 +30,7 @@ export type SessionArtifactTarget = Readonly<
 /** Every string the viewer shows, including its Site frame and states. */
 export type SessionArtifactViewerLabels = Partial<ArtifactLabels>;
 
-export type SessionArtifactViewerProps = ClientOverride &
+export type SessionArtifactViewerProps = ClientOverride<ChatClient> &
   Readonly<{
     /** The conversation the artifact belongs to; the proxy only serves its artifacts. */
     sessionId: string;
@@ -47,7 +48,7 @@ export type SessionArtifactViewerProps = ClientOverride &
   }>;
 
 type ViewerClient = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   | "withHeaders"
   | "apiUrl"
   | "fetchApi"

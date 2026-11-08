@@ -3,6 +3,7 @@
 // requested key in the protected form. Shared by the web card and the React
 // Native card; no DOM, and no key ever enters React state here.
 import { ConnectController } from "@opengeni/connect";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
 import { useConnect } from "../hooks/use-connect";
@@ -28,7 +29,7 @@ export function usePreparedMcpSetupAttempt({
   canConfigure,
   returnUrl,
 }: {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   item: AuthNeededItem;
   canConfigure: boolean;
@@ -86,7 +87,7 @@ export function usePreparedMcpSetupAccess({
 }: {
   t: OpenGeniText;
   controller: ConnectController;
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   onConfigured?: (() => void | Promise<void>) | undefined;

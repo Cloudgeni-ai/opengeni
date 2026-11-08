@@ -5,6 +5,11 @@ import { ACTION_CATALOG } from "@opengeni/contracts/app-actions";
 import { ACTION_REQUEST_SCHEMAS } from "../src/mcp/action-schema-imports.gen";
 import { describeAction } from "../src/organization-mcp";
 
+test("product decision inference adds no agent-facing organization action", () => {
+  expect(ACTION_CATALOG.some((action) => action.path.endsWith("/decisions"))).toBe(false);
+  expect(ACTION_REQUEST_SCHEMAS.ModelDecisionRequest).toBeUndefined();
+});
+
 test("every action keeps the exact request-schema object and JSON projection", () => {
   const namespace = contracts as Record<string, unknown>;
   const expectedNames = new Set<string>();

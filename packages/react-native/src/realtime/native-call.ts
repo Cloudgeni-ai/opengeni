@@ -66,8 +66,7 @@ export type NativeCallAudioRoute = "receiver" | "speaker" | "bluetooth" | "headp
 
 /**
  * Why the call audio route changed. `categoryChange` is the audio session being
- * reconfigured (for example WebRTC applying its voice-chat setup once call audio
- * starts), not the person; `activated` is the route the call starts on.
+ * reconfigured, not the person; `activated` is the route the call starts on.
  */
 export type NativeCallRouteChangeReason =
   | "activated"
@@ -87,8 +86,8 @@ export type NativeCallRouteChangeReason =
 export interface NativeCallAdapter {
   /**
    * Whether the system shows a started call (CallKit's call screen and
-   * Recents). False where the adapter only sets up call audio (Android).
-   * Absent means true.
+   * Recents, or Android's call notification). False where the adapter only
+   * sets up call audio (Android without system calls). Absent means true.
    */
   showsSystemCall?: boolean | undefined;
   /** Report an outgoing call to the system and activate the call audio session. */
@@ -202,11 +201,6 @@ export function useNativeRealtimeCall(options: {
   /** The call id the system knows about; null for an in-app call. */
   const systemCallRef = useRef<string | null>(null);
   const connectedRef = useRef<string | null>(null);
-  /**
-   * Loudspeaker or receiver, as the person last chose it during this call; null
-   * between calls. Kept when the audio session is reconfigured underneath it.
-   */
-  const preferredSpeakerRef = useRef<boolean | null>(null);
   const realtimeRef = useRef(realtime);
   realtimeRef.current = realtime;
   const status = realtime.snapshot.status;
@@ -227,7 +221,6 @@ export function useNativeRealtimeCall(options: {
       callIdRef.current = null;
       systemCallRef.current = null;
       connectedRef.current = null;
-      preferredSpeakerRef.current = null;
       setCallId(null);
       setEnding(false);
       setSpeakerState(false);
@@ -241,22 +234,9 @@ export function useNativeRealtimeCall(options: {
     if (!call) return;
     return call.subscribe((event) => {
       if (event.type === "routeChanged") {
-        const builtIn = event.route === "speaker" || event.route === "receiver";
-        const preferred = preferredSpeakerRef.current;
-        if (builtIn && preferred !== null) {
-          if (event.reason === "categoryChange") {
-            // Not the person: the session was reconfigured (WebRTC's voice-chat
-            // setup when call audio starts falls back to the receiver). Put the
-            // audio back where they had it; the resulting change reports it.
-            if ((event.route === "speaker") !== preferred) {
-              void call.setSpeaker(preferred).catch(() => undefined);
-              return;
-            }
-          } else if (event.reason !== undefined) {
-            // The person picked it (the call screen, Control Center) or a device came or went.
-            preferredSpeakerRef.current = event.route === "speaker";
-          }
-        }
+        // The call adapter keeps the route where the call put it while voice
+        // starts; changes are the person's (call screen, Control Center) or a
+        // headset's, so the screen shows where audio actually plays.
         setRoute(event.route);
         setSpeakerState(event.route === "speaker");
         return;
@@ -267,7 +247,6 @@ export function useNativeRealtimeCall(options: {
         callIdRef.current = null;
         systemCallRef.current = null;
         connectedRef.current = null;
-        preferredSpeakerRef.current = null;
         setCallId(null);
         setEnding(false);
         setSystemCall(false);
@@ -313,7 +292,6 @@ export function useNativeRealtimeCall(options: {
     setError(null);
     if (call) {
       // Every call starts on the loudspeaker (the system call configures it so).
-      preferredSpeakerRef.current = true;
       setSpeakerState(true);
     }
     if (answered) {
@@ -365,13 +343,8 @@ export function useNativeRealtimeCall(options: {
 
   const setSpeaker = useCallback(
     (on: boolean) => {
-      const previous = preferredSpeakerRef.current;
-      if (callIdRef.current) preferredSpeakerRef.current = on;
       setSpeakerState(on);
-      void call?.setSpeaker(on).catch(() => {
-        if (callIdRef.current) preferredSpeakerRef.current = previous;
-        setSpeakerState(!on);
-      });
+      void call?.setSpeaker(on).catch(() => setSpeakerState(!on));
     },
     [call],
   );

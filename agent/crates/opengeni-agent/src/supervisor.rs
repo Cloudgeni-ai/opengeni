@@ -376,10 +376,8 @@ pub(crate) fn rejected_bearer_reconnect_command(
     format!("opengeni-agent connect --force --api-url {api_url} --workspace-id {workspace_id}")
 }
 
-/// NATS emits this server error when the intentionally short-lived user JWT
-/// reaches its expiry. The enrollment bearer remains valid and reconnecting
-/// mints a fresh user JWT, so this is planned credential rotation rather than
-/// an outage or an enrollment denial.
+/// Control planes issue expiring user JWTs to bound revoked access. Distinguish
+/// their expected expiry from unrelated transport failures.
 fn message_is_expected_credential_rotation(message: &str) -> bool {
     message
         .to_ascii_lowercase()
@@ -472,11 +470,8 @@ impl ShutdownSignal {
 
 /// Why the current NATS connection generation ended.
 ///
-/// Credential rotation is expected: the control plane deliberately issues
-/// short-lived NATS user JWTs and the agent reconnects with its durable
-/// enrollment bearer to mint the next one. It outranks a subsequent generic
-/// `Disconnected` event so the supervisor does not add outage backoff to a
-/// planned rotation.
+/// Expiry from an older control plane outranks a subsequent generic
+/// `Disconnected` event so mixed-version rollout does not add outage backoff.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 enum TransportLossKind {
@@ -595,6 +590,18 @@ fn transport_loss_outcome(lane: &'static str, signal: &TransportLossSignal) -> C
 struct ConnectedNats {
     client: async_nats::Client,
     transport_lost: TransportLossSignal,
+    owner: NatsConnectionOwner,
+}
+
+/// The generation owns the socket, not the last RPC holding a client clone.
+/// Dropping this guard also cancels an in-progress library reconnect. Accepted
+/// physical work and its replay receipts remain owned by the engine.
+struct NatsConnectionOwner(async_nats::Client);
+
+impl Drop for NatsConnectionOwner {
+    fn drop(&mut self) {
+        self.0.close();
+    }
 }
 
 /// What ends a live connection generation besides a shutdown and its own
@@ -643,6 +650,8 @@ pub struct SupervisorLink<P: Platform> {
     pub connection_instance_id: String,
     /// Set when the agent runs in a compute sandbox behind its host.
     pub compute: Option<ComputeLink>,
+    /// Shared with the relay hub so renewal updates future registrations in place.
+    pub relay_credential: Option<RelayCredential>,
 }
 
 impl<P: Platform> Clone for SupervisorLink<P> {
@@ -655,6 +664,7 @@ impl<P: Platform> Clone for SupervisorLink<P> {
             authentication_state: self.authentication_state,
             connection_instance_id: self.connection_instance_id.clone(),
             compute: self.compute.clone(),
+            relay_credential: self.relay_credential.clone(),
         }
     }
 }
@@ -675,6 +685,7 @@ impl<P: Platform> SupervisorLink<P> {
             authentication_state: None,
             connection_instance_id: uuid::Uuid::new_v4().to_string(),
             compute: None,
+            relay_credential: None,
         }
     }
 
@@ -717,6 +728,9 @@ struct WorkspaceLink<P: Platform> {
     connection_id: String,
     platform: Arc<P>,
     creds: StoredCredentials,
+    /// Refreshed login credential for the next dial; never tears down a live socket.
+    nats_bearer: tokio::sync::watch::Sender<String>,
+    relay_credential: Option<RelayCredential>,
     api_url: Option<String>,
     authentication_state: Option<crate::config::AuthenticationState>,
     connection_instance_id: String,
@@ -742,6 +756,8 @@ impl<P: Platform> WorkspaceLink<P> {
         Self {
             connection_id: definition.connection_id,
             platform: definition.platform,
+            nats_bearer: tokio::sync::watch::channel(definition.credentials.nats_bearer.clone()).0,
+            relay_credential: definition.relay_credential,
             creds: definition.credentials,
             api_url: definition.api_url,
             authentication_state: definition.authentication_state,
@@ -786,6 +802,48 @@ impl<P: Platform> WorkspaceLink<P> {
             replacement.replies = previous.replies.clone();
         }
         replacement
+    }
+
+    fn refresh_credentials(&self, candidate: &SupervisorLink<P>) -> bool {
+        if !self.same_frame_scope(candidate) {
+            return false;
+        }
+        if candidate.credentials == self.creds
+            && candidate.authentication_state == self.authentication_state
+        {
+            return true;
+        }
+        if self.authentication_state.is_some() || candidate.authentication_state.is_some() {
+            return false;
+        }
+        let mut settings = candidate.credentials.clone();
+        settings.nats_bearer.clone_from(&self.creds.nats_bearer);
+        settings.relay_token.clone_from(&self.creds.relay_token);
+        if settings != self.creds
+            || !crate::enrollment::same_bearer_authority(
+                &self.creds.nats_bearer,
+                &candidate.credentials.nats_bearer,
+            )
+            || (candidate.credentials.relay_token != self.creds.relay_token
+                && self.relay_credential.is_none())
+        {
+            return false;
+        }
+        self.nats_bearer.send_if_modified(|bearer| {
+            if *bearer == candidate.credentials.nats_bearer {
+                return false;
+            }
+            bearer.clone_from(&candidate.credentials.nats_bearer);
+            true
+        });
+        if let Some(relay) = &self.relay_credential {
+            relay.set(opengeni_agent_stream::RelayEndpoint {
+                url: candidate.credentials.relay_url.clone(),
+                token: candidate.credentials.relay_token.clone(),
+                expires_at_ms: None,
+            });
+        }
+        true
     }
 
     fn subject_prefix(&self) -> String {
@@ -1281,8 +1339,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                             removed_or_rescoped.insert(id.clone());
                         }
                         let unchanged = same_scope && next.get(id).is_some_and(|candidate| {
-                            candidate.credentials == link.creds
-                                && candidate.authentication_state == link.authentication_state
+                            link.refresh_credentials(candidate)
                         });
                         if !unchanged {
                             link.shutdown.request();
@@ -1354,6 +1411,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         }
         let mut backoff = Backoff::standard();
         let mut reconnect = self.reconnect.subscribe();
+        let mut credentials = link.nats_bearer.subscribe();
         info!(
             connection_id = %link.connection_id,
             agent_id = %link.creds.agent_id,
@@ -1376,12 +1434,18 @@ impl<P: Platform + 'static> Supervisor<P> {
 
             // The dial that follows answers every reconnect asked for so far.
             reconnect.mark_unchanged();
+            credentials.mark_unchanged();
             match self
                 .serve_one_connection(link, &mut backoff, &mut reconnect)
                 .await
             {
                 ConnectionOutcome::CleanShutdown => return,
-                ConnectionOutcome::AuthenticationRejected => {
+                ConnectionOutcome::AuthenticationRejected(bearer) => {
+                    // Renewal may have completed while this dial was rejected.
+                    // Never suspend a newer bearer or wait for another file edit.
+                    if *credentials.borrow() != bearer {
+                        continue;
+                    }
                     // The file watcher adopts recovery state and later renewed
                     // credentials without discarding retained work. If the disk
                     // is temporarily unwritable, retry only that local write,
@@ -1389,7 +1453,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     loop {
                         match crate::credential_renewal::record_authentication_rejection(
                             &link.connection_id,
-                            &link.creds.nats_bearer,
+                            &bearer,
                         ) {
                             Ok(()) => break,
                             Err(error) => warn!(connection_id = %link.connection_id, %error,
@@ -1400,8 +1464,10 @@ impl<P: Platform + 'static> Supervisor<P> {
                             () = tokio::time::sleep(backoff.next_delay()) => {}
                         }
                     }
-                    self.link_stop_notified(link).await;
-                    return;
+                    tokio::select! {
+                        () = self.link_stop_notified(link) => return,
+                        Ok(()) = credentials.changed() => {}
+                    }
                 }
                 ConnectionOutcome::CredentialRotation => {
                     info!(
@@ -1449,13 +1515,14 @@ impl<P: Platform + 'static> Supervisor<P> {
     ) -> ConnectionOutcome {
         // The dial has no client yet, so a shutdown here just exits (nothing to
         // announce).
-        let connect = match self.dial(link, reconnect).await {
+        let (connect, bearer) = match self.dial(link, reconnect).await {
             Ok(result) => result,
             Err(outcome) => return outcome,
         };
         let ConnectedNats {
             client,
             transport_lost: control_transport_lost,
+            owner: _control_owner,
         } = match connect {
             Ok(connection) => connection,
             Err(e @ SupervisorError::Authentication(_)) => {
@@ -1471,7 +1538,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                     error = %e,
                     "control plane rejected this connection's credentials; transport retries paused pending renewal. Inspect `opengeni-agent connections`; if reconnect is required, use `{reconnect_command}`"
                 );
-                return ConnectionOutcome::AuthenticationRejected;
+                return ConnectionOutcome::AuthenticationRejected(bearer);
             }
             Err(e) => return ConnectionOutcome::Disconnected(e.to_string()),
         };
@@ -1520,6 +1587,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let ConnectedNats {
             client: bulk_client,
             transport_lost: bulk_transport_lost,
+            owner: _bulk_owner,
         } = match self.dial_bulk(link, &client, reconnect).await {
             Ok(connection) => connection,
             Err(outcome) => return outcome,
@@ -1685,7 +1753,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 ConnectionOutcome::CleanShutdown => "shutdown",
                 ConnectionOutcome::CredentialRotation => "credential_rotation",
                 ConnectionOutcome::Reconnect => "reconnect",
-                ConnectionOutcome::AuthenticationRejected => "authentication_rejected",
+                ConnectionOutcome::AuthenticationRejected(_) => "authentication_rejected",
                 ConnectionOutcome::Disconnected(_) => "disconnect",
             };
             info!(
@@ -2536,12 +2604,13 @@ impl<P: Platform + 'static> Supervisor<P> {
         &self,
         link: &WorkspaceLink<P>,
         reconnect: &mut tokio::sync::watch::Receiver<u64>,
-    ) -> Result<Result<ConnectedNats, SupervisorError>, ConnectionOutcome> {
+    ) -> Result<(Result<ConnectedNats, SupervisorError>, String), ConnectionOutcome> {
+        let bearer = link.nats_bearer.borrow().clone();
         tokio::select! {
             biased;
             () = self.link_stop_notified(link) => Err(ConnectionOutcome::CleanShutdown),
             Ok(()) = reconnect.changed() => Err(ConnectionOutcome::Reconnect),
-            result = self.connect(link) => Ok(result),
+            result = self.connect_with_bearer(link, &bearer) => Ok((result, bearer)),
         }
     }
 
@@ -2554,13 +2623,13 @@ impl<P: Platform + 'static> Supervisor<P> {
         reconnect: &mut tokio::sync::watch::Receiver<u64>,
     ) -> Result<ConnectedNats, ConnectionOutcome> {
         match self.dial(link, reconnect).await {
-            Ok(Ok(connection)) => Ok(connection),
+            Ok((Ok(connection), _)) => Ok(connection),
             // A rejected credential pauses retries until renewal, as on the
             // control connection, rather than redialing in a storm.
-            Ok(Err(SupervisorError::Authentication(_))) => {
-                Err(ConnectionOutcome::AuthenticationRejected)
+            Ok((Err(SupervisorError::Authentication(_)), bearer)) => {
+                Err(ConnectionOutcome::AuthenticationRejected(bearer))
             }
-            Ok(Err(e)) => Err(ConnectionOutcome::Disconnected(format!(
+            Ok((Err(e), _)) => Err(ConnectionOutcome::Disconnected(format!(
                 "bulk dial failed: {e}"
             ))),
             Err(ConnectionOutcome::CleanShutdown) => {
@@ -2591,10 +2660,14 @@ impl<P: Platform + 'static> Supervisor<P> {
     /// A rejected bearer surfaces as [`SupervisorError::Authentication`]. The
     /// link stays paused until renewal or explicit reconnect supplies credentials;
     /// transport failures alone use the reconnect backoff.
-    async fn connect(&self, link: &WorkspaceLink<P>) -> Result<ConnectedNats, SupervisorError> {
+    async fn connect_with_bearer(
+        &self,
+        link: &WorkspaceLink<P>,
+        bearer: &str,
+    ) -> Result<ConnectedNats, SupervisorError> {
         // A compute agent dials its own host, which authenticates the sandbox
         // on its link; it presents no credential.
-        if link.compute.is_none() && link.creds.nats_bearer.is_empty() {
+        if link.compute.is_none() && bearer.is_empty() {
             // No bearer means the control plane never minted one (an enrollment from
             // before the credential plane was configured). Surface a clear, typed
             // disconnect rather than dial with an empty token the callout will deny.
@@ -2608,7 +2681,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let opts = if link.compute.is_some() {
             async_nats::ConnectOptions::new()
         } else {
-            async_nats::ConnectOptions::new().token(link.creds.nats_bearer.clone())
+            async_nats::ConnectOptions::new().token(bearer.to_owned())
         };
         let opts = opts
             .name(format!(
@@ -2660,9 +2733,16 @@ impl<P: Platform + 'static> Supervisor<P> {
                 }
             })?;
         Ok(ConnectedNats {
+            owner: NatsConnectionOwner(client.clone()),
             client,
             transport_lost,
         })
+    }
+
+    #[cfg(test)]
+    async fn connect(&self, link: &WorkspaceLink<P>) -> Result<ConnectedNats, SupervisorError> {
+        let bearer = link.nats_bearer.borrow().clone();
+        self.connect_with_bearer(link, &bearer).await
     }
 
     /// Publishes the connect [`Hello`] on the events subject and folds the
@@ -3242,11 +3322,10 @@ async fn publish_response(
 /// The outcome of one connection generation.
 enum ConnectionOutcome {
     /// Stop transport attempts until the connection store resolves authority.
-    AuthenticationRejected,
+    AuthenticationRejected(String),
     /// The connection dropped (transient); the supervisor backs off + reconnects.
     Disconnected(String),
-    /// The short-lived NATS user credential expired as designed. Reconnect with
-    /// the durable enrollment bearer immediately to mint its successor.
+    /// An older server expired the NATS user credential. Reconnect immediately.
     CredentialRotation,
     /// A reconnect was asked for ([`ReconnectSignal`]): dial again at once.
     Reconnect,
@@ -5388,6 +5467,7 @@ mod tests {
         let ConnectedNats {
             client: _client,
             transport_lost,
+            owner: _owner,
         } = supervisor
             .connect(&link)
             .await
@@ -5403,6 +5483,72 @@ mod tests {
             transport_lost.is_requested(),
             "a real NATS disconnect must remain latched"
         );
+    }
+
+    /// Old work may keep client handles indefinitely. Repeated generation
+    /// replacement must still leave exactly the current control/bulk pair open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retired_generations_close_sockets_even_with_retained_client_clones() {
+        use opengeni_agent_platform::NativePlatform;
+
+        let Some(bin) = it::find_nats_server() else {
+            return;
+        };
+        let port = it::free_local_port();
+        let monitor = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn_authenticated(&bin, port, monitor);
+        let mut credentials = it::test_credentials(&format!("nats://127.0.0.1:{port}"));
+        credentials.nats_bearer = "accepted-test-token".into();
+        let platform = Arc::new(NativePlatform::new());
+        let link = WorkspaceLink::from_definition(
+            SupervisorLink::new("generation-owner", platform.clone(), credentials.clone())
+                .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID),
+        );
+        let supervisor = Supervisor::new(platform, credentials, "test-0.0.0");
+        let http = reqwest::Client::new();
+        let monitor_url = format!("http://127.0.0.1:{monitor}/connz");
+        let ready = Instant::now() + Duration::from_secs(5);
+        while http.get(&monitor_url).send().await.is_err() {
+            assert!(Instant::now() < ready, "NATS monitor ready");
+            tokio::task::yield_now().await;
+        }
+        let mut old_handles = Vec::new();
+        for _ in 0..10 {
+            let control = supervisor.connect(&link).await.expect("control");
+            let bulk = supervisor.connect(&link).await.expect("bulk");
+            old_handles.push(control.client.clone());
+            old_handles.push(bulk.client.clone());
+            // Exercise library reconnect too: cancellation must own that task,
+            // not merely enqueue a drain behind its next successful dial.
+            control.client.force_reconnect().await.expect("disconnect");
+            drop(control);
+            drop(bulk);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let state: serde_json::Value = http
+                    .get(&monitor_url)
+                    .send()
+                    .await
+                    .expect("monitor")
+                    .json()
+                    .await
+                    .expect("connection JSON");
+                if state["num_connections"] == 0 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "retired sockets still open: {state}"
+                );
+                tokio::task::yield_now().await;
+            }
+        }
+        for old in old_handles {
+            assert!(
+                old.flush().await.is_err(),
+                "old handles cannot reconnect or publish"
+            );
+        }
     }
 
     /// A dead bulk lane must end the whole logical connection generation even
@@ -5431,6 +5577,7 @@ mod tests {
         let ConnectedNats {
             client: control_client,
             transport_lost: control_transport_lost,
+            owner: _control_owner,
         } = supervisor
             .connect(&link)
             .await
@@ -5438,6 +5585,7 @@ mod tests {
         let ConnectedNats {
             client: bulk_client,
             transport_lost: bulk_transport_lost,
+            owner: _bulk_owner,
         } = supervisor.connect(&link).await.expect("connect bulk lane");
         let subscription = control_client
             .subscribe(link.rpc_subject())
@@ -5509,6 +5657,7 @@ mod tests {
         let ConnectedNats {
             client: control_client,
             transport_lost: control_transport_lost,
+            owner: _control_owner,
         } = supervisor
             .connect(&link)
             .await
@@ -5516,6 +5665,7 @@ mod tests {
         let ConnectedNats {
             client: _bulk_client,
             transport_lost: bulk_transport_lost,
+            owner: _bulk_owner,
         } = supervisor.connect(&link).await.expect("connect bulk lane");
         let subscription = control_client
             .subscribe(link.rpc_subject())
@@ -6509,6 +6659,184 @@ mod tests {
 
         shutdown.request();
         let _ = tokio::time::timeout(Duration::from_secs(5), run).await;
+    }
+
+    fn renewal_test_bearer(generation: u64, expiry: u64) -> String {
+        use base64::Engine as _;
+        let claims = serde_json::json!({
+            "workspaceId": "test-workspace", "agentId": "test-agent",
+            "enrollmentId": "test-agent", "subjectPrefix": "agent.test-workspace.test-agent",
+            "credentialGeneration": generation, "exp": expiry,
+        });
+        format!(
+            "oge_{}.test-signature",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+        )
+    }
+
+    #[tokio::test]
+    async fn only_token_renewal_refreshes_credentials_without_retiring_the_link() {
+        use opengeni_agent_platform::NativePlatform;
+        let mut credentials = it::test_credentials("nats://127.0.0.1:1");
+        credentials.nats_bearer = renewal_test_bearer(1, 100);
+        let mut definition =
+            SupervisorLink::new("renewal", Arc::new(NativePlatform::new()), credentials);
+        let relay = RelayCredential::fixed("http://127.0.0.1:9", "old");
+        definition.relay_credential = Some(relay.clone());
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let mut credential_updates = link.nats_bearer.subscribe();
+        let mut renewed = definition.clone();
+        renewed.credentials.nats_bearer = renewal_test_bearer(1, 200);
+        renewed.credentials.relay_token = "new".into();
+        assert!(link.refresh_credentials(&renewed));
+        // A login refusal waiting on the old bearer must wake even if renewal
+        // arrived before it registered its wait; repeated snapshots do not wake.
+        credential_updates.changed().await.unwrap();
+        assert!(link.refresh_credentials(&renewed));
+        assert!(!credential_updates.has_changed().unwrap());
+        assert_eq!(*link.nats_bearer.borrow(), renewed.credentials.nats_bearer);
+        assert_eq!(relay.current().await.unwrap().token, "new");
+        assert!(!link.shutdown.is_requested());
+
+        for candidate in [
+            {
+                let mut changed = renewed.clone();
+                changed.credentials.nats_bearer = renewal_test_bearer(2, 300);
+                changed
+            },
+            {
+                let mut changed = renewed.clone();
+                changed.credentials.nats_urls = vec!["nats://other.test".into()];
+                changed
+            },
+            {
+                let mut changed = renewed.clone();
+                changed.credentials.consented_screen_control = true;
+                changed
+            },
+            {
+                let mut changed = renewed.clone();
+                changed.authentication_state =
+                    Some(crate::config::AuthenticationState::RenewalRequired);
+                changed
+            },
+            {
+                let mut changed = renewed.clone();
+                changed.credentials.nats_bearer = "malformed".into();
+                changed
+            },
+        ] {
+            assert!(!link.refresh_credentials(&candidate));
+        }
+        assert_eq!(*link.nats_bearer.borrow(), renewed.credentials.nats_bearer);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::too_many_lines)] // one live command spanning credential renewal
+    async fn live_credential_renewal_keeps_the_connection_and_inflight_command() {
+        use opengeni_agent_platform::NativePlatform;
+        let Some(bin) = it::find_nats_server() else {
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&bin, port);
+        let url = format!("nats://127.0.0.1:{port}");
+        let client = it::connect_with_retry(&url, Duration::from_secs(5)).await;
+        let directory = tempfile::tempdir().unwrap();
+        let platform = Arc::new(NativePlatform::with_root(directory.path()));
+        let mut credentials = it::test_credentials(&url);
+        credentials.nats_bearer = renewal_test_bearer(1, 100);
+        let definition = SupervisorLink::new("live-renewal", platform, credentials)
+            .with_connection_instance_id(TEST_CONNECTION_INSTANCE_ID);
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let mut events = client.subscribe(link.events_subject()).await.unwrap();
+        let mut frames = client
+            .subscribe(link.op_subject("renewal-inflight"))
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+        let supervisor = Supervisor::new_links(std::slice::from_ref(&definition), "test");
+        let shutdown = supervisor.shutdown_handle();
+        let (updates, rx) = tokio::sync::watch::channel(vec![definition.clone()]);
+        let run = tokio::spawn(async move { supervisor.run_with_updates(rx).await });
+        assert!(
+            it::wait_for_event(&mut events, Duration::from_secs(10), |event| matches!(
+                event.event,
+                Some(Event::Heartbeat(_))
+            ))
+            .await
+        );
+        let request = ControlRequest {
+            request_id: "renewal-inflight".into(),
+            epoch: 0,
+            resource_policy: None,
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(v1::ExecRequest {
+                    command: vec!["touch renewal-started; sleep 1; printf renewed".into()],
+                    shell: true,
+                    ..Default::default()
+                })),
+                window_bytes: 1 << 20,
+                ..Default::default()
+            })),
+        };
+        let requester = client.clone();
+        let subject = link.rpc_subject();
+        let pending = tokio::spawn(async move {
+            requester
+                .request(subject, request.encode_to_vec().into())
+                .await
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !directory.path().join("renewal-started").exists() {
+            assert!(Instant::now() < deadline, "command started");
+            tokio::task::yield_now().await;
+        }
+        let mut renewed = definition;
+        renewed.credentials.nats_bearer = renewal_test_bearer(1, 200);
+        updates.send(vec![renewed]).unwrap();
+        let reply = pending.await.unwrap().unwrap();
+        let reply = ControlResponse::decode(reply.payload.as_ref()).unwrap();
+        assert!(reply.error.is_none(), "{reply:?}");
+        let mut output = Vec::new();
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(5), frames.next())
+                .await
+                .unwrap()
+                .unwrap();
+            let frame = v1::OpFrame::decode(message.payload.as_ref()).unwrap();
+            match frame.body {
+                Some(v1::op_frame::Body::Data(data)) => output.extend_from_slice(&data.bytes),
+                Some(v1::op_frame::Body::Exit(exit)) => {
+                    assert_eq!(exit.exit_code, 0);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(output, b"renewed");
+        // A refresh must not publish GoingOffline or another Hello. The next
+        // heartbeat comes from the original generation, after the update.
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(10), events.next())
+                .await
+                .unwrap()
+                .unwrap();
+            let event = AgentEvent::decode(message.payload.as_ref()).unwrap();
+            assert!(
+                !matches!(event.event, Some(Event::GoingOffline(_))),
+                "renewal retired the live connection"
+            );
+            if matches!(event.event, Some(Event::Heartbeat(_))) {
+                break;
+            }
+        }
+        shutdown.request();
+        tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[test]

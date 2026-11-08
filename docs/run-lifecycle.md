@@ -129,7 +129,11 @@ shell session, pending shell start, remote operation) and registration count;
 command text, numeric handles and provider locators are never logged.
 Grafana exposes stage occupancy and thirty-second slow-stage observations;
 the bounded containment log and worker restarts identify actual exits.
-A stuck writer drain is never detached to release a successor. At the deadline,
+A Connected Machine operation whose foreground consumer has ended can release
+its writer through committed durable stop-request adoption on the original
+connection. Cleanup retries this handoff independently of transport observation;
+failed adoption, a cancellation request alone, or an unknown outcome cannot
+release the writer. A stuck writer drain is never detached to release a successor. At the deadline,
 the host stops polling and requests the ordinary graceful worker shutdown. Other
 live turns checkpoint and resume the same logical turn on a healthy worker,
 without spending their unexpected-worker-death redispatch allowance. The
@@ -143,6 +147,14 @@ never exit the shared process. The deadline resets only when cleanup advances
 to another stage and
 is disarmed when the finalizer exits, including exceptional exits. Publishing a
 quiescence receipt does not disable containment for later housekeeping.
+Attempt-private secret-file deletion is best-effort work outside this join:
+after writers drain, deletion starts against every exact backend that received
+files, without resolving the current route or entering workspace capture
+admission. A pending provider deletion cannot hold activity completion or cause
+worker containment; late failures are observed. These attempt-scoped paths live
+outside the workspace and are never read by a successor. Run-credential
+generation/pointer deletion is still mandatory, successor-safe workspace work
+and remains in `credential_cleanup`; it is not detached.
 Host containment intent survives a Temporal finalization exception that masks
 its force-timeout error. The lifecycle reports `force_stopped`, keeps the SDK
 exception as the cause, and the standalone entry point labels its nonzero exit
@@ -5583,7 +5595,15 @@ timestamp. Their labels are limited to the closed provider/backend/outcome and,
 where applicable, phase/count/cache vocabularies; session, turn, request,
 credential, and content values remain only in authenticated durable events.
 Operation durations can nest and overlap; summing them does not produce a
-critical path. Initial session creation adds content-free
+critical path. The cumulative queue milestone includes time queued behind an
+active turn and session holds, not just worker dispatch delay. Likewise,
+acceptance-to-provider-dispatch excludes only this turn's own provider think
+time: earlier turns' provider and tool work can occur while this turn waits.
+Correlate a slow turn's start with its predecessor's completion and historical
+queue-hold evidence before attributing these samples to platform saturation.
+The per-request pre-dispatch metric has a different boundary and does not
+include that earlier work. Histogram quantiles cannot be subtracted to recover
+a per-turn preparation duration. Initial session creation adds content-free
 `api.session_create.authorization|body_read|site_origin|core_create|response_projection`
 child spans within the existing HTTP span. Authorization still precedes body
 handling and creation; response policy projection remains outside the create
@@ -5737,9 +5757,20 @@ When a Responses terminal omits its output array, completed stream items are
 reassembled by numeric `output_index`; sparse provider positions are compacted
 to the observed items rather than treated as missing output, while duplicate
 indices still fail closed.
-For generic providers, an attempt-local async context then awaits the durable
-`started` checkpoint at the literal pre-fetch boundary; request bytes cannot
-reach the wire first. Model-preparation `started` is durable before
+For generic providers, an attempt-local async context awaits the initial durable
+`started` checkpoint at the literal pre-fetch boundary; the first request's bytes
+cannot reach the wire first. Each request, including AI SDK / AI Gateway follow-up
+calls after tools, emits its own `started`, `first_byte` and terminal event.
+Only the enclosing startup preparation receipt is once per attempt; its latch
+must not suppress later request lifecycles. Follow-up started/first-byte
+observations use the ordered background event lane: they do not add a pre-fetch
+write wait. Queued observations share batches and the next awaited checkpoint;
+completion shares the canonical usage/response transaction when usage exists.
+Activity finalization joins outstanding delivery. Background observation failures
+remain best-effort, like startup progress receipts, while every call still awaits
+its required history/admission checkpoint. See [agent-step latency](design/agent-step-latency.md)
+for the response/tool transaction boundaries and recovery invariants.
+Model-preparation `started` is durable before
 `runStream` is invoked, including an immediately-calling native transport. A
 semantic terminal is latched before downstream stream cleanup; if the consumer
 cancels after parsing it, the audit remains `completed` rather than producing a

@@ -12,6 +12,7 @@ import {
   type CodexRealtimeDiagnostics,
   type CodexRealtimeInitialItem,
   type CodexRealtimeCallInput,
+  type CodexRealtimeProviderConfig,
 } from "@opengeni/codex";
 import {
   acquireSubscriptionCoreCodexOperationLease,
@@ -29,6 +30,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
+import { createRealtimeProviderConfigCache } from "./realtime-provider-config-cache";
 
 export type CodexRealtimeBrokerFailureReason =
   | "subscription_disabled"
@@ -82,10 +84,17 @@ export type CodexRealtimeBrokerDependencies = {
   }>;
   loadInitialItems(): Promise<CodexRealtimeInitialItem[]>;
   tokenResolver(credentialId: string): CodexTokenResolver;
+  loadProviderConfig?(
+    auth: CodexAuthHeaders,
+    options: { signal?: AbortSignal | undefined },
+  ): Promise<CodexRealtimeProviderConfig>;
   createCall(
     auth: CodexAuthHeaders,
     input: CodexRealtimeCallInput,
-    options: { signal?: AbortSignal | undefined },
+    options: {
+      signal?: AbortSignal | undefined;
+      providerConfig?: CodexRealtimeProviderConfig | undefined;
+    },
   ): Promise<CodexRealtimeProviderAnswer>;
 };
 
@@ -246,15 +255,37 @@ export async function brokerSessionCodexRealtime(
   // This comes from active session_history_items after lifecycle owner proof;
   // it is not accepted from the browser request and is replayed identically on
   // the one authentication-only retry below.
-  const initialItems = await deps.loadInitialItems();
-
   const resolver = deps.tokenResolver(credentialId);
-  let token: Omit<CodexAuthHeaders, "clientVersion">;
-  try {
-    token = await resolver.getToken();
-  } catch (error) {
-    throw credentialError(error);
-  }
+  // History and credential/configuration reads are independent after owner
+  // admission. Await both so failures cannot leave an unobserved rejection.
+  const [historyResult, preparationResult] = await Promise.allSettled([
+    deps.loadInitialItems(),
+    resolver
+      .getToken()
+      .catch((error) => {
+        throw credentialError(error);
+      })
+      .then(async (token) => {
+        const auth = { ...token, clientVersion: CODEX_CLIENT_VERSION };
+        try {
+          return {
+            token,
+            providerConfig: await deps.loadProviderConfig?.(auth, { signal: input.signal }),
+          };
+        } catch (error) {
+          // Preserve the authentication-only retry below, including config 401s.
+          if (error instanceof CodexRealtimeError && error.code === "authentication")
+            return { token, authenticationError: error, providerConfig: undefined };
+          throw brokerProviderError(error);
+        }
+      }),
+  ]);
+  // Keep the operation lease until both branches settle, even when one fails.
+  if (historyResult.status === "rejected") throw historyResult.reason;
+  if (preparationResult.status === "rejected") throw preparationResult.reason;
+  const initialItems = historyResult.value;
+  const prepared = preparationResult.value;
+  let token = prepared.token;
   const callInput: CodexRealtimeCallInput = {
     ...input.request,
     sessionId: input.sessionId,
@@ -262,8 +293,10 @@ export async function brokerSessionCodexRealtime(
     instructions: openGeniRealtimeInstructions(input.request.instructions),
   };
   try {
+    if (prepared.authenticationError) throw prepared.authenticationError;
     return await deps.createCall({ ...token, clientVersion: CODEX_CLIENT_VERSION }, callInput, {
       signal: input.signal,
+      providerConfig: prepared.providerConfig,
     });
   } catch (error) {
     if (!(error instanceof CodexRealtimeError) || error.code !== "authentication") {
@@ -280,8 +313,11 @@ export async function brokerSessionCodexRealtime(
     throw credentialError(error);
   }
   try {
-    return await deps.createCall({ ...token, clientVersion: CODEX_CLIENT_VERSION }, callInput, {
+    const auth = { ...token, clientVersion: CODEX_CLIENT_VERSION };
+    const providerConfig = await deps.loadProviderConfig?.(auth, { signal: input.signal });
+    return await deps.createCall(auth, callInput, {
       signal: input.signal,
+      providerConfig,
     });
   } catch (error) {
     if (error instanceof CodexRealtimeError && error.code === "authentication") {
@@ -308,17 +344,36 @@ async function loadRealtimeInitialItems(
   return projectSessionRealtimeInitialItems(history, continuity);
 }
 
-async function createRealtimeCall(
-  fetchImpl: CodexFetch,
-  auth: CodexAuthHeaders,
-  callInput: CodexRealtimeCallInput,
-  options: { signal?: AbortSignal | undefined },
-): Promise<CodexRealtimeProviderAnswer> {
-  const providerConfig = await fetchCodexRealtimeProviderConfig(auth, fetchImpl, options);
-  return await createCodexRealtimeCall(auth, callInput, fetchImpl, {
-    ...options,
-    providerConfig,
-  });
+// Separate injected transports (including tests) and never cache a credential.
+const providerConfigCaches = new WeakMap<
+  CodexFetch,
+  ReturnType<typeof createRealtimeProviderConfigCache>
+>();
+
+export type RealtimeSetupPhase =
+  | "owner"
+  | "candidates"
+  | "lease"
+  | "history"
+  | "token"
+  | "config"
+  | "fence"
+  | "provider_call"
+  | "release";
+
+function setupTimer(options: CodexRealtimeBrokerOptions) {
+  return async <T>(phase: RealtimeSetupPhase, work: () => Promise<T>): Promise<T> => {
+    const start = performance.now();
+    try {
+      return await work();
+    } finally {
+      try {
+        options.onTiming?.(phase, performance.now() - start);
+      } catch {
+        /* Telemetry cannot change call outcomes. */
+      }
+    }
+  };
 }
 
 /**
@@ -350,7 +405,8 @@ export async function brokerSessionCoreCodexRealtime(
       "Connected Codex subscription realtime is disabled",
     );
   }
-  const owner = await readSubscriptionCoreSessionOwner(db, context);
+  const timed = setupTimer(brokerOptions);
+  const owner = await timed("owner", () => readSubscriptionCoreSessionOwner(db, context));
   if (!owner) {
     throw new CodexRealtimeBrokerError(
       "credential_unavailable",
@@ -362,7 +418,9 @@ export async function brokerSessionCoreCodexRealtime(
     ...context,
     sessionOwnerSubjectId: owner.ownerSubjectId,
   };
-  const candidates = await listSubscriptionCoreCodexOperationCandidates(db, scope);
+  const candidates = await timed("candidates", () =>
+    listSubscriptionCoreCodexOperationCandidates(db, scope),
+  );
   // A turn may run on a plan without voice; a call takes a connection that
   // has it whenever one exists (legacy parity).
   const ordered = [
@@ -381,7 +439,9 @@ export async function brokerSessionCoreCodexRealtime(
       holderId: `realtime:${context.sessionId}`,
       generation: 1,
     };
-    const lease = await acquireSubscriptionCoreCodexOperationLease(db, scope, ref);
+    const lease = await timed("lease", () =>
+      acquireSubscriptionCoreCodexOperationLease(db, scope, ref),
+    );
     if (lease.kind !== "acquired") continue;
     try {
       const resolver = buildSubscriptionCoreCodexConnectionTokenResolver(
@@ -400,6 +460,12 @@ export async function brokerSessionCoreCodexRealtime(
         candidate.connectionId,
         fetchImpl,
       );
+      let cache = providerConfigCaches.get(fetchImpl);
+      if (!cache) {
+        cache = createRealtimeProviderConfigCache();
+        providerConfigCaches.set(fetchImpl, cache);
+      }
+      let configKey = "";
       return await brokerSessionCodexRealtime(
         {
           enabled: true,
@@ -409,17 +475,49 @@ export async function brokerSessionCoreCodexRealtime(
             connectedCredentialIds: new Set([candidate.connectionId]),
           }),
           loadInitialItems: () =>
-            loadRealtimeInitialItems(db, context.workspaceId, context.sessionId),
-          tokenResolver: () => resolver,
+            timed("history", () =>
+              loadRealtimeInitialItems(db, context.workspaceId, context.sessionId),
+            ),
+          tokenResolver: () => ({
+            getToken: () => timed("token", () => resolver.getToken()),
+            refresh: () => timed("token", () => resolver.refresh()),
+          }),
+          loadProviderConfig: (auth, options) => {
+            configKey = JSON.stringify([
+              context.accountId,
+              candidate.connectionId,
+              auth.chatgptAccountId,
+              auth.clientVersion,
+              auth.isFedramp,
+            ]);
+            return timed("config", () =>
+              cache.get(configKey, () =>
+                fetchCodexRealtimeProviderConfig(auth, requestFetch, options),
+              ),
+            );
+          },
           createCall: async (auth, callInput, options) => {
             // Pre-dispatch fence on the exact operation lease.
-            if (!(await renewSubscriptionCoreCodexOperationLease(db, scope, ref))) {
+            if (
+              !(await timed("fence", () =>
+                renewSubscriptionCoreCodexOperationLease(db, scope, ref),
+              ))
+            ) {
               throw new CodexRealtimeBrokerError(
                 "credential_unavailable",
                 "Codex subscription credential is unavailable",
               );
             }
-            return await createRealtimeCall(requestFetch, auth, callInput, options);
+            try {
+              return await timed("provider_call", () =>
+                createCodexRealtimeCall(auth, callInput, requestFetch, options),
+              );
+            } catch (error) {
+              // A rejected/stale configuration must not poison the next call.
+              // Never replay a call on an ambiguous provider outcome.
+              cache.invalidate(configKey);
+              throw error;
+            }
           },
         },
         { ...input, sessionId: context.sessionId },
@@ -433,7 +531,9 @@ export async function brokerSessionCoreCodexRealtime(
         // An observer must never change the call's outcome.
       }
     } finally {
-      await releaseSubscriptionCoreCodexOperationLease(db, scope, ref).catch(() => false);
+      await timed("release", () =>
+        releaseSubscriptionCoreCodexOperationLease(db, scope, ref),
+      ).catch(() => false);
     }
   }
   if (refused) throw refused;
@@ -444,6 +544,7 @@ export async function brokerSessionCoreCodexRealtime(
 }
 
 export type CodexRealtimeBrokerOptions = {
+  onTiming?: (phase: RealtimeSetupPhase, durationMs: number) => void;
   /**
    * Called when the provider refused realtime for one connection and the
    * call moves on to the next candidate (for operator logs).

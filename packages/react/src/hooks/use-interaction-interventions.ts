@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   CreateInteractionInterventionRequest,
   InteractionIntervention,
@@ -12,7 +13,7 @@ import {
 } from "../session-context";
 import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
-export type UseInteractionInterventionsOptions = EmbeddedInterventionClientOverride & {
+export type UseInteractionInterventionsOptions = EmbeddedInterventionClientOverride<ChatClient> & {
   enabled?: boolean | undefined;
   resourceKind?: "browser_session" | "computer_session" | undefined;
   resourceId?: string | null | undefined;
@@ -239,4 +240,4 @@ function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
-export type InteractionInterventionsClient = EmbeddedInterventionClientLike;
+export type InteractionInterventionsClient = EmbeddedInterventionClientLike<ChatClient>;

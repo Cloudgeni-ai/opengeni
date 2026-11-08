@@ -1,4 +1,5 @@
 import { organizationAdministrationAccountIds } from "@opengeni/react/app/lib/permissions";
+import type { ChatClient } from "@opengeni/sdk";
 export { organizationAdministrationAccountIds } from "@opengeni/react/app/lib/permissions";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
@@ -33,7 +34,7 @@ export function useOrganizationWorkspaceAdministration(): OrganizationWorkspaceA
 }
 
 export function OrganizationWorkspaceAdministrationBoundary(props: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   accessContext: AccessContext;
   accessKeyVersion: number;
   workspaceId: string;

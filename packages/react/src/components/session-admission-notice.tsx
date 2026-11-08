@@ -1,4 +1,4 @@
-import type { MachineView, Session, SessionMachineAccess } from "@opengeni/sdk";
+import type { MachineView, ChatSession as Session, SessionMachineAccess } from "@opengeni/sdk";
 import { InfoIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useSessionStart, type UseSessionStartOptions } from "../hooks/use-session-start";

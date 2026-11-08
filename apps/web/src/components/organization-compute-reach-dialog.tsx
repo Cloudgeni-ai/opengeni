@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import { toast } from "sonner";
 
 import type { OrganizationComputeReach } from "@opengeni/sdk";
@@ -73,7 +74,7 @@ export function OrganizationComputeReachDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   kind: OrganizationComputeKind;
   name: string;
   reach: OrganizationComputeReach;

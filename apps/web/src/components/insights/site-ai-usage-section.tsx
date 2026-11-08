@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   InsightsSiteUsageQuery,
   InsightsSiteUsageResponse,
@@ -23,7 +24,7 @@ export type SiteAiUsageLoad =
  * Source attribution is aggregate accounting, never private conversation discovery.
  */
 export function useSiteAiUsage(
-  client: Pick<OpenGeniBrowserClient, "getWorkspaceInsightsSiteUsage">,
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "getWorkspaceInsightsSiteUsage">,
   workspaceId: string,
   range: InsightsSiteUsageQuery["range"] | null,
 ): SiteAiUsageLoad {

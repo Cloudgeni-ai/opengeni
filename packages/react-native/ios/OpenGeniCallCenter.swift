@@ -46,8 +46,8 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
   private var incoming: [UUID: IncomingCall] = [:]
   private var pendingStart: [String: Any]?
   private var routeObserver: NSObjectProtocol?
-  /// Where a call's audio starts: every call starts on the loudspeaker, and the
-  /// person's choice during it is kept by JavaScript (see `routeChanged` reasons).
+  /// Loudspeaker or receiver for the current call. Every call starts on the
+  /// loudspeaker; the person's choice during it replaces that.
   private var speaker = true
   private(set) var voipToken: String?
 
@@ -75,6 +75,8 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
     let created = CXProvider(configuration: configuration)
     created.setDelegate(self, queue: nil)
     provider = created
+    // Before any call audio starts, so WebRTC never reconfigures a live call.
+    OpenGeniCallAudio.matchWebRTC(speaker: speaker)
     routeObserver = NotificationCenter.default.addObserver(
       forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
     ) { [weak self] note in
@@ -99,6 +101,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
     }
     if provider == nil { configure(includeInRecents: true) }
     speaker = true
+    OpenGeniCallAudio.matchWebRTC(speaker: speaker)
     let handle = CXHandle(type: .generic, value: target ?? "opengeni")
     let action = CXStartCallAction(call: id, handle: handle)
     action.contactIdentifier = title
@@ -155,9 +158,9 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
 
   func setSpeaker(_ on: Bool) throws {
     speaker = on
-    let session = AVAudioSession.sharedInstance()
-    try session.setCategory(.playAndRecord, mode: .voiceChat, options: Self.options(speaker: on))
-    try session.overrideOutputAudioPort(on ? .speaker : .none)
+    try OpenGeniCallAudio.configureSession(speaker: on)
+    // The loudspeaker wins over a connected headset when the person picks it.
+    try AVAudioSession.sharedInstance().overrideOutputAudioPort(on ? .speaker : .none)
   }
 
   // MARK: Start requests from outside the app
@@ -189,7 +192,10 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
   func reportIncoming(_ payload: [String: Any], completion: @escaping () -> Void) {
     if provider == nil { configure(includeInRecents: true) }
     guard let provider else { return completion() }
-    if activeCalls.isEmpty { speaker = true }
+    if activeCalls.isEmpty {
+      speaker = true
+      OpenGeniCallAudio.matchWebRTC(speaker: speaker)
+    }
     let id = (payload["callId"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
     let sessionId = payload["sessionId"] as? String ?? ""
     let ringUntil = (payload["ringUntil"] as? String).flatMap(Self.parseDate)
@@ -287,8 +293,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
   func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
     // CallKit activates this configuration; WebRTC's voice processing then
     // provides echo cancellation for hands-free use.
-    let session = AVAudioSession.sharedInstance()
-    try? session.setCategory(.playAndRecord, mode: .voiceChat, options: Self.options(speaker: speaker))
+    try? OpenGeniCallAudio.configureSession(speaker: speaker)
     provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: Date())
     action.fulfill()
   }
@@ -313,8 +318,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
       return action.fail()
     }
     // CallKit activates this configuration; voice then runs as on any call.
-    let session = AVAudioSession.sharedInstance()
-    try? session.setCategory(.playAndRecord, mode: .voiceChat, options: Self.options(speaker: speaker))
+    try? OpenGeniCallAudio.configureSession(speaker: speaker)
     call.state = "answered"
     incoming[action.callUUID] = call
     activeCalls.insert(action.callUUID)
@@ -365,13 +369,8 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
     DispatchQueue.main.async { [weak self] in self?.emit?(event) }
   }
 
-  private static func options(speaker: Bool) -> AVAudioSession.CategoryOptions {
-    speaker ? [.allowBluetooth, .defaultToSpeaker] : [.allowBluetooth]
-  }
-
-  /// Why the route changed. "categoryChange" is the session being configured
-  /// (WebRTC applies its own voice-chat configuration when call audio starts,
-  /// which falls back to the receiver); the others are the person or a device.
+  /// Why the route changed. "categoryChange" is the session being configured;
+  /// the others are the person or a device.
   private static func routeReason(_ reason: AVAudioSession.RouteChangeReason) -> String {
     switch reason {
     case .categoryChange: return "categoryChange"

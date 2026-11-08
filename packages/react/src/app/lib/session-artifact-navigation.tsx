@@ -80,7 +80,7 @@ export function useAppLinkResolver(): OpenGeniLinkResolver {
 
 /**
  * {@link useAppLinkResolver} inside one workspace's session: a workspace-less
- * `artifact:` file link or `session:` chat link belongs to that workspace, as
+ * `artifact:` file/editor link or `session:` chat link belongs to that workspace, as
  * it does in the agent's chat replies, so links in its questions and other
  * session text resolve the same way. The host's resolver still sees the link
  * first. With `openSession`, a plain click on a chat link opens the chat here
@@ -109,7 +109,10 @@ export function useWorkspaceAppLinkResolver(
           : null,
         app,
         (target) =>
-          (target.kind === "file" || target.kind === "session") && target.workspaceId === null
+          (target.kind === "file" ||
+            target.kind === "editable-artifact" ||
+            target.kind === "session") &&
+          target.workspaceId === null
             ? app({ ...target, workspaceId })
             : null,
       ) ?? app,

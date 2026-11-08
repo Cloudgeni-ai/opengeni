@@ -27,6 +27,15 @@ import type { ActionCatalogEntry } from "../../packages/contracts/src/app-action
  * in the browser.
  */
 export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
+  {
+    pattern: /^\/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/configuration$/,
+    reason:
+      "configuration read for compact UI clients; the existing getSession agent action already returns the full configuration",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/:workspaceId\/decisions$/,
+    reason: "stateless product inference API; agents use the internal configured decision model",
+  },
   { pattern: /^\/v1\/auth\//, reason: "Opengeni sign-in itself" },
   {
     pattern: /^\/v1\/site-auth\//,

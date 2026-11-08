@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   DEVELOPER_SETUP_API_KEY_PRESET,
   OWNER_LEVEL_API_KEY_CREATOR_SENTENCE,
@@ -48,9 +49,11 @@ import {
 import type { ApiKey } from "@opengeni/react/app/types";
 
 type CreateOrganizationApiKeyRequest = Parameters<
-  OpenGeniBrowserClient["createOrganizationApiKey"]
+  ChatClient<OpenGeniBrowserClient>["createOrganizationApiKey"]
 >[1];
-type CreateApiKeyResponse = Awaited<ReturnType<OpenGeniBrowserClient["createOrganizationApiKey"]>>;
+type CreateApiKeyResponse = Awaited<
+  ReturnType<ChatClient<OpenGeniBrowserClient>["createOrganizationApiKey"]>
+>;
 
 type OrganizationApiKeysSectionProps = {
   organizationId: string;

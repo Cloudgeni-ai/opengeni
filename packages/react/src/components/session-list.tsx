@@ -1,4 +1,9 @@
-import { deriveSessionDisplayTitle, type OpenGeniClient, type Session } from "@opengeni/sdk";
+import {
+  deriveSessionDisplayTitle,
+  type OpenGeniClient,
+  type ChatSession as Session,
+} from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { ArchiveIcon, PencilIcon, PlusIcon } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useClientConfigFlags } from "../hooks/use-client-config-flags";
@@ -41,7 +46,7 @@ const DEFAULT_LABELS = (t: OpenGeniText): SessionListLabels => ({
 /** How long the list offers Undo after archiving; the server accepts it a little longer. */
 const ARCHIVE_UNDO_MS = 10_000;
 
-export type SessionListProps = ClientOverride & {
+export type SessionListProps = ClientOverride<ChatClient> & {
   selectedSessionId?: string | null | undefined;
   onSelect: (sessionId: string) => void;
   /** Shown as a "New chat" button when provided. */
@@ -70,7 +75,7 @@ export type SessionListProps = ClientOverride & {
   className?: string | undefined;
 };
 
-type ArchiveClient = Partial<Pick<OpenGeniClient, "updateSessionArchive">>;
+type ArchiveClient = Partial<Pick<ChatClient<OpenGeniClient>, "updateSessionArchive">>;
 
 /**
  * The workspace's root chats the current user may read, newest activity

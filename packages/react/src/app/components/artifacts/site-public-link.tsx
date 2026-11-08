@@ -1,4 +1,5 @@
 import type { SitePublication, SitePublicationLink } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { DesktopBridge } from "@opengeni/sdk/desktop-bridge";
 import {
@@ -50,7 +51,7 @@ export function useSitePublicationLink({
   workspaceId,
   siteId,
 }: {
-  client: Pick<OpenGeniBrowserClient, "getSitePublicationLink">;
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "getSitePublicationLink">;
   workspaceId: string;
   siteId: string;
 }): {

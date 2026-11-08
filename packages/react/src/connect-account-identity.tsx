@@ -1,4 +1,5 @@
 import type { ConnectAccount } from "@opengeni/connect";
+import type { ChatClient } from "@opengeni/sdk";
 import type { CapabilityCatalogItem, OpenGeniClient } from "@opengeni/sdk";
 import { ConnectionServiceLogo } from "./connection-service-logo";
 import {
@@ -14,7 +15,7 @@ export function ConnectAccountIdentity({
   capabilities,
 }: {
   account: ConnectAccount;
-  client?: OpenGeniClient | undefined;
+  client?: ChatClient<OpenGeniClient> | undefined;
   capabilities: CapabilityCatalogItem[];
 }) {
   const t = useOpenGeniText();

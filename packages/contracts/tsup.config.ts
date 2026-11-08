@@ -4,6 +4,7 @@ import { defineConfig } from "tsup";
 // stay external so consumers can deduplicate their schema and hashing runtimes.
 export default defineConfig({
   entry: [
+    "src/browser-response-headers.ts",
     "src/modal-native-proof-v2.ts",
     "src/allowance-refusal.ts",
     "src/billing-credit-notifications.ts",

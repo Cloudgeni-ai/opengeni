@@ -1,4 +1,5 @@
 import { ORGANIZATION_PROVIDER_META } from "@/components/models/provider-metadata";
+import type { ChatClient } from "@opengeni/sdk";
 import { ClaudeSignInPage } from "@/components/models/claude-signin";
 import { CLAUDE_MODEL_CHOICES, claudeModelLabel } from "@/components/models/claude-setup";
 import { Disclosure } from "@opengeni/react/ui/disclosure";
@@ -125,16 +126,16 @@ type ProviderConnectionConfig = {
   unavailableModelDescription: string;
   modelToastName: string;
   listCustomModels: (
-    client: OpenGeniBrowserClient,
+    client: ChatClient<OpenGeniBrowserClient>,
     workspaceId: string,
   ) => Promise<{ models: WorkspaceProviderCustomModel[] }>;
   createCustomModel: (
-    client: OpenGeniBrowserClient,
+    client: ChatClient<OpenGeniBrowserClient>,
     workspaceId: string,
     request: CustomModelCreateRequest,
   ) => Promise<WorkspaceProviderCustomModel>;
   deleteCustomModel: (
-    client: OpenGeniBrowserClient,
+    client: ChatClient<OpenGeniBrowserClient>,
     workspaceId: string,
     customModelId: string,
     request: CustomModelDeleteRequest,
@@ -508,7 +509,7 @@ export interface ProviderConnectionView {
 
 export function useProviderConnection(
   props: ProviderConnectionProps & {
-    client: OpenGeniBrowserClient;
+    client: ChatClient<OpenGeniBrowserClient>;
     config: ProviderConnectionConfig;
   },
 ): ProviderConnectionView & {
@@ -2243,7 +2244,7 @@ export function AiGatewayConnectionCard(props: ProviderConnectionProps) {
 
 /** Isolated product fixture seam; production uses useProviderConnection on the Models page. */
 export function AiGatewayConnectionCardWithClient(
-  props: ProviderConnectionProps & { client: OpenGeniBrowserClient },
+  props: ProviderConnectionProps & { client: ChatClient<OpenGeniBrowserClient> },
 ) {
   return <StandaloneProviderConnection {...props} config={VERCEL_AI_GATEWAY_CONFIG} />;
 }
@@ -2255,7 +2256,7 @@ export function OpenRouterConnectionCard(props: ProviderConnectionProps) {
 
 /** Isolated product fixture seam; production uses useProviderConnection on the Models page. */
 export function OpenRouterConnectionCardWithClient(
-  props: ProviderConnectionProps & { client: OpenGeniBrowserClient },
+  props: ProviderConnectionProps & { client: ChatClient<OpenGeniBrowserClient> },
 ) {
   return <StandaloneProviderConnection {...props} config={OPENROUTER_CONFIG} />;
 }
@@ -2267,14 +2268,14 @@ export function OpperConnectionCard(props: ProviderConnectionProps) {
 
 /** Isolated product fixture seam; production uses useProviderConnection on the Models page. */
 export function OpperConnectionCardWithClient(
-  props: ProviderConnectionProps & { client: OpenGeniBrowserClient },
+  props: ProviderConnectionProps & { client: ChatClient<OpenGeniBrowserClient> },
 ) {
   return <StandaloneProviderConnection {...props} config={OPPER_CONFIG} />;
 }
 
 function StandaloneProviderConnection(
   props: ProviderConnectionProps & {
-    client: OpenGeniBrowserClient;
+    client: ChatClient<OpenGeniBrowserClient>;
     config: ProviderConnectionConfig;
   },
 ) {

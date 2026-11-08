@@ -25,6 +25,7 @@ import {
   checkWorkspaceAllowance,
   deleteSessionQueueItemInTransaction,
   editQueuedTurnInTransaction,
+  effectiveSessionPolicyQuery,
   getComposerDraftInTransaction,
   getSession,
   requireSessionArchiveMemberAuthority,
@@ -1343,37 +1344,42 @@ export async function getHumanComposerDraft(
   context: HumanSessionCommandContext,
 ): Promise<ComposerDraft> {
   await authorizeHumanSessionCommand(deps, context, "session.composer.read");
-  const row = await withWorkspaceSubjectRls(
+  return await withWorkspaceSubjectRls(
     deps.db,
     context.workspaceId,
     context.subjectId,
-    async (scoped) =>
-      withEffectiveComposerDraftPolicy(
+    async (scoped) => {
+      const row = await withEffectiveComposerDraftPolicy(
         scoped,
         await getComposerDraftInTransaction(scoped, {
           workspaceId: context.workspaceId,
           sessionId: context.sessionId,
           subjectId: context.subjectId,
         }),
-      ),
+      );
+      const mapped = composerDraft(row);
+      if (mapped) return mapped;
+      // No stored draft: only the effective composer policy is needed, not
+      // the full session, MCP metadata, cursor and control-tree projection.
+      const [policy] = await effectiveSessionPolicyQuery(scoped, context.workspaceId, [
+        context.sessionId,
+      ]);
+      if (!policy) throw new Error(`Session not found: ${context.sessionId}`);
+      return {
+        revision: 0,
+        text: "",
+        annotations: [],
+        resources: [],
+        model: policy.model,
+        reasoningEffort: policy.reasoningEffort as ComposerDraft["reasoningEffort"],
+        latencyMode: policy.latencyMode as ComposerDraft["latencyMode"],
+        policyFollowsSession: true,
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: null,
+      };
+    },
   );
-  const mapped = composerDraft(row);
-  if (mapped) return mapped;
-  const session = await getSession(deps.db, context.workspaceId, context.sessionId);
-  if (!session) throw new Error(`Session not found: ${context.sessionId}`);
-  return {
-    revision: 0,
-    text: "",
-    annotations: [],
-    resources: [],
-    model: session.model,
-    reasoningEffort: session.reasoningEffort,
-    latencyMode: session.latencyMode,
-    policyFollowsSession: true,
-    sourceTurnId: null,
-    sourceTurnVersion: null,
-    updatedAt: null,
-  };
 }
 
 export async function saveHumanComposerDraft(

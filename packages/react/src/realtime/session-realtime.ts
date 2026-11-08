@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 /**
  * Platform-neutral session realtime: the controller hook, admission rules and
  * the workspace voice-model catalog. Free of DOM components, so web and native
@@ -82,7 +83,7 @@ const REALTIME_LANGUAGE_STORAGE_KEY = "opengeni:realtime-language";
 const REALTIME_MODEL_CATALOG_CACHE_TTL_MS = 60_000;
 const REALTIME_MODEL_CATALOG_CACHE_MAX_WORKSPACES = 64;
 
-export type RealtimeControllerClient = EmbeddedRealtimeSessionClientLike &
+export type RealtimeControllerClient = EmbeddedRealtimeSessionClientLike<ChatClient> &
   SessionRealtimeClientLike;
 
 const realtimeLanguageListeners = new Set<() => void>();
@@ -620,6 +621,9 @@ export function useSessionRealtime(options: {
     }
     await controller.start();
   }, [model, t]);
+  const prepare = useCallback(async () => {
+    await controllerRef.current?.prepare?.();
+  }, []);
   const stop = useCallback(async () => {
     await controllerRef.current?.stop();
   }, []);
@@ -663,6 +667,7 @@ export function useSessionRealtime(options: {
     codexConnected: options.codexConnected,
     /** @deprecated Replies play without a mounted element; rendering this ref has no effect. */
     audioRef,
+    prepare,
     start,
     stop,
     retry,

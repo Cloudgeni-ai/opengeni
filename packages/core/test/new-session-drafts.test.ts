@@ -395,10 +395,35 @@ describe("core new-session draft hydration", () => {
       const consumed = await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId!);
       expect(consumed.text).toBe("");
       expect(consumed.revision).toBe(saved.revision + 1);
+      // Restoring the seed on another client must not turn Customize into a
+      // pinned empty list. The exclusions distinguish these two policies,
+      // even when the person merely opened Customize without turning one off.
+      expect(consumed.options.excludedMcpServerIds).toEqual(excludedMcpServerIds);
+      const restored = await saveActorNewSessionDraft(
+        { db, settings, objectStorage: null },
+        grant,
+        grant.workspaceId!,
+        { ...consumed, text: "Search again", expectedRevision: consumed.revision },
+      );
+      const exclusionOnly =
+        restored.tools.length === 0 && restored.options.excludedMcpServerIds !== undefined;
+      const next = await createSessionForRequest(draftCreateDeps(), grant, grant.workspaceId!, {
+        initialMessage: restored.text,
+        ...restored.options,
+        ...(restored.toolsProvided && !exclusionOnly ? { tools: restored.tools } : {}),
+        model: restored.model,
+        reasoningEffort: restored.reasoningEffort,
+        latencyMode: restored.latencyMode,
+        expectedNewSessionDraftRevision: restored.revision,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      expect(next.toolPolicy.mode).toBe("workspace_default");
+      expect(next.toolPolicy.excludedMcpServerIds ?? []).toEqual(excludedMcpServerIds);
+      expect(next.tools.map((tool) => tool.id)).toEqual(session.tools.map((tool) => tool.id));
     }
   }, 180_000);
 
-  test("still rejects an exclusion-only create against a draft with pinned connectors", async () => {
+  test("an exclusion-only create against a draft with pinned connectors starts what was sent", async () => {
     if (!available) return;
     const { grant } = await fixture();
     const saved = await saveActorNewSessionDraft(
@@ -417,22 +442,26 @@ describe("core new-session draft hydration", () => {
         options: { visibility: "workspace" },
       },
     );
-    await expect(
-      createSessionForRequest(draftCreateDeps(), grant, grant.workspaceId!, {
-        initialMessage: saved.text,
-        visibility: "workspace",
-        resources: [],
-        excludedMcpServerIds: [],
-        model: saved.model,
-        reasoningEffort: saved.reasoningEffort,
-        latencyMode: saved.latencyMode,
-        expectedNewSessionDraftRevision: saved.revision,
-        idempotencyKey: crypto.randomUUID(),
-      }),
-    ).rejects.toMatchObject({ status: 409 });
+    // Send carries what is in the box (workspace connectors), never the draft.
+    const session = await createSessionForRequest(draftCreateDeps(), grant, grant.workspaceId!, {
+      initialMessage: saved.text,
+      visibility: "workspace",
+      resources: [],
+      excludedMcpServerIds: [],
+      model: saved.model,
+      reasoningEffort: saved.reasoningEffort,
+      latencyMode: saved.latencyMode,
+      expectedNewSessionDraftRevision: saved.revision,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(session.toolPolicy.mode).toBe("workspace_default");
+    // Still at the revision the Send came from, so the draft is cleared.
+    const consumed = await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId!);
+    expect(consumed.revision).toBe(saved.revision + 1);
+    expect(consumed.text).toBe("");
   }, 180_000);
 
-  test("rejects a stale create before committing a visible session shell", async () => {
+  test("a create from an older revision starts its chat and keeps the newer sibling draft", async () => {
     if (!available) return;
     const { grant } = await fixture();
     const first = await saveActorNewSessionDraft(
@@ -451,7 +480,7 @@ describe("core new-session draft hydration", () => {
         options: { visibility: "workspace" },
       },
     );
-    await saveActorNewSessionDraft(
+    const newer = await saveActorNewSessionDraft(
       { db, settings, objectStorage: null },
       grant,
       grant.workspaceId!,
@@ -488,25 +517,27 @@ describe("core new-session draft hydration", () => {
       getDocumentServices: () => ({}) as never,
     } as unknown as ApiRouteDeps;
 
-    await expect(
-      createSessionForRequest(deps, grant, grant.workspaceId!, {
-        initialMessage: first.text,
-        visibility: "workspace",
-        resources: [],
-        tools: [],
-        model: first.model,
-        reasoningEffort: first.reasoningEffort,
-        latencyMode: first.latencyMode,
-        expectedNewSessionDraftRevision: first.revision,
-        idempotencyKey: crypto.randomUUID(),
-      }),
-    ).rejects.toMatchObject({ status: 409 });
+    const session = await createSessionForRequest(deps, grant, grant.workspaceId!, {
+      initialMessage: first.text,
+      visibility: "workspace",
+      resources: [],
+      tools: [],
+      model: first.model,
+      reasoningEffort: first.reasoningEffort,
+      latencyMode: first.latencyMode,
+      expectedNewSessionDraftRevision: first.revision,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(session.id).toBeString();
 
     const [stored] = await shared!.admin<Array<{ count: number }>>`
       select count(*)::int as count
       from sessions
       where workspace_id = ${grant.workspaceId!}`;
-    expect(stored).toEqual({ count: 0 });
+    expect(stored).toEqual({ count: 1 });
+    // The sibling tab's newer draft is not what was sent, so it stays.
+    const kept = await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId!);
+    expect(kept).toMatchObject({ revision: newer.revision, text: "newer sibling-tab prompt" });
   }, 180_000);
 
   test("treats a markerless old-client save, including [], as explicit tools", async () => {

@@ -104,6 +104,7 @@ mock.module("@opengeni/sdk", () => ({
     listWorkspaces = async () => [{ id: "workspace", accountId: "org", name: "Work" }];
     getClientConfig = async () => null;
     signOutNativeApp = async () => undefined;
+    withSessionResponse = () => this;
   },
 }));
 mock.module("@opengeni/react-native", () => ({ createHydratedPersistenceAdapter: () => ({}) }));

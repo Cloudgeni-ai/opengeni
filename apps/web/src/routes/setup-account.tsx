@@ -1,4 +1,5 @@
 import { Link } from "@tanstack/react-router";
+import type { ChatClient } from "@opengeni/sdk";
 import { CheckIcon, KeyRoundIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
@@ -433,7 +434,7 @@ function InvitationSummary({
 }
 
 async function findMatchingPendingInvitation(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   preview: Extract<OrganizationUserSetupPreview, { state: "pending" }>,
 ): Promise<OrganizationInvitation | null> {
   const seenCursors = new Set<string>();

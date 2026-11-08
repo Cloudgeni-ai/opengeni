@@ -1,5 +1,8 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
-  Session,
+  ChatSession as Session,
+  Session as FullSession,
+  OpenGeniClient,
   SessionListEntry,
   SessionListTotals,
   SiteConversationGroup,
@@ -8,39 +11,40 @@ import { useCallback, useEffect, useRef } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { usePolledValue } from "./internal";
 
-export type UseWorkspaceSessionsOptions = ClientOverride & {
-  includeTotals?: boolean | undefined;
-  needsYouOnly?: boolean | undefined;
-  /** Only read-only sessions moved to the idle-session archive. */
-  contentArchivedOnly?: boolean | undefined;
-  /** Only workstreams the signed-in person started or messaged. */
-  mineOnly?: boolean | undefined;
-  /** Compact list records; detail reads remain full sessions. */
-  projection?: "summary" | undefined;
-  limit?: number | undefined;
-  parentSessionId?: string | null | undefined;
-  cursor?: string | undefined;
-  search?: string | undefined;
-  /** Return only the complete personal pinned projection. */
-  pinsOnly?: boolean | undefined;
-  /** Skip pinned details when the pinned section is loaded separately. */
-  includePinned?: boolean | undefined;
-  archivedOnly?: boolean | undefined;
-  sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
-  archiveStatus?: "active" | "archived" | "all" | undefined;
-  /**
-   * Conversations that run inside a Site: `include` lists them as rows,
-   * `group` (root pages) returns them as `siteGroups` instead.
-   */
-  siteConversations?: "include" | "group" | undefined;
-  /** Refresh interval (ms) for fleet/manager views. Off by default. */
-  pollIntervalMs?: number | undefined;
-  enabled?: boolean | undefined;
-  /** Optional shared causal clock invoked when each network read starts. */
-  beginRead?: (() => number) | undefined;
-};
+export type UseWorkspaceSessionsOptions<Client extends ChatClient = OpenGeniClient> =
+  ClientOverride<Client> & {
+    includeTotals?: boolean | undefined;
+    needsYouOnly?: boolean | undefined;
+    /** Only read-only sessions moved to the idle-session archive. */
+    contentArchivedOnly?: boolean | undefined;
+    /** Only workstreams the signed-in person started or messaged. */
+    mineOnly?: boolean | undefined;
+    /** Compact list records; detail reads remain full sessions. */
+    projection?: "summary" | undefined;
+    limit?: number | undefined;
+    parentSessionId?: string | null | undefined;
+    cursor?: string | undefined;
+    search?: string | undefined;
+    /** Return only the complete personal pinned projection. */
+    pinsOnly?: boolean | undefined;
+    /** Skip pinned details when the pinned section is loaded separately. */
+    includePinned?: boolean | undefined;
+    archivedOnly?: boolean | undefined;
+    sortBy?: "updatedAt" | "createdAt" | "name" | undefined;
+    archiveStatus?: "active" | "archived" | "all" | undefined;
+    /**
+     * Conversations that run inside a Site: `include` lists them as rows,
+     * `group` (root pages) returns them as `siteGroups` instead.
+     */
+    siteConversations?: "include" | "group" | undefined;
+    /** Refresh interval (ms) for fleet/manager views. Off by default. */
+    pollIntervalMs?: number | undefined;
+    enabled?: boolean | undefined;
+    /** Optional shared causal clock invoked when each network read starts. */
+    beginRead?: (() => number) | undefined;
+  };
 
-export type UseWorkspaceSessionsResult<T extends Session | SessionListEntry = Session> = {
+export type UseWorkspaceSessionsResult<T extends Session | SessionListEntry = FullSession> = {
   /**
    * All visible rows, with pins first. This preserves the pre-pinning hook
    * contract for consumers that only read `sessions`.
@@ -67,16 +71,24 @@ export type UseWorkspaceSessionsResult<T extends Session | SessionListEntry = Se
 
 /** List the workspace's sessions — the data behind fleet and manager views. */
 export function useWorkspaceSessions(
-  options: UseWorkspaceSessionsOptions & { projection: "summary" },
+  options: UseWorkspaceSessionsOptions<ChatClient> & { projection: "summary" },
 ): UseWorkspaceSessionsResult<SessionListEntry>;
 export function useWorkspaceSessions(
-  options?: UseWorkspaceSessionsOptions & { projection?: undefined },
+  options?: UseWorkspaceSessionsOptions & {
+    projection?: undefined;
+  },
 ): UseWorkspaceSessionsResult;
 export function useWorkspaceSessions(
+  options: UseWorkspaceSessionsOptions<ChatClient> & { projection?: undefined },
+): UseWorkspaceSessionsResult<Session>;
+export function useWorkspaceSessions(
   options: UseWorkspaceSessionsOptions,
+): UseWorkspaceSessionsResult<FullSession | SessionListEntry>;
+export function useWorkspaceSessions(
+  options: UseWorkspaceSessionsOptions<ChatClient>,
 ): UseWorkspaceSessionsResult<Session | SessionListEntry>;
 export function useWorkspaceSessions(
-  options: UseWorkspaceSessionsOptions = {},
+  options: UseWorkspaceSessionsOptions<ChatClient> = {},
 ): UseWorkspaceSessionsResult<Session | SessionListEntry> {
   const { client, workspaceId } = useOpenGeni(options);
   const projection = options.projection;

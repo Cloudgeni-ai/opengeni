@@ -12,8 +12,8 @@ import android.os.Looper
 import android.util.Log
 
 /**
- * The phone's audio set up for a voice call while one runs: what CallKit's
- * audio session does on iOS. Starting takes audio focus for voice
+ * The phone's audio set up for a voice call while one runs, where the system
+ * call ([SystemCalls]) is unavailable: what CallKit's audio session does on iOS. Starting takes audio focus for voice
  * communication, switches the phone into communication mode (the mode its
  * voice-call microphone processing and routing expect) and routes the call
  * to a connected headset, or else the loudspeaker. Ending puts back what was
@@ -21,8 +21,6 @@ import android.util.Log
  */
 internal object CallAudio {
   private const val TAG = "OpenGeniCall"
-
-  @Volatile var emit: ((Map<String, Any?>) -> Unit)? = null
 
   private val main = Handler(Looper.getMainLooper())
 
@@ -119,7 +117,7 @@ internal object CallAudio {
 
   private fun send(route: String, reason: String) {
     lastRoute = route
-    emit?.invoke(mapOf("type" to "routeChanged", "route" to route, "reason" to reason))
+    CallEvents.send(mapOf("type" to "routeChanged", "route" to route, "reason" to reason))
   }
 
   /** Route the call and say where it went. */

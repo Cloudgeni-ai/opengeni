@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { OpenGeniApiError, type BillingPlanBalance } from "@opengeni/sdk";
@@ -237,7 +238,9 @@ function makeClient(overrides: Record<string, unknown> = {}) {
 }
 
 type Client = ReturnType<typeof makeClient>;
-type InvitationRequest = Parameters<OpenGeniBrowserClient["createOrganizationInvitation"]>[1] &
+type InvitationRequest = Parameters<
+  ChatClient<OpenGeniBrowserClient>["createOrganizationInvitation"]
+>[1] &
   Pick<OrganizationInvitation, "role" | "initialWorkspaceIds">;
 
 async function flush() {
@@ -276,7 +279,7 @@ function Provider({
 }) {
   return (
     <OrganizationDirectoryProvider
-      client={client as unknown as OpenGeniBrowserClient}
+      client={client as unknown as ChatClient<OpenGeniBrowserClient>}
       identity={identity}
       actorRole={actorRole}
       managedSession

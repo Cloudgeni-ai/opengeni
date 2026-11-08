@@ -3,6 +3,7 @@
 // settings cards; every webhook, the provider and both forms are pages with
 // their own URL (lib/developer-route.ts).
 import type { WorkspaceInheritedIntegrationsResponse } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useMemo, type ReactNode } from "react";
 
@@ -219,7 +220,7 @@ export function OrganizationDeveloperIntegrations({
   location = LIST,
   onNavigate,
 }: {
-  client: Pick<OpenGeniBrowserClient, "requestJson">;
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "requestJson">;
   organizationId: string;
   canManage: boolean;
   location?: DeveloperLocation;

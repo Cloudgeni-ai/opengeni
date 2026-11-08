@@ -1,4 +1,5 @@
 import { OpenGeniApiError, type OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { Directory, File, Paths } from "expo-file-system";
 import { useCallback, useSyncExternalStore } from "react";
 import {
@@ -53,10 +54,12 @@ export function classifyFeedbackFailure(error: unknown): FeedbackSendFailure {
     : "retry";
 }
 
-let sender: { accountId: string; client: OpenGeniClient } | null = null;
+let sender: { accountId: string; client: ChatClient<OpenGeniClient> } | null = null;
 
 /** The signed-in account's client; reports only go out under the account that wrote them. */
-export function bindFeedbackSender(next: { accountId: string; client: OpenGeniClient } | null) {
+export function bindFeedbackSender(
+  next: { accountId: string; client: ChatClient<OpenGeniClient> } | null,
+) {
   sender = next;
 }
 

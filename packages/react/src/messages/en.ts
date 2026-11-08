@@ -11,16 +11,26 @@ export const englishMessages = {
   "approvalSurface.allow": "Allow",
   "approvalSurface.approvalNeeded": "Approval needed",
   "approvalSurface.approveAction": "Approve action",
+  /** Approves every waiting action the person may approve, one decision each. */
+  "approvalSurface.approveAll": "Approve all {length}",
   "approvalSurface.approving": "Approving…",
+  /** Shown in place of the bulk buttons while their decisions are sent. */
+  "approvalSurface.approvingIndexOfLength": "Approving {index} of {length}…",
   "approvalSurface.backToReview": "Back to review",
   /** Declines an app action's question without running it. */
   "approvalSurface.cancel": "Cancel",
   /** The empty choice of an MCP server's drop-down question. */
   "approvalSurface.choose": "Choose…",
+  /** One action Approve all could not approve; it stays waiting. Selecting it shows its card. */
+  "approvalSurface.couldnTApproveTitle": "Couldn't approve {title}: {error}",
+  "approvalSurface.couldnTDeclineTitle": "Couldn't decline {title}: {error}",
   "approvalSurface.couldnTLoadThisAction":
     "Couldn't load this action, so it can't be approved yet. You can still decline it.",
   "approvalSurface.decline": "Decline",
+  /** Declines every waiting action, one decision each. */
+  "approvalSurface.declineAll": "Decline all",
   "approvalSurface.declining": "Declining…",
+  "approvalSurface.decliningIndexOfLength": "Declining {index} of {length}…",
   "approvalSurface.lengthActionsAreWaitingFor": "{length} actions are waiting for you",
   "approvalSurface.loadingActionDetails": "Loading action details…",
   "approvalSurface.nextAction": "Next action",
@@ -1258,6 +1268,8 @@ export const englishMessages = {
   "composerTranscriptionControl.savedTranscriptionFailedRetryWhen":
     "Saved. Transcription failed, retry when ready.",
   "composerTranscriptionControl.savingAudioLocally": "Saving audio…",
+  "composerTranscriptionControl.speechServiceOutOfCredit":
+    "The speech-to-text service is out of credit. Recording saved; retry once it's topped up.",
   "composerTranscriptionControl.startVoiceInput": "Start voice input",
   "composerTranscriptionControl.stopAndTranscribe": "Stop and transcribe",
   "composerTranscriptionControl.stopsAndTranscribesInSeconds":
@@ -1849,8 +1861,6 @@ export const englishMessages = {
   "hooks.useComposer.seeAttachedContext": "(see attached context)",
   "hooks.useComposer.theDurableComposerDraftIs":
     "The durable composer draft is not ready for delivery.",
-  "hooks.useComposer.theMessageDraftCouldNot":
-    "The message draft could not be saved before delivery.",
   "hooks.useComposer.theRequestCouldNotBe":
     "The request could not be confirmed. Check its status before retrying.",
   "hooks.useComputerFrameStream.desktopViewLostConnection": "Desktop view lost connection.",

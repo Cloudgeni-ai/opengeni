@@ -79,6 +79,7 @@ export default defineConfig({
     "@opengeni/contracts/session-list-entries",
     "@opengeni/contracts/session-final-reply",
     "@opengeni/contracts/session-history",
+    "@opengeni/contracts/browser-response-headers",
     "@opengeni/contracts/site-session-http",
     "@opengeni/contracts/plugin-discovery",
     "@opengeni/contracts/workspace-integration-wire",

@@ -17,7 +17,7 @@ import type {
 } from "@opengeni/sdk";
 
 import type { OpenGeniMessageKey, OpenGeniText } from "../../messages/runtime";
-import { inSentence } from "../../ui/relative-time";
+import { inSentence } from "../../ui/time-format";
 import {
   sessionAutomationWait,
   sessionAutomationWaitLabel,
@@ -34,7 +34,7 @@ import {
   validateCadence,
   type CadenceScheduleSpec,
   type CadenceValue,
-} from "../../ui/cadence-picker";
+} from "../../ui/cadence-model";
 import {
   emptyEventTriggersDraft,
   eventTriggersDraftFrom,
@@ -560,6 +560,26 @@ export function automationUpdateRequest(
               : { triggers: [] },
         }),
   };
+}
+
+/* ----------------------------------------------------------------------------
+   Create with Opengeni.
+   -------------------------------------------------------------------------- */
+
+/**
+ * The first message of a "Create with Opengeni" chat: the person says what
+ * should happen and how often, and the agent finds what the automation needs
+ * and creates it. Setup guidance belongs in the bundled schedules Skill, which
+ * the agent reads when this request is relevant.
+ */
+export function automationAgentOpeningMessage(request: string, timeZone: string): string {
+  return [
+    "Help me create an automation in this workspace.",
+    "",
+    request.trim(),
+    "",
+    `My time zone is ${timeZone}.`,
+  ].join("\n");
 }
 
 /* ----------------------------------------------------------------------------

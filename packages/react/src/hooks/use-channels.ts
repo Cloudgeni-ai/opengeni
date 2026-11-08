@@ -1,15 +1,24 @@
-import type { Channel, CreateChannelRequest, Session, UpdateChannelRequest } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
+import type {
+  Channel,
+  CreateChannelRequest,
+  ChatSession as Session,
+  Session as FullSession,
+  OpenGeniClient,
+  UpdateChannelRequest,
+} from "@opengeni/sdk";
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { channelCacheFor } from "./channel-cache";
 import { useMutationRunner, usePolledValue } from "./internal";
 
-export type UseChannelsOptions = ClientOverride & {
-  pollIntervalMs?: number | undefined;
-  enabled?: boolean | undefined;
-};
+export type UseChannelsOptions<Client extends ChatClient = OpenGeniClient> =
+  ClientOverride<Client> & {
+    pollIntervalMs?: number | undefined;
+    enabled?: boolean | undefined;
+  };
 
-export type UseChannelsResult = {
+export type UseChannelsResult<S extends Session = FullSession> = {
   channels: Channel[];
   loading: boolean;
   error: Error | null;
@@ -19,7 +28,7 @@ export type UseChannelsResult = {
   reorder: (channelIds: string[]) => Promise<Channel[] | null>;
   remove: (channelId: string) => Promise<boolean>;
   /** Re-file a session into a channel; null moves it back to the inbox. */
-  moveSession: (sessionId: string, channelId: string | null) => Promise<Session | null>;
+  moveSession: (sessionId: string, channelId: string | null) => Promise<S | null>;
   mutating: boolean;
   mutationError: Error | null;
   clearMutationError: () => void;
@@ -30,7 +39,11 @@ export type UseChannelsResult = {
  * ("workstreams") by work type. Pure metadata — filing a session into a
  * channel never affects execution.
  */
-export function useChannels(options: UseChannelsOptions = {}): UseChannelsResult {
+export function useChannels(options?: UseChannelsOptions): UseChannelsResult;
+export function useChannels(options: UseChannelsOptions<ChatClient>): UseChannelsResult<Session>;
+export function useChannels(
+  options: UseChannelsOptions<ChatClient> = {},
+): UseChannelsResult<Session> {
   const { client, workspaceId } = useOpenGeni(options);
   const cache = useMemo(() => channelCacheFor(client, workspaceId), [client, workspaceId]);
   const snapshot = useSyncExternalStore(cache.subscribe, cache.getSnapshot, cache.getSnapshot);

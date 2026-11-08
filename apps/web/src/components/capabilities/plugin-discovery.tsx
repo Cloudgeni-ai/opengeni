@@ -3,6 +3,7 @@ import {
   type CapabilityCatalogItem,
   type PluginInstallationSummary,
 } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ConnectionInstalled, PluginDiscovery as Catalog } from "@opengeni/react/connect";
 import { BoxesIcon } from "lucide-react";
@@ -40,7 +41,7 @@ export function PluginDiscovery({
   onManageInstalled?: (plugin: PluginInstallationSummary, opener: HTMLElement) => void;
   canManage?: boolean;
   onChanged?: () => void;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   query: string;
 }) {

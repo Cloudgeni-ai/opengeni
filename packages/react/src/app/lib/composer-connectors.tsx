@@ -1,4 +1,4 @@
-import type { Session, UpdateSessionToolPolicyRequest } from "@opengeni/sdk";
+import type { ChatSession as Session, UpdateSessionToolPolicyRequest } from "@opengeni/sdk";
 import type { CapabilityCatalogItem, ConnectionMetadata } from "../types";
 import type { McpServerOption } from "./session-tools";
 import { connectionHealth } from "./capabilities";

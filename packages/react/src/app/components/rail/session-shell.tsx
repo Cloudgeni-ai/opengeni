@@ -5,7 +5,7 @@ import { requestSessionArchive } from "../../lib/archive-session";
 // sections (workspace switcher, navigation extras, footer, banners) come in as
 // slots, so the web app and embeds share one shell and differ only in what they
 // put in it.
-import type { SessionSummary } from "@opengeni/sdk";
+import type { ChatSession as SessionSummary } from "@opengeni/sdk";
 import { MenuIcon, MessagesSquareIcon, Settings2Icon } from "lucide-react";
 import {
   useCallback,

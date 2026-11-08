@@ -4,10 +4,11 @@ import {
   type PersonalResourceAttachmentIntent,
   type Rig,
   type ResourceAuthorityScope,
-  type Session,
+  type ChatSession as Session,
   type UserResourceAuthoritySummary,
   type Workspace,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 import type { AuthSession } from "../types";
@@ -101,7 +102,7 @@ export function resolvePersonalResourceOwnerScope(input: {
 }
 
 async function listAuthorityPages(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   resourceKind: "rig" | "connected_machine",
 ): Promise<{
@@ -125,7 +126,7 @@ async function listAuthorityPages(
 
 /** Bounded metadata-only load. Resource values and grant credentials never enter web state. */
 export async function loadPersonalResourceCatalog(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   scope: PersonalResourceOwnerScope,
   permissions: PersonalResourceReadPermissions,
 ): Promise<PersonalResourceCatalog> {

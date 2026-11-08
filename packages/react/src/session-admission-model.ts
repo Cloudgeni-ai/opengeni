@@ -4,7 +4,7 @@
 // that runs on somebody else's personal machine). Web (`@opengeni/react/session-ui`)
 // and React Native render the same words from the message catalog, so a host
 // translates them once (`sessionAdmission.*`).
-import type { MachineView, Session, SessionMachineAccess } from "@opengeni/sdk";
+import type { MachineView, ChatSession as Session, SessionMachineAccess } from "@opengeni/sdk";
 import type { OpenGeniText } from "./messages/runtime";
 
 /** Whether a Connected Machine can take work right now. Offline, reconnecting

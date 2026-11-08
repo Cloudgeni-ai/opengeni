@@ -785,6 +785,34 @@ const SettingsSchema = z.object({
   teamsBotTenantId: z.string().uuid().optional(),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
+  integrationsPrivateNetworkAllowedHosts: z.preprocess(
+    (value) =>
+      typeof value === "string"
+        ? value
+            .split(",")
+            .map((host) => host.trim())
+            .filter(Boolean)
+        : value,
+    z
+      .array(
+        z
+          .string()
+          .trim()
+          .toLowerCase()
+          .regex(
+            /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?(?::[0-9]{1,5})?$/,
+            "Expected an exact hostname, optionally followed by :port",
+          )
+          .refine((entry) => {
+            const [hostname, port] = entry.split(":");
+            return (
+              hostname!.length <= 253 &&
+              (port === undefined || (Number(port) > 0 && Number(port) <= 65535))
+            );
+          }, "Invalid hostname or port"),
+      )
+      .default([]),
+  ),
   // Privacy limits a deployment (for example a product that embeds Opengeni)
   // sets for every organization. They only narrow what organizations choose:
   // Only me chats and schedules off in shared workspaces, new chats and
@@ -1345,6 +1373,13 @@ const SettingsSchema = z.object({
   // AZURE_CLIENT_SECRET, instead of a static key.
   // OPENGENI_DECISION_MODEL_AUTH
   decisionModelAuth: z.enum(["api_key", "deployment_identity"]).default("api_key"),
+  // Optional complete override for stateless public /decisions calls only.
+  // Unset preserves the shared decision category; never mix credentials between categories.
+  publicDecisionModelProvider: z.enum(["jev", "openai", "openrouter"]).optional(),
+  publicDecisionModelId: z.string().trim().min(1).optional(),
+  publicDecisionModelApiKey: z.string().optional(),
+  publicDecisionModelBaseUrl: z.string().url().optional(),
+  publicDecisionModelAuth: z.enum(["api_key", "deployment_identity"]).optional(),
   // Decision-observability fence. When enabled, the worker emits one
   // bounded, metadata-only adaptive-policy replay record alongside the unchanged
   // sticky-sharded decision. It never changes placement/admission/failover.
@@ -2691,6 +2726,25 @@ export type DecisionModelConfiguration =
       baseUrl: string;
       azureEntra: NonNullable<ReturnType<typeof deploymentAzureEntraCredential>>;
     };
+
+/** Select public-call settings without mutating the agent's decision configuration. */
+export function publicDecisionModelSettings(settings: Settings): Settings {
+  const explicit =
+    settings.publicDecisionModelProvider !== undefined ||
+    settings.publicDecisionModelId !== undefined ||
+    settings.publicDecisionModelApiKey !== undefined ||
+    settings.publicDecisionModelBaseUrl !== undefined ||
+    settings.publicDecisionModelAuth !== undefined;
+  if (!explicit) return settings;
+  return {
+    ...settings,
+    decisionModelProvider: settings.publicDecisionModelProvider,
+    decisionModelId: settings.publicDecisionModelId,
+    decisionModelApiKey: settings.publicDecisionModelApiKey,
+    decisionModelBaseUrl: settings.publicDecisionModelBaseUrl,
+    decisionModelAuth: settings.publicDecisionModelAuth ?? "api_key",
+  };
+}
 
 /**
  * Explicit deployment credentials only. Compatibility is code-search-only.
@@ -5938,6 +5992,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
+    integrationsPrivateNetworkAllowedHosts: optional(
+      "OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS",
+    ),
     privacyOnlyMeAllowed: optional("OPENGENI_PRIVACY_ONLY_ME_ALLOWED"),
     privacyWorkspaceDefaultRequired: optional("OPENGENI_PRIVACY_WORKSPACE_DEFAULT_REQUIRED"),
     privacyAdminScheduleSummariesRequired: optional(
@@ -6098,6 +6155,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     decisionModelApiKey: optional("OPENGENI_DECISION_MODEL_API_KEY"),
     decisionModelBaseUrl: optional("OPENGENI_DECISION_MODEL_BASE_URL"),
     decisionModelAuth: optional("OPENGENI_DECISION_MODEL_AUTH"),
+    publicDecisionModelProvider: optional("OPENGENI_PUBLIC_DECISION_MODEL_PROVIDER"),
+    publicDecisionModelId: optional("OPENGENI_PUBLIC_DECISION_MODEL_ID"),
+    publicDecisionModelApiKey: optional("OPENGENI_PUBLIC_DECISION_MODEL_API_KEY"),
+    publicDecisionModelBaseUrl: optional("OPENGENI_PUBLIC_DECISION_MODEL_BASE_URL"),
+    publicDecisionModelAuth: optional("OPENGENI_PUBLIC_DECISION_MODEL_AUTH"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
     subscriptionCrossProviderFailoverEnabled: optional(

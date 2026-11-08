@@ -5,6 +5,7 @@ import type {
   NativePushRule,
   OpenGeniClient,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import Constants from "expo-constants";
 import * as Notifications from "expo-notifications";
 import { router, usePathname } from "expo-router";
@@ -35,9 +36,12 @@ const DEFAULT_RULES: NativePushRule[] = ["needs_input", "failed", "agent"];
 const CALL_RULES: readonly NativePushRule[] = ["call", "call_members"];
 const isCallRule = (rule: NativePushRule) => CALL_RULES.includes(rule);
 
-/** Whether this build can ring for agent calls (PushKit and CallKit on iPhone). */
+/**
+ * Whether this build can ring for agent calls: PushKit and CallKit on iPhone,
+ * a call push and a system call on Android.
+ */
 function agentCallsSupported(): boolean {
-  return Platform.OS === "ios" && Boolean(sharedCallAdapter()?.incoming);
+  return Boolean(sharedCallAdapter()?.incoming);
 }
 
 /** The data every Opengeni push carries, so a tap can open the right place. */
@@ -97,7 +101,7 @@ void Notifications.setNotificationCategoryAsync("og.question", [
  * the app has to open (several open, or a question that needs the full form).
  */
 async function actOnNotification(
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   data: PushData,
   action: string,
   text: string | undefined,
@@ -250,9 +254,10 @@ export function useNotificationSettingsSections(inbox: InboxSettingsState): {
           setDevice(null);
           return;
         }
-        // Calls ring through PushKit, which needs no notification permission;
-        // everything else does.
-        let granted = permission === "granted" || rules.every(isCallRule);
+        // Calls ring an iPhone through PushKit, which needs no notification
+        // permission; everything else does, Android's ring screen too.
+        let granted =
+          permission === "granted" || (Platform.OS === "ios" && rules.every(isCallRule));
         if (!granted) {
           const asked = await Notifications.requestPermissionsAsync();
           setPermission(asked.status);
@@ -382,7 +387,9 @@ function agentCallSection(input: {
   const own = rules.includes("call");
   const members = rules.includes("call_members");
   const without = rules.filter((rule) => !isCallRule(rule));
-  const notReady = !voipToken;
+  // Android rings through the ordinary push token.
+  const notReady = Platform.OS === "ios" && !voipToken;
+  const phone = Platform.OS === "ios" ? "iPhone" : "phone";
   return {
     id: "agent-calls",
     title: "Calls from agents",
@@ -395,7 +402,7 @@ function agentCallSection(input: {
       {
         kind: "toggle",
         id: "agent-calls-own",
-        title: "Let agents call this iPhone",
+        title: `Let agents call this ${phone}`,
         subtitle: "Agents working for you",
         value: own,
         disabled: notReady && !own,
@@ -711,7 +718,7 @@ export function inboxSettingsSections({
  * when answered.
  */
 export async function markSessionInboxRead(
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   sessionId: string,
 ): Promise<void> {
   const inbox = await client.listInbox().catch(() => null);
@@ -741,7 +748,7 @@ export async function markSessionInboxRead(
  * so the menu only offers it where it works.
  */
 export function useSessionRepliesMute(
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   workspaceId: string,
   sessionId: string,
   topLevel: boolean,
