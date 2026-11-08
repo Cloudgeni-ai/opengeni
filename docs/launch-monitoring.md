@@ -31,6 +31,16 @@ alert-channel links; staging is a production rehearsal, not production evidence.
 
 ## Evidence and operating rules
 
+- Total MCP tool duration and retained Browser/Computer-session inventory are
+  diagnostics, not warning conditions. Successful commands, connector operations
+  and explicit waits may legitimately take a long time; total duration cannot
+  distinguish requested work from service overhead. Retained interactions may
+  deliberately keep a sandbox warm and do not prove a session is abandoned.
+  Runtime Failures duration panels and
+  `opengeni:sandbox_leases_interaction_only:fresh_max` remain available for
+  investigation and cost review. Failure, uncertain-outcome, stuck-work and
+  failed-drain alerts remain active. Do not terminate a session solely to clear
+  an idle-inventory metric.
 - Warning alerts need sustained, traffic-gated evidence; critical/page alerts
   use the configured urgent route. Group related symptoms by environment;
   keep repeat notifications bounded. Do not silence a real unresolved incident
