@@ -1,5 +1,0 @@
----
-"@opengeni/agent-host": patch
----
-
-A command's `kill -1` no longer takes a Linux Connected Machine agent offline. `kill -1` signals every process of the user, so the agent stopped, and a foreground agent's keeper stopped it for good. The agent now keeps running when one of its own commands sends it `SIGTERM` or `SIGINT`, including from a short-lived sender that already exited while a command was running or had just ended. The keeper ignores stop signals from the agent's commands, lets the agent decide about senders that already exited, and starts again an agent such a signal ended (`SIGHUP`, `SIGQUIT`, `SIGUSR2`). Nothing is blocked: the command still receives every signal, and the service manager, the desktop app, Ctrl-C, `opengeni-agent stop` or a `kill` from a shell outside the agent's commands still stop it. On Windows each command now runs on a hidden console of its own, so a Ctrl-C event a command sends to its whole console no longer stops the agent. `kill 0` and `kill -<group>` already reached only the command's own process group; a new test keeps it that way.

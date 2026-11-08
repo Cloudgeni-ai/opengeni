@@ -1,4 +1,5 @@
 import {
+  OpenGeniApiError,
   resolveWorkspaceVoiceInputEnabled,
   SESSION_SCOPE_HEADER,
   type ClientVoiceInputConfig,
@@ -777,14 +778,21 @@ function ConversationView({
                   className="mx-auto max-w-3xl"
                   {...approvalProps}
                   approvals={approvals}
+                  // A refusal rejects, so the card (or Approve all) names it
+                  // and keeps the action waiting.
                   onApprove={async (approval, answer) => {
-                    await control.approve(approval.id, undefined, answer);
+                    await control.approve(approval.id, undefined, answer, { throwOnError: true });
                   }}
                   onReject={async (approval) => {
-                    await control.reject(approval.id);
+                    await control.reject(approval.id, undefined, { throwOnError: true });
                   }}
                   responding={control.responding}
-                  error={control.error}
+                  // A 409 means it was already decided: nothing to show.
+                  error={
+                    control.error instanceof OpenGeniApiError && control.error.status === 409
+                      ? null
+                      : control.error
+                  }
                 />
               ) : null}
               <ProviderRecoveryNotice

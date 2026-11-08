@@ -174,7 +174,7 @@ import {
   agentMemoryAccess,
   controlHumanSessionWorkstream,
   createSessionForRequest,
-  getActorNewSessionModelChoice,
+  getActorNewSessionStartChoices,
   hasPermission,
   recordSlackEvent,
   requireAccessContext,
@@ -184,10 +184,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import {
-  otherDeploymentLinkContext,
-  slackRecentRepositoryResources,
-} from "./slack-session-defaults";
+import { otherDeploymentLinkContext, slackFormRepositoryResources } from "./slack-session-defaults";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
@@ -5334,14 +5331,14 @@ type SlackNewSessionDefaults = {
  * What a new Slack task starts with.
  *
  * A Slack message is not the website composer, so the person's last composer
- * selection (an explicit connector list, a compute target) never narrows
- * it. Connectors, first-party tools, Sandbox Environment and compute are left
- * to session creation, which applies the
- * workspace defaults and freezes the person's own connections through the
- * ordinary delegation snapshot. Repositories are the person's own recently
- * used repositories that the workspace GitHub App still offers them, attached
- * best effort. Only an explicitly chosen model carries over, because choosing
- * a model narrows nothing.
+ * selection (an explicit connector list, a compute target) never narrows it.
+ * Connectors, first-party tools, Sandbox Environment and compute are left to
+ * session creation, which applies the workspace defaults and freezes the
+ * person's own connections through the ordinary delegation snapshot.
+ * Repositories are those in the person's new-chat form, as a new chat in the
+ * app would start with, limited to what the workspace GitHub App offers them
+ * and attached best effort. The model carries over only when explicitly
+ * chosen, because choosing a model narrows nothing.
  *
  * A create can commit its reserved shell before initial-event acceptance. Keep
  * that shell's exact selections on retry instead of resolving defaults again.
@@ -5360,12 +5357,19 @@ async function slackNewSessionDefaults(
   );
   if (!pending) {
     // An open chat is the agent's, not the asker's: no personal model choice
-    // or recent repositories; the workspace defaults apply.
+    // or form repositories; the workspace defaults apply.
     if (options.open) return { resources: [] };
-    const [modelChoice, resources] = await Promise.all([
-      getActorNewSessionModelChoice(deps, grant, interaction.workspaceId),
-      slackRecentRepositoryResources(deps, grant, interaction.workspaceId),
-    ]);
+    const { modelChoice, repositories } = await getActorNewSessionStartChoices(
+      deps,
+      grant,
+      interaction.workspaceId,
+    );
+    const resources = await slackFormRepositoryResources(
+      deps,
+      grant,
+      interaction.workspaceId,
+      repositories,
+    );
     return { ...modelChoice, resources };
   }
   if (

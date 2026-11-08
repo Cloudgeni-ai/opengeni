@@ -1573,6 +1573,9 @@ export function buildTimeline(
 
       case "session.context.compacted": {
         closeStreamingTail();
+        // A checkpoint that trimmed history keeps why its summary failed.
+        const fallback = asRecord(payload.fallback);
+        const providerMessage = compactionProviderMessage(fallback);
         settleOrPushContextCompaction(items, {
           id: event.id,
           turnId,
@@ -1581,7 +1584,8 @@ export function buildTimeline(
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: numberOrNull(payload.estimatedTokensAfter),
           skipReason: null,
-          providerRejection: null,
+          providerRejection: compactionProviderRejection(fallback),
+          ...(providerMessage ? { providerMessage } : {}),
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -1591,6 +1595,7 @@ export function buildTimeline(
 
       case "session.context.compaction.skipped": {
         closeStreamingTail();
+        const providerMessage = compactionProviderMessage(payload);
         settleOrPushContextCompaction(items, {
           id: event.id,
           turnId,
@@ -1600,6 +1605,7 @@ export function buildTimeline(
           estimatedTokensAfter: null,
           skipReason: typeof payload.reason === "string" ? payload.reason : null,
           providerRejection: compactionProviderRejection(payload),
+          ...(providerMessage ? { providerMessage } : {}),
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -4118,9 +4124,9 @@ function numberOrNull(value: unknown): number | null {
 }
 
 /**
- * Read the closed provider-rejection record a `summarization_failed` skip
- * carries. Only bounded identifiers are accepted; a provider message is never
- * part of the payload and would be ignored here anyway.
+ * Read the closed provider-rejection record a `summarization_failed` skip (or
+ * a trimmed checkpoint's `fallback`) carries. Only bounded identifiers are
+ * accepted; the provider's message is read separately.
  */
 function compactionProviderRejection(
   payload: Record<string, unknown>,
@@ -4138,6 +4144,12 @@ function compactionProviderRejection(
     param: text(record.param),
     requestId: text(record.requestId),
   };
+}
+
+/** The provider's bounded error message on a compaction record, when present. */
+function compactionProviderMessage(record: Record<string, unknown>): string | null {
+  const message = record.providerMessage;
+  return typeof message === "string" && message.trim() ? message.trim().slice(0, 1_000) : null;
 }
 
 function compactionTrigger(payload: Record<string, unknown>): ContextCompactionItem["trigger"] {

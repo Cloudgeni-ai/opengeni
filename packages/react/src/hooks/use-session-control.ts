@@ -5,6 +5,15 @@ import { useMutationRunner } from "./internal";
 
 export type UseSessionControlOptions = EmbeddedSessionClientOverride;
 
+/** How one approval decision reports a refusal. */
+export type ApprovalDecisionOptions = {
+  /**
+   * Reject with the refusal instead of resolving `null`, so a caller deciding
+   * several approvals can tell which ones failed and why. `error` is set either way.
+   */
+  throwOnError?: boolean | undefined;
+};
+
 export type UseSessionControlResult = {
   pause: (reason?: string) => Promise<SessionControlResponse | null>;
   resume: (reason?: string) => Promise<SessionControlResponse | null>;
@@ -18,9 +27,14 @@ export type UseSessionControlResult = {
     approvalId: string,
     message?: string,
     answer?: McpElicitationAnswer,
+    options?: ApprovalDecisionOptions,
   ) => Promise<SessionEvent | null>;
   /** Reject a pending `requires_action` approval. */
-  reject: (approvalId: string, message?: string) => Promise<SessionEvent | null>;
+  reject: (
+    approvalId: string,
+    message?: string,
+    options?: ApprovalDecisionOptions,
+  ) => Promise<SessionEvent | null>;
   /** True while an approval decision is in flight. */
   responding: boolean;
   error: Error | null;
@@ -89,6 +103,7 @@ export function useSessionControl(
       decision: "approve" | "reject",
       message?: string,
       answer?: McpElicitationAnswer,
+      decisionOptions: ApprovalDecisionOptions = {},
     ): Promise<SessionEvent | null> => {
       if (!sessionId) {
         return null;
@@ -102,15 +117,22 @@ export function useSessionControl(
         };
       }
       const clientEventId = pendingApproval.current.clientEventId;
-      const accepted = await runApproval(() =>
-        client.sendApprovalDecision(workspaceId, sessionId, {
-          approvalId,
-          decision,
-          ...(message !== undefined ? { message } : {}),
-          ...(answer !== undefined ? answer : {}),
-          clientEventId,
-        }),
-      );
+      let refusal: { cause: unknown } | null = null;
+      const accepted = await runApproval(async () => {
+        try {
+          return await client.sendApprovalDecision(workspaceId, sessionId, {
+            approvalId,
+            decision,
+            ...(message !== undefined ? { message } : {}),
+            ...(answer !== undefined ? answer : {}),
+            clientEventId,
+          });
+        } catch (cause) {
+          refusal = { cause };
+          throw cause;
+        }
+      });
+      if (decisionOptions.throwOnError && refusal) throw (refusal as { cause: unknown }).cause;
       if (
         accepted !== null &&
         pendingApproval.current?.targetKey === approvalTargetKey &&
@@ -124,12 +146,17 @@ export function useSessionControl(
   );
 
   const approve = useCallback(
-    async (approvalId: string, message?: string, answer?: McpElicitationAnswer) =>
-      await decide(approvalId, "approve", message, answer),
+    async (
+      approvalId: string,
+      message?: string,
+      answer?: McpElicitationAnswer,
+      decisionOptions?: ApprovalDecisionOptions,
+    ) => await decide(approvalId, "approve", message, answer, decisionOptions),
     [decide],
   );
   const reject = useCallback(
-    async (approvalId: string, message?: string) => await decide(approvalId, "reject", message),
+    async (approvalId: string, message?: string, decisionOptions?: ApprovalDecisionOptions) =>
+      await decide(approvalId, "reject", message, undefined, decisionOptions),
     [decide],
   );
 

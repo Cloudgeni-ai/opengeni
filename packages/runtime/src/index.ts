@@ -534,6 +534,7 @@ import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   compactionSummaryOutputTokens,
+  truncateCompactionSummary,
   buildRemoteCompactionV2PromptInput,
   extractRemoteCompactionV2OutputItem,
   estimateSerializedValueTokens,
@@ -587,6 +588,16 @@ import {
   managedCodemodeClientDirectory,
   type ManagedCodemodeClientDownload,
 } from "./sandbox/codemode-client";
+import {
+  installManagedShellTools,
+  loadManagedShellTools,
+  type ManagedShellTools,
+} from "./sandbox/shell-tools";
+export {
+  loadManagedShellTools,
+  MANAGED_SHELL_TOOLS_ARCHES,
+  type ManagedShellToolsDownload,
+} from "./sandbox/shell-tools";
 export {
   loadManagedCodemodeClient,
   managedCodemodeClientBytes,
@@ -1011,7 +1022,9 @@ export { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents
 export {
   CompactionNeededError,
   CompactionProviderResponseError,
+  COMPACTION_PROVIDER_MESSAGE_MAX_CHARS,
   EmptyCompactionSummaryError,
+  compactionProviderMessage,
   compactionProviderRejection,
   compactionProviderRejectionFromDiagnostics,
   describeCompactionProviderRejection,
@@ -1019,6 +1032,10 @@ export {
   buildCompactionPromptInput,
   buildCompactionReplacement,
   buildCompactionReplacementHistory,
+  buildTrimmedCompactionReplacement,
+  buildTrimmedContextCheckpointItem,
+  DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
+  TRIMMED_CONTEXT_NOTICE,
   type CompactionReplacement,
   type CompactionTurnContext,
   compactionAttachmentFileIds,
@@ -1037,7 +1054,6 @@ export {
   isRemoteCompactionItem,
   isRetainedRemoteV2Message,
   latestCompactionReplacementFingerprint,
-  portableSwitchTranscriptStart,
   PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION,
   prepareCompactionPromptInput,
   projectRemoteCompactionOverflowRetryInput,
@@ -1506,27 +1522,31 @@ export async function summarizeForCompaction(
   const azureResponses = provider.wireProfile === "azure-openai";
   const maxTokens =
     options.maxOutputTokens ?? compactionSummaryOutputTokens(settings.contextWindowTokens);
+  // Set when an endpoint refused the output cap and the summary was requested
+  // without one; the summary is then held to the cap here instead.
+  let outputCapDropped = false;
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
-    let completion: unknown;
-    try {
-      completion = await client.chat.completions.create(
-        {
-          model,
-          max_tokens: maxTokens,
-          messages: [
-            ...(options.systemInstructions
-              ? [{ role: "system" as const, content: options.systemInstructions }]
-              : []),
-            { role: "user", content: transcript },
-          ],
-          ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
-        } as any,
-        options.signal ? { signal: options.signal } : undefined,
+    const requestCompletion = (outputCap: boolean) => {
+      if (!outputCap) outputCapDropped = true;
+      return sendCompactionRequest(() =>
+        client.chat.completions.create(
+          {
+            model,
+            ...(outputCap ? { max_tokens: maxTokens } : {}),
+            messages: [
+              ...(options.systemInstructions
+                ? [{ role: "system" as const, content: options.systemInstructions }]
+                : []),
+              { role: "user", content: transcript },
+            ],
+            ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+          } as any,
+          options.signal ? { signal: options.signal } : undefined,
+        ),
       );
-    } catch (error) {
-      throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
-    }
+    };
+    const completion = await withCompactionOutputCapRetry(provider, requestCompletion);
     const usage = modelResponseUsageFromResponse(completion);
     if (usage) {
       await options.onUsage?.(usage);
@@ -1552,7 +1572,7 @@ export async function summarizeForCompaction(
     if (!summary) {
       throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(completion, summary));
     }
-    return summary;
+    return outputCapDropped ? truncateCompactionSummary(summary, maxTokens) : summary;
   }
   // Use the same SDK Responses adapter as the real agent call. It converts the
   // structured AgentInputItems (callId/providerData/etc.) to provider wire
@@ -1605,12 +1625,7 @@ export async function summarizeForCompaction(
         ...(options.signal ? { signal: options.signal } : {}),
       };
   const dispatch = async (send: () => Promise<unknown>): Promise<unknown> => {
-    let result: unknown;
-    try {
-      result = await send();
-    } catch (error) {
-      throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
-    }
+    const result = await sendCompactionRequest(send);
     const usage = modelResponseUsageFromResponse(result);
     if (usage) {
       await options.onUsage?.(usage);
@@ -1646,24 +1661,103 @@ export async function summarizeForCompaction(
       response = await dispatch(() => claude.getResponse(claudeRequest(true)));
     }
   } else {
-    response = await dispatch(() =>
-      new CompactionResponsesModel(client, model, provider).fetchResponse(request),
-    );
+    const responses = new CompactionResponsesModel(client, model, provider);
+    response = await withCompactionOutputCapRetry(provider, (outputCap) => {
+      if (!outputCap) outputCapDropped = true;
+      return dispatch(() =>
+        responses.fetchResponse(
+          outputCap ? request : { ...request, modelSettings: withoutMaxTokens(request) },
+        ),
+      );
+    });
   }
   if (compactionResponseCalledTool(response)) {
     throw new EmptyCompactionSummaryError({ stage: "checkpoint_response", reason: "tool_call" });
   }
-  if (
-    (response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens" ||
-    isFailedCompactionProviderResponse(response)
-  ) {
-    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
+  // A summary cut off at the output limit is unusable, the same as a Chat
+  // Completions `length` finish; it is not a provider failure.
+  if ((response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens") {
+    throw new EmptyCompactionSummaryError({ stage: "checkpoint_response", reason: "max_tokens" });
+  }
+  if (isFailedCompactionProviderResponse(response)) {
+    throw new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(response),
+      undefined,
+      response,
+    );
   }
   const summary = extractResponseOutputText(response).trim();
   if (!summary) {
     throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
   }
-  return summary;
+  return outputCapDropped ? truncateCompactionSummary(summary, maxTokens) : summary;
+}
+
+/** Send one checkpoint request; any provider or transport failure becomes the content-free error. */
+async function sendCompactionRequest<T>(send: () => Promise<T>): Promise<T> {
+  try {
+    return await send();
+  } catch (error) {
+    if (error instanceof CompactionProviderResponseError) throw error;
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+  }
+}
+
+/** A workspace's or organization's own OpenAI-compatible endpoint. */
+function isCompatibleModelEndpoint(provider: ResolvedModelProvider): boolean {
+  return (
+    provider.kind === "direct-compatible-workspace" ||
+    provider.kind === "direct-compatible-organization"
+  );
+}
+
+/** Statuses with which a server refuses a request it parsed as invalid. */
+const COMPACTION_OUTPUT_CAP_RETRY_STATUSES = new Set([400, 422]);
+
+/**
+ * Send a checkpoint request, and when an OpenAI-compatible endpoint refuses it
+ * as invalid, send it once more without the output cap. Ordinary requests to
+ * these endpoints carry no cap, and compatible servers commonly refuse one
+ * that is above the model's output limit or above what is left of its context
+ * window. The retry uses the request shape the endpoint already accepts. The
+ * caller holds the uncapped summary to the cap afterwards (cut from the
+ * middle), so the checkpoint fits exactly as a capped one would. A context-length refusal is retried too:
+ * such servers often count the requested output against the window, so it
+ * cannot be told apart from an oversized cap. Other providers are not retried.
+ * Each `send` wraps its own provider call; any other error it throws, such as
+ * one from usage accounting, passes through unchanged and is never retried.
+ */
+async function withCompactionOutputCapRetry<T>(
+  provider: ResolvedModelProvider,
+  send: (outputCap: boolean) => Promise<T>,
+): Promise<T> {
+  try {
+    return await send(true);
+  } catch (error) {
+    if (
+      !isCompatibleModelEndpoint(provider) ||
+      !(error instanceof CompactionProviderResponseError) ||
+      error.status === undefined ||
+      !COMPACTION_OUTPUT_CAP_RETRY_STATUSES.has(error.status)
+    ) {
+      throw error;
+    }
+    try {
+      return await send(false);
+    } catch (retryError) {
+      if (!(retryError instanceof CompactionProviderResponseError)) throw retryError;
+      throw new CompactionProviderResponseError(
+        { ...retryError.diagnostics, outputCapRetried: true },
+        retryError.cause,
+        retryError,
+      );
+    }
+  }
+}
+
+function withoutMaxTokens(request: ModelRequest): ModelRequest["modelSettings"] {
+  const { maxTokens: _maxTokens, ...modelSettings } = request.modelSettings;
+  return modelSettings;
 }
 
 /**
@@ -1896,7 +1990,11 @@ export async function requestRemoteCompactionV2(
     await options.onUsage?.(usage);
   }
   if (isFailedCompactionProviderResponse(response)) {
-    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
+    throw new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(response),
+      undefined,
+      response,
+    );
   }
   try {
     return extractRemoteCompactionV2OutputItem(response);
@@ -13841,6 +13939,16 @@ function sandboxCodemodeTokenHooksForAgent(
               },
             ]
           : []),
+        ...(managedShellToolsBackend(agentActiveSandboxBackend.get(agent))
+          ? [
+              {
+                id: "shell-tools",
+                phase: "beforeAgentStart" as const,
+                independent: true,
+                run: runManagedShellToolsHook,
+              },
+            ]
+          : []),
         {
           id: "codemode-token",
           phase: "beforeAgentStart",
@@ -14788,6 +14896,70 @@ function gitConfigQuotedContent(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+/**
+ * Shell helpers for every write to the global Git config during repository
+ * preparation. Several preparations can run on one box at once (chats created
+ * together share their sandbox, and each clones its repositories in
+ * parallel), and they all write the same `$HOME/.gitconfig`. Git takes a
+ * `.gitconfig.lock` for each write and fails at once when another writer holds
+ * it, so:
+ *
+ * - `with_git_global_config_lock <command...>` runs a whole group of global
+ *   config reads and writes under one per-box mutex (flock on a file beside
+ *   the other Opengeni state), so concurrent preparations take turns and a
+ *   check-then-add never duplicates an entry. It is re-entrant, and it waits
+ *   at most GIT_GLOBAL_CONFIG_LOCK_WAIT_SECONDS before running the group
+ *   anyway. Without flock (macOS) the group runs unserialised.
+ * - `git_global_config <git config args...>` is `git config --global` that
+ *   retries, within a bound, while the lock is held - by a writer outside the
+ *   mutex, such as the agent's own `git config --global`, or when the mutex is
+ *   unavailable. Any other failure returns at once with git's status.
+ */
+const GIT_GLOBAL_CONFIG_LOCK_WAIT_SECONDS = 60;
+const GIT_GLOBAL_CONFIG_WRITE_ATTEMPTS = 100;
+const GIT_GLOBAL_CONFIG_FUNCTION_LINES: readonly string[] = [
+  "git_global_config() {",
+  "  git_global_config_attempt=0",
+  "  while :; do",
+  '    if git_global_config_output="$(LC_ALL=C command git config --global "$@" 2>&1)"; then',
+  '      [ -z "$git_global_config_output" ] || printf \'%s\\n\' "$git_global_config_output"',
+  "      return 0",
+  "    else",
+  "      git_global_config_status=$?",
+  "    fi",
+  '    case "$git_global_config_output" in',
+  '      *"could not lock config file"*) ;;',
+  "      *)",
+  '        [ -z "$git_global_config_output" ] || printf \'%s\\n\' "$git_global_config_output" >&2',
+  '        return "$git_global_config_status"',
+  "        ;;",
+  "    esac",
+  "    git_global_config_attempt=$((git_global_config_attempt + 1))",
+  `    if [ "$git_global_config_attempt" -ge ${GIT_GLOBAL_CONFIG_WRITE_ATTEMPTS} ]; then`,
+  "      printf '%s\\n' \"$git_global_config_output\" >&2",
+  '      return "$git_global_config_status"',
+  "    fi",
+  "    sleep 0.1 2>/dev/null || sleep 1",
+  "  done",
+  "}",
+  "with_git_global_config_lock() {",
+  '  if [ -n "${OPENGENI_GIT_GLOBAL_CONFIG_LOCKED:-}" ] || ! command -v flock >/dev/null 2>&1; then',
+  '    "$@"',
+  "    return $?",
+  "  fi",
+  '  git_global_config_lock_file="$HOME/.opengeni/git-global-config.lock"',
+  '  if ! { mkdir -p "$HOME/.opengeni" && : >>"$git_global_config_lock_file"; } 2>/dev/null; then',
+  '    "$@"',
+  "    return $?",
+  "  fi",
+  "  (",
+  `    flock -w ${GIT_GLOBAL_CONFIG_LOCK_WAIT_SECONDS} 9 2>/dev/null || true`,
+  "    OPENGENI_GIT_GLOBAL_CONFIG_LOCKED=1",
+  '    "$@"',
+  '  ) 9>>"$git_global_config_lock_file"',
+  "}",
+];
+
 function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescriptor[]): string[] {
   const rewrites = gitHttpBrokerRewrites(routes);
   const brokeredRepositoryUris = new Set(rewrites.map((rewrite) => rewrite.repositoryUri));
@@ -14819,8 +14991,11 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
     ),
     'mv -f "$git_http_broker_config.tmp.$$" "$git_http_broker_config"',
     'umask "$broker_umask"',
-    'git config --global --unset-all include.path "$git_http_broker_config" >/dev/null 2>&1 || true',
-    'git config --global --add include.path "$git_http_broker_config"',
+    "include_git_http_broker_config() {",
+    '  git_global_config --unset-all include.path "$git_http_broker_config" >/dev/null 2>&1 || true',
+    '  git_global_config --add include.path "$git_http_broker_config"',
+    "}",
+    "with_git_global_config_lock include_git_http_broker_config",
   ];
 }
 
@@ -15081,7 +15256,7 @@ export function repositoryIdentityCommandLines(
     '  if [ -n "$identity_dir" ]; then',
     '    command git -C "$identity_dir" config --local "$@"',
     "  else",
-    '    command git config --global "$@"',
+    '    git_global_config "$@"',
     "  fi",
     "}",
     "identity_value() {",
@@ -15160,9 +15335,10 @@ export function repositoryIdentityCommandLines(
     '  remove_managed_identity "$1"',
     "}",
     ...calls,
+    // The box-wide default goes to the shared global config: one locked unit.
     defaultIdentity
-      ? `apply_managed_identity '' ${identityArguments(defaultIdentity, "default")} || true`
-      : "remove_managed_identity '' || true",
+      ? `with_git_global_config_lock apply_managed_identity '' ${identityArguments(defaultIdentity, "default")} || true`
+      : "with_git_global_config_lock remove_managed_identity '' || true",
   ];
 }
 
@@ -15461,10 +15637,13 @@ function gitCredentialHelperCommandLines(
     // Empty helper resets lower-priority/system helpers; our exact path-aware
     // helper returns no credential for an unbound remote, so multi-binding
     // sessions fail closed instead of falling through to ambient credentials.
-    "git config --global --unset-all credential.helper >/dev/null 2>&1 || true",
-    "git config --global --add credential.helper ''",
-    'git config --global --add credential.helper "$git_credential_helper"',
-    "git config --global credential.useHttpPath true",
+    "install_git_credential_helper() {",
+    "  git_global_config --unset-all credential.helper >/dev/null 2>&1 || true",
+    "  git_global_config --add credential.helper ''",
+    '  git_global_config --add credential.helper "$git_credential_helper"',
+    "  git_global_config credential.useHttpPath true",
+    "}",
+    "with_git_global_config_lock install_git_credential_helper",
     ...gitHttpBrokerConfigCommandLines(brokerRoutes),
     'wrapper_dir="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"',
     'mkdir -p "$wrapper_dir"',
@@ -15897,20 +16076,18 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '    case "$trust_output" in *"dubious ownership"*|*"unsafe repository"*) ;; *) return 0 ;; esac',
   '    trust_resolved="$(cd "$target" 2>/dev/null && pwd -P)" || trust_resolved="$target"',
   '    for trust_path in "$target" "$trust_resolved"; do',
-  '      if command git config --global --get-all safe.directory 2>/dev/null | grep -Fqx -- "$trust_path"; then continue; fi',
-  "      trust_attempt=0",
-  // Parallel clones share one global config file; retry its lock briefly.
-  '      until command git config --global --add safe.directory "$trust_path" 2>/dev/null; do',
-  "        trust_attempt=$((trust_attempt + 1))",
-  '        if [ "$trust_attempt" -ge 5 ]; then break; fi',
-  "        sleep 1",
-  "      done",
+  // Parallel clones share one global config file: check and add as one unit.
+  '      with_git_global_config_lock repository_trust_path "$trust_path" || true',
   "    done",
   '    if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
   '      echo "Repository resource at $target is owned by another user; added it to safe.directory"',
   "    else",
   '      echo "Repository resource at $target is owned by another user and could not be trusted with safe.directory" >&2',
   "    fi",
+  "  }",
+  "  repository_trust_path() {",
+  '    if command git config --global --get-all safe.directory 2>/dev/null | grep -Fqx -- "$1"; then return 0; fi',
+  '    git_global_config --add safe.directory "$1" >/dev/null 2>&1',
   "  }",
   // Whether a readable work tree still serves the pinned commit. The clone
   // records the commit it materialized, so the agent's own commits, branches
@@ -16154,6 +16331,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
 function optionalRepositoryCloneRunnerLines(timeoutSeconds: number): string[] {
   const script = [
     "set -eu",
+    ...GIT_GLOBAL_CONFIG_FUNCTION_LINES,
     ...cloneRepositoryFunctionLines,
     `trap 'rm -rf "\${tmp:-/nonexistent-opengeni-optional-clone}"; exit 143' TERM INT`,
     'clone_repository "$@"',
@@ -16230,6 +16408,7 @@ export function repositoryCloneCommand(
     "  exit 127",
     "}",
     "ensure_git",
+    ...GIT_GLOBAL_CONFIG_FUNCTION_LINES,
     ...gitCredentialHelperCommandLines(
       resources,
       bindings,
@@ -16386,6 +16565,72 @@ export async function runManagedCodemodeClientHook(
       context.codemodeClientDownload,
     ),
   );
+}
+
+/**
+ * Managed sandboxes whose commands the worker runs itself. Compute sandboxes,
+ * Connected Machines and run_on targets run commands through the machine
+ * agent, which carries its own rg and jq; `local` is the operator's own host.
+ */
+export function managedShellToolsBackend(backend: Settings["sandboxBackend"] | undefined): boolean {
+  return backend !== undefined && MANAGED_SHELL_TOOLS_BACKENDS.has(backend);
+}
+
+/** Listed explicitly, so a new backend receives nothing until it is added here. */
+const MANAGED_SHELL_TOOLS_BACKENDS: ReadonlySet<Settings["sandboxBackend"]> = new Set([
+  "docker",
+  "modal",
+  "daytona",
+  "runloop",
+  "e2b",
+  "blaxel",
+  "cloudflare",
+  "vercel",
+  "opensandbox",
+]);
+
+/**
+ * Delivers the release's rg and jq beside the managed Codemode client. Best
+ * effort: a box that cannot receive them keeps its own tools, so only a turn
+ * cancellation stops setup here.
+ */
+export async function runManagedShellToolsHook(
+  session: SandboxSessionLike,
+  context: SandboxLifecycleHookContext,
+  load: () => Promise<ManagedShellTools | null> = loadManagedShellTools,
+): Promise<void> {
+  try {
+    const tools = await load();
+    if (!tools) return;
+    const result = await withSandboxOperationPurpose("hook.shell-tools", () =>
+      installManagedShellTools(
+        session,
+        tools,
+        async (cmd) =>
+          await runSandboxLifecycleCommand(
+            session,
+            {
+              cmd,
+              workdir: "/workspace",
+              ...(context.runAs ? { runAs: context.runAs } : {}),
+              yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+              maxOutputTokens: 1_000,
+            },
+            context.commandRunner,
+          ),
+        context.runAs,
+        context.codemodeClientDownload?.shellTools,
+      ),
+    );
+    if (result === "failed") {
+      console.warn("Managed shell tools were not delivered; the box keeps its own tools");
+    }
+  } catch (error) {
+    if (error instanceof TurnSandboxCommandCancelledError) throw error;
+    console.warn("Managed shell tools were not delivered; the box keeps its own tools", {
+      error: error instanceof Error ? error.name : "unknown",
+    });
+  }
 }
 
 export async function refreshCodemodeTokenFile(

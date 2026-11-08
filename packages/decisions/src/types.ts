@@ -1,73 +1,31 @@
-/** Shared typed judgments. Consumers own rubrics and thresholds; providers own inference. */
-export type DecisionInstructions = string | Record<string, unknown> | unknown[];
-export type DecisionPredicateQuestion = {
-  type: "predicate";
-  instructions: DecisionInstructions;
-  criteria?: { true?: DecisionInstructions; false?: DecisionInstructions };
-};
-export type DecisionChoiceQuestion = {
-  type: "choice";
-  instructions: DecisionInstructions;
-  criteria: Record<string, DecisionInstructions | null>;
-};
-export type DecisionScoreQuestion = {
-  type: "score";
-  instructions: DecisionInstructions;
-  criteria: DecisionInstructions[];
-};
-export type DecisionQuestion =
-  | DecisionPredicateQuestion
-  | DecisionChoiceQuestion
-  | DecisionScoreQuestion;
-export type DecisionRefusal = { type: "refusal"; reason?: string };
-export type DecisionPredicateAnswer = { type: "predicate"; probability: number };
-export type DecisionChoiceAnswer = {
-  type: "choice";
-  choice: string;
-  probabilities?: Record<string, number>;
-  confidence?: number;
-};
-export type DecisionScoreAnswer = {
-  type: "score";
-  score: number;
-  probabilities?: Record<string, number>;
-  confidence?: number;
-};
-export type DecisionAnswer =
-  | DecisionPredicateAnswer
-  | DecisionChoiceAnswer
-  | DecisionScoreAnswer
-  | DecisionRefusal;
-export type DecisionAnswerFor<Q> =
-  | DecisionRefusal
-  | (Q extends DecisionPredicateQuestion
-      ? DecisionPredicateAnswer
-      : Q extends DecisionChoiceQuestion
-        ? DecisionChoiceAnswer
-        : DecisionScoreAnswer);
+import type {
+  DecisionInstructions,
+  DecisionPredicateQuestion,
+  DecisionQuestion,
+  DecisionUsage,
+  DecisionResult,
+} from "@opengeni/contracts";
+export type {
+  DecisionInstructions,
+  DecisionPredicateQuestion,
+  DecisionChoiceQuestion,
+  DecisionScoreQuestion,
+  DecisionQuestion,
+  DecisionRefusal,
+  DecisionPredicateAnswer,
+  DecisionChoiceAnswer,
+  DecisionScoreAnswer,
+  DecisionAnswer,
+  DecisionAnswerFor,
+  DecisionUsage,
+  DecisionResult,
+} from "@opengeni/contracts";
 
-export type DecisionUsage = {
-  model: string;
-  provider: string;
-  requestId?: string;
-  inputTokens: number | null;
-  outputTokens: number | null;
-  /** Successful chunks, not retry attempts. */
-  requests: number;
-  costUsd: number | null;
-  costSource: "provider-reported" | "estimate" | "unknown";
-};
 export type DecisionOptions = {
   signal?: AbortSignal;
   tag?: string;
   /** Called even when a received answer is invalid. Never reconstructed on history replay. */
   onUsage?: (usage: DecisionUsage) => void | Promise<void>;
-};
-export type DecisionResult<
-  Q extends Record<string, DecisionQuestion> = Record<string, DecisionQuestion>,
-> = {
-  answers: { [K in keyof Q]: DecisionAnswerFor<Q[K]> };
-  usage: DecisionUsage;
 };
 export interface DecisionModel {
   decide<Q extends Record<string, DecisionQuestion>>(

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import type { SandboxSessionLike } from "@openai/agents/sandbox";
 import { sandboxCommandExitCode, sandboxCommandOutput } from "./command-result";
 import { SandboxLifecycleCommandExitError } from "./lifecycle-command-error";
+import { managedShellToolsPathEnvironment, type ManagedShellToolsDownload } from "./shell-tools";
 
 /** Data shipped with the worker, never fetched from a package registry at turn time. */
 export type ManagedCodemodeClient = {
@@ -27,7 +28,11 @@ export function managedCodemodeClientBytes(client: ManagedCodemodeClient): strin
  * box installs the client in one provider command instead of staging a large
  * file through several editor round trips.
  */
-export type ManagedCodemodeClientDownload = { url: string };
+export type ManagedCodemodeClientDownload = {
+  url: string;
+  /** The release's rg and jq bundles, delivered beside the client. */
+  shellTools?: ManagedShellToolsDownload;
+};
 
 export function managedCodemodeClientDirectory(
   client: ManagedCodemodeClient,
@@ -255,6 +260,8 @@ export function managedCodemodeClientEnvironment(directory: string): string[] {
     'if [ -z "${OPENGENI_CODEMODE_NATIVE_CLIENT:-}" ]; then',
     `  export PATH=${quote(directory)}:"$PATH"`,
     `  export OPENGENI_CODEMODE_CLIENT_MODULE=${quote(`${directory}/client.mjs`)}`,
+    // The release's rg and jq go last, so the box's own copies win.
+    `  ${managedShellToolsPathEnvironment()}`,
     "else",
     "  unset OPENGENI_CODEMODE_CLIENT_MODULE",
     "fi",

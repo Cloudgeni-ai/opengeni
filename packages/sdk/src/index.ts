@@ -1,4 +1,17 @@
 export type {
+  ModelDecisionRequest,
+  ModelDecisionResponse,
+  DecisionQuestion,
+  DecisionResult,
+  DecisionUsage,
+  DecisionAnswer,
+  DecisionAnswerFor,
+  DecisionRefusal,
+  DecisionPredicateQuestion,
+  DecisionChoiceQuestion,
+  DecisionScoreQuestion,
+} from "@opengeni/contracts";
+export type {
   BillingAlertSettings,
   UpdateBillingAlertSettingsRequest,
   BillingCreditNotification,
@@ -646,6 +659,7 @@ export { streamWorkspaceInteractionRevisions } from "./interaction-revision-stre
 export type { WorkspaceInteractionRevisionStreamTransport } from "./interaction-revision-stream";
 export { parseWorkspaceLiveEvent, streamWorkspaceLiveEvents } from "./workspace-live-stream";
 export type {
+  WorkspaceDraftsChangedEvent,
   WorkspaceLiveEvent,
   WorkspaceSessionListEvent,
   WorkspaceLiveStreamOptions,

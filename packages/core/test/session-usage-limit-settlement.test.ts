@@ -112,6 +112,94 @@ function nonReceiptWrites(calls: Call[]) {
     });
 }
 
+test("auxiliary provider costs retain reported versus estimated provenance without inventing credit prices", async () => {
+  active = spyWrites();
+  for (const source of ["provider-reported", "estimate"] as const) {
+    const receipt = await settleModelUsage(
+      testSettings(),
+      db,
+      settlementInput(
+        {
+          model: "decision/custom",
+          chargesOpenGeniCredits: false,
+          byok: false,
+          externalProviderCost: { costUsd: 0.003, source },
+          normalizedUsage: normalizeModelCallUsage({ inputTokens: 10 }),
+          sourceId: `model_call:${source}`,
+        },
+        "task",
+      ),
+    );
+    expect(receipt.estimatedProviderCostMicros).toBe(3000);
+    expect(receipt.pricedCostMicros).toBe(0);
+  }
+  expect(
+    active.calls.filter((call) => call.fn === "receipt").map((call) => call.input.amountMicros),
+  ).toEqual([3000, 3000]);
+  expect(
+    active.calls.filter((call) => call.fn === "usage").map((call) => call.input.eventType),
+  ).toContain("model.provider_cost");
+  expect(
+    active.calls.filter((call) => call.fn === "usage").map((call) => call.input.eventType),
+  ).toContain("model.estimated_provider_cost");
+  expect(active.calls.filter((call) => call.fn === "debit")).toHaveLength(0);
+});
+
+test("external provider cost cannot override a credit price or admit invalid money", async () => {
+  active = spyWrites();
+  for (const costUsd of [-1, NaN, Infinity]) {
+    await expect(
+      settleModelUsage(
+        testSettings(),
+        db,
+        settlementInput(
+          {
+            model: "decision/custom",
+            chargesOpenGeniCredits: false,
+            externalProviderCost: { costUsd, source: "provider-reported" },
+          },
+          "task",
+        ),
+      ),
+    ).rejects.toThrow("Invalid externally funded model cost");
+  }
+  await expect(
+    settleModelUsage(
+      testSettings(),
+      db,
+      settlementInput(
+        {
+          model: "decision/custom",
+          chargesOpenGeniCredits: true,
+          externalProviderCost: { costUsd: 1, source: "provider-reported" },
+        },
+        "task",
+      ),
+    ),
+  ).rejects.toThrow("Invalid externally funded model cost");
+  expect(active.calls).toHaveLength(0);
+});
+
+test("unknown auxiliary cost never borrows a same-named chat model price", async () => {
+  active = spyWrites();
+  const result = await settleModelUsage(
+    testSettings({ modelPricingJson: PRICED }),
+    db,
+    settlementInput(
+      {
+        model: "priced-model",
+        chargesOpenGeniCredits: false,
+        byok: false,
+        externalProviderCost: null,
+      },
+      "task",
+    ),
+  );
+  expect(result.estimatedProviderCostMicros).toBeNull();
+  expect(result.pricingSource).toBeNull();
+  expect(active.calls.find((call) => call.fn === "receipt")?.input.amountMicros).toBeNull();
+});
+
 const paths: Array<{
   name: string;
   settings: () => ReturnType<typeof testSettings>;

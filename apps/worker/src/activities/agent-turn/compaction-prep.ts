@@ -62,6 +62,7 @@ import { sessionStartedUnattended } from "./unattended";
 import { acceptsPromptCacheKeyForTurn } from "./codex";
 import {
   safeErrorDiagnostic,
+  compactionFailureProviderMessage,
   compactionFailureTurnEventPayload,
   isCompactionSummaryFailure,
   shouldRecoverCompactionProviderFailure,
@@ -541,6 +542,10 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     isCodexSubscriptionTurn: billingState.isCodexTurn,
     onCompactionStarted: (trigger: "auto" | "operator" | "proactive" | "overflow") =>
       recordContextCompactionStarted(observability, trigger),
+    // A summary that fails terminally falls back to trimming history, but
+    // never one cut short by this attempt's own cancellation.
+    ...(cancellationSignal ? { cancellationSignal } : {}),
+    observability,
     publishLiveEvents: publishCompactionLiveEvents,
     ...(remoteCompactionRequester ? { requestRemoteCompactionV2: remoteCompactionRequester } : {}),
   } as const;
@@ -677,6 +682,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
             clearRequestedCompaction: true,
             publishLiveEvents: publishCompactionLiveEvents,
             providerRejection: compactionProviderRejection(error),
+            providerMessage: compactionFailureProviderMessage(error),
           },
         );
         if (!isCompactionSummaryFailure(error)) throw error;
@@ -882,6 +888,7 @@ export async function runPostAgentCompaction(
             clearRequestedCompaction: true,
             publishLiveEvents: publishCompactionLiveEvents,
             providerRejection: compactionProviderRejection(error),
+            providerMessage: compactionFailureProviderMessage(error),
           },
         );
         if (!isCompactionSummaryFailure(error)) throw error;
@@ -1075,6 +1082,7 @@ export async function runPostAgentCompaction(
           clearRequestedCompaction: forcedTrigger !== null,
           publishLiveEvents: publishCompactionLiveEvents,
           providerRejection: compactionProviderRejection(compactError),
+          providerMessage: compactionFailureProviderMessage(compactError),
         },
       );
       if (!isCompactionSummaryFailure(compactError)) throw compactError;

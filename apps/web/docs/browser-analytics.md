@@ -173,12 +173,13 @@ recorded failure code and closed markers, never from failure text:
 `provider_access`, `daily_limit`, `monthly_limit`, `provider_quota`,
 `rate_limited`, `provider_error`, `model_unavailable`, `codex_account`,
 `safety_refusal`, `sandbox`, `mcp`, `context_limit`, `connectivity`,
-`pre_start`, `other`. The first next step is reported as
+`pre_start`, `machine_access`, `other`. The first next step is reported as
 `turn_failure_action{failure_class, action}` with `action` one of `retry`,
 `switch_model` (another model chosen in the composer), `buy_credits`,
 `upgrade_plan` (Upgrade to Pro),
 `connect_model`, `new_session` (a labelled New session control),
-`send_message` (a new message sent from the composer), or `left` (best effort:
+`send_message` (a new message sent from the composer), `allow_machine`
+(the chat's machine allowed for it from the banner), or `left` (best effort:
 the banner went away without an action, the page was closed, or the tab stayed
 hidden for five minutes).
 

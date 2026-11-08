@@ -43,6 +43,8 @@ seconds, instead of waiting for the whole turn: a reply it is still writing
 stops and it answers with your message in mind, and running tools are not cut
 off. The message simply
 appears in the conversation. People see one Send and nothing to learn: the
+server decides at arrival whether the message steers the running turn or
+starts a new one, so a stale screen never queues it behind the turn. The
 shared session screen shows no Queue choice beside it and no Queue or Steer
 words (a message sent while the workstream is paused waits and shows as a
 waiting message). Pass `offerQueue: true` as well to offer Queue next to Send.

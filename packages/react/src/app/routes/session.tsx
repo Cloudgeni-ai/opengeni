@@ -50,6 +50,7 @@ import {
   chatComposerPlaceholder,
   failedSessionCopy,
   failureFallbackReason,
+  MACHINE_ACCESS_REQUIRED_CODE,
 } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import {
@@ -131,7 +132,7 @@ import {
 } from "../lib/session-usage-limit";
 import { SessionUsageLimitNotice } from "../../usage";
 import { isSessionUsageLimitSubmissionError } from "../../lib/format";
-import { OpenGeniSessionUsageLimitReachedError } from "@opengeni/sdk/browser";
+import { OpenGeniApiError, OpenGeniSessionUsageLimitReachedError } from "@opengeni/sdk/browser";
 import { SESSION_USAGE_LIMIT_GOAL_PAUSED_REASON } from "@opengeni/sdk/session-usage-limits";
 import { expireArtifactCatalog } from "../lib/artifact-catalog-cache";
 import { useArtifactCatalogMutationInvalidation } from "../lib/use-artifact-catalog-mutation-invalidation";
@@ -213,7 +214,7 @@ import {
   sessionReadOnlyArchive,
 } from "../components/session/session-retention";
 import { useRail } from "../components/rail/rail-context";
-import { sessionComputeLabel } from "../../sandbox-label-model";
+import { machineDisplayName, sessionComputeLabel } from "../../sandbox-label-model";
 import { useBackgroundAttentionTitle } from "../lib/background-attention-title";
 import { ChatViewportFileDropTarget } from "../components/session/chat-viewport-file-drop-target";
 import { sessionInputWait } from "../lib/session-rail";
@@ -339,7 +340,11 @@ import {
   usePersonalResourceAttachment,
 } from "../lib/use-personal-resource-attachment";
 import { personalMachineUseIntent } from "../lib/personal-resource-attachments";
-import { isPersonalMachine, moveChatToMachine } from "../lib/move-chat-to-machine";
+import {
+  isPersonalMachine,
+  machineUseMessage,
+  moveChatToMachine,
+} from "../lib/move-chat-to-machine";
 import type { MachineView } from "../../machines";
 import { useWorkspaceModelCatalog } from "../lib/use-workspace-model-catalog";
 import type {
@@ -1693,9 +1698,11 @@ export function SessionRoute({
         ...answer,
       });
     } catch (error) {
-      toast.error("Couldn't submit the decision", {
-        description: userErrorText(error),
-      });
+      // Already decided (elsewhere, or by an earlier Approve all): no news.
+      if (!(error instanceof OpenGeniApiError && error.status === 409))
+        toast.error("Couldn't submit the decision", {
+          description: userErrorText(error),
+        });
       throw error instanceof Error ? error : new Error(String(error));
     }
   }
@@ -3995,6 +4002,43 @@ function SessionChatPane(props: {
     props.session.workspaceId,
     "connections:write",
   );
+  // The turn was refused because this chat isn't allowed on its owner's
+  // machine. Only the owner, viewing a chat that runs on that machine, can
+  // allow it: Allow sends their consent for this chat with a message that
+  // picks the work up again, like an ordinary Send.
+  const allowFailedMachine =
+    props.failure?.failureCode === MACHINE_ACCESS_REQUIRED_CODE &&
+    runsOnCanMessage &&
+    runsOnActiveMachineConsent &&
+    runsOn.activeMachine
+      ? {
+          consent: runsOnActiveMachineConsent,
+          machineName: machineDisplayName(t, runsOn.activeMachine),
+        }
+      : null;
+  const allowMachine = allowFailedMachine
+    ? {
+        machineName: allowFailedMachine.machineName,
+        onAllow: async (): Promise<string | null> => {
+          const chat = readChatSendContext();
+          if (chat.blocked) return chat.blocked;
+          if (chat.awaitingHuman) return "Answer the question above first.";
+          try {
+            await context.client.sendMessage(props.session.workspaceId, props.session.id, {
+              text: `${machineUseMessage(allowFailedMachine.machineName)} Continue where you left off.`,
+              ...chat.extras,
+              personalResourceAttachment: allowFailedMachine.consent,
+              clientEventId: crypto.randomUUID(),
+            });
+            return null;
+          } catch (failure) {
+            return userErrorText(failure, "Try again.");
+          } finally {
+            await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
+          }
+        },
+      }
+    : undefined;
   // An archived chat is read-only: there is nothing to retry or recover.
   const failureRecovery =
     !props.hasNewer &&
@@ -4017,6 +4061,7 @@ function SessionChatPane(props: {
             }
             canChooseModel={canChooseRecoveryModel}
             codexUsage={codexUsageChoice}
+            allowMachine={allowMachine}
             hasModelPicker={hasComposerPolicy}
             freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
             subscriptions={connectableSubscriptions(context.clientConfig.models)}

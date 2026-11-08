@@ -4181,8 +4181,10 @@ export type CreateSessionRequest = {
   // double-submit/retry of the same logical create collapse to one session.
   // Distinct from the per-call clientEventId.
   idempotencyKey?: string | undefined;
-  // Exact actor-private pre-session draft revision represented by this create.
-  // The server consumes only this revision after durable initialization.
+  // The caller's new-chat draft revision this create was composed from. The
+  // create is never refused over it: once the session is accepted, the server
+  // clears that draft only while it is still at this revision or holds exactly
+  // what was sent, so a newer draft saved on another device stays.
   expectedNewSessionDraftRevision?: number | undefined;
   agentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   maxNestedAgentDepth?: number | undefined;
@@ -8206,7 +8208,12 @@ export type SaveComposerDraftRequest = Omit<
 export type SubmitComposerDraftRequest = Omit<SaveComposerDraftRequest, "expectedRevision"> & {
   expectedDraftRevision: number;
   clientEventId: string;
-  delivery: "send" | "steer";
+  /**
+   * `steer_or_send` lets the server steer while a turn runs (or is about to
+   * start) and otherwise send; see `steerMessage`. `routing` in the
+   * response says which it chose.
+   */
+  delivery: "send" | "steer" | "steer_or_send";
   controlEtag?: string;
   modelContext?: string;
   /** IANA time zone of the sender; see `UserMessageEventInput`. */
@@ -10629,6 +10636,8 @@ export const KNOWN_USAGE_EVENT_TYPES = [
   "agent_run.completed",
   "model.tokens",
   "model.cost",
+  "model.provider_cost",
+  "model.estimated_provider_cost",
   "file.uploaded",
   "file.deleted",
   "document.indexed",
@@ -10648,6 +10657,8 @@ export type KnownUsageEventType = (typeof KNOWN_USAGE_EVENT_TYPES)[number];
 export type UsageEventType = KnownUsageEventType | (string & {});
 
 export type UsageEvent = {
+  /** Caller attribution only; does not select the payer or workspace. */
+  tenantLabel?: string | undefined;
   id: string;
   workspaceId: string;
   accountId: string;

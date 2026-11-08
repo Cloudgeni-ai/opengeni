@@ -25,6 +25,8 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   `GET /v1/workspaces/:workspaceId/models` (stateless OpenAI-compatible single
   model calls without tools; see [`chat-completions.md`](chat-completions.md))
 - `GET /v1/access/me`
+- `POST /v1/workspaces/:workspaceId/decisions` (stateless typed judgments;
+  see [`model-inference.md`](model-inference.md))
 - `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
 - `POST /v1/organizations/additional` (managed-human creation of another isolated organization with its first shared workspace)
 - bounded/keyset `GET /v1/organization-invitations` and exact subject-bound

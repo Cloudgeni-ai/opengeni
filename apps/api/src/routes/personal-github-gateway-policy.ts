@@ -18,7 +18,10 @@ import {
   receivePackRejection,
   type ReceivePackCommand,
 } from "../integrations/git-receive-pack";
-import type { GitHubGatewayAction } from "../integrations/github-gateway-requests";
+import {
+  refRewriteFollowsPolicy,
+  type GitHubGatewayAction,
+} from "../integrations/github-gateway-requests";
 
 /** The policy actions of `gh` and Git requests are the `github_personal` tools' own. */
 export const PERSONAL_GITHUB_POLICY_SERVER_ID = "github_personal";
@@ -258,14 +261,18 @@ function refLabel(ref: string): string {
 }
 
 /**
- * Inspect a `git-receive-pack` request: deleting a ref or a force push needs
- * the person's approval; any other push is unchanged. A refused push gets
- * Git's own per-ref rejection with Opengeni's reason.
+ * Inspect a `git-receive-pack` request. Deleting or force-pushing a branch
+ * other than the default branch follows the person's `ref_create` policy;
+ * the default branch, a tag or any other ref asks, as does a push this
+ * reader cannot read. Any other push is unchanged. A refused push gets Git's
+ * own per-ref rejection with Opengeni's reason.
  */
 export async function inspectPersonalGitHubPush(input: {
   body: ReadableStream<Uint8Array> | null;
   gzip: boolean;
   repositoryFullName: string;
+  /** The repository's default branch; null (or absent) when unknown, so every rewrite asks. */
+  defaultBranch?: string | null;
   isAncestor: GitHubAncestryCheck;
   identity: GatewayDecisionIdentity;
   decide: GatewayDecider;
@@ -347,10 +354,9 @@ export async function inspectPersonalGitHubPush(input: {
   }
   const forced: ReceivePackCommand[] = [];
   if (updates.length > 0) {
+    // Past the inspection limit the commits before the cut still count.
     const pack =
-      prefix.complete && request.packOffset < raw.length
-        ? readPackCommits(raw.subarray(request.packOffset))
-        : null;
+      request.packOffset < raw.length ? readPackCommits(raw.subarray(request.packOffset)) : null;
     for (const update of updates) {
       const fastForward = await isFastForward(update, pack?.commits ?? null, input.isAncestor);
       if (!fastForward) forced.push(update);
@@ -364,8 +370,11 @@ export async function inspectPersonalGitHubPush(input: {
     ...forced.map((command) => `force-push ${refLabel(command.ref)}`),
   ];
   const title = `${capitalize(parts.join(", "))} on ${input.repositoryFullName}`.slice(0, 240);
+  const alwaysAsk = [...deletions, ...forced].some(
+    (command) => !refRewriteFollowsPolicy(command.ref, input.defaultBranch ?? null),
+  );
   const decision = await input.decide(input.identity, {
-    action: { kind: "write", tools: ["ref_create"], alwaysAsk: true, title },
+    action: { kind: "write", tools: ["ref_create"], alwaysAsk, title },
     digest: requestDigest([
       "git-push",
       input.repositoryFullName.toLowerCase(),

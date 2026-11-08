@@ -24,6 +24,7 @@ import { createSessionForRequest } from "../src/domain/sessions";
 import {
   getActorNewSessionDraft,
   getActorNewSessionModelChoice,
+  getActorNewSessionStartChoices,
   saveActorNewSessionDraft,
 } from "../src/application/new-session-drafts";
 
@@ -397,7 +398,7 @@ describe("core new-session draft hydration", () => {
     }
   }, 180_000);
 
-  test("still rejects an exclusion-only create against a draft with pinned connectors", async () => {
+  test("an exclusion-only create against a draft with pinned connectors starts what was sent", async () => {
     if (!available) return;
     const { grant } = await fixture();
     const saved = await saveActorNewSessionDraft(
@@ -416,22 +417,26 @@ describe("core new-session draft hydration", () => {
         options: { visibility: "workspace" },
       },
     );
-    await expect(
-      createSessionForRequest(draftCreateDeps(), grant, grant.workspaceId!, {
-        initialMessage: saved.text,
-        visibility: "workspace",
-        resources: [],
-        excludedMcpServerIds: [],
-        model: saved.model,
-        reasoningEffort: saved.reasoningEffort,
-        latencyMode: saved.latencyMode,
-        expectedNewSessionDraftRevision: saved.revision,
-        idempotencyKey: crypto.randomUUID(),
-      }),
-    ).rejects.toMatchObject({ status: 409 });
+    // Send carries what is in the box (workspace connectors), never the draft.
+    const session = await createSessionForRequest(draftCreateDeps(), grant, grant.workspaceId!, {
+      initialMessage: saved.text,
+      visibility: "workspace",
+      resources: [],
+      excludedMcpServerIds: [],
+      model: saved.model,
+      reasoningEffort: saved.reasoningEffort,
+      latencyMode: saved.latencyMode,
+      expectedNewSessionDraftRevision: saved.revision,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(session.toolPolicy.mode).toBe("workspace_default");
+    // Still at the revision the Send came from, so the draft is cleared.
+    const consumed = await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId!);
+    expect(consumed.revision).toBe(saved.revision + 1);
+    expect(consumed.text).toBe("");
   }, 180_000);
 
-  test("rejects a stale create before committing a visible session shell", async () => {
+  test("a create from an older revision starts its chat and keeps the newer sibling draft", async () => {
     if (!available) return;
     const { grant } = await fixture();
     const first = await saveActorNewSessionDraft(
@@ -450,7 +455,7 @@ describe("core new-session draft hydration", () => {
         options: { visibility: "workspace" },
       },
     );
-    await saveActorNewSessionDraft(
+    const newer = await saveActorNewSessionDraft(
       { db, settings, objectStorage: null },
       grant,
       grant.workspaceId!,
@@ -487,25 +492,27 @@ describe("core new-session draft hydration", () => {
       getDocumentServices: () => ({}) as never,
     } as unknown as ApiRouteDeps;
 
-    await expect(
-      createSessionForRequest(deps, grant, grant.workspaceId!, {
-        initialMessage: first.text,
-        visibility: "workspace",
-        resources: [],
-        tools: [],
-        model: first.model,
-        reasoningEffort: first.reasoningEffort,
-        latencyMode: first.latencyMode,
-        expectedNewSessionDraftRevision: first.revision,
-        idempotencyKey: crypto.randomUUID(),
-      }),
-    ).rejects.toMatchObject({ status: 409 });
+    const session = await createSessionForRequest(deps, grant, grant.workspaceId!, {
+      initialMessage: first.text,
+      visibility: "workspace",
+      resources: [],
+      tools: [],
+      model: first.model,
+      reasoningEffort: first.reasoningEffort,
+      latencyMode: first.latencyMode,
+      expectedNewSessionDraftRevision: first.revision,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    expect(session.id).toBeString();
 
     const [stored] = await shared!.admin<Array<{ count: number }>>`
       select count(*)::int as count
       from sessions
       where workspace_id = ${grant.workspaceId!}`;
-    expect(stored).toEqual({ count: 0 });
+    expect(stored).toEqual({ count: 1 });
+    // The sibling tab's newer draft is not what was sent, so it stays.
+    const kept = await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId!);
+    expect(kept).toMatchObject({ revision: newer.revision, text: "newer sibling-tab prompt" });
   }, 180_000);
 
   test("treats a markerless old-client save, including [], as explicit tools", async () => {
@@ -618,8 +625,9 @@ describe("core new-session draft hydration", () => {
     expect(hydrated.model).toBe("scripted-model");
     expect(hydrated.reasoningEffort).toBe("high");
     expect(hydrated.latencyMode).toBe("fast");
-    // Only the chosen model policy is reused by surfaces that start work
-    // without the composer; the draft's resources and tools are its own
+    // Surfaces that start work without the composer reuse the chosen model
+    // policy and the form's repositories (revoked ones already dropped, form
+    // order kept); the draft's other resources and tools are its own
     // narrowing and never leak into them.
     const choice = await getActorNewSessionModelChoice({ db, settings }, grant, workspaceId);
     expect(choice).toEqual({
@@ -627,12 +635,21 @@ describe("core new-session draft hydration", () => {
       reasoningEffort: "high",
       latencyMode: "fast",
     });
+    const start = await getActorNewSessionStartChoices({ db, settings }, grant, workspaceId);
+    expect(start).toEqual({ modelChoice: choice, repositories: [resources[0], resources[2]] });
     const other = await getActorNewSessionModelChoice(
       { db, settings },
       { ...grant, subjectId: `user:other-${crypto.randomUUID()}` },
       workspaceId,
     );
     expect(other).toEqual({});
+    expect(
+      await getActorNewSessionStartChoices(
+        { db, settings },
+        { ...grant, subjectId: `user:other-${crypto.randomUUID()}` },
+        workspaceId,
+      ),
+    ).toEqual({ modelChoice: {}, repositories: [] });
   }, 180_000);
 
   test("keeps an organization machine connected from another workspace", async () => {

@@ -1,5 +1,0 @@
----
-"@opengeni/api-router": patch
----
-
-A connected password manager login whose password needs a person's approval before each use no longer keeps its passkey out of the agent's browser. Only an approval rule on the whole item, or (for a passkey saved in Opengeni) on one of the passkey's own fields, holds a passkey back, the same way field rules already apply to every other secret use. Each passkey lease now logs `browser.passkey.leased` with the relying parties loaded and every item skipped with its reason (`approval_required`, `secrets_disabled`, `provider_unavailable`, `provider_cannot_read_passkeys`, `provider_read_failed`, `provider_returned_no_passkeys`, `incomplete_passkey`), once per browser until the outcome changes. The write-back after a browser action logs `browser.passkey.synced` with `loadedRpIds` even when nothing was saved or asserted, while the browser held passkeys, so a sign-in that never reached the authenticator can be told apart from one that never had the passkey.

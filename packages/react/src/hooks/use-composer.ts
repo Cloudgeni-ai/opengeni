@@ -148,6 +148,12 @@ function initialComposerShadow(
 
 type PendingComposerOperation = {
   delivery: "send" | "steer";
+  /**
+   * Sent as `steer_or_send` (Send under `busySend: "steer"`): the server
+   * decides, atomically with the turn state, whether it steers or sends.
+   * Kept with the operation so a retry repeats the exact request.
+   */
+  steerOrSend?: boolean | undefined;
   input: SendMessageInput;
   draftAtSend: string;
   resourcesAtSend: ResourceRef[];
@@ -186,7 +192,15 @@ export type ComposerOptimisticMessage = {
 
 type OptimisticSendOperation = ComposerOptimisticMessage & {
   input: SendMessageInput;
+  /** As on `PendingComposerOperation`. */
+  steerOrSend?: boolean | undefined;
   draftPayload: SaveComposerDraftRequest | null;
+  /**
+   * The draft revision this send's first attempt went ahead from. A retry of
+   * the same `clientEventId` repeats it, so the server replays the accepted
+   * send instead of seeing a different request under the same key.
+   */
+  expectedDraftRevision?: number | undefined;
   /** Latest unsent local draft that must survive this operation and remounts. */
   newerShadow: ComposerDraftShadow;
   canRetry: boolean;
@@ -262,6 +276,7 @@ function restoreOptimisticSendOperations(
   return stored.map(({ hasMcpCredentialUpdates, ...operation }) => ({
     ...operation,
     delivery: "send",
+    steerOrSend: operation.steerOrSend === true,
     destination: operation.destination === "queue" ? "queue" : "chat",
     newerShadow: operation.newerShadow ?? { text: "", resources: [], annotations: [] },
     state:
@@ -296,6 +311,19 @@ function restoreOptimisticSendOperations(
 
 function restoredCorrelationId(value: unknown): string | undefined {
   return typeof value === "string" && /^[\w.:-]{1,128}$/u.test(value) ? value : undefined;
+}
+
+/**
+ * A server older than `steer_or_send` refuses it as an unknown request field
+ * or value, naming `delivery`, before accepting anything. The composer then
+ * falls back to choosing Send or Steer from its own view of the session.
+ */
+function rejectsSteerOrSend(error: unknown): boolean {
+  return (
+    error instanceof OpenGeniApiError &&
+    (error.status === 400 || error.status === 422) &&
+    /\bdelivery\b/u.test(`${error.message}\n${error.body}`)
+  );
 }
 
 function restoredErrorReference(
@@ -440,6 +468,7 @@ function readStoredPendingComposerOperation(
     }
     return {
       ...(record as StoredPendingComposerOperation),
+      steerOrSend: record.steerOrSend === true,
       annotationsAtSend: timelineAnnotationList(record.annotationsAtSend)
         ? record.annotationsAtSend
         : [],
@@ -836,7 +865,8 @@ export function useComposer(
   options: UseComposerOptions = {},
 ): ComposerControllerState {
   const t = useOpenGeniText();
-  const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
+  const { client, workspaceId, registerSessionReconciler, workspaceDraftsEvent } =
+    useEmbeddedSession(options);
   const formatError = useErrorMessage();
   const durableDrafts = options.draftPersistence !== "disabled";
   if (!durableDrafts && !options.initialPolicy) {
@@ -936,6 +966,9 @@ export function useComposer(
   const targetGeneration = useRef(0);
   const draftReadGeneration = useRef(0);
   const draftReadInFlightRef = useRef<string | null>(null);
+  // A soft reload asked for while a read was running: that read may predate
+  // the change that prompted it, so one more read follows it.
+  const draftRereadPendingRef = useRef<string | null>(null);
   const draftReadAbortRef = useRef<AbortController | null>(null);
   const draftReadRetryRef = useRef<{
     targetKey: string;
@@ -943,6 +976,11 @@ export function useComposer(
     timer: ReturnType<typeof setTimeout> | null;
   }>({ targetKey, failures: 0, timer: null });
   const lastSavedSignature = useRef<string | null>(null);
+  // The newest draft revision whose content this page saved or showed. A
+  // read while someone types here moves the save base (`draftRef`) to another
+  // device's newer draft without showing it; Send then goes ahead from this
+  // revision instead, so the server keeps that draft (`sendDraftBasis`).
+  const sendBasisRef = useRef<number | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   // A model, effort or speed pick is one deliberate click, not typing: it is
   // saved without the typing pause, so clicking another chat right after it
@@ -981,6 +1019,8 @@ export function useComposer(
   const busySend: ComposerBusySend = options.busySend ?? "queue";
   const busySendRef = useRef(busySend);
   busySendRef.current = busySend;
+  // Set once the server refuses `steer_or_send` (older than it).
+  const steerOrSendUnsupportedRef = useRef(false);
   const singleSend = busySend === "steer" && options.offerQueue !== true;
   const sendBlockedRef = useRef(options.sendBlocked);
   sendBlockedRef.current = options.sendBlocked;
@@ -1034,6 +1074,7 @@ export function useComposer(
     policyPickedRef.current = !durableDrafts || shadow?.policy !== undefined;
     setPolicyPicked(policyPickedRef.current);
     draftRef.current = null;
+    sendBasisRef.current = null;
     restoredResourcesRef.current = shadow?.resources ?? [];
     lastSavedSignature.current = null;
     savePickPromptlyRef.current = false;
@@ -1091,6 +1132,7 @@ export function useComposer(
       targetGeneration.current += 1;
       draftReadGeneration.current += 1;
       draftReadInFlightRef.current = null;
+      draftRereadPendingRef.current = null;
       draftReadAbortRef.current?.abort();
       draftReadAbortRef.current = null;
     },
@@ -1127,6 +1169,7 @@ export function useComposer(
         policyRef.current = nextPolicy;
         restoredResourcesRef.current = next.resources;
         draftRef.current = null;
+        sendBasisRef.current = null;
         lastSavedSignature.current = null;
         setDraft(null);
         setValue(next.text);
@@ -1165,6 +1208,7 @@ export function useComposer(
       policyPickedRef.current = !next.policyFollowsSession;
       setPolicyPicked(policyPickedRef.current);
       draftRef.current = next;
+      sendBasisRef.current = next.revision;
       restoredResourcesRef.current = next.resources;
       lastSavedSignature.current = draftSignature(draftPayload(next));
       localEditRevision.current += 1;
@@ -1200,6 +1244,36 @@ export function useComposer(
     [durableDrafts, pendingOperationKey, setOptimisticDraftShadow, targetKey],
   );
 
+  /**
+   * A Send that goes ahead from an older revision leaves another device's
+   * newer draft in place. The box the Send emptied is not an edit, so
+   * autosave must not save it over that draft, even if the Send then fails.
+   * Typing here afterwards is saved as usual.
+   */
+  const keepNewerDraftAfterSend = useCallback((): void => {
+    const base = draftRef.current;
+    if (
+      !base ||
+      !policyRef.current ||
+      valueRef.current !== "" ||
+      restoredResourcesRef.current.length > 0 ||
+      annotationsRef.current.length > 0
+    ) {
+      return;
+    }
+    // From the refs: a Send runs from an older render's callbacks.
+    lastSavedSignature.current = draftSignature(
+      composerDraftPayload(
+        base,
+        valueRef.current,
+        restoredResourcesRef.current,
+        annotationsRef.current,
+        pickedPolicy(policyPickedRef, policyRef),
+        resolveSendExtras(sendExtrasRef.current).resources ?? [],
+      ),
+    );
+  }, []);
+
   const loadDraft = useCallback(
     async (replaceLocal: boolean): Promise<void> => {
       if (targetKeyRef.current !== targetKey) return;
@@ -1227,7 +1301,10 @@ export function useComposer(
         );
       };
       if (!replaceLocal && retry.timer !== null) return;
-      if (draftReadInFlightRef.current === targetKey) return;
+      if (draftReadInFlightRef.current === targetKey) {
+        if (!replaceLocal) draftRereadPendingRef.current = targetKey;
+        return;
+      }
       if (retry.timer !== null) {
         clearTimeout(retry.timer);
         retry.timer = null;
@@ -1303,6 +1380,18 @@ export function useComposer(
         // its freshly decoded object back into React creates a response -> render
         // -> read feedback loop. Hard reload remains the explicit exception.
         if (replaceLocal || fetched.revision > currentRevision) {
+          // A fetched draft that is empty or holds this page's own write has
+          // nothing of another device's that a Send from it could clear
+          // unseen. Neither does the first read in the usual case; if
+          // something is typed before it lands, autosave saves over it
+          // anyway (last-writer-wins).
+          const fetchedIsSendBasis =
+            currentRevision === -1 ||
+            !composerDraftHasContent(fetched) ||
+            isPageDraftWrite(
+              `${workspaceId}\u0000${sessionId}`,
+              draftContentKey(draftPayload(fetched)),
+            );
           draftRef.current = fetched;
           setDraft(fetched);
           setDraftConflict(null);
@@ -1312,6 +1401,7 @@ export function useComposer(
           if (shadow) {
             // The server can only know the original operation. Never replace
             // newer local edits while that operation is still uncertain.
+            if (fetchedIsSendBasis) sendBasisRef.current = fetched.revision;
             valueRef.current = shadow.text;
             restoredResourcesRef.current = shadow.resources;
             annotationsRef.current = shadow.annotations;
@@ -1327,10 +1417,15 @@ export function useComposer(
             setRestoredResources(shadow.resources);
             setAnnotations(shadow.annotations);
             if (shadow.policy) setPolicy(shadow.policy);
+            // A box a Send emptied while it runs is not an edit: never let
+            // autosave save it over the newer draft just read, even if the
+            // Send then fails.
+            if (!fetchedIsSendBasis) keepNewerDraftAfterSend();
           } else if (
             replaceLocal ||
             (!localWasDirtyAtStart && localAtStart === localEditRevision.current)
           ) {
+            sendBasisRef.current = fetched.revision;
             valueRef.current = fetched.text;
             restoredResourcesRef.current = fetched.resources;
             annotationsRef.current = fetched.annotations ?? [];
@@ -1346,8 +1441,12 @@ export function useComposer(
             // Keep the in-flight edit, but the fetched row is still the OCC
             // base. First hydrate has no local policy until this read lands;
             // without it autosave cannot persist the typed text.
+            // Unless it is a send basis, Send does not name it (see
+            // `sendBasisRef`).
+            if (fetchedIsSendBasis) sendBasisRef.current = fetched.revision;
             lastSavedSignature.current = draftSignature(draftPayload(fetched));
             if (!policyRef.current || !policyPickedRef.current) adoptFetchedPolicy();
+            if (!fetchedIsSendBasis) keepNewerDraftAfterSend();
           }
         } else if (
           fetched.revision === currentRevision &&
@@ -1405,9 +1504,19 @@ export function useComposer(
         if (draftReadAbortRef.current === requestAbort) {
           draftReadAbortRef.current = null;
         }
+        if (draftRereadPendingRef.current === targetKey) {
+          draftRereadPendingRef.current = null;
+          if (
+            targetKeyRef.current === targetKey &&
+            draftReadInFlightRef.current === null &&
+            retry.timer === null
+          ) {
+            void loadDraft(false);
+          }
+        }
       }
     },
-    [client, durableDrafts, sessionId, targetKey, workspaceId, t],
+    [client, durableDrafts, keepNewerDraftAfterSend, sessionId, targetKey, workspaceId, t],
   );
 
   useEffect(() => {
@@ -1417,6 +1526,21 @@ export function useComposer(
     }
     void loadDraft(false);
   }, [durableDrafts, loadDraft, sessionId]);
+  // This person's draft here changed on another of their devices. Read it
+  // again: a composer that isn't being typed in shows it, one being typed in
+  // keeps its text and saves on top of it (see `loadDraft`).
+  useEffect(() => {
+    if (
+      !sessionId ||
+      !durableDrafts ||
+      !workspaceDraftsEvent ||
+      workspaceDraftsEvent.workspaceId !== workspaceId ||
+      !workspaceDraftsEvent.sessionIds.includes(sessionId)
+    ) {
+      return;
+    }
+    void loadDraft(false);
+  }, [durableDrafts, loadDraft, sessionId, workspaceDraftsEvent, workspaceId]);
   // After long background / sleep the in-memory revision is often stale while
   // a prior autosave already advanced the server. Soft-reload on wake so the
   // next keystroke does not OCC against a dead revision.
@@ -1543,9 +1667,11 @@ export function useComposer(
   }, [annotations, durableDrafts, restoredResources, targetKey, value]);
 
   const adoptDraftBase = useCallback(
-    (next: ComposerDraft): void => {
+    // `written` is false for a draft this page neither saved nor shows.
+    (next: ComposerDraft, written = true): void => {
       if (targetKeyRef.current !== targetKey) return;
       draftRef.current = next;
+      if (written) sendBasisRef.current = next.revision;
       setDraft(next);
       const nextPolicy = policyFromDraft(next);
       if (next.policyFollowsSession) {
@@ -1567,6 +1693,33 @@ export function useComposer(
       setError(null);
     },
     [targetKey],
+  );
+
+  /**
+   * Take the draft an accepted Send left. The server clears the draft only
+   * while it still holds what was sent; a newer draft saved on another device
+   * stays, and this composer shows it once the sent message has left the box,
+   * unless something new is being typed here.
+   */
+  const followAcceptedDraft = useCallback(
+    (next: ComposerDraft): void => {
+      // A kept newer draft becomes a send basis only once it is shown.
+      adoptDraftBase(next, !composerDraftHasContent(next));
+      if (!composerDraftHasContent(next)) return;
+      setTimeout(() => {
+        if (
+          targetKeyRef.current !== targetKey ||
+          draftRef.current?.revision !== next.revision ||
+          valueRef.current !== "" ||
+          restoredResourcesRef.current.length > 0 ||
+          annotationsRef.current.length > 0
+        ) {
+          return;
+        }
+        applyDraft(next);
+      }, 0);
+    },
+    [adoptDraftBase, applyDraft, targetKey],
   );
 
   /**
@@ -1594,13 +1747,21 @@ export function useComposer(
   /**
    * Save the draft now. The caller holds the draft slot.
    *
-   * A save refused as made against an old revision re-reads the draft before
-   * it counts as a conflict. The same content, or content this page wrote itself (a save
-   * whose reply was lost, or one that landed after the composer remounted),
-   * is not another tab: the save just moves to the current revision. An
-   * explicit choice (Send, Keep mine) saves the person's content over
-   * whatever is there. Only an autosave that meets someone else's edit
-   * stops and offers Keep mine / Use other draft.
+   * A save refused as made against an old revision re-reads the draft and
+   * saves again on top of it. A composer saves only what is being typed in
+   * it, so the latest typing wins, wherever it happened; a composer that is
+   * not being typed in follows the latest draft instead (see `loadDraft`).
+   * Only a draft that keeps changing through every re-read is reported.
+   *
+   * Send's own save (`overNewer: false`) never lands on top of another
+   * device's newer draft: it takes that draft as the save base without
+   * making it a send basis, so Send goes ahead from the revision it last saw
+   * and the server keeps the newer draft. A newer draft holding this page's
+   * own earlier write (a lost reply, a save that landed after a remount) is
+   * still saved over. Own writes are recognised by content alone, so another
+   * device's draft that repeats one of this page's last few saves counts as
+   * this page's; that is rare, and the cost is the plain last-writer-wins
+   * result.
    */
   const saveDraftInSlot = useCallback(
     async (
@@ -1609,7 +1770,7 @@ export function useComposer(
       // Receives this call's own failure (never a later autosave's), so a send
       // blocked by it keeps its real cause.
       onFailure?: (problem: Error) => void,
-      intent: "autosave" | "explicit" = "autosave",
+      overNewer = true,
     ): Promise<boolean> => {
       const owned = () =>
         targetKeyRef.current === owner.targetKey && targetGeneration.current === owner.generation;
@@ -1641,7 +1802,7 @@ export function useComposer(
         for (let reread = 0; ; reread += 1) {
           let problem: Error;
           try {
-            rememberDraftWrite(writesKey, draftContentKey(request));
+            rememberPageDraftWrite(writesKey, draftContentKey(request));
             const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
             settledWritesRef.current.set(writesKey, {
               revision: saved.revision,
@@ -1669,8 +1830,10 @@ export function useComposer(
             adoptDraftBase(remote);
             return true;
           }
-          if (intent !== "explicit" && !recentDraftWrites.get(writesKey)?.includes(remoteContent)) {
-            return fail(problem);
+          if (!overNewer && !isPageDraftWrite(writesKey, remoteContent)) {
+            draftRef.current = remote;
+            setDraft(remote);
+            return true;
           }
           draftRef.current = remote;
           setDraft(remote);
@@ -1687,7 +1850,6 @@ export function useComposer(
     async (
       payload: SaveComposerDraftRequest,
       onFailure?: (problem: Error) => void,
-      intent: "autosave" | "explicit" = "autosave",
     ): Promise<boolean> => {
       const owner = { targetKey, generation: targetGeneration.current };
       if (!sessionId || !durableDrafts || targetKeyRef.current !== owner.targetKey) {
@@ -1695,7 +1857,7 @@ export function useComposer(
       }
       const release = await acquireDraftSlot();
       try {
-        return await saveDraftInSlot(payload, owner, onFailure, intent);
+        return await saveDraftInSlot(payload, owner, onFailure);
       } finally {
         release();
       }
@@ -1947,13 +2109,19 @@ export function useComposer(
           releaseDraftSlot = await acquireDraftSlot();
           let persistFailure = null as Error | null;
           if (
+            // A retry repeats its first attempt, which already saved (or went
+            // ahead without saving): saving again could write over a newer
+            // draft from another device.
+            operation.expectedDraftRevision === undefined &&
+            // The save base is another device's draft this page never showed.
+            !sendDraftBasis(draftRef.current, sendBasisRef.current).behind &&
             !(await saveDraftInSlot(
               operation.draftPayload,
               { targetKey: ownedTargetKey, generation: ownedGeneration },
               (problem) => {
                 persistFailure = problem;
               },
-              "explicit",
+              false,
             ))
           ) {
             // An update that blocks the draft save holds the send like any
@@ -1962,9 +2130,27 @@ export function useComposer(
               notSubmitted = true;
               throw persistFailure;
             }
-            throw new ComposerStateError(t("hooks.useComposer.theMessageDraftCouldNot"));
+            // Otherwise the save only keeps the draft in step. Send carries
+            // what is in the box and goes ahead from the draft as last seen.
+            setError(null);
+            setDraftConflict(null);
           }
-          expectedDraftRevision = draftRef.current?.revision;
+          const basis = sendDraftBasis(draftRef.current, sendBasisRef.current);
+          if (basis.behind) keepNewerDraftAfterSend();
+          expectedDraftRevision = operation.expectedDraftRevision ?? basis.revision;
+          if (
+            expectedDraftRevision !== undefined &&
+            operation.expectedDraftRevision !== expectedDraftRevision
+          ) {
+            const firstBasis = expectedDraftRevision;
+            replaceOptimisticSends((current) =>
+              current.map((candidate) =>
+                candidate.clientEventId === operation.clientEventId
+                  ? { ...candidate, expectedDraftRevision: firstBasis }
+                  : candidate,
+              ),
+            );
+          }
         }
         if (
           targetKeyRef.current !== ownedTargetKey ||
@@ -1976,57 +2162,90 @@ export function useComposer(
           ...operation.input,
           ...(expectedDraftRevision !== undefined ? { expectedDraftRevision } : {}),
         };
-        let acceptedResult: SubmitComposerDraftResponse | null = null;
-        let acceptedEvent: SessionEvent | null = null;
-        if (durableDrafts) {
-          if (!operation.draftPayload || expectedDraftRevision === undefined) {
-            throw new ComposerStateError(t("hooks.useComposer.theDurableComposerDraftIs"));
-          }
-          const result = await client
-            .submitComposerDraft(workspaceId, sessionId, {
-              text: operation.draftPayload.text,
-              annotations: operation.draftPayload.annotations,
-              resources: operation.draftPayload.resources,
-              // Absent while the draft follows the chat's settings.
-              ...(operation.draftPayload.model !== undefined
-                ? { model: operation.draftPayload.model }
-                : {}),
-              ...(operation.draftPayload.reasoningEffort !== undefined
-                ? { reasoningEffort: operation.draftPayload.reasoningEffort }
-                : {}),
-              ...(operation.draftPayload.latencyMode !== undefined
-                ? { latencyMode: operation.draftPayload.latencyMode }
-                : {}),
-              expectedDraftRevision,
-              clientEventId: operation.clientEventId,
-              delivery: "send",
-              ...(wireInput.controlEtag ? { controlEtag: wireInput.controlEtag } : {}),
-              ...(wireInput.modelContext ? { modelContext: wireInput.modelContext } : {}),
-              ...(wireInput.mcpCredentialUpdates
-                ? { mcpCredentialUpdates: wireInput.mcpCredentialUpdates }
-                : {}),
-              ...(wireInput.connectionAccounts
-                ? { connectionAccounts: wireInput.connectionAccounts }
-                : {}),
+        // Assigned inside `submit`, so the declared types must not narrow.
+        let acceptedResult = null as Pick<
+          SubmitComposerDraftResponse,
+          "accepted" | "turn" | "receipt" | "routing"
+        > | null;
+        let acceptedEvent = null as SessionEvent | null;
+        // Under `busySend: "steer"` the server decides Steer or Send
+        // (`steer_or_send`); its `routing` places the message below.
+        let steerOrSend = operation.steerOrSend === true;
+        const submit = async (): Promise<void> => {
+          if (durableDrafts) {
+            if (!operation.draftPayload || expectedDraftRevision === undefined) {
+              throw new ComposerStateError(t("hooks.useComposer.theDurableComposerDraftIs"));
+            }
+            const result = await client
+              .submitComposerDraft(workspaceId, sessionId, {
+                text: operation.draftPayload.text,
+                annotations: operation.draftPayload.annotations,
+                resources: operation.draftPayload.resources,
+                // Absent while the draft follows the chat's settings.
+                ...(operation.draftPayload.model !== undefined
+                  ? { model: operation.draftPayload.model }
+                  : {}),
+                ...(operation.draftPayload.reasoningEffort !== undefined
+                  ? { reasoningEffort: operation.draftPayload.reasoningEffort }
+                  : {}),
+                ...(operation.draftPayload.latencyMode !== undefined
+                  ? { latencyMode: operation.draftPayload.latencyMode }
+                  : {}),
+                expectedDraftRevision,
+                clientEventId: operation.clientEventId,
+                delivery: steerOrSend ? "steer_or_send" : "send",
+                ...(wireInput.controlEtag ? { controlEtag: wireInput.controlEtag } : {}),
+                ...(wireInput.modelContext ? { modelContext: wireInput.modelContext } : {}),
+                ...(wireInput.mcpCredentialUpdates
+                  ? { mcpCredentialUpdates: wireInput.mcpCredentialUpdates }
+                  : {}),
+                ...(wireInput.connectionAccounts
+                  ? { connectionAccounts: wireInput.connectionAccounts }
+                  : {}),
 
-              ...(wireInput.personalResourceAttachment
-                ? { personalResourceAttachment: wireInput.personalResourceAttachment }
-                : {}),
-            })
-            .catch((cause: unknown) => {
-              mutationFailureObserved = true;
-              throw cause;
-            });
-          acceptedResult = result;
-          adoptDraftBase(result.draft);
-          releaseDraftSlot?.();
-        } else {
-          acceptedEvent = await client
-            .sendMessage(workspaceId, sessionId, wireInput)
-            .catch((cause: unknown) => {
-              mutationFailureObserved = true;
-              throw cause;
-            });
+                ...(wireInput.personalResourceAttachment
+                  ? { personalResourceAttachment: wireInput.personalResourceAttachment }
+                  : {}),
+              })
+              .catch((cause: unknown) => {
+                mutationFailureObserved = true;
+                throw cause;
+              });
+            acceptedResult = result;
+            followAcceptedDraft(result.draft);
+            releaseDraftSlot?.();
+          } else if (steerOrSend) {
+            acceptedResult = await client
+              .steerMessage(workspaceId, sessionId, wireInput, { delivery: "steer_or_send" })
+              .catch((cause: unknown) => {
+                mutationFailureObserved = true;
+                throw cause;
+              });
+          } else {
+            acceptedEvent = await client
+              .sendMessage(workspaceId, sessionId, wireInput)
+              .catch((cause: unknown) => {
+                mutationFailureObserved = true;
+                throw cause;
+              });
+          }
+        };
+        try {
+          await submit();
+        } catch (cause) {
+          // Refused before anything was accepted by a server older than
+          // `steer_or_send`: send as this view chose, as before it.
+          if (!steerOrSend || !rejectsSteerOrSend(cause)) throw cause;
+          steerOrSendUnsupportedRef.current = true;
+          steerOrSend = false;
+          replaceOptimisticSends((current) =>
+            current.map((candidate) =>
+              candidate.clientEventId === operation.clientEventId
+                ? { ...candidate, steerOrSend: false }
+                : candidate,
+            ),
+          );
+          await submit();
         }
         if (
           targetKeyRef.current !== ownedTargetKey ||
@@ -2115,7 +2334,8 @@ export function useComposer(
     })();
   }, [
     acquireDraftSlot,
-    adoptDraftBase,
+    followAcceptedDraft,
+    keepNewerDraftAfterSend,
     client,
     durableDrafts,
     formatError,
@@ -2292,7 +2512,11 @@ export function useComposer(
   }, [client, durableDrafts, error, sessionId, targetKey, workspaceId]);
 
   const dispatch = useCallback(
-    async (delivery: "send" | "steer", explicit?: string): Promise<boolean> => {
+    async (
+      delivery: "send" | "steer",
+      explicit?: string,
+      steerOrSend = false,
+    ): Promise<boolean> => {
       const ownedTargetKey = targetKey;
       const ownedGeneration = targetGeneration.current;
       const operationKey = pendingComposerOperationKey(workspaceId, sessionId);
@@ -2360,6 +2584,7 @@ export function useComposer(
       };
 
       const deliver = async (operation: PendingComposerOperation) => {
+        const wireDelivery = operation.steerOrSend ? "steer_or_send" : operation.delivery;
         if (durableDrafts) {
           const input = operation.input;
           if (input.expectedDraftRevision === undefined || input.clientEventId === undefined) {
@@ -2375,7 +2600,7 @@ export function useComposer(
             ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
             expectedDraftRevision: input.expectedDraftRevision,
             clientEventId: input.clientEventId,
-            delivery: operation.delivery,
+            delivery: wireDelivery,
             ...(input.controlEtag ? { controlEtag: input.controlEtag } : {}),
             ...(input.modelContext ? { modelContext: input.modelContext } : {}),
             ...(input.mcpCredentialUpdates
@@ -2386,15 +2611,43 @@ export function useComposer(
               ? { personalResourceAttachment: input.personalResourceAttachment }
               : {}),
           });
-          adoptDraftBase(result.draft);
+          followAcceptedDraft(result.draft);
           return result;
         }
         if (operation.delivery === "steer") {
-          return await client.steerMessage(workspaceId, sessionId, operation.input);
+          return await client.steerMessage(
+            workspaceId,
+            sessionId,
+            operation.input,
+            operation.steerOrSend ? { delivery: "steer_or_send" } : {},
+          );
         }
         await client.sendMessage(workspaceId, sessionId, operation.input);
         return null;
       };
+      // Before anything is accepted, a server without `steer_or_send` names it
+      // in its refusal; this composer then chooses from its own view instead.
+      const deliverOrFallBack = async (operation: PendingComposerOperation) => {
+        try {
+          return await deliver(operation);
+        } catch (cause) {
+          if (!operation.steerOrSend || !rejectsSteerOrSend(cause)) throw cause;
+          steerOrSendUnsupportedRef.current = true;
+          const chosen = { ...operation, steerOrSend: false };
+          if (pendingOperationRef.current === operation) {
+            pendingOperationRef.current = chosen;
+            rememberPendingComposerOperation(operationKey, chosen);
+          }
+          return await deliver(chosen);
+        }
+      };
+      // A `steer_or_send` the server resolved to a Send is an ordinary message:
+      // it shows from the session's events, not as a Steer.
+      const steered = (
+        operation: PendingComposerOperation,
+        result: Awaited<ReturnType<typeof deliver>>,
+      ): result is NonNullable<typeof result> =>
+        result !== null && (!operation.steerOrSend || result.routing === "accepted_for_steering");
 
       if (delivery === "steer") {
         if (steeringRef.current?.clientEventId !== pending?.input.clientEventId) {
@@ -2474,8 +2727,8 @@ export function useComposer(
           }
           try {
             if (durableDrafts) releaseDraftSlot = await acquireDraftSlot();
-            const result = await deliver(pending);
-            if (pending.delivery === "steer" && result) {
+            const result = await deliverOrFallBack(pending);
+            if (pending.delivery === "steer" && steered(pending, result)) {
               keepSteering = true;
               setSteering({
                 phase: "accepted",
@@ -2486,6 +2739,8 @@ export function useComposer(
                 stoppingPreviousAttempt:
                   result.replay !== true && (result.interruptionCount ?? 0) > 0,
               });
+            } else {
+              keepSteering = false;
             }
           } catch (cause) {
             const problem = asError(cause);
@@ -2536,17 +2791,27 @@ export function useComposer(
         const sendText = hasText ? rawText : hasAnnotations ? "" : FILE_ONLY_MESSAGE_TEXT(t);
         const currentPayload = currentDraftPayload();
         const payload = currentPayload ? { ...currentPayload, text: sendText } : null;
-        if (payload) {
-          releaseDraftSlot = await acquireDraftSlot();
+        // The slot first: a save of this page's that is still running decides
+        // the basis. A save base that is another device's draft this page
+        // never showed is not saved over: Send goes ahead from the send basis.
+        if (payload) releaseDraftSlot = await acquireDraftSlot();
+        if (payload && !sendDraftBasis(draftRef.current, sendBasisRef.current).behind) {
+          let saveFailure = null as Error | null;
           if (
             !(await saveDraftInSlot(
               payload,
               { targetKey: ownedTargetKey, generation: ownedGeneration },
-              undefined,
-              "explicit",
+              (problem) => {
+                saveFailure = problem;
+              },
+              false,
             ))
           ) {
-            return false;
+            // Only an outage holds the message; otherwise it is sent from the
+            // draft as last seen, carrying what is in the box.
+            if (!saveFailure || isTransientServiceFailure(saveFailure)) return false;
+            setError(null);
+            setDraftConflict(null);
           }
         }
         if (
@@ -2560,17 +2825,21 @@ export function useComposer(
         // carries a minimal default so the attachments still get delivered.
         pendingClientEventId.current ??= generateClientEventId();
         const effectiveControl = effectiveControlRef.current;
+        const draftBasis = sendDraftBasis(draftRef.current, sendBasisRef.current);
         const input = composeSendInput(sendText, pendingClientEventId.current, extras, {
           ...pickedPolicy(policyPickedRef, policyRef),
           ...(effectiveControl?.controlEtag ? { controlEtag: effectiveControl.controlEtag } : {}),
-          ...(durableDrafts && draftRef.current
-            ? { expectedDraftRevision: draftRef.current.revision }
+          ...(durableDrafts && draftBasis.revision !== undefined
+            ? { expectedDraftRevision: draftBasis.revision }
             : {}),
           resources: mergeResources(restoredResources, extras.resources ?? []),
           annotations: cloneAnnotations(annotationsAtSend),
         });
         const operation: PendingComposerOperation = {
           delivery,
+          ...(delivery === "steer" && steerOrSend && !steerOrSendUnsupportedRef.current
+            ? { steerOrSend: true }
+            : {}),
           input,
           draftAtSend,
           resourcesAtSend: [...restoredResources],
@@ -2596,8 +2865,8 @@ export function useComposer(
           });
         }
         try {
-          const result = await deliver(operation);
-          if (delivery === "steer" && result) {
+          const result = await deliverOrFallBack(operation);
+          if (delivery === "steer" && steered(operation, result)) {
             keepSteering = true;
             setSteering({
               phase: "accepted",
@@ -2665,7 +2934,7 @@ export function useComposer(
       onSent,
       restoredResources,
       annotations,
-      adoptDraftBase,
+      followAcceptedDraft,
       saveDraftInSlot,
       sending,
       sessionId,
@@ -2678,7 +2947,7 @@ export function useComposer(
   );
 
   const sendToQueue = useCallback(
-    async (explicit?: string): Promise<boolean> => {
+    async (explicit?: string, steerOrSend = false): Promise<boolean> => {
       if (pendingOperationRef.current?.delivery === "send") {
         return await dispatch("send", explicit);
       }
@@ -2719,6 +2988,7 @@ export function useComposer(
       const operation: OptimisticSendOperation = {
         clientEventId,
         delivery: "send",
+        ...(steerOrSend && !steerOrSendUnsupportedRef.current ? { steerOrSend: true } : {}),
         destination:
           effectiveControl?.state === "paused" || hasEarlierUnsettledSend
             ? "queue"
@@ -2784,17 +3054,20 @@ export function useComposer(
   const send = useCallback(
     async (explicit?: string): Promise<boolean> => {
       // A retained uncertain Send keeps its own delivery; only fresh input
-      // follows the busy-send preference.
+      // follows the busy-send preference. Under `steer` the server makes the
+      // real choice (`steer_or_send`), atomically with the turn state: this
+      // view only picks how the message shows until it answers, so a stale
+      // view can never queue a message meant for the running turn.
       if (
         busySendRef.current === "steer" &&
         pendingOperationRef.current?.delivery !== "send" &&
         takesBusyPath()
       ) {
-        return await steer(explicit);
+        return await dispatch("steer", explicit, true);
       }
-      return await sendToQueue(explicit);
+      return await sendToQueue(explicit, busySendRef.current === "steer");
     },
-    [sendToQueue, steer, takesBusyPath],
+    [dispatch, sendToQueue, takesBusyPath],
   );
   const sendAlternate = useCallback(
     async (explicit?: string): Promise<boolean> =>
@@ -2847,6 +3120,8 @@ export function useComposer(
             clientEventId: nextClientEventId,
             input: retryInput,
             draftPayload: operation.draftPayload,
+            // A new key goes ahead from the draft as it is now.
+            expectedDraftRevision: undefined,
             occurredAt: new Date().toISOString(),
             state: "sending",
             error: undefined,
@@ -3310,11 +3585,7 @@ export function useComposer(
       setError(null);
       const payload = currentDraftPayload();
       if (payload) {
-        await persistPayload(
-          { ...payload, expectedRevision: remote.revision },
-          undefined,
-          "explicit",
-        );
+        await persistPayload({ ...payload, expectedRevision: remote.revision }, undefined);
       }
     },
     [
@@ -3661,21 +3932,64 @@ function draftSignature(payload: SaveComposerDraftRequest): string {
   return JSON.stringify(content);
 }
 
+/** Whether a draft holds anything to show in the composer. */
+function composerDraftHasContent(draft: ComposerDraft): boolean {
+  return (
+    draft.text.length > 0 ||
+    (draft.annotations ?? []).length > 0 ||
+    draft.resources.length > 0 ||
+    draft.sourceTurnId !== null
+  );
+}
+
 /** Re-reads a save makes after "draft changed" before giving up on it. */
 const DRAFT_CONFLICT_REREADS = 3;
-
-/**
- * The draft content this page recently wrote, per chat. It outlives a
- * composer remount, so a save that lands after the composer re-read the
- * draft is still recognised as this page's own write.
- */
-const recentDraftWrites = new Map<string, string[]>();
 
 /** The revision and content of a composer's latest accepted save. */
 type SettledDraftWrite = { revision: number; content: string };
 
 /** Saves of an edit whose composer left the chat, per chat, while they run. */
 const leftDraftSaves = new Map<string, Promise<void>>();
+
+/**
+ * Draft content this page asked the server to save, per chat, newest last.
+ * A newer draft holding one of these is this page's own write (a lost reply,
+ * or a save that landed after a remount), not another device's.
+ */
+const pageDraftWrites = new Map<string, string[]>();
+const PAGE_DRAFT_WRITES_PER_CHAT = 8;
+const PAGE_DRAFT_WRITE_CHATS = 64;
+
+function rememberPageDraftWrite(chatKey: string, content: string): void {
+  const writes = (pageDraftWrites.get(chatKey) ?? []).filter((write) => write !== content);
+  writes.push(content);
+  pageDraftWrites.delete(chatKey);
+  pageDraftWrites.set(chatKey, writes.slice(-PAGE_DRAFT_WRITES_PER_CHAT));
+  if (pageDraftWrites.size > PAGE_DRAFT_WRITE_CHATS) {
+    const oldest = pageDraftWrites.keys().next().value;
+    if (oldest !== undefined) pageDraftWrites.delete(oldest);
+  }
+}
+
+function isPageDraftWrite(chatKey: string, content: string): boolean {
+  return pageDraftWrites.get(chatKey)?.includes(content) ?? false;
+}
+
+/**
+ * The draft revision a Send names, from the save base and the send basis
+ * (the newest revision this page saved or showed). A save base newer than
+ * the basis is another device's draft this page never showed (`behind`):
+ * Send goes ahead from the basis without saving, so the server keeps that
+ * draft. The basis is 0 when this page has only seen that no draft exists.
+ */
+function sendDraftBasis(
+  base: ComposerDraft | null,
+  basis: number | null,
+): { revision: number | undefined; behind: boolean } {
+  if (!base) return { revision: undefined, behind: false };
+  if (basis !== null && basis < base.revision) return { revision: basis, behind: true };
+  return { revision: base.revision, behind: false };
+}
 
 /** How long reading a chat's draft waits for such a save before reading anyway. */
 const LEFT_DRAFT_SAVE_WAIT_MS = 3_000;
@@ -3719,7 +4033,7 @@ function saveLeftDraft(
         ...left.payload,
         expectedRevision: Math.max(settled?.revision ?? base, base),
       };
-      rememberDraftWrite(chatKey, content);
+      rememberPageDraftWrite(chatKey, content);
       const saved = await left.client.saveComposerDraft(left.workspaceId, left.sessionId, request);
       settledWrites.set(chatKey, { revision: saved.revision, content });
     })
@@ -3728,12 +4042,6 @@ function saveLeftDraft(
       if (leftDraftSaves.get(chatKey) === save) leftDraftSaves.delete(chatKey);
     });
   leftDraftSaves.set(chatKey, save);
-}
-
-function rememberDraftWrite(chatKey: string, content: string): void {
-  const writes = (recentDraftWrites.get(chatKey) ?? []).filter((entry) => entry !== content);
-  writes.push(content);
-  recentDraftWrites.set(chatKey, writes.slice(-8));
 }
 
 /** Draft content as the server stores it, for comparing a save with a read. */

@@ -1,7 +1,7 @@
 import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import { authorizeTeamsConversationAdmission } from "../application/teams-private-session";
 import type { TeamsConversationProof } from "@opengeni/db";
-import type { BillingOrigin } from "@opengeni/contracts";
+import type { BillingOrigin, SessionPromptDelivery } from "@opengeni/contracts";
 import {
   isDirectModelId,
   MESSAGE_TIME_ZONE_METADATA_KEY,
@@ -177,7 +177,6 @@ import {
   type ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
-  assertExactNewSessionDraftInTransaction,
   createSession,
   createSessionWithIdempotencyKeyResult,
   canonicalSessionCommandHash,
@@ -219,7 +218,6 @@ import {
   listSessionMcpServersForChildInheritance,
   requireSession,
   setActiveSandbox,
-  setSubjectRlsContext,
   replaySubmittedHumanPromptFromBoundaryReceipt,
   submitHumanPromptInTransaction,
   appendSessionEventsWithLockedSessionUpdate,
@@ -248,6 +246,7 @@ import {
   WorkspaceControlBusyError,
   type SessionCommandActor,
   type NewSessionDraftSnapshot,
+  comparableNewSessionDraftOptions,
 } from "@opengeni/db";
 import {
   publishDurableSessionEvents,
@@ -337,6 +336,7 @@ import {
 import {
   assertToolRefsSubset,
   availableToolRefs,
+  isOptionalGitHubAppRepositoryResource,
   mergeToolRefs,
   mergeToolRefEager,
   normalizeResources,
@@ -1261,7 +1261,6 @@ export async function createAndStartSessionWithOutcome(input: {
   let targetSeededBeforeCreateCommit = false;
   const beforeCreateCommit =
     requiresActiveWorkspaceCustomModel ||
-    input.consumeNewSessionDraft ||
     input.beforeCreateCommit ||
     preflightTarget ||
     targetPreflightFailureMessage
@@ -1320,18 +1319,6 @@ export async function createAndStartSessionWithOutcome(input: {
             if (!active) {
               throw modelUnavailableHttpException(input.model);
             }
-          }
-          // Reject an already-stale browser draft before the newly inserted
-          // shell can commit. The initializer repeats this exact check while
-          // consuming the draft after it installs the first runnable unit.
-          if (input.consumeNewSessionDraft && context?.created !== false) {
-            await setSubjectRlsContext(tx, input.consumeNewSessionDraft.subjectId);
-            await assertExactNewSessionDraftInTransaction(tx, {
-              workspaceId: input.workspaceId,
-              subjectId: input.consumeNewSessionDraft.subjectId,
-              expectedRevision: input.consumeNewSessionDraft.expectedRevision,
-              expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot,
-            });
           }
           if (preflightTarget?.ok && context?.created !== false) {
             const seeded = await setActiveSandbox(tx, {
@@ -2022,7 +2009,7 @@ type PostUserMessageTurnInput = {
 
   captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
-  delivery?: "send" | "steer";
+  delivery?: SessionPromptDelivery;
   origin?: "human" | "operator";
   /** Content-free product surface the request entered through. */
   surface?: SessionTurnSurface | null;
@@ -2089,7 +2076,11 @@ function finalizePostUserMessageTurn(
             sessionId,
             workflowId: result.turn.temporalWorkflowId,
             wakeRevision: result.wakeRevision,
-            ...((input.delivery ?? "send") === "steer" || result.interruptionCount > 0
+            // `steer_or_send` asks for the interruption only when the server
+            // resolved it to a Steer.
+            ...((input.delivery ?? "send") === "steer" ||
+            (input.delivery === "steer_or_send" && result.routing === "accepted_for_steering") ||
+            result.interruptionCount > 0
               ? { interruptionRequested: true }
               : {}),
           });
@@ -3643,11 +3634,6 @@ async function createSessionForRequestInFileScope(
   // This is a fresh-creation default only: replay/repair preserves persisted
   // policy, and follow-ups use the recipient session's own frozen settings.
   const latencyMode = payload.latencyMode ?? "standard";
-  if (payload.expectedNewSessionDraftRevision !== undefined && payload.rigId === null) {
-    throw new HTTPException(409, {
-      message: "The submitted session options are not represented by the new-session draft",
-    });
-  }
   const expectedNewSessionDraftSnapshot: NewSessionDraftSnapshot | null =
     payload.expectedNewSessionDraftRevision !== undefined
       ? {
@@ -3658,24 +3644,15 @@ async function createSessionForRequestInFileScope(
           model,
           reasoningEffort,
           latencyMode,
-          options: {
-            ...(payload.excludedMcpServerIds !== undefined
-              ? { excludedMcpServerIds: payload.excludedMcpServerIds }
-              : {}),
-            ...(visibilityProvided ? { visibility: payload.visibility } : {}),
-            ...(payload.sandboxBackend ? { sandboxBackend: payload.sandboxBackend } : {}),
-            ...(payload.targetSandboxId ? { targetSandboxId: payload.targetSandboxId } : {}),
-            ...(payload.workingDir ? { workingDir: payload.workingDir } : {}),
-            ...(payload.rigId ? { rigId: payload.rigId } : {}),
-            ...(payload.goal ? { goal: payload.goal } : {}),
-            ...(payload.firstPartyMcpPermissions
-              ? { firstPartyMcpPermissions: payload.firstPartyMcpPermissions }
-              : {}),
-            ...(payload.firstPartyMcpTools
-              ? { firstPartyMcpTools: payload.firstPartyMcpTools }
-              : {}),
-            ...(payload.agent ? { agent: payload.agent } : {}),
-          },
+          // What this Send carried. After the create is accepted, the draft is
+          // cleared only while it still holds this (or is still at the
+          // revision the sender saw). Every draft option is also a create
+          // field with the same name, so the request supplies the whole
+          // comparable set without a hand-written entry per option.
+          options: comparableNewSessionDraftOptions({
+            ...payload,
+            visibility: visibilityProvided ? payload.visibility : undefined,
+          }),
         }
       : null;
   const inheritedFromParent = parentSession !== null;
@@ -4480,7 +4457,7 @@ export async function createSessionForRequest(
 }
 
 function sessionPromptBoundaryRequestHash(input: {
-  delivery: "send" | "steer";
+  delivery: SessionPromptDelivery;
   controlEtag: string | null;
   expectedDraftRevision: number | null;
   text: string;
@@ -4551,7 +4528,7 @@ async function acceptSessionUserMessageInFileScope(
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
     connectionAccounts?: McpConnectionAccountSelection[];
-    delivery?: "send" | "steer";
+    delivery?: SessionPromptDelivery;
     /** The sender's IANA zone as the client reported it; unresolvable names are ignored. */
     timeZone?: string | null;
     origin?: "human" | "operator";
@@ -4614,9 +4591,10 @@ async function acceptSessionUserMessageInFileScope(
         context: delegatedServiceInitiator.context,
       }
     : (promptInitiator.actor ?? { type: "human", subjectId: grant.subjectId });
+  // `steer_or_send` may steer, so it needs Steer authority.
   await requireSessionAuthorization(deps, grant, {
     sessionId,
-    operation: delivery === "steer" ? "session.steer" : "session.append",
+    operation: delivery === "send" ? "session.append" : "session.steer",
     surface: "core",
   });
   const requestedResources = normalizeResources(input.resources ?? []);
@@ -4701,7 +4679,7 @@ async function acceptSessionUserMessageInFileScope(
     await requireSessionUsageLimitAllows(
       db,
       { accountId: grant.accountId, workspaceId, sessionId, runtime: true },
-      { sink: deps.observability, boundary: delivery === "steer" ? "steer" : "send" },
+      { sink: deps.observability, boundary: delivery === "send" ? "send" : "steer" },
     );
     const settings = await resolveWorkspaceModelBoundarySettings(
       deps,
@@ -4767,7 +4745,8 @@ async function acceptSessionUserMessageInFileScope(
     // Re-submitting a checked-out queue edit retains the original turn's
     // causal human when its own sender resubmits it, just as the locked
     // prompt transaction does. Anyone else's edit is their own message.
-    if (delivery === "send" && input.expectedDraftRevision != null) {
+    // A queue edit resubmitted with `steer_or_send` is always a Send.
+    if (delivery !== "steer" && input.expectedDraftRevision != null) {
       const draft = await withWorkspaceSubjectSessionActivityRls(
         db,
         workspaceId,
@@ -4826,8 +4805,15 @@ async function acceptSessionUserMessageInFileScope(
       requestedResources,
       attachmentOwnerContext,
     );
+    // The chat's automatically attached repositories that later lose access
+    // (the installation is removed, or the repository is taken out of it)
+    // must not refuse every later message: the worker drops each one for
+    // the turn and reports it as skipped. Repositories this message adds and
+    // ones the person attached explicitly are still checked here.
     await validateGitHubRepositorySelection(db, workspaceId, [
-      ...existingSession.resources,
+      ...existingSession.resources.filter(
+        (resource) => !isOptionalGitHubAppRepositoryResource(resource),
+      ),
       ...requestedResources,
     ]);
     const mcpCredentialUpdates = validateSessionMcpCredentialUpdates({

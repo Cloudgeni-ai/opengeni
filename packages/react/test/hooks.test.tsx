@@ -3030,7 +3030,7 @@ describe("useComposer queue-vs-steer", () => {
     await hook.unmount();
   });
 
-  test("busySend steer with offerQueue makes a busy Send a Steer and offers Queue; idle Send, paused Send and sendToQueue still queue", async () => {
+  test("busySend steer with offerQueue lets the server decide every Send and offers Queue; sendToQueue and Queue still queue", async () => {
     const calls: Array<{ delivery: string; text: string }> = [];
     const text = (input: unknown) =>
       typeof input === "string" ? input : (input as { text: string }).text;
@@ -3042,8 +3042,11 @@ describe("useComposer queue-vs-steer", () => {
           clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
         };
       },
-      steerMessage: async (_workspaceId, _sessionId, input) => {
-        calls.push({ delivery: "steer", text: text(input) });
+      steerMessage: async (_workspaceId, _sessionId, input, options) => {
+        calls.push({
+          delivery: options?.delivery ?? "steer",
+          text: text(input),
+        });
         return steerResult();
       },
     });
@@ -3088,17 +3091,19 @@ describe("useComposer queue-vs-steer", () => {
     expect(hook.result.current.working).toBe(false);
     await flushing(async () => expect(await hook.result.current.send("paused")).toBe(true));
 
+    // Every Send asks the server to steer or send (a paused chat keeps it
+    // waiting there); the explicit Queue choices stay plain Sends.
     expect(calls).toEqual([
-      { delivery: "steer", text: "busy" },
+      { delivery: "steer_or_send", text: "busy" },
       { delivery: "send", text: "after the turn" },
       { delivery: "send", text: "alternate queues" },
-      { delivery: "send", text: "idle" },
-      { delivery: "send", text: "paused" },
+      { delivery: "steer_or_send", text: "idle" },
+      { delivery: "steer_or_send", text: "paused" },
     ]);
     await hook.unmount();
   });
 
-  test("busySend steer alone is one Send: no alternate, busy Send steers, paused Send waits", async () => {
+  test("busySend steer alone is one Send: no alternate, and the server decides every Send", async () => {
     const calls: Array<{ delivery: string; text: string }> = [];
     const text = (input: unknown) =>
       typeof input === "string" ? input : (input as { text: string }).text;
@@ -3110,8 +3115,11 @@ describe("useComposer queue-vs-steer", () => {
           clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
         };
       },
-      steerMessage: async (_workspaceId, _sessionId, input) => {
-        calls.push({ delivery: "steer", text: text(input) });
+      steerMessage: async (_workspaceId, _sessionId, input, options) => {
+        calls.push({
+          delivery: options?.delivery ?? "steer",
+          text: text(input),
+        });
         return steerResult();
       },
     });
@@ -3138,9 +3146,182 @@ describe("useComposer queue-vs-steer", () => {
     expect(hook.result.current.alternateSend).toBeNull();
     await flushing(async () => expect(await hook.result.current.send("paused")).toBe(true));
     expect(calls).toEqual([
-      { delivery: "steer", text: "busy" },
-      { delivery: "send", text: "paused" },
+      { delivery: "steer_or_send", text: "busy" },
+      { delivery: "steer_or_send", text: "paused" },
     ]);
+    await hook.unmount();
+  });
+
+  test("one Send from a stale idle view still reaches the running turn, because the server decides", async () => {
+    // The composer's copy of the session says nothing runs, but the turn
+    // started on the server seconds ago. Choosing from that copy used to send
+    // a plain Send, which waited behind the turn and ran as its own turn.
+    const steers: Array<
+      Exclude<Parameters<OpenGeniClient["steerMessage"]>[2], string> & {
+        delivery?: string | undefined;
+      }
+    > = [];
+    const sends: unknown[] = [];
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        sends.push(input);
+        return makeEvent(1, "user.message");
+      },
+      steerMessage: async (_workspaceId, _sessionId, input, options) => {
+        if (typeof input !== "string") steers.push({ ...input, delivery: options?.delivery });
+        // The server resolves it against the turn that really runs.
+        return steerResult();
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          events: noEvents,
+          sendDestination: () => "chat",
+          busySend: "steer",
+        }),
+      undefined,
+    );
+    expect(hook.result.current.working).toBe(false);
+    await flushing(async () =>
+      expect(await hook.result.current.send("short follow-up")).toBe(true),
+    );
+    expect(sends).toEqual([]);
+    expect(steers).toMatchObject([{ text: "short follow-up", delivery: "steer_or_send" }]);
+    expect(steers[0]?.clientEventId).toBeString();
+    // Shown in the chat with the turn it reached, never in a queue.
+    expect(hook.result.current.optimisticMessages).toMatchObject([
+      { text: "short follow-up", destination: "chat", state: "queued" },
+    ]);
+    await hook.unmount();
+  });
+
+  test("an uncertain one-Send retries the exact steer_or_send request", async () => {
+    const steers: Array<
+      Exclude<Parameters<OpenGeniClient["steerMessage"]>[2], string> & {
+        delivery?: string | undefined;
+      }
+    > = [];
+    const client = fakeClient({
+      steerMessage: async (_workspaceId, _sessionId, input, options) => {
+        if (typeof input !== "string") steers.push({ ...input, delivery: options?.delivery });
+        if (steers.length === 1) throw gatewayError(503);
+        return steerResult();
+      },
+      listEvents: async () => [],
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          events: noEvents,
+          sendDestination: () => "chat",
+          busySend: "steer",
+        }),
+      undefined,
+    );
+    await flushing(async () => expect(await hook.result.current.send("are you there")).toBe(true));
+    await flush();
+    await flush(SERVICE_UPDATING_CALM_WINDOW_MS + 10_000);
+    // The uncertain attempt is retried with the same operation key and the
+    // same delivery, so the server replays its first decision instead of
+    // deciding again.
+    const key = steers[0]?.clientEventId;
+    expect(key).toBeString();
+    expect(steers.map((input) => [input.clientEventId, input.delivery])).toEqual([
+      [key, "steer_or_send"],
+      [key, "steer_or_send"],
+    ]);
+    expect(hook.result.current.optimisticMessages?.[0]).toMatchObject({
+      destination: "chat",
+      state: "queued",
+    });
+    await hook.unmount();
+  });
+
+  test("a busy-looking one-Send the server resolves to a Send leaves no Steer showing", async () => {
+    const client = fakeClient({
+      steerMessage: async () =>
+        steerResult(undefined, undefined, { routing: "accepted_for_execution" }),
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          events: noEvents,
+          // Stale the other way: the turn already finished on the server.
+          sendDestination: () => "queue",
+          busySend: "steer",
+        }),
+      undefined,
+    );
+    await flushing(() => hook.result.current.setValue("new question"));
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(hook.result.current.steering).toBeNull();
+    expect(hook.result.current.value).toBe("");
+    await hook.unmount();
+  });
+
+  test("against a server without steer_or_send, one-Send falls back to the composer's own choice", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return makeEvent(calls.length, "user.message");
+      },
+      steerMessage: async (_workspaceId, _sessionId, input, options) => {
+        const delivery = options?.delivery ?? "steer";
+        calls.push({ delivery, text: text(input) });
+        if (delivery === "steer_or_send") {
+          throw new OpenGeniApiError(
+            422,
+            JSON.stringify({ message: 'invalid steer request: Unrecognized key: "delivery"' }),
+          );
+        }
+        return steerResult();
+      },
+    });
+    let destination: "chat" | "queue" = "chat";
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          events: noEvents,
+          sendDestination: () => destination,
+          busySend: "steer",
+        }),
+      undefined,
+    );
+    await flushing(async () => expect(await hook.result.current.send("idle")).toBe(true));
+    destination = "queue";
+    await hook.rerender(undefined);
+    await flushing(async () => expect(await hook.result.current.send("busy")).toBe(true));
+    expect(calls).toEqual([
+      { delivery: "steer_or_send", text: "idle" },
+      { delivery: "send", text: "idle" },
+      // Remembered: the next Send does not ask again.
+      { delivery: "steer", text: "busy" },
+    ]);
+    expect(hook.result.current.error).toBeNull();
     await hook.unmount();
   });
 
@@ -5515,7 +5696,7 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
-  test("autosave never overwrites another tab after a stale-revision conflict", async () => {
+  test("autosave after a stale-revision conflict saves the latest typing on top", async () => {
     const initial = {
       revision: 1,
       text: "remote one",
@@ -5563,9 +5744,10 @@ describe("useComposer durable draft and control binding", () => {
     await flushing(async () => hook.result.current.setValue("mine remains"));
     await flush(600);
     expect(hook.result.current.value).toBe("mine remains");
-    expect(hook.result.current.draftConflict?.message).toContain("Composer draft changed");
-    expect(hook.result.current.draft?.revision).toBe(1);
-    expect(saves).toBe(1);
+    // The latest typing wins: the save re-reads and lands on the newer revision.
+    expect(hook.result.current.draftConflict).toBeNull();
+    expect(hook.result.current.draft).toMatchObject({ revision: 3, text: "mine remains" });
+    expect(saves).toBe(2);
     await hook.unmount();
   });
 

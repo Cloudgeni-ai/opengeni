@@ -1559,6 +1559,19 @@ keeps the earlier behaviour: it inserts the interruption row, moves the row to
 the head and stops the live attempt now, including tool calls in flight. The
 workspace setting `busySend` (`queue` by default) and the composer's `busySend`
 option only choose which of the two an ordinary Send uses while a turn runs.
+Under `busySend: "steer"` the composer does not decide from its own copy of the
+session: it submits `delivery: "steer_or_send"` (on the Steer route or a draft
+submit), and `submitHumanPromptInTransaction` resolves it under the same branch
+and queue locks that start and settle turns. It becomes a Steer when the branch
+is active, not admission-blocked, the message is not waiting for a machine owner,
+and either a turn is active or a runnable queued turn is about to start; in that
+"just starting" case the Steer is ordered behind the first runnable turn (and any
+Steers already behind it) so that turn claims first and hands over at its first
+model step. Otherwise it is a plain Send: an idle session starts a turn and a
+paused one queues without being resumed. Only the resolved `steer` or `send` is
+recorded on the event, turn and routing; the request hash keeps `steer_or_send`,
+so an exact retry replays the first decision and the same key with another
+delivery is refused.
 
 Active compaction is the other exception: while a claimed standalone
 compaction is running, or an ordinary attempt's latest compaction landmark is
@@ -1844,7 +1857,9 @@ Discovery uses field-aware retrieval and optional generic decision-model selecti
 The shared typed predicate/choice/score interface is `@opengeni/decisions`, used by
 both discovery and the code-search judge. Deployment-owned Jev, OpenAI Decisions
 or OpenRouter Decisions credentials are explicit, separate from conversational
-models. See [`decision-models.md`](decision-models.md) for configuration, usage and
+models. The public stateless API reuses the same configured adapter, with an optional
+independent public model category that defaults to the shared model and never
+changes agent decisions. See [`decision-models.md`](decision-models.md) for configuration, usage and
 verified provider boundaries; no ordinary-chat inference fallback is implied.
 Native Responses routes retain hosted search and native function loading; generic
 routes return compact alternatives and append selected schemas after the result.
@@ -2214,10 +2229,17 @@ rules with MCP, workers and embedded hosts.
 Composer submission's shared command, `packages/core/src/application/composer-submit.ts`,
 serves stock HTTP and in-process embedding hosts, owning validation, draft rotation,
 event append, turn routing, receipt/replay behavior, and the response contract.
-Web Send rebases drafts (including unavailable files), aligns
-file-only text with create, freezes edits, preserves late voice transcripts
-(`packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/app/lib/use-new-session-draft.tsx`,
-`packages/react/src/app/routes/sessions-index.tsx`), and protects sibling drafts.
+Send wins over the saved draft: create and composer submit carry the content
+in the box and are never refused because the draft changed. The request's
+expected draft revision is only the basis for clearing the draft after
+acceptance, which happens only while the draft still holds what was sent, so a
+newer draft from another of the person's devices stays. Draft saves publish a
+content-free `workspace.drafts.changed` hint to the author's own workspace live
+stream; idle composers re-read and follow it, and autosave lands on top of a
+newer draft (latest typing wins). Web Send aligns file-only text with create,
+freezes edits and preserves late voice transcripts
+(`packages/react/src/hooks/use-voice-input.ts`, `packages/react/src/hooks/use-new-session-draft.ts`,
+`packages/react/src/app/routes/sessions-index.tsx`).
 
 Canonical: `apps/api/src/app.ts`, `apps/api/src/routes/`, and
 `packages/core/src/`.
@@ -2312,6 +2334,23 @@ Preparation is singleflight per epoch; unchanged identities and Connected Machin
 skip it. No hooks replay, provider creation, or manifest changes.
 Wiring: `apps/worker/src/sandbox-routing.ts` and
 `apps/worker/src/activities/agent-turn/sandbox-runtime.ts`.
+
+Bundled shell tools: every placement's shell has `rg` and `jq` from official
+release builds pinned by SHA-256 in
+`packages/runtime/src/sandbox/shell-tools-manifest.ts` (licence notices beside
+it). Their directory is appended to the end of PATH, so a system copy always
+wins, and nothing is downloaded when a command runs. The machine agent embeds
+its own target's build (`agent/crates/opengeni-agent/src/shell_tools.rs`) and
+extends each command's PATH, covering compute sandboxes, selfhosted task
+containers, Connected Machines and run_on targets. For other managed backends
+the worker carries per-architecture Linux bundles and the `shell-tools` setup
+hook installs one beside the Codemode client (signed download, else the
+provider's file API; skipped when the image has both tools, and for a day
+after a box could not install them), at
+`/workspace/.opengeni/shell-tools/rg-<version>-jq-<version>`. The hook and the
+PATH line ride with the managed Codemode client, so an agent without Codemode
+on those backends keeps only the image's own tools. Image and release
+builds get the bytes from `scripts/fetch-shell-tools.ts`.
 
 Codemode adds attempt scope, active-attempt fencing, a durable operation journal,
 sandbox delivery and recovery. Programmatic review uses a linked durable action
@@ -3305,7 +3344,7 @@ organization-workspace lifecycle authority; see [external membership operation r
 | Site Data (Site collections, files, access modes, quotas) | `packages/db/src/site-data.ts`, `packages/db/src/site-data-policy.ts`, `apps/api/src/site-data/`, `apps/api/src/routes/site-data.ts`, `apps/api/src/mcp/site-data-tools.ts`, `packages/sdk/src/site-data.ts` | [`site-data.md`](site-data.md) |
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input and dictation | `packages/contracts/src/recordings.ts`, `apps/api/src/routes/recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
-| Stateless single model calls (Chat Completions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `packages/runtime/src/single-model-call.ts` | [`chat-completions.md`](chat-completions.md) |
+| Stateless model calls (chat and typed decisions) or session titles | `apps/api/src/model-calls/`, `apps/api/src/routes/chat-completions.ts`, `apps/api/src/routes/decisions.ts`, `packages/runtime/src/single-model-call.ts`, `packages/runtime/src/configured-decision-model.ts` | [`chat-completions.md`](chat-completions.md), [`model-inference.md`](model-inference.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
 | Providers and social connectors | `apps/api/src/integrations/`, `apps/api/src/mcp/server.ts`, `packages/core/src/application/new-session-drafts.ts`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | Microsoft Teams delegated tools and bot conversations | `packages/capabilities/src/integration-definitions.ts`, `apps/api/src/integrations/teams-bot.ts`, `apps/api/src/integrations/teams-protocol.ts`, `apps/api/src/integrations/teams-group.ts`, `apps/api/src/integrations/teams-admin-proof.ts`, `apps/api/src/integrations/teams-onboarding-limit.ts`, `packages/db/src/teams-conversations.ts` | [`microsoft-teams-release-readiness.md`](microsoft-teams-release-readiness.md) |

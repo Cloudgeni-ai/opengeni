@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "6.10.0",
+  "version": "6.11.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -92,6 +92,7 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/decisions": "workspace:*",
     "@opengeni/interaction": "workspace:*",
+    "@opengeni/jev": "workspace:*",
     "@opengeni/network": "workspace:*",
     "@opengeni/observability": "workspace:*",
     "@opengeni/sdk": "workspace:*",

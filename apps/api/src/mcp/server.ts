@@ -976,12 +976,9 @@ function buildSessionCreateToolInput(
       reasoningEffort: CreateSessionRequest.out.shape.reasoningEffort.describe(
         "Omit to inherit the exact calling turn's reasoning effort.",
       ),
-      latencyMode: z4
-        .enum(["standard", "priority", "fast"])
-        .optional()
-        .describe(
-          "Omit for standard latency, even when model and reasoning are inherited. Fast or priority must be selected explicitly and supported by the model.",
-        ),
+      latencyMode: CreateSessionRequest.out.shape.latencyMode.describe(
+        "Omit for standard latency, even when model and reasoning are inherited. Fast, priority or ultrafast must be selected explicitly and supported by the model.",
+      ),
       // Advertise only the backends this deployment serves; core rejects any
       // other value at create (sandboxBackendServed).
       sandboxBackend: z4.enum(servedBackends as [SandboxBackend, ...SandboxBackend[]]).optional(),

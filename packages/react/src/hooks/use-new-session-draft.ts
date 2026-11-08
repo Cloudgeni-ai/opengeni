@@ -7,7 +7,8 @@ import type {
   SaveNewSessionDraftRequest,
 } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { OpenGeniContext } from "../session-context";
 import {
   isTransientServiceFailure,
   retryTransient,
@@ -49,7 +50,9 @@ export type FlushedNewSessionDraft = {
 
 export type AcknowledgeConsumedNewSessionDraftResult =
   | { kind: "consumed" }
-  | { kind: "preserved"; flushed: FlushedNewSessionDraft };
+  | { kind: "preserved"; flushed: FlushedNewSessionDraft }
+  /** A newer draft from another device stayed as the draft; the form now shows it. */
+  | { kind: "followed" };
 
 export type UseNewSessionDraftResult = {
   draft: NewSessionDraft | null;
@@ -130,6 +133,17 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   restoreReadyFilesRef.current = options.restoreReadyFiles;
   const draftRef = useRef<NewSessionDraft | null>(null);
   const lastSavedSignature = useRef<string | null>(null);
+  // The newest draft revision this form saved or showed. A reconnect read
+  // can make another device's newer draft the save base without showing it;
+  // Send then goes ahead from this revision without saving, so the server
+  // keeps that draft. 0 when the form has only typed over a draft it never
+  // saw.
+  const sendBasisRef = useRef<number | null>(null);
+  // The create was refused over the draft. Only an older server does that,
+  // and it accepts the Send only at the draft's current revision. It lasts
+  // only until this form next learns that revision (a save, a followed
+  // draft, or an accepted create).
+  const createRefusedRef = useRef(false);
   const passiveProjectionSignature = useRef<string | null>(null);
   const pendingHydratedBaselineGeneration = useRef<number | null>(null);
   const targetGeneration = useRef(0);
@@ -151,6 +165,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     (cause: unknown): boolean => {
       if (!isNewSessionDraftConflict(cause)) return false;
       const problem = asError(cause);
+      createRefusedRef.current = true;
       setCurrentConflict(problem);
       setError(problem);
       return true;
@@ -257,6 +272,11 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   const applyRemote = useCallback(
     (remote: ValidatedRemoteDraft): void => {
       draftRef.current = remote.draft;
+      sendBasisRef.current = remote.draft.revision;
+      createRefusedRef.current = false;
+      // The box shows this draft from now on, before React renders it, so a
+      // save queued for the previous box sees it as stale.
+      valueRef.current = cloneEditable(remote.editable);
       // A GET may project away revoked files, repositories, or tools without
       // changing the stored row. This signature suppresses passive autosave;
       // explicit Send always writes its exact snapshot before create.
@@ -317,6 +337,8 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     abortActiveRemoteReads();
     persistenceEpoch.current += 1;
     draftRef.current = null;
+    sendBasisRef.current = null;
+    createRefusedRef.current = false;
     lastSavedSignature.current = null;
     passiveProjectionSignature.current = null;
     pendingHydratedBaselineGeneration.current = null;
@@ -346,7 +368,12 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   }, [resourceHydrationReady, targetKey]);
 
   const persistSnapshot = useCallback(
-    (snapshot: NewSessionDraftEditable, force = false): Promise<FlushedNewSessionDraft | null> => {
+    (
+      snapshot: NewSessionDraftEditable,
+      force = false,
+      rebase = true,
+      onlyIfCurrent = false,
+    ): Promise<FlushedNewSessionDraft | null> => {
       const generation = targetGeneration.current;
       const epoch = persistenceEpoch.current;
       const signature = draftSignature(snapshot);
@@ -359,17 +386,70 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         if (!force && signature === lastSavedSignature.current) {
           return { revision: current.revision, signature };
         }
+        // An autosave queued behind other work whose snapshot is no longer in
+        // the box (the form followed another device's draft meanwhile) is
+        // stale: saving it would write over that draft. Any later change to
+        // the box starts its own autosave.
+        if (onlyIfCurrent && signature !== draftSignature(valueRef.current)) return null;
         setSaving(true);
+        // A newer draft saved on another device is saved over: this composer
+        // saves only what is being typed in it, so the latest typing wins.
+        // An autosave of a box holding no message has no typing to keep, so
+        // it never lands on another device's message this form never showed:
+        // a save base the form never showed is checked first, and a newer
+        // draft it meets is read before anything is saved on top of it.
+        const emptyAutosave = onlyIfCurrent && !holdsMessage(snapshot);
+        let expectedRevision =
+          emptyAutosave && sendBasisRef.current !== null && sendBasisRef.current < current.revision
+            ? sendBasisRef.current
+            : current.revision;
+        const newer: { message: ValidatedRemoteDraft | null } = { message: null };
         try {
-          const save = () =>
-            client.saveNewSessionDraft(workspaceId, {
-              ...snapshot,
-              expectedRevision: current.revision,
-            });
+          const save = async (): Promise<NewSessionDraft> => {
+            for (let attempt = 0; ; attempt += 1) {
+              try {
+                return await client.saveNewSessionDraft(workspaceId, {
+                  ...snapshot,
+                  expectedRevision,
+                });
+              } catch (cause) {
+                const currentRevision = newSessionDraftConflictRevision(cause);
+                const superseded =
+                  attempt >= 2 ||
+                  generation !== targetGeneration.current ||
+                  epoch !== persistenceEpoch.current;
+                if (emptyAutosave && !superseded && isNewSessionDraftConflict(cause)) {
+                  const remote = await readRemote();
+                  if (
+                    !remote ||
+                    generation !== targetGeneration.current ||
+                    epoch !== persistenceEpoch.current
+                  ) {
+                    throw cause;
+                  }
+                  // Another device's message is kept and followed; picks over
+                  // a draft holding no message still save on top of it.
+                  if (holdsMessage(remote.editable)) {
+                    newer.message = remote;
+                    throw cause;
+                  }
+                  expectedRevision = remote.draft.revision;
+                  continue;
+                }
+                // A save that was superseded meanwhile (another target, or
+                // Send taking over the draft) is dropped, never rebased.
+                if (!rebase || currentRevision === undefined || superseded) {
+                  throw cause;
+                }
+                expectedRevision = currentRevision;
+              }
+            }
+          };
           // Send's save is idempotent by construction: it writes one exact
           // snapshot against one expected revision. If an unconfirmed attempt
-          // did commit, the repeat is a revision conflict that flushForSend
-          // already reconciles by rereading, so it can never apply twice.
+          // did commit, the repeat is a revision conflict, which flushForSend
+          // recognises as this form's own write by rereading, so it can never
+          // apply twice.
           const saved = force
             ? await retryTransient(save, {
                 shouldContinue: () =>
@@ -381,6 +461,8 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
             return null;
           }
           draftRef.current = saved;
+          sendBasisRef.current = saved.revision;
+          createRefusedRef.current = false;
           lastSavedSignature.current = signature;
           passiveProjectionSignature.current = null;
           setDraft(saved);
@@ -389,6 +471,14 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           return { revision: saved.revision, signature };
         } catch (cause) {
           if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
+            return null;
+          }
+          if (newer.message) {
+            // The form follows the other device's message while its box
+            // still holds none; typing since then saves on top of it.
+            if (!holdsMessage(valueRef.current)) applyRemote(newer.message);
+            setCurrentConflict(null);
+            setError(null);
             return null;
           }
           const problem = asError(cause);
@@ -408,7 +498,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       );
       return operation;
     },
-    [client, retryDelaysMs, setCurrentConflict, setError, workspaceId],
+    [applyRemote, client, readRemote, retryDelaysMs, setCurrentConflict, setError, workspaceId],
   );
 
   const valueSignature = draftSignature(options.value);
@@ -442,7 +532,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     const snapshot = cloneEditable(valueRef.current);
     autosaveTimer.current = setTimeout(() => {
       autosaveTimer.current = null;
-      void persistSnapshot(snapshot);
+      void persistSnapshot(snapshot, false, true, true);
     }, 500);
     return () => {
       if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
@@ -471,6 +561,13 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           const remote = await readRemote();
           if (!remote || generation !== targetGeneration.current) return null;
           draftRef.current = remote.draft;
+          // This form never showed what it reads here. Another device's
+          // message is not a basis, so Send keeps it instead of saving over it.
+          sendBasisRef.current =
+            !holdsMessage(remote.editable) ||
+            draftSignature(remote.editable) === draftSignature(snapshot)
+              ? remote.draft.revision
+              : 0;
           lastSavedSignature.current = draftSignature(remote.editable);
           setDraft(remote.draft);
         } catch (cause) {
@@ -478,34 +575,102 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           return null;
         }
       }
-      // A sibling can save between our read and write. Retry a bounded number of
-      // times; only the explicit Send may choose the visible snapshot over it.
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        if (generation !== targetGeneration.current) return null;
-        if (conflictRef.current) {
-          await saveChain.current;
-          try {
-            const remote = await readRemote();
-            if (!remote || generation !== targetGeneration.current) return null;
+      if (generation !== targetGeneration.current) return null;
+      // The route clears the visible error after a refused create, so the
+      // refusal itself also asks for the reread.
+      if (conflictRef.current || createRefusedRef.current) {
+        // A refusal already seen (an older server that still fences Send on
+        // the draft, or a save that met another device's) leaves an unknown
+        // base: read it once before saving.
+        await saveChain.current;
+        const refused = createRefusedRef.current;
+        createRefusedRef.current = false;
+        try {
+          const remote = await readRemote();
+          if (!remote || generation !== targetGeneration.current) return null;
+          draftRef.current = remote.draft;
+          // Another device's message read here was never shown: it is not a
+          // basis, so Send keeps it instead of saving over it. After an older
+          // server refused the create, the current revision is the only basis
+          // it accepts.
+          if (
+            refused ||
+            !holdsMessage(remote.editable) ||
+            draftSignature(remote.editable) === draftSignature(snapshot)
+          ) {
+            sendBasisRef.current = remote.draft.revision;
+          } else {
+            sendBasisRef.current ??= 0;
+          }
+          lastSavedSignature.current = draftSignature(remote.editable);
+          passiveProjectionSignature.current = null;
+          setDraft(remote.draft);
+          setCurrentConflict(null);
+          setError(null);
+        } catch (cause) {
+          // The reread is still owed to the next Send.
+          if (refused) createRefusedRef.current = true;
+          if (generation === targetGeneration.current) setError(asError(cause));
+          return null;
+        }
+      }
+      // A save of this form that is still running decides the basis: it is
+      // this form's own write.
+      await saveChain.current;
+      if (generation !== targetGeneration.current) return null;
+      const sentFrom = (): FlushedNewSessionDraft | null => {
+        const base = draftRef.current;
+        if (!base || generation !== targetGeneration.current) return null;
+        const basis = sendBasisRef.current;
+        return {
+          revision: basis !== null && basis < base.revision ? basis : base.revision,
+          signature: draftSignature(snapshot),
+        };
+      };
+      // The save base is another device's draft this form never showed (a
+      // reconnect read while typing): Send goes ahead from the draft as last
+      // seen without saving, and the server keeps that newer draft.
+      const basis = sendBasisRef.current;
+      if (draftRef.current && basis !== null && basis < draftRef.current.revision) {
+        return sentFrom();
+      }
+      // GET can be a sanitized projection of a different stored row. An
+      // explicit Send always writes its clicked snapshot, even when its
+      // signature appears unchanged. It never writes over a newer draft from
+      // another device: on a conflict it sends from the draft as last seen,
+      // and the server keeps that newer draft.
+      const flushed = await persistSnapshot(snapshot, true, false);
+      if (flushed) return flushed;
+      // The save only keeps the draft in step: Send carries the snapshot
+      // itself. Unless Opengeni is unreachable, it goes ahead from the draft
+      // as last seen, which the server clears only if nothing newer replaced it.
+      if (generation !== targetGeneration.current || isTransientServiceFailure(errorRef.current)) {
+        return null;
+      }
+      if (isNewSessionDraftConflict(errorRef.current)) {
+        // A save whose reply was lost can have committed, so its retry finds
+        // the draft moved on. A draft holding exactly this snapshot is this
+        // form's own write: go ahead from it.
+        try {
+          const remote = await readRemote(false);
+          if (
+            remote &&
+            generation === targetGeneration.current &&
+            draftSignature(remote.editable) === draftSignature(snapshot)
+          ) {
             draftRef.current = remote.draft;
-            lastSavedSignature.current = draftSignature(remote.editable);
+            sendBasisRef.current = remote.draft.revision;
+            lastSavedSignature.current = draftSignature(snapshot);
             passiveProjectionSignature.current = null;
             setDraft(remote.draft);
-            setCurrentConflict(null);
-            setError(null);
-          } catch (cause) {
-            if (generation === targetGeneration.current) setError(asError(cause));
-            return null;
           }
+        } catch {
+          // The draft as last seen still serves as the basis.
         }
-        // GET can be a sanitized projection of a different stored row. An
-        // explicit Send always writes its clicked snapshot, even when its
-        // signature appears unchanged, before exact create consumes it.
-        const flushed = await persistSnapshot(snapshot, true);
-        if (flushed) return flushed;
-        if (!conflictRef.current) return null;
       }
-      return null;
+      setCurrentConflict(null);
+      setError(null);
+      return sentFrom();
     },
     [persistSnapshot, readRemote, setCurrentConflict, setError],
   );
@@ -520,14 +685,11 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       flushed: FlushedNewSessionDraft,
       visibleSignature = flushed.signature,
     ): Promise<AcknowledgeConsumedNewSessionDraftResult | null> => {
+      // The create was accepted, so no older server's refusal is pending.
+      createRefusedRef.current = false;
       const current = draftRef.current;
-      if (
-        !current ||
-        current.revision !== flushed.revision ||
-        lastSavedSignature.current !== flushed.signature
-      ) {
-        return null;
-      }
+      // A Send that went ahead from an older basis leaves a newer save base.
+      if (!current || current.revision < flushed.revision) return null;
 
       if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
       autosaveTimer.current = null;
@@ -561,16 +723,27 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           // newer safe seed. A larger revision proves that a sibling/in-flight
           // edit won after the create; never overwrite that newer authority.
           const expectedSeedRevision = flushed.revision + 1;
-          if (remote.draft.revision > expectedSeedRevision) {
-            const problem = new Error(
-              "New-session defaults changed in another client while the session was created",
-            );
+          // A cleared draft is the next-create seed: no text and no files. A
+          // revision past that seed, or one that still holds a message, is a
+          // newer draft another device saved.
+          const keptNewer =
+            remote.draft.revision > expectedSeedRevision ||
+            (remote.draft.revision === expectedSeedRevision && holdsMessage(remote.editable));
+          if (keptNewer) {
+            // Another device saved a newer draft. It stays as the draft, and a
+            // form showing only the sent message, or nothing (a form emptied
+            // as it sent), now shows it instead.
+            if (
+              draftSignature(valueRef.current) === visibleSignature ||
+              !holdsMessage(valueRef.current)
+            ) {
+              applyRemote(remote);
+              return { kind: "followed" };
+            }
             draftRef.current = remote.draft;
             lastSavedSignature.current = draftSignature(remote.editable);
             passiveProjectionSignature.current = null;
             setDraft(remote.draft);
-            setCurrentConflict(problem);
-            setError(problem);
             return null;
           }
           if (remote.draft.revision < expectedSeedRevision) {
@@ -580,6 +753,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           }
 
           draftRef.current = remote.draft;
+          sendBasisRef.current = remote.draft.revision;
           lastSavedSignature.current = draftSignature(remote.editable);
           passiveProjectionSignature.current = null;
           setDraft(remote.draft);
@@ -591,6 +765,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
             // UI-only until the next page load instead of persisting the
             // route's deliberate clear as a new empty draft.
             draftRef.current = null;
+            sendBasisRef.current = null;
             lastSavedSignature.current = null;
             passiveProjectionSignature.current = null;
             setDraft(null);
@@ -608,6 +783,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
             return null;
           }
           draftRef.current = saved;
+          sendBasisRef.current = saved.revision;
           lastSavedSignature.current = signature;
           passiveProjectionSignature.current = null;
           setDraft(saved);
@@ -639,7 +815,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       );
       return await operation;
     },
-    [client, readRemote, setCurrentConflict, setError, workspaceId],
+    [applyRemote, client, readRemote, setCurrentConflict, setError, workspaceId],
   );
 
   const resolveConflict = useCallback(
@@ -656,6 +832,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         const remote = await readRemote();
         if (!remote || generation !== targetGeneration.current) return;
         draftRef.current = remote.draft;
+        sendBasisRef.current = remote.draft.revision;
         lastSavedSignature.current = draftSignature(remote.editable);
         passiveProjectionSignature.current = null;
         setDraft(remote.draft);
@@ -674,6 +851,39 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   );
 
   const unavailable = error !== null && conflict === null && isTransientServiceFailure(error);
+
+  // This person's new-chat draft changed on another of their devices. A form
+  // that isn't being typed in follows it; one being typed in keeps its text,
+  // and its next save goes on top of the newer draft.
+  const draftsEvent = useContext(OpenGeniContext)?.workspaceDraftsEvent ?? null;
+  useEffect(() => {
+    if (!draftsEvent?.newSession || draftsEvent.workspaceId !== workspaceId) return;
+    const generation = targetGeneration.current;
+    const idle = () =>
+      !loadingRef.current &&
+      autosaveTimer.current === null &&
+      (draftRef.current === null
+        ? // A form whose draft was just sent holds no message to keep. A
+          // model, project or visibility picked on it since is replaced by
+          // the followed draft, like any other setting of that draft.
+          !holdsMessage(valueRef.current)
+        : draftSignature(valueRef.current) === lastSavedSignature.current ||
+          draftSignature(valueRef.current) === passiveProjectionSignature.current);
+    if (!idle()) return;
+    void (async () => {
+      try {
+        await saveChain.current;
+        const remote = await readRemote(false);
+        if (!remote || generation !== targetGeneration.current || !idle()) return;
+        if (remote.draft.revision <= (draftRef.current?.revision ?? 0)) return;
+        // A sent form stays cleared until another device saves a message.
+        if (draftRef.current === null && !holdsMessage(remote.editable)) return;
+        applyRemote(remote);
+      } catch {
+        // A missed follow is harmless: the next hint or read catches up.
+      }
+    })();
+  }, [applyRemote, draftsEvent, readRemote, workspaceId]);
 
   /**
    * Re-read after Opengeni was unreachable. The remote draft replaces the
@@ -698,6 +908,16 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       }
       unloadedValueSignature.current = null;
       draftRef.current = remote.draft;
+      // The form keeps its own text, so the remote draft is shown only when it
+      // matches that text; one holding no message has nothing to lose.
+      if (
+        !holdsMessage(remote.editable) ||
+        draftSignature(remote.editable) === draftSignature(valueRef.current)
+      ) {
+        sendBasisRef.current = remote.draft.revision;
+      } else {
+        sendBasisRef.current ??= 0;
+      }
       lastSavedSignature.current = draftSignature(remote.editable);
       passiveProjectionSignature.current = null;
       setDraft(remote.draft);
@@ -763,6 +983,11 @@ function cloneEditable(value: NewSessionDraftEditable): NewSessionDraftEditable 
   return structuredClone(value);
 }
 
+/** Whether a new-chat draft holds a message: text or files. */
+function holdsMessage(value: NewSessionDraftEditable): boolean {
+  return value.text.length > 0 || value.resources.some((resource) => resource.kind === "file");
+}
+
 function normalizeLegacyNewSessionDraft(remote: NewSessionDraft): NewSessionDraft {
   // Old servers returned the tools array without the explicitness marker. The
   // old request contract made that array the user's complete selection, so an
@@ -812,6 +1037,29 @@ export function isNewSessionDraftConflict(cause: unknown): boolean {
     cause.status === 409 &&
     cause.code === "NEW_SESSION_DRAFT_CONFLICT"
   );
+}
+
+/**
+ * The draft revision the server held when it refused a Send as a draft
+ * conflict, or undefined when the refusal does not say (an older server).
+ * Equal to the revision this Send just saved, it means nothing else changed
+ * the draft: the Send and its own draft disagree, and a retry cannot help.
+ */
+export function newSessionDraftConflictRevision(cause: unknown): number | undefined {
+  if (!isNewSessionDraftConflict(cause)) return undefined;
+  const error = cause as OpenGeniApiError;
+  const detailed = error.details?.["currentRevision"];
+  if (typeof detailed === "number") return detailed;
+  try {
+    const body = JSON.parse(error.body) as {
+      currentRevision?: unknown;
+      error?: { currentRevision?: unknown };
+    };
+    const revision = body.currentRevision ?? body.error?.currentRevision;
+    return typeof revision === "number" ? revision : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function asError(cause: unknown): Error {

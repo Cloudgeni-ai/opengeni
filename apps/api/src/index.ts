@@ -873,6 +873,9 @@ export async function startApi(options: StartApiOptions = {}) {
       await billingAutoTopUpsStopped;
       // Write queued presence before the database pool closes.
       await routeDeps.userPresence?.close().catch(() => undefined);
+      await routeDeps.decisions?.flushUsage().catch(() => {
+        observability.error("Decision usage receipts remain pending at shutdown");
+      });
       await Promise.allSettled([
         vaultProvidersClosed,
         Promise.resolve(editableArtifactComposition?.close()),

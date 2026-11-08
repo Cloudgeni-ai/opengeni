@@ -16,6 +16,7 @@ export const SANDBOX_OPERATION_PURPOSES = [
   "hook.artifact-runtime-doctor",
   "hook.azure-cli-login",
   "hook.codemode-client",
+  "hook.shell-tools",
   "hook.codemode-token",
   "hook.codemode-token-renewal-registration",
   "hook.git-credential-renewal-registration",
