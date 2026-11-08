@@ -38,6 +38,7 @@ import Svg, { Path } from "react-native-svg";
 import { Icon } from "./icon";
 import { useNativeTimelineMessages } from "./messages";
 import { withAlpha } from "./primitives";
+import { SessionAvatar, type SessionAvatarClient, type SessionAvatarProps } from "./session-avatar";
 import { BAR_MAX_FONT_SCALE, fontStyle, useNativeTimelineTheme, type WebColorToken } from "./theme";
 
 /* ----------------------------------------------------------------------------
@@ -137,6 +138,11 @@ export interface SessionRowProps {
    * them or is paused). It replaces the last-update time and sets the dot's tone.
    */
   attention?: { word: string; tone: "failed" | "waiting" } | null | undefined;
+  /**
+   * Loads image avatars with the person's own access. Without it a chat's
+   * image avatar shows its initials; emoji, icon and letter avatars need none.
+   */
+  avatarClient?: SessionAvatarClient | null | undefined;
   now?: Date | undefined;
 }
 
@@ -148,6 +154,7 @@ export function SessionRow({
   onTogglePin,
   workspaceName,
   attention,
+  avatarClient,
   now,
 }: SessionRowProps) {
   const theme = useNativeTimelineTheme();
@@ -214,12 +221,31 @@ export function SessionRow({
     >
       <StatusDot tone={status.tone} pulse={status.pulse} />
       <View style={{ flex: 1, minWidth: 0 }}>
-        <Text
-          numberOfLines={1}
-          style={{ ...fontStyle(theme, 400), fontSize: 14, lineHeight: 20, color: c.fg }}
-        >
-          {title}
-        </Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+          {/* A chat's avatar travels with its title, as in the web sidebar. */}
+          {session.avatar ? (
+            <SessionAvatar
+              avatar={session.avatar}
+              name={title}
+              workspaceId={session.workspaceId}
+              seed={session.id}
+              size="sm"
+              client={avatarClient}
+            />
+          ) : null}
+          <Text
+            numberOfLines={1}
+            style={{
+              ...fontStyle(theme, 400),
+              flexShrink: 1,
+              fontSize: 14,
+              lineHeight: 20,
+              color: c.fg,
+            }}
+          >
+            {title}
+          </Text>
+        </View>
         {meta || workspaceName ? (
           <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 2 }}>
             {workspaceName ? (
@@ -298,6 +324,8 @@ export function SessionRowList(props: {
   onTogglePin?: ((session: Session) => void) | undefined;
   /** Labels rows from another workspace with that workspace's name. */
   workspaceNameOf?: ((session: Session) => string | undefined) | undefined;
+  /** Loads image avatars with the person's own access (see {@link SessionRowProps.avatarClient}). */
+  avatarClient?: SessionAvatarClient | null | undefined;
 }) {
   const theme = useNativeTimelineTheme();
   return (
@@ -321,6 +349,7 @@ export function SessionRowList(props: {
             onPress={() => props.onOpen(session.id)}
             onTogglePin={props.onTogglePin ? () => props.onTogglePin?.(session) : undefined}
             workspaceName={props.workspaceNameOf?.(session)}
+            avatarClient={props.avatarClient}
           />
         </View>
       ))}
@@ -380,6 +409,8 @@ export function SessionHeaderTitle({
   align = Platform.OS === "ios" ? "center" : "left",
   sideInset = 116,
   fullAccess = false,
+  avatar,
+  agentName,
 }: {
   title: string;
   /** The display status: pass `blocked` for an admission-blocked session. */
@@ -399,6 +430,13 @@ export function SessionHeaderTitle({
    * a small shield and "Full access" on the status line, as on the web header.
    */
   fullAccess?: boolean | undefined;
+  /**
+   * The avatar beside the title: the agent's for a chat with one, otherwise
+   * the chat's own. `useNativeSessionIdentity` gives both this and `agentName`.
+   */
+  avatar?: Omit<SessionAvatarProps, "size"> | null | undefined;
+  /** The agent the chat belongs to, named first on the line under the title. */
+  agentName?: string | null | undefined;
 }) {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
@@ -413,7 +451,7 @@ export function SessionHeaderTitle({
     presentation?.tone === "running" ||
     presentation?.tone === "waiting" ||
     presentation?.tone === "failed";
-  const spoken = [title, label, fullAccess ? "Full access is on" : undefined]
+  const spoken = [title, agentName, label, fullAccess ? "Full access is on" : undefined]
     .filter(Boolean)
     .join(", ");
   return (
@@ -433,15 +471,41 @@ export function SessionHeaderTitle({
           : { alignItems: "flex-start", maxWidth: 240 }
       }
     >
-      <Text
-        numberOfLines={1}
-        maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
-        style={{ ...fontStyle(theme, 600), fontSize: 16, lineHeight: 20, color: c.fg }}
-      >
-        {title}
-      </Text>
-      {(presentation && label) || fullAccess ? (
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, maxWidth: "100%" }}>
+        {avatar ? <SessionAvatar {...avatar} size="sm" /> : null}
+        <Text
+          numberOfLines={1}
+          maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
+          style={{
+            ...fontStyle(theme, 600),
+            flexShrink: 1,
+            fontSize: 16,
+            lineHeight: 20,
+            color: c.fg,
+          }}
+        >
+          {title}
+        </Text>
+      </View>
+      {(presentation && label) || fullAccess || agentName ? (
         <View style={{ flexDirection: "row", alignItems: "center", gap: 5, marginTop: 1 }}>
+          {agentName ? (
+            <Text
+              testID="session-header-agent"
+              numberOfLines={1}
+              maxFontSizeMultiplier={BAR_MAX_FONT_SCALE}
+              style={{
+                ...fontStyle(theme, 500),
+                fontSize: 12,
+                lineHeight: 15,
+                flexShrink: 1,
+                color: c["fg-muted"],
+                marginRight: presentation && label ? 3 : 0,
+              }}
+            >
+              {agentName}
+            </Text>
+          ) : null}
           {presentation && label ? (
             <>
               <StatusDot tone={presentation.tone} pulse={presentation.pulse} size={6} />

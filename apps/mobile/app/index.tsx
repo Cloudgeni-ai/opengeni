@@ -546,6 +546,7 @@ function Home() {
             <SessionRowList
               sessions={sections.pinned}
               models={models}
+              avatarClient={client}
               onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
               onTogglePin={(session) => void togglePin(session)}
             />
@@ -557,6 +558,7 @@ function Home() {
             <SessionRowList
               sessions={sections.recent}
               models={models}
+              avatarClient={client}
               onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
               onTogglePin={(session) => void togglePin(session)}
             />
