@@ -670,6 +670,27 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     });
   });
 
+  test("seeding preserves default, exclusion-only, and deliberately pinned connector policies", async () => {
+    for (const policy of [
+      { tools: [], toolsProvided: false, options: {} },
+      { tools: [], toolsProvided: true, options: { excludedMcpServerIds: [] } },
+      { tools: [], toolsProvided: true, options: { excludedMcpServerIds: ["slack"] } },
+      { tools: [], toolsProvided: false, options: { excludedMcpServerIds: ["slack"] } },
+      { tools: [], toolsProvided: true, options: {} },
+      { tools: [{ kind: "mcp" as const, id: "docs" }], toolsProvided: true, options: {} },
+    ]) {
+      const context = await fixture();
+      const saved = await saveDraft(context, 0, policy);
+      const session = await createUninitializedSession(context);
+      await initialize(context, session.id, saved.revision);
+      const seeded = (await readDraft(context.grant.workspaceId!, context.subjectId))!;
+      expect(seeded.text).toBe("");
+      expect(seeded.tools).toEqual(policy.tools);
+      expect(newSessionDraftToolsProvided(seeded)).toBe(policy.toolsProvided);
+      expect(publicNewSessionDraftOptions(seeded)).toEqual(policy.options);
+    }
+  });
+
   test("turns only an exact accepted revision into a safe seed after durable initialization", async () => {
     const exact = await fixture();
     const channelId = crypto.randomUUID();
