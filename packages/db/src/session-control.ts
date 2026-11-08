@@ -514,6 +514,49 @@ function advisoryLockFunction(mode: Exclude<WorkspaceControlLockMode, "none">) {
     : sql.raw("pg_advisory_xact_lock_shared");
 }
 
+function workspaceControlAdvisoryQuery(
+  db: Database,
+  workspaceId: string,
+  mode: WorkspaceControlLockMode,
+) {
+  return mode === "none"
+    ? Promise.resolve()
+    : db.execute(
+        sql`select ${advisoryLockFunction(mode)}(hashtextextended(${`workspace-control:${workspaceId}`}, 0))`,
+      );
+}
+
+function workspaceControlRowQuery(
+  db: Database,
+  workspaceId: string,
+  mode: WorkspaceControlLockMode,
+) {
+  return db.execute<WorkspaceControlRow>(sql`
+    select
+      workspace_id as "workspaceId", account_id as "accountId", revision,
+      workspace_state as "workspaceState", workspace_pause_revision as "workspacePauseRevision",
+      timer_id as "timerId", timer_action as "timerAction",
+      timer_due_at as "timerDueAt", timer_pause_for_seconds as "timerPauseForSeconds",
+      timer_pause_revision as "timerPauseRevision", reason,
+      changed_by as "changedBy", changed_at as "changedAt"
+    from ${schema.workspaceInferenceControls}
+    where workspace_id = ${workspaceId}
+    ${lockClause(mode)}
+  `);
+}
+
+function requireWorkspaceControlRow(
+  rows: readonly WorkspaceControlRow[],
+  workspaceId: string,
+): WorkspaceControlRow {
+  const row = rows[0];
+  if (!row)
+    throw new SessionControlInvariantError(
+      `Workspace ${workspaceId} has no mandatory inference-control row`,
+    );
+  return row;
+}
+
 function lockBudgetFor(options: WorkspaceControlLockOptions): WorkspaceControlLockBudget | null {
   if (options.budget) return options.budget;
   if (options.lockTimeoutMs === undefined) return null;
@@ -583,42 +626,21 @@ export async function lockWorkspaceInferenceControl(
   const [prior] = budget
     ? await db.execute<{ value: string }>(sql`select current_setting('lock_timeout') as value`)
     : [];
-  if (mode !== "none") {
-    await boundedLockStep(db, workspaceId, budget, () =>
-      db.execute(
-        sql`select ${advisoryLockFunction(mode)}(hashtextextended(${`workspace-control:${workspaceId}`}, 0))`,
-      ),
-    );
+  const advisory = () => workspaceControlAdvisoryQuery(db, workspaceId, mode);
+  const readControl = () => workspaceControlRowQuery(db, workspaceId, mode);
+  // One pinned connection executes the advisory lock before the row read.
+  // Explicit lock budgets still recompute their remaining time between steps.
+  let rows;
+  if (budget) {
+    if (mode !== "none") await boundedLockStep(db, workspaceId, budget, advisory);
+    rows = await boundedLockStep(db, workspaceId, budget, readControl);
+  } else {
+    [, rows] = await Promise.all([advisory(), readControl()]);
   }
-  const rows = await boundedLockStep(db, workspaceId, budget, () =>
-    db.execute<WorkspaceControlRow>(sql`
-      select
-        workspace_id as "workspaceId",
-        account_id as "accountId",
-        revision,
-        workspace_state as "workspaceState",
-        workspace_pause_revision as "workspacePauseRevision",
-        timer_id as "timerId", timer_action as "timerAction",
-        timer_due_at as "timerDueAt", timer_pause_for_seconds as "timerPauseForSeconds",
-        timer_pause_revision as "timerPauseRevision",
-        reason,
-        changed_by as "changedBy",
-        changed_at as "changedAt"
-      from ${schema.workspaceInferenceControls}
-      where workspace_id = ${workspaceId}
-      ${lockClause(mode)}
-    `),
-  );
   if (budget) {
     await db.execute(sql`select set_config('lock_timeout', ${prior?.value ?? "0"}, true)`);
   }
-  const row = rows[0];
-  if (!row) {
-    throw new SessionControlInvariantError(
-      `Workspace ${workspaceId} has no mandatory inference-control row`,
-    );
-  }
-  return row;
+  return requireWorkspaceControlRow(rows, workspaceId);
 }
 
 export type WorkspaceControlAdmissionLock = {
@@ -832,63 +854,97 @@ export async function lockSessionEventWriteRows(
   db: Database,
   input: SessionEventWriteProjectionInput,
 ): Promise<SessionEventWriteFenceLocks> {
-  await lockSiteRuntimeAdmission(db, input.workspaceId, input.sessionIds ?? []);
   const controlLock = input.controlLock;
-  const control =
-    controlLock === "share" || controlLock === "update"
-      ? await lockWorkspaceInferenceControl(db, input.workspaceId, controlLock)
-      : null;
+  const locksControl = controlLock === "share" || controlLock === "update";
+  await lockSiteRuntimeAdmission(
+    db,
+    input.workspaceId,
+    locksControl ? undefined : (input.sessionIds ?? []),
+  );
 
   const eventOnly = input.rowProjection === "event";
   const sessionColumns = eventOnly ? eventSessionColumns : getTableColumns(schema.sessions);
   const sessionIds = [...new Set(input.sessionIds ?? [])].sort();
   const sessionLock = input.sessionLock ?? "no_key_update";
-  // Submit in canonical lock order on the transaction-pinned connection. The
-  // server still executes separate statements with fresh READ COMMITTED
-  // snapshots; only the client waits overlap. Cursor-dependent work stays below.
-  const [workspaces, lockedSessions] = await Promise.all([
-    (input.workspaceLock ?? "key_share") === "key_share"
+  const turnIds = [...new Set(input.turnIds ?? [])].sort();
+  const attemptIds = [...new Set(input.attemptIds ?? [])].sort();
+  const readTurns = () =>
+    turnIds.length > 0
       ? db
-          .select(eventOnly ? eventWorkspaceColumns : getTableColumns(schema.workspaces))
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, input.workspaceId))
-          .for("key share")
-          .limit(1)
-      : [],
-    sessionIds.length > 0
-      ? db
-          .select(sessionColumns)
-          .from(schema.sessions)
+          .select(eventOnly ? eventTurnColumns : getTableColumns(schema.sessionTurns))
+          .from(schema.sessionTurns)
           .where(
             and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              anyOf(schema.sessions.id, sessionIds),
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              anyOf(schema.sessionTurns.id, turnIds),
             ),
           )
-          .orderBy(schema.sessions.id)
-          .for(sessionLock === "key_share" ? "key share" : "no key update")
-      : [],
-  ]);
-  const workspace = workspaces[0] ?? null;
-  let sessions = lockedSessions;
-
-  const cursors =
-    sessions.length > 0
-      ? await db
-          .select()
-          .from(schema.sessionEventCursors)
-          .where(
-            and(
-              eq(schema.sessionEventCursors.workspaceId, input.workspaceId),
-              inArray(
-                schema.sessionEventCursors.sessionId,
-                sessions.map((session) => session.id),
-              ),
-            ),
-          )
-          .orderBy(schema.sessionEventCursors.sessionId)
+          .orderBy(schema.sessionTurns.id)
           .for("update")
       : [];
+  const readAttempts = () =>
+    attemptIds.length > 0
+      ? db
+          .select(eventOnly ? eventAttemptColumns : getTableColumns(schema.sessionTurnAttempts))
+          .from(schema.sessionTurnAttempts)
+          .where(
+            and(
+              eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+              anyOf(schema.sessionTurnAttempts.id, attemptIds),
+            ),
+          )
+          .orderBy(schema.sessionTurnAttempts.id)
+          .for("update")
+      : [];
+  // Submit in canonical lock order on the transaction-pinned connection. The
+  // server still executes separate statements with fresh READ COMMITTED
+  // snapshots; only the client waits overlap. All IDs are already known, and
+  // the cursor FK guarantees that no cursor exists without its session. Raw
+  // writers still re-read session authority after the cursor before turns.
+  const [, controlRows, workspaces, lockedSessions, cursors, pipelinedTurns, pipelinedAttempts] =
+    await Promise.all([
+      locksControl ? workspaceControlAdvisoryQuery(db, input.workspaceId, controlLock) : undefined,
+      locksControl ? workspaceControlRowQuery(db, input.workspaceId, controlLock) : [],
+      (input.workspaceLock ?? "key_share") === "key_share"
+        ? db
+            .select(eventOnly ? eventWorkspaceColumns : getTableColumns(schema.workspaces))
+            .from(schema.workspaces)
+            .where(eq(schema.workspaces.id, input.workspaceId))
+            .for("key share")
+            .limit(1)
+        : [],
+      sessionIds.length > 0
+        ? db
+            .select(sessionColumns)
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                anyOf(schema.sessions.id, sessionIds),
+              ),
+            )
+            .orderBy(schema.sessions.id)
+            .for(sessionLock === "key_share" ? "key share" : "no key update")
+        : [],
+      sessionIds.length > 0
+        ? db
+            .select()
+            .from(schema.sessionEventCursors)
+            .where(
+              and(
+                eq(schema.sessionEventCursors.workspaceId, input.workspaceId),
+                inArray(schema.sessionEventCursors.sessionId, sessionIds),
+              ),
+            )
+            .orderBy(schema.sessionEventCursors.sessionId)
+            .for("update")
+        : [],
+      sessionLock === "key_share" ? [] : readTurns(),
+      sessionLock === "key_share" ? [] : readAttempts(),
+    ]);
+  const control = locksControl ? requireWorkspaceControlRow(controlRows, input.workspaceId) : null;
+  const workspace = workspaces[0] ?? null;
+  let sessions = lockedSessions;
   if (cursors.length !== sessions.length) {
     throw new SessionControlInvariantError(
       `Session event cursor lock set was incomplete for workspace ${input.workspaceId}`,
@@ -936,36 +992,10 @@ export async function lockSessionEventWriteRows(
     return { ...session, lastSequence: cursor.lastSequence };
   });
 
-  const turnIds = [...new Set(input.turnIds ?? [])].sort();
-  const attemptIds = [...new Set(input.attemptIds ?? [])].sort();
-  const [turns, attempts] = await Promise.all([
-    turnIds.length > 0
-      ? db
-          .select(eventOnly ? eventTurnColumns : getTableColumns(schema.sessionTurns))
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              anyOf(schema.sessionTurns.id, turnIds),
-            ),
-          )
-          .orderBy(schema.sessionTurns.id)
-          .for("update")
-      : [],
-    attemptIds.length > 0
-      ? db
-          .select(eventOnly ? eventAttemptColumns : getTableColumns(schema.sessionTurnAttempts))
-          .from(schema.sessionTurnAttempts)
-          .where(
-            and(
-              eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
-              anyOf(schema.sessionTurnAttempts.id, attemptIds),
-            ),
-          )
-          .orderBy(schema.sessionTurnAttempts.id)
-          .for("update")
-      : [],
-  ]);
+  const [turns, attempts] =
+    sessionLock === "key_share"
+      ? await Promise.all([readTurns(), readAttempts()])
+      : [pipelinedTurns, pipelinedAttempts];
 
   return { control, workspace, sessions: canonicalSessions, cursors, turns, attempts };
 }

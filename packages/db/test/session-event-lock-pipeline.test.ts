@@ -9,8 +9,9 @@ import {
   createSession,
   withWorkspaceRls,
 } from "../src/index";
-import { lockSessionEventWriteRows } from "../src/session-control";
+import { lockSessionEventWriteRows, lockWorkspaceInferenceControl } from "../src/session-control";
 import { submitTestHumanPrompt } from "../../../test/integration/helpers/session-control";
+import { withSiteRuntimeAdmission } from "../src/site-runtime-admission";
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -94,6 +95,118 @@ async function waitForLock(pid: number) {
   }
   throw new Error("Expected controlled lock wait");
 }
+
+for (const sessionLock of ["no_key_update", "key_share"] as const) {
+  for (const stage of ["workspace", "session", "cursor"] as const) {
+    test(`${sessionLock}: ${stage} lock precedes every queued successor`, async () => {
+      const input = await fixture();
+      const statements = [
+        () => observer`select id from workspaces where id = ${input.workspaceId} for update nowait`,
+        () =>
+          observer`select id from sessions where id = ${input.sessionIds[0]!} for update nowait`,
+        () =>
+          observer`select session_id from session_event_cursors where session_id = ${input.sessionIds[0]!} for update nowait`,
+        () =>
+          observer`select id from session_turns where id = ${input.turnIds[0]!} for update nowait`,
+        () =>
+          observer`select id from session_turn_attempts where id = ${input.attemptIds[0]!} for update nowait`,
+      ];
+      const index = ["workspace", "session", "cursor"].indexOf(stage);
+      const held = gate(),
+        release = gate(),
+        started = gate();
+      const holder = shared.admin.begin(async (tx) => {
+        if (stage === "workspace")
+          await tx`select id from workspaces where id = ${input.workspaceId} for update`;
+        if (stage === "session")
+          await tx`select id from sessions where id = ${input.sessionIds[0]!} for update`;
+        if (stage === "cursor")
+          await tx`select session_id from session_event_cursors where session_id = ${input.sessionIds[0]!} for update`;
+        held.release();
+        await release.promise;
+      });
+      await held.promise;
+      let pid = 0;
+      const pending = withWorkspaceRls(client.db, input.workspaceId, async (tx) => {
+        await tx.execute(sql`select set_config('statement_timeout', '10000', true)`);
+        const rows = await tx.execute(sql`select pg_backend_pid() as pid`);
+        pid = Number(rows[0].pid);
+        started.release();
+        return lockSessionEventWriteRows(tx, {
+          ...input,
+          controlLock: "share",
+          sessionLock,
+          rowProjection: "event",
+        });
+      });
+      void pending.catch(() => {});
+      try {
+        await started.promise;
+        await waitForLock(pid);
+        for (const successor of statements.slice(index + 1)) await successor();
+        release.release();
+        await holder;
+        const result = await pending;
+        expect(result.attempts[0]!.id).toBe(input.attemptIds[0]!);
+      } finally {
+        release.release();
+        await holder;
+        await pending.catch(() => {});
+      }
+    });
+  }
+}
+
+test("queued control row waits behind the advisory lock", async () => {
+  const input = await fixture();
+  const held = gate(),
+    release = gate(),
+    started = gate();
+  const holder = shared.admin.begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtextextended(${`workspace-control:${input.workspaceId}`}, 0))`;
+    held.release();
+    await release.promise;
+  });
+  await held.promise;
+  let pid = 0;
+  const pending = withWorkspaceRls(client.db, input.workspaceId, async (tx) => {
+    await tx.execute(sql`select set_config('statement_timeout', '10000', true)`);
+    const rows = await tx.execute(sql`select pg_backend_pid() as pid`);
+    pid = Number(rows[0].pid);
+    started.release();
+    return lockWorkspaceInferenceControl(tx, input.workspaceId, "share");
+  });
+  void pending.catch(() => {});
+  try {
+    await started.promise;
+    await waitForLock(pid);
+    await observer`select workspace_id from workspace_inference_controls where workspace_id = ${input.workspaceId} for update nowait`;
+    release.release();
+    await holder;
+    expect((await pending).workspaceId).toBe(input.workspaceId);
+  } finally {
+    release.release();
+    await holder;
+    await pending.catch(() => {});
+  }
+});
+
+test("control-aware writes retain the Site admission fence even for another session", async () => {
+  const input = await fixture();
+  await expect(
+    withSiteRuntimeAdmission(
+      {
+        workspaceId: input.workspaceId,
+        sessionId: crypto.randomUUID(),
+        admissionId: crypto.randomUUID(),
+      },
+      () =>
+        withWorkspaceRls(client.db, input.workspaceId, (tx) =>
+          lockSessionEventWriteRows(tx, { ...input, controlLock: "share" }),
+        ),
+    ),
+  ).rejects.toThrow("Site conversation admission expired");
+});
 
 test("queued attempt read waits for the canonical turn lock", async () => {
   const input = await fixture();
