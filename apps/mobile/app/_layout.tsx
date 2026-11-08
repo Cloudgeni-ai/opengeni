@@ -74,12 +74,9 @@ export default function RootLayout() {
                   <Stack.Screen name="automation/[id]" options={{ title: "" }} />
                   <Stack.Screen
                     name="automation-new"
-                    options={{
-                      headerShown: false,
-                      presentation: "formSheet",
-                      sheetAllowedDetents: [0.6, 1],
-                      sheetGrabberVisible: true,
-                    }}
+                    // A page sheet like Feedback: it opens with the keyboard up, and
+                    // a detented form sheet fights the keyboard over the layout.
+                    options={{ headerShown: false, presentation: "modal" }}
                   />
                   <Stack.Screen name="session/[id]" options={{ title: "" }} />
                   <Stack.Screen name="settings" options={{ title: "Settings" }} />

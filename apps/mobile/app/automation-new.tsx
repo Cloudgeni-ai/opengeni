@@ -138,7 +138,7 @@ function NewAutomation() {
       </View>
       <ScrollView
         keyboardShouldPersistTaps="handled"
-        contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 32, gap: 12 }}
+        contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 8, paddingBottom: 32, gap: 12 }}
       >
         <Text style={{ ...fontStyle(theme, 500), fontSize: 15, lineHeight: 20, color: c.fg }}>
           What should happen, and how often?
