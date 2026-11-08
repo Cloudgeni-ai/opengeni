@@ -1061,6 +1061,17 @@ export async function runTurnStreamAttempt(
     let latestPromptCacheRequest: Promise<PromptCacheRequestFingerprint | null> | null = null;
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
+    let fallbackProviderRequestIsStartup = true;
+    const publishFallbackProviderEvents = async (events: Parameters<TurnEventPublisher>[0]) => {
+      if (!fallbackProviderRequestIsStartup && eventing.publishInBackground) {
+        // Follow-up lifecycle receipts are observation, not dispatch authority.
+        // The existing ordered lane joins them at the next awaited append and
+        // at finalization; the history/admission checkpoint still gates fetch.
+        eventing.publishInBackground(events);
+      } else {
+        await eventing.publish!(events);
+      }
+    };
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
       enterModelRequestStage("dispatch_checkpoint");
       await checkpointBeforeProviderDispatch();
@@ -1070,6 +1081,7 @@ export async function runTurnStreamAttempt(
       }
       enterModelRequestStage("request_audit");
       sandboxState.firstProviderRequestStarted = true;
+      fallbackProviderRequestIsStartup = !eventing.firstModelRequestPreparationRecorded;
       const preparationDurationMs =
         !eventing.firstModelRequestPreparationRecorded &&
         eventing.firstModelRequestPreparationStartedAt !== null
@@ -1089,7 +1101,7 @@ export async function runTurnStreamAttempt(
       const auditStartedAt = performance.now();
       let auditOutcome: "completed" | "failed" = "completed";
       try {
-        await eventing.publish!([
+        await publishFallbackProviderEvents([
           ...(preparationDurationMs === null
             ? []
             : [
@@ -1130,7 +1142,7 @@ export async function runTurnStreamAttempt(
           });
         }
       }
-      // The required audit itself may have consumed the remaining window.
+      // The required startup audit may have consumed the remaining window.
       // This awaited observer still owns the literal pre-fetch boundary.
       assertProviderOverloadRecoveryActive({
         failureCode: attempt.providerRecoveryPolicyCode,
@@ -1450,7 +1462,7 @@ export async function runTurnStreamAttempt(
       if (fallbackProviderRequestStartedAt === null) return;
       const durationMs = Math.max(0, performance.now() - fallbackProviderRequestStartedAt);
       fallbackProviderRequestStartedAt = null;
-      await eventing.publish!([
+      await publishFallbackProviderEvents([
         {
           type: "agent.model.request",
           payload: {
@@ -1560,7 +1572,7 @@ export async function runTurnStreamAttempt(
               performance.now() - fallbackProviderRequestLifecycleStartedAt,
             );
             fallbackProviderRequestLifecycleStartedAt = null;
-            await eventing.publish!([
+            await publishFallbackProviderEvents([
               {
                 type: "agent.model.request",
                 payload: {
@@ -2090,7 +2102,7 @@ export async function runTurnStreamAttempt(
         );
         fallbackProviderRequestStartedAt = null;
         fallbackProviderRequestLifecycleStartedAt = null;
-        await eventing.publish!([
+        await publishFallbackProviderEvents([
           {
             type: "agent.model.request",
             payload: {

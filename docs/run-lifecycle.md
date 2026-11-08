@@ -5737,12 +5737,17 @@ When a Responses terminal omits its output array, completed stream items are
 reassembled by numeric `output_index`; sparse provider positions are compacted
 to the observed items rather than treated as missing output, while duplicate
 indices still fail closed.
-For generic providers, an attempt-local async context then awaits the durable
-`started` checkpoint at the literal pre-fetch boundary; request bytes cannot
-reach the wire first. Each request, including AI SDK / AI Gateway follow-up
+For generic providers, an attempt-local async context awaits the initial durable
+`started` checkpoint at the literal pre-fetch boundary; the first request's bytes
+cannot reach the wire first. Each request, including AI SDK / AI Gateway follow-up
 calls after tools, emits its own `started`, `first_byte` and terminal event.
 Only the enclosing startup preparation receipt is once per attempt; its latch
-must not suppress later request lifecycles. Model-preparation `started` is durable before
+must not suppress later request lifecycles. Follow-up lifecycle observations use
+the existing ordered background event lane: they do not add a pre-fetch write
+wait, and subsequent awaited appends and activity finalization join their
+delivery. Their observation failures are best-effort, like startup progress
+receipts, while every call still awaits its required history/admission checkpoint.
+Model-preparation `started` is durable before
 `runStream` is invoked, including an immediately-calling native transport. A
 semantic terminal is latched before downstream stream cleanup; if the consumer
 cancels after parsing it, the audit remains `completed` rather than producing a

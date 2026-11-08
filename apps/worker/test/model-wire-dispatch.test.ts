@@ -5,6 +5,7 @@ import { InitialModelWireDispatchClock } from "../src/activities/agent-turn/mode
 import { assertProviderOverloadRecoveryActive } from "../src/activities/agent-turn/errors";
 import { instrumentedModelFetch } from "../../../packages/runtime/src/model-provider-client";
 import { withModelTransportStartedObserver } from "../../../packages/runtime/src/model-preparation-diagnostics";
+import { createTurnEventLane } from "../src/activities/agent-turn/turn-event-lane";
 
 const identity = { provider: "azure", dispatchId: "dispatch-1" };
 const firstUnixMs = Date.parse("2026-10-03T15:00:00.000Z");
@@ -67,41 +68,68 @@ describe("attempt-local initial wire dispatch clock", () => {
       const activeTurnId = "turn";
       const input = { attemptId: "attempt" };
       const dispatchId = "dispatch";
-      const attempt = { executionGeneration: 1 };
+      const attempt = { executionGeneration: 1, providerRecoveryPolicyCode: "provider_overloaded", providerRecoveryCount: 1, providerRecoveryStartedAt: 1000 };
       const enterModelRequestStage = () => {};
       const checkpointBeforeProviderDispatch = async () => {};
-      const assertProviderOverloadRecoveryActive = () => {};
       const providerTurn = {};
       const subscriptionCoreTurnOf = () => null;
       let fallbackProviderRequestStartedAt = null;
       let fallbackProviderRequestLifecycleStartedAt = null;
+      let fallbackProviderRequestIsStartup = true;
+      const publishFallbackProviderEvents = ${declaration("publishFallbackProviderEvents")};
       const start = ${declaration("recordFallbackProviderDispatchAtWire")};
       const firstByte = ${declaration("settleFallbackProviderFirstByte")};
       const complete = async () => { ${parsed.source.slice(completed.start, completed.end)} };
       return { start, firstByte, complete };
     `;
     const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const lane = createTurnEventLane();
+    let recoveryNow = 1000;
+    let releaseAudit!: () => void;
+    let auditGate = Promise.resolve();
+    const append = async (events: typeof published) => {
+      await auditGate;
+      published.push(...events);
+    };
     const callbacks = new Function(
       "eventing",
+      "assertProviderOverloadRecoveryActive",
       new Bun.Transpiler({ loader: "ts" }).transformSync(source),
-    )({
-      firstModelRequestPreparationRecorded: false,
-      firstModelRequestPreparationStartedAt: performance.now(),
-      initialModelWireDispatch: new InitialModelWireDispatchClock(),
-      publish: async (events: typeof published) => {
-        published.push(...events);
+    )(
+      {
+        firstModelRequestPreparationRecorded: false,
+        firstModelRequestPreparationStartedAt: performance.now(),
+        initialModelWireDispatch: new InitialModelWireDispatchClock(),
+        publish: (events: typeof published) => lane.run(() => append(events)),
+        publishInBackground: (events: typeof published) =>
+          lane.runInBackground(() => append(events)),
       },
-    }) as {
+      (input: Parameters<typeof assertProviderOverloadRecoveryActive>[0]) =>
+        assertProviderOverloadRecoveryActive({ ...input, now: recoveryNow }),
+    ) as {
       start: () => Promise<void>;
       firstByte: () => Promise<void>;
       complete: () => Promise<void>;
     };
     for (let i = 0; i < 3; i++) {
+      if (i === 1) {
+        // A completed response retired recovery. An expired historical window
+        // cannot reject later healthy calls, and their audit must not block fetch.
+        recoveryNow += 16 * 60_000;
+        auditGate = new Promise<void>((resolve) => {
+          releaseAudit = resolve;
+        });
+      }
       await callbacks.start();
       await callbacks.firstByte();
       await callbacks.firstByte();
       await callbacks.complete();
       await callbacks.complete();
+      if (i === 1) {
+        expect(published.filter((event) => event.type === "agent.model.request")).toHaveLength(3);
+        releaseAudit();
+      }
+      await lane.backgroundSettled();
     }
     expect(
       published
@@ -159,6 +187,8 @@ describe("attempt-local initial wire dispatch clock", () => {
       const enterModelRequestStage = () => {};
       let fallbackProviderRequestStartedAt = null;
       let fallbackProviderRequestLifecycleStartedAt = null;
+      let fallbackProviderRequestIsStartup = true;
+      const publishFallbackProviderEvents = events => eventing.publish(events);
       ${compiled}
       return publish;
     `,
@@ -269,6 +299,7 @@ describe("attempt-local initial wire dispatch clock", () => {
       const input = { attemptId: "attempt-1" };
       const dispatchId = "dispatch-1";
       const attempt = { executionGeneration: 7 };
+      const publishFallbackProviderEvents = events => eventing.publish(events);
       ${compiled}
       return settle;
     `,
