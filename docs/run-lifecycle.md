@@ -129,7 +129,11 @@ shell session, pending shell start, remote operation) and registration count;
 command text, numeric handles and provider locators are never logged.
 Grafana exposes stage occupancy and thirty-second slow-stage observations;
 the bounded containment log and worker restarts identify actual exits.
-A stuck writer drain is never detached to release a successor. At the deadline,
+A Connected Machine operation whose foreground consumer has ended can release
+its writer through committed durable stop-request adoption on the original
+connection. Cleanup retries this handoff independently of transport observation;
+failed adoption, a cancellation request alone, or an unknown outcome cannot
+release the writer. A stuck writer drain is never detached to release a successor. At the deadline,
 the host stops polling and requests the ordinary graceful worker shutdown. Other
 live turns checkpoint and resume the same logical turn on a healthy worker,
 without spending their unexpected-worker-death redispatch allowance. The

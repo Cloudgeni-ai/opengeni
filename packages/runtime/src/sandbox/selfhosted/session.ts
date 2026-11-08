@@ -433,8 +433,7 @@ export interface SelfhostedSessionDeps {
     input: SelfhostedBackgroundCommandAdoption,
   ) => Promise<{ commandId: string }>;
   /** Record, with a stop request bound to its exact connection, a command this
-   * caller already reported as failed because its machine stopped answering
-   * or its agent connection was replaced. The session's command ledger then stops or settles
+   * caller already reported as failed without terminal proof. The session's command ledger then stops or settles
    * it, and the caller does not wait for a machine that may never answer.
    * For callers without a turn (direct requests); without it, a turn records
    * the command through adoptBackgroundCommand. */
@@ -1466,6 +1465,8 @@ export class SelfhostedSession {
     let adoptedCommandId: string | null = null;
     let ownershipTransferPending = false;
     let terminalProof = false;
+    let foregroundFinished = false;
+    let abandonment: Promise<void> | null = null;
     // The start reached no agent before its connection was replaced: it
     // never ran.
     let notDispatched = false;
@@ -1481,7 +1482,47 @@ export class SelfhostedSession {
     this.inFlightOpStreamOutput.set(opId, retainedOutput);
     const yieldBackground = backgroundYieldMs > 0 && this.adoptBackgroundCommand !== undefined;
     const earlyYield = new AbortController();
+    const abandon = async (): Promise<void> => {
+      if (adoptedCommandId) return;
+      if (!this.abandonCommand) throw new Error("No durable command custody is available");
+      abandonment ??= (async () => {
+        notifyDurableOpOwnershipTransferStarted(opId);
+        try {
+          const abandoned = await this.abandonCommand!({
+            controlWorkspaceId: admission.controlWorkspaceId,
+            enrollmentId: this.agentId,
+            connectionInstanceId: admission.connectionInstanceId,
+            opId,
+            command,
+          });
+          adoptedCommandId = abandoned.commandId;
+          notifyDurableOpOwnershipTransferred(opId);
+          if (this.inFlightOpStreamClients.get(opId) === client) {
+            this.inFlightOpStreamClients.delete(opId);
+            this.inFlightOpStreamOutput.delete(opId);
+          }
+        } catch (error) {
+          notifyDurableOpOwnershipTransferFailed(opId);
+          throw error;
+        }
+      })();
+      try {
+        await abandonment;
+      } finally {
+        abandonment = null;
+      }
+    };
     const remoteControl: RemoteOperationControl = {
+      abandonExecCommand: async (requestedOpId) => {
+        if (requestedOpId !== opId || !foregroundFinished || terminalProof || notDispatched)
+          return false;
+        if (!this.abandonCommand) return false;
+        // The command's original consumer has ended. Reuse its exact launch
+        // identity even if the machine never answers again or an earlier
+        // adoption failed. No OpStart, route lookup, or output ACK is needed.
+        await abandon();
+        return true;
+      },
       yieldExecCommand: (requestedOpId) => {
         if (requestedOpId !== opId || !yieldBackground) return false;
         earlyYield.abort();
@@ -1733,19 +1774,10 @@ export class SelfhostedSession {
         // answers again, or settles it once its runner is retired. If recording
         // fails, cleanup keeps ownership.
         try {
-          notifyDurableOpOwnershipTransferStarted(opId);
-          const abandoned = await this.abandonCommand({
-            controlWorkspaceId: admission.controlWorkspaceId,
-            enrollmentId: this.agentId,
-            connectionInstanceId: admission.connectionInstanceId,
-            opId,
-            command,
-          });
-          adoptedCommandId = abandoned.commandId;
+          await abandon();
           stopRecorded = true;
-          notifyDurableOpOwnershipTransferred(opId);
         } catch {
-          notifyDurableOpOwnershipTransferFailed(opId);
+          // Retained exact control retries durable custody during finalization.
         }
       }
       const startConfirmed = controlError.detail[START_CONFIRMED_DETAIL_KEY];
@@ -1788,6 +1820,7 @@ export class SelfhostedSession {
       }
       throw controlError;
     } finally {
+      foregroundFinished = true;
       // An observer failure does not prove that the exact provider operation
       // stopped. Keep its launch client available for cancellation and
       // readExisting recovery; only terminal proof or durable adoption releases
