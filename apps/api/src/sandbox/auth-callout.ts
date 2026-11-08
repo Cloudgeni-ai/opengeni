@@ -25,10 +25,8 @@
 // SECURITY (§18): the bearer value + the account signing seed are NEVER logged. A
 // validation failure → a DENIAL response (the server refuses the connection); a
 // responder error → the request is left UNANSWERED (fail-closed; the server denies
-// on its callout timeout). Bearer expiry bounds admission, not an established
-// socket. Live authority is the active enrollment and exact runner lease; revoked
-// or superseded runners cannot receive work or renew that lease. The responder's
-// broker-inventory audit also explicitly closes their existing sockets.
+// on its callout timeout). The bearer's `exp` caps the minted credential's life so a
+// revoked/expired enrollment cannot outlive its bearer.
 
 import { createHash } from "node:crypto";
 import { createLogThrottle, type LogThrottle } from "@opengeni/observability";
@@ -56,10 +54,11 @@ import {
 import type { Observability } from "@opengeni/observability";
 import { observabilityEventBusOptions } from "../observability";
 import { AGENT_CONNECTION_LEASE_MS } from "./connection-authority";
-import { connectionAuthorityName, startLiveConnectionAuthority } from "./live-connection-authority";
 
 /** The NATS subject nats-server publishes authorization requests on (ADR-26). */
 export const AUTH_CALLOUT_SUBJECT = "$SYS.REQ.USER.AUTH";
+/** Keep live NATS credentials short-lived while never outliving the bearer. */
+export const NATS_USER_JWT_TTL_SECONDS = 5 * 60;
 export interface AuthCalloutDeps {
   db: Database;
   settings: Settings;
@@ -175,7 +174,7 @@ export async function handleAuthorizationRequest(
   }
 
   const secret = resolveEnrollmentSigningSecret(deps.settings);
-  if (!secret || !deps.settings.sandboxSelfhostedEnabled) {
+  if (!secret) {
     // The credential plane is off for this deployment — deny rather than mint an
     // unscoped credential. (The responder should not even be running in this case,
     // but fail-closed regardless.)
@@ -275,30 +274,27 @@ export async function handleAuthorizationRequest(
   }
 
   // GRANT: the operational subject includes the exact claimed process instance.
-  // No control request is routed to an old subject after a successor claims
-  // authority. Socket expiry is not the authority or revocation boundary.
+  // A previous socket may remain open until its short JWT expires, but no control
+  // request is routed to its old subject after a successor claims authority.
   const permissions = workspaceAgentPermissions(
     claims.workspaceId,
     claims.agentId,
     connectionInstanceId,
   );
+  const nowSeconds = Math.floor(Date.now() / 1000);
   const userJwt = mintUserJwt({
     userPublicKey: decoded.userNkey,
     accountSeed: deps.callout.accountSeed,
-    name: connectionAuthorityName({
-      workspaceId: claims.workspaceId,
-      enrollmentId: claims.enrollmentId,
-      credentialGeneration: claims.credentialGeneration,
-      connectionInstanceId,
-    }),
+    name: claims.agentId,
     permissions,
     // Server-config-mode placement: the embedded user JWT's `aud` is the account
     // the user binds to (the configured `auth_callout.account`). All agents +
     // the privileged control plane share this account so subjects route; the
     // per-workspace isolation is carried by the subject permissions above.
     audienceAccount: deps.callout.accountName,
-    // NATS exp disconnects the live socket; it is not a renewable login token.
-    // Authenticate on every dial, but never schedule a healthy transport outage.
+    // Tie the credential's life to the bearer's remaining life: a revoked/expired
+    // enrollment cannot outlive its bearer at the NATS layer either.
+    expiresAtSeconds: Math.min(claims.exp, nowSeconds + NATS_USER_JWT_TTL_SECONDS),
   });
   const response = mintAuthResponse({
     userPublicKey: decoded.userNkey,
@@ -327,34 +323,18 @@ export async function startAuthCalloutResponder(
   deps: AuthCalloutDeps,
   natsUrl: string,
 ): Promise<ResponderConnection> {
-  let authority: Awaited<ReturnType<typeof startLiveConnectionAuthority>> | undefined;
   const connection = await createResponderConnection(
     natsUrl,
     { kind: "user-password", user: deps.callout.user, pass: deps.callout.password },
     AUTH_CALLOUT_SUBJECT,
-    (bytes) => {
-      if (!authority?.isReady()) throw new Error("live connection authority is not ready");
-      return handleAuthorizationRequest(deps, bytes);
-    },
+    (bytes) => handleAuthorizationRequest(deps, bytes),
     {
       name: "opengeni-auth-callout",
       ...(deps.observability ? observabilityEventBusOptions(deps.observability) : {}),
     },
   );
-  try {
-    authority = await startLiveConnectionAuthority(deps, connection.connection);
-  } catch (error) {
-    await connection.close();
-    throw error;
-  }
   deps.observability?.info?.("Opengeni NATS auth-callout responder started", {
     subject: AUTH_CALLOUT_SUBJECT,
   });
-  return {
-    connection: connection.connection,
-    close: async () => {
-      await authority?.close();
-      await connection.close();
-    },
-  };
+  return connection;
 }

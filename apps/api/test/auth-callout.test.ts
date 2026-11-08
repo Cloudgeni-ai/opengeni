@@ -7,7 +7,7 @@
 
 import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
 import { signEnrollmentBearer } from "@opengeni/contracts";
-import { decodeAuthRequest, mintAuthResponse, nkeys, type NatsConnection } from "@opengeni/events";
+import { decodeAuthRequest, mintAuthResponse, nkeys } from "@opengeni/events";
 import { createLogThrottle } from "@opengeni/observability";
 
 const SECRET = "test-enrollment-signing-secret";
@@ -65,7 +65,6 @@ mock.module("@opengeni/db", () => ({
           workspaceId,
           status: "active",
           credentialGeneration,
-          connectionInstanceId: connectionOwners.get(`${workspaceId}:${enrollmentId}`),
         } as never);
   },
   claimEnrollmentConnection: async (
@@ -97,10 +96,11 @@ mock.module("@opengeni/db", () => ({
 }));
 
 // Imported AFTER the db mock so the responder binds the mocked getEnrollment.
-const { AUTH_CALLOUT_DENIAL_WARNING_INTERVAL_MS, handleAuthorizationRequest } =
-  await import("../src/sandbox/auth-callout");
-const { connectionAuthorityName, reconcileLiveConnections } =
-  await import("../src/sandbox/live-connection-authority");
+const {
+  AUTH_CALLOUT_DENIAL_WARNING_INTERVAL_MS,
+  handleAuthorizationRequest,
+  NATS_USER_JWT_TTL_SECONDS,
+} = await import("../src/sandbox/auth-callout");
 
 const account = nkeys.createAccount();
 const ACCOUNT_SEED = new TextDecoder().decode(account.getSeed());
@@ -108,7 +108,7 @@ const ACCOUNT_SEED = new TextDecoder().decode(account.getSeed());
 function deps() {
   return {
     db: {} as never,
-    settings: { enrollmentSigningSecret: SECRET, sandboxSelfhostedEnabled: true } as never,
+    settings: { enrollmentSigningSecret: SECRET } as never,
     callout: { accountSeed: ACCOUNT_SEED, accountName: "APP", user: "auth", password: "p" },
   };
 }
@@ -152,57 +152,6 @@ afterAll(() => {
 });
 
 describe("handleAuthorizationRequest", () => {
-  test("live authority audits every broker and inventory page, not client-supplied names", async () => {
-    connectionOwners.set(`${WS}:${AGENT}`, CONNECTION);
-    const healthy = connectionAuthorityName({
-      workspaceId: WS,
-      enrollmentId: AGENT,
-      credentialGeneration: 1,
-      connectionInstanceId: CONNECTION,
-    });
-    const stale = connectionAuthorityName({
-      workspaceId: WS,
-      enrollmentId: AGENT,
-      credentialGeneration: 2,
-      connectionInstanceId: CONNECTION,
-    });
-    const offsets: number[] = [];
-    const kicked: string[] = [];
-    const nc = {
-      requestMany: async (_subject: string, data: string) => {
-        const { offset } = JSON.parse(data);
-        offsets.push(offset);
-        return (async function* () {
-          for (const server of ["server-a", "server-b"])
-            yield {
-              json: () => ({
-                server: { id: server },
-                data: {
-                  total: 1025,
-                  connections:
-                    offset === 0
-                      ? [
-                          { cid: 1, account: "APP", authorized_user: healthy },
-                          { cid: 2, account: "APP", authorized_user: "control", name: stale },
-                          { cid: 3, account: "OTHER", authorized_user: stale },
-                        ]
-                      : [{ cid: 1025, account: "APP", authorized_user: stale }],
-                },
-              }),
-            };
-        })();
-      },
-      request: async (subject: string, data: string) => {
-        const server = subject.split(".")[3];
-        kicked.push(`${server}:${JSON.parse(data).cid}`);
-        return { json: () => ({ server: { id: server } }) };
-      },
-    } as unknown as NatsConnection;
-    await reconcileLiveConnections(deps(), nc);
-    expect(offsets).toEqual([0, 1024]);
-    expect(kicked).toEqual(["server-a:0", "server-b:0", "server-a:1025", "server-b:1025"]);
-  });
-
   test("a valid + active bearer GRANTS a workspace-scoped user JWT", async () => {
     const bearer = await signEnrollmentBearer(SECRET, {
       workspaceId: WS,
@@ -223,8 +172,9 @@ describe("handleAuthorizationRequest", () => {
     expect(userClaims.nats.pub.allow).toEqual([scope, "_INBOX.>"]);
     expect(userClaims.nats.sub.allow).toEqual([scope]);
     expect(userClaims.aud).toBe("APP");
-    // A login deadline must not become a timer that severs accepted work.
-    expect(userClaims.exp).toBeUndefined();
+    const now = Math.floor(Date.now() / 1000);
+    expect(userClaims.exp).toBeGreaterThan(now);
+    expect(userClaims.exp).toBeLessThanOrEqual(now + NATS_USER_JWT_TTL_SECONDS);
   });
 
   test("a MISSING bearer is denied", async () => {
@@ -392,7 +342,7 @@ describe("handleAuthorizationRequest", () => {
     expect(denied.error).toMatch(/another runner/i);
   });
 
-  test("a soon-expiring login bearer does not schedule a live socket disconnect", async () => {
+  test("the user JWT never outlives a sooner bearer expiration", async () => {
     const bearerExp = Math.floor(Date.now() / 1000) + 30;
     const bearer = await signEnrollmentBearer(SECRET, {
       workspaceId: WS,
@@ -406,7 +356,7 @@ describe("handleAuthorizationRequest", () => {
     const userClaims = JSON.parse(
       Buffer.from(res.userJwt!.split(".")[1]!, "base64url").toString("utf8"),
     );
-    expect(userClaims.exp).toBeUndefined();
+    expect(userClaims.exp).toBe(bearerExp);
   });
 
   test("a denial response is still a SIGNED, server-addressed auth response", async () => {

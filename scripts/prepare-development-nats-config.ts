@@ -49,15 +49,12 @@ http: 8222
 
 accounts {
   ${quoted(config.accountName)}: {
-    imports: [ { service: { account: SYS, subject: "$SYS.REQ.SERVER.*.KICK" } } ]
     users: [
       { user: ${quoted(config.controlUser)}, password: ${quoted(config.controlPassword)} }
       { user: ${quoted(config.calloutUser)}, password: ${quoted(config.calloutPassword)} }
     ]
   }
-  SYS: {
-    exports: [ { service: "$SYS.REQ.SERVER.*.KICK", accounts: [${quoted(config.accountName)}] } ]
-  }
+  SYS: {}
 }
 system_account: SYS
 

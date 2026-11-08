@@ -152,11 +152,9 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 Postgres commits precede notifications. NATS carries fanout, invalidations,
 request/reply and machine streams, never commit evidence.
 
-Connected Machine login-credential expiry is an admission check, not a timer on
-an authenticated socket. Exact runner leases fence routing and event ingestion;
-the auth responder reconciles broker inventories with durable enrollment authority
-and explicitly kicks revoked or superseded sockets. Healthy sockets have no TTL;
-token renewal updates future dials in place. The native supervisor owns and closes
+Connected Machine socket credentials retain their five-minute revocation bound.
+Exact runner leases fence routing and event ingestion; enrollment-token renewal
+updates future dials in place. The native supervisor owns and closes
 each generation's control and bulk socket tasks independently of retained work.
 See [Connected Machines](connected-machines.md#control-transport-recovery).
 

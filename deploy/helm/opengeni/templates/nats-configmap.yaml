@@ -39,16 +39,13 @@ data:
       # callout) all live in APP so subjects route. Per-workspace isolation is the
       # agents' signed JWT subject permissions.
       {{ .Values.nats.authCallout.account }}: {
-        imports: [ { service: { account: SYS, subject: "$SYS.REQ.SERVER.*.KICK" } } ]
         users: [
           { user: {{ .Values.nats.authCallout.controlUser }}, password: $OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD }
           { user: {{ .Values.nats.authCallout.calloutUser }}, password: $OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD }
         ]
       }
       # The system account (monitoring/advisories). Kept operationally separate.
-      SYS: {
-        exports: [ { service: "$SYS.REQ.SERVER.*.KICK", accounts: [{{ .Values.nats.authCallout.account }}] } ]
-      }
+      SYS: {}
     }
     system_account: SYS
 

@@ -816,8 +816,7 @@ export async function startApi(options: StartApiOptions = {}) {
     });
     observability.info("Opengeni machine-metrics + hello ingestion consumers started", {});
   }
-  // Keep revoking existing sockets when a previously enabled plane is disabled.
-  if (settings.sandboxSelfhostedEnabled || resolveNatsCalloutConfig(settings)) {
+  if (settings.sandboxSelfhostedEnabled) {
     const callout = resolveNatsCalloutConfig(settings);
     if (callout) {
       try {

@@ -41,23 +41,9 @@ generation and invalidates existing grants.
 ### Control transport recovery
 
 The API/worker uses its shared NATS connection for control RPC, operation frames,
-and acknowledgements. Enrollment bearer expiry bounds admission on every dial,
-not the lifetime of an authenticated NATS socket: auth-callout user JWTs have no
-scheduled expiry. Live authority remains the active enrollment and exact runner
-lease; revocation or takeover stops routing and heartbeat renewal immediately.
-The auth responder also audits account-scoped broker connection inventories every
-five seconds, comparing each signed enrollment/generation/runner identity with
-PostgreSQL and explicitly disconnecting revoked, removed or superseded sockets.
-This is authorization revalidation, not a connection TTL: healthy sockets survive
-every audit, even after login expiry or a missed heartbeat. Broker inventory makes
-revocation recoverable after an API restart; DB errors never imply revocation.
-New admission is blocked while the audit cannot run. The NATS config must export
-`$SYS.REQ.SERVER.*.KICK` from SYS to the application account and import it there
-(see `deploy/nats/auth-callout.conf`); agents' signed permissions deny this service.
-Apply this broker config before deploying the API. Without it the responder fails
-closed rather than admitting non-expiring access it cannot revoke.
-
-Ordinary token renewal updates the next-dial bearer and the
+and acknowledgements. The broker's five-minute credential bounds established
+access after enrollment revocation; fresh admission checks enrollment authority.
+Ordinary enrollment-token renewal updates the next-dial bearer and the
 relay's future registrations in place, leaving accepted operations and healthy
 sockets untouched. Authority, consent, endpoint or authentication-state changes
 still replace the link.

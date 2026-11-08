@@ -376,8 +376,8 @@ pub(crate) fn rejected_bearer_reconnect_command(
     format!("opengeni-agent connect --force --api-url {api_url} --workspace-id {workspace_id}")
 }
 
-/// Older control planes issue expiring user JWTs. Preserve their reconnect
-/// compatibility during rollout; current servers do not expire healthy sockets.
+/// Control planes issue expiring user JWTs to bound revoked access. Distinguish
+/// their expected expiry from unrelated transport failures.
 fn message_is_expected_credential_rotation(message: &str) -> bool {
     message
         .to_ascii_lowercase()
