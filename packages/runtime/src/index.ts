@@ -3712,33 +3712,19 @@ export function hasCanonicalEditableArtifactToolSurface(
 /**
  * errorFunction for built-in tools whose execution failures must stay fatal.
  * With `errorFunction: null` the SDK also rethrows its own InvalidToolInputError
- * (arguments that are not JSON or do not match the schema), which ends the whole
- * turn over a correctable model mistake. This returns that one error to the model
- * as a tool result, naming only property paths and issue messages, never values,
- * and rethrows every other error unchanged.
+ * (arguments that do not match the schema), which ends the whole turn over a
+ * correctable model mistake. This returns that one error to the model as a tool
+ * result and rethrows every other error unchanged. The SDK's own parser stays the
+ * authority (including strict-mode null stripping). Tool data is redacted in this
+ * process (OPENAI_AGENTS_DONT_LOG_TOOL_DATA), so the error carries no field
+ * detail; the model already has the schema.
  */
 function invalidToolInputOnlyErrorFunction(toolName: string) {
   return (_context: unknown, error: unknown): string => {
     if (!(error instanceof ModelBehaviorError) || error.name !== "InvalidToolInputError") {
       throw error;
     }
-    const original = (error as { originalError?: unknown }).originalError;
-    // Duck-typed: the schema may come from another copy of zod.
-    const rawIssues = (original as { issues?: unknown } | undefined)?.issues;
-    const issues = Array.isArray(rawIssues)
-      ? rawIssues.slice(0, 10).flatMap((issue: { path?: unknown; message?: unknown }) => {
-          if (typeof issue?.message !== "string") return [];
-          const path = Array.isArray(issue.path) ? issue.path.map(String).join(".") : "";
-          return [path ? `${path}: ${issue.message}` : issue.message];
-        })
-      : [];
-    const detail =
-      issues.length > 0
-        ? ` (${issues.join("; ")})`
-        : original instanceof SyntaxError
-          ? " (not valid JSON)"
-          : "";
-    return `The ${toolName} tool was not called because its arguments do not match its input schema${detail}. Correct the arguments and call the tool again.`;
+    return `The ${toolName} tool was not called because its arguments do not match its input schema. Correct the arguments and call the tool again.`;
   };
 }
 
