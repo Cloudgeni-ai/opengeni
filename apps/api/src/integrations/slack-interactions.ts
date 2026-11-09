@@ -2868,6 +2868,7 @@ async function handleSlackRouteChoice(
     ? await getSlackAgent(deps.db, {
         accountId: home.accountId,
         agentId: chosen.candidateSlackAgentId,
+        connectionId: entry.connectionId,
       })
     : null;
   if (

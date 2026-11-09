@@ -4,6 +4,11 @@
 // sync triggers (and their opengeni.agents_dual_write no-op), RLS on the new
 // tables, revision and sessions.agent_id immutability, and the wider legacy
 // checks.
+//
+// The contract (1317) drops the two sync triggers; their functions stay until
+// the legacy drop. This suite puts the triggers back on its own database so it
+// keeps covering the expand-era behaviour, which runs in production from 1243
+// until 1317.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { sql as drizzleSql } from "drizzle-orm";
@@ -42,6 +47,13 @@ beforeAll(async () => {
   const acquired = await acquireRestrictedRuntimeTestDatabase("agents-expand");
   if (!acquired) throw new Error("PostgreSQL required");
   shared = acquired;
+  await shared.admin.unsafe(`
+    CREATE TRIGGER bot_templates_sync_agent
+      AFTER INSERT OR UPDATE OR DELETE ON "${shared.schema}".bot_templates
+      FOR EACH ROW EXECUTE FUNCTION "${shared.schema}".sync_agent_from_bot_template();
+    CREATE TRIGGER slack_agents_sync_agent
+      AFTER INSERT OR UPDATE OR DELETE ON "${shared.schema}".slack_agents
+      FOR EACH ROW EXECUTE FUNCTION "${shared.schema}".sync_agent_from_slack_agent();`);
   app = createDb(shared.appUrl, { searchPath: shared.schema });
   appSql = postgres(shared.appUrl, {
     max: 2,

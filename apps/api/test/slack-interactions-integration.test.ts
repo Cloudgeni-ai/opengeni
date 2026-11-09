@@ -13348,8 +13348,9 @@ describe("Slack agents", () => {
 
     const agents = async () =>
       await shared!.admin<{ id: string; name: string; knowledge_collection_id: string | null }[]>`
-        select id, name, knowledge_collection_id from slack_agents
-        where connection_id = ${value.connectionId} and name = 'Finance'`;
+        select a.id, a.name, a.memory_collection_id as knowledge_collection_id
+        from agents a join agent_slack_installs i on i.agent_id = a.id
+        where i.connection_id = ${value.connectionId} and a.name = 'Finance'`;
     const press = async (actionId: string, userId: string) =>
       await pressSlackButton(value, {
         post: card,

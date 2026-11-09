@@ -207,7 +207,7 @@ test("without a connected Slack workspace, admins get one way to connect it", as
   expect(container.textContent).toContain("Connect Slack");
 });
 
-test("while it is on in one Slack workspace, the other's switch says to turn that off first", async () => {
+test("while it is on in one Slack workspace, it can be turned on in another too", async () => {
   const agent = makeAgent({ name: "Data team", slack: [availability()] });
   const client = {
     listAgentSlackInstalls: async () => ({
@@ -230,6 +230,8 @@ test("while it is on in one Slack workspace, the other's switch says to turn tha
   };
   const container = await render(agent, client);
   expect(toggle(container, "Available in Acme").getAttribute("aria-disabled")).not.toBe("true");
-  expect(toggle(container, "Available in Acme Support").getAttribute("aria-disabled")).toBe("true");
-  expect(container.textContent).toContain("It's available in Acme. Turn that off first.");
+  expect(toggle(container, "Available in Acme Support").getAttribute("aria-disabled")).not.toBe(
+    "true",
+  );
+  expect(container.textContent).not.toContain("Turn that off first");
 });

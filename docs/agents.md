@@ -9,8 +9,10 @@ be available, per connected Slack installation.
 
 The change ships as expand, migrate and contract releases
 ([migrations-expand-contract.md](migrations-expand-contract.md)). The API now
-reads and writes `agents` and keeps the legacy rows in sync for older
-releases ([API](#api)); the legacy tables go in the contract step.
+reads and writes only `agents`; since the contract
+([Contract](#contract)) every legacy foreign key points at
+`agent_slack_installs` and nothing writes `bot_templates` or `slack_agents`.
+The legacy drop removes those tables.
 
 ## Data
 
@@ -34,8 +36,18 @@ Slack routes, interactions, proposals, intro posts, suggestions, the
   agent and Slack connection, owned by the agent's home workspace so a rename
   updates it in the same transaction. `name_key` is the Slack handle key (same
   normalisation as `slack_agents.name_key`), unique per connection; `open` is
-  the open-use switch. The announcement channel stays per installation in
-  `slack_agent_update_settings`.
+  the open-use switch; `install_workspace_id` (migration 1301) is the Slack
+  installation's own workspace, where its routes and Slack records live.
+  Deleting that workspace deletes the row. The announcement channel stays per
+  installation in `slack_agent_update_settings`.
+- The Slack records keyed by agent (`slack_channel_routes`,
+  `slack_interactions`, `slack_agent_user_states`, `slack_agent_proposals`,
+  `slack_agent_intro_posts`, `slack_agent_suggestions`) reference
+  `agent_slack_installs (agent_id, connection_id)` (migrations 1304 to 1316):
+  one agent in one installation, exactly what a `slack_agents` row was.
+  Turning Slack off in an installation deletes its routes, user states, intro
+  records and suggestions there and unlinks its chats and proposals
+  (`ON DELETE SET NULL` of the agent column only), as before.
 - `sessions.agent_id` (migration 1244): the agent a chat was started for. No
   foreign key (recheck on use). A trigger allows only one change, from NULL to a
   value. Forks copy it with the row; child workers never set it. It is
@@ -80,29 +92,15 @@ All three tables are FORCE RLS with the usual home `workspace_isolation`.
 1244 links existing Slack agent chats to their agent from
 `slack_interactions.slack_agent_id`, leaving `agent_prompt_revision` NULL.
 
-## Sync until the contract step
+## Sync during the rollout
 
-Older binaries keep writing `bot_templates` and `slack_agents` during and
-after the expand release. `AFTER INSERT OR UPDATE OR DELETE` triggers mirror
-those writes:
-
-- Only the columns the write changed are copied, so fields an agent gained in
-  the new model stay. A new revision is added only when the text the legacy
-  table owns changed (a template's First message, a Slack agent's
-  Instructions); the other text is carried over from the current revision.
-- Deleting a legacy row deletes the agent. A template never changes an agent
-  whose origin is a Slack agent. A new Slack agent that shares a template
-  agent's id takes that agent over (it becomes a shared Slack agent with
-  Memory on and keeps the First message).
-- The triggers run as the writer and switch the tenancy settings to the
-  agent's home workspace with no person, then restore them, because a Slack
-  agent's row lives in the installation's workspace while its agent lives in
-  the target workspace. Every update must change exactly one row, and a write
-  whose agent is out of reach fails rather than syncing nothing. Deletes may
-  find nothing, because a workspace deletion can cascade to the agent first.
-- They do nothing while `opengeni.agents_dual_write = '1'`. Code that writes
-  both shapes sets it transaction-locally, so, for example, turning Slack off
-  (deleting the legacy `slack_agents` row) never deletes the agent.
+From the expand release until the contract, older binaries wrote
+`bot_templates` and `slack_agents`. `AFTER INSERT OR UPDATE OR DELETE`
+triggers (1243) mirrored those writes into the agents tables; they did nothing
+while `opengeni.agents_dual_write = '1'`, which the API switch set while it
+wrote both shapes. The contract (1317) drops the triggers. Their functions stay
+until the legacy drop, because the previous release's readiness check expects
+them.
 
 The legacy checks were widened so dual writes never fail: Slack agent names up
 to 120 characters, descriptions 0 to 280 and Instructions up to 20,000;
@@ -136,14 +134,12 @@ path is the agent's home.
   Slack name rules are checked only when Slack is turned on (and on a rename
   while it is on). On a clash the agent already in Slack keeps its name and the
   other is refused (`agent_slack_name_taken`); agents are never merged.
-- For now an agent is available in at most one Slack installation
-  (`agent_slack_single_install`), because `slack_agents.id` is the agent's id
-  and `slack_channel_routes` still points at `slack_agents`.
-- Turning Slack off deletes the legacy row, and with it the agent's channel
-  routes, intro records and update settings in that installation; its older
-  Slack threads lose their link to the agent
-  (`slack_interactions.slack_agent_id` is set to null), so they no longer
-  resolve to it if Slack is turned on again.
+- An agent can be available in any number of Slack installations.
+- Turning Slack off in an installation deletes its `agent_slack_installs`
+  row, and with it the agent's channel routes, user states, intro records and
+  suggestions there; its older Slack threads in that installation lose their link
+  to the agent (`slack_interactions.slack_agent_id` is set to null), so they no
+  longer resolve to it if Slack is turned on again.
 - The visibility rule is checked again under the agent's row lock, so an
   agent can never be Only me and in Slack at once.
 - `PUT /agents/:id/slack/:connectionId` takes the availability's own
@@ -153,27 +149,52 @@ path is the agent's home.
   scope for a shared agent, the owner's personal scope for an Only me one. It
   is best effort and may wait for review under Review-first.
 
-### Dual write
+### Contract
 
-Every write updates `agents` (and a revision, and `agent_slack_installs`) and
-the legacy rows in the same transaction, with
-`set_config('opengeni.agents_dual_write', '1', true)` so the sync triggers
-stand aside:
+Migrations 1301 to 1319, after the API switch is the previous release. Each
+file that adds or drops a foreign key holds one key, so it locks the
+referencing table and then the referenced one, the order writers take them in.
 
-- `bot_templates` for agents whose origin is a bot template (First message as
-  `setup_instructions`);
-- `slack_agents` while the agent is available in Slack, in the installation's
-  workspace and targeting the home workspace (Instructions, `open`, Memory
-  collection, `version` mirrored). Turning Slack off deletes that row, not the
-  agent.
+1. 1301 adds `agent_slack_installs.install_workspace_id` and copies it from
+   `slack_agents.workspace_id`, and raises each
+   agent's `version` to its legacy row's where that was higher (the legacy
+   Slack agents API showed the greater of the two). A trigger on
+   `slack_agents` fills the column for the previous release's writes during
+   the rollout. 1302 adds its foreign key to `workspaces` `NOT VALID` and 1303
+   indexes it concurrently.
+2. 1304 to 1309 add the per-installation foreign keys `NOT VALID`, one table
+   each (routes, interactions, user states, proposals, intro records,
+   suggestions); 1310 validates them and 1302's.
+3. 1311 to 1316 drop the foreign keys to `slack_agents`, one table each, and
+   1317 drops the sync triggers.
+4. 1318 and 1319 add unique indexes per installation (`connection_id`,
+   agent, Slack person or channel) concurrently; the API writes against them.
 
-The backfill started agents at version 1, so during the rollout the legacy
-Slack agents API shows the greater of the agent's and its legacy row's
-version, accepts either, and raises the agent's version to match before a
-write.
+The API no longer writes `bot_templates` or `slack_agents`. It only deletes an
+agent's leftover `slack_agents` row when it renames the agent or removes the
+agent or one of its installations: the previous release still inserts those
+rows, and a stale one (its id or old name) would refuse it turning the agent
+on again in an installation it left, or reusing a freed name, during the
+rollout or after a rollback to it. Once the legacy drop has removed the table
+this is skipped. The per-agent
+unique keys `slack_agent_user_states_agent_user_uq` and
+`slack_agent_intro_posts_agent_channel_uq` stay until the legacy drop because
+the previous release names them in `ON CONFLICT`. Until then, the same Slack
+person (Enterprise Grid) or shared channel (Slack Connect) in two installations
+of one agent hits them, and that installation's hint, open notice or intro
+record counts as already made.
 
-Older pods keep reading and writing the legacy rows during a rolling deploy,
-and the triggers carry their writes over.
+Rolling back past the API switch is not safe once the contract is applied:
+older binaries rely on the dropped triggers and foreign keys.
+
+The API switch release itself (the previous release, during the rollout or
+after a rollback to it) still finds an installation's workspace through
+`slack_agents`, which this release no longer writes. An agent this release
+turned on in Slack therefore falls back to its home workspace there, and an
+agent in several installations is seen only through the installation it
+joined first: in the others a pick from a route card answers that the agent
+is gone, and turning it on in another installation is refused. That degrades
+until this release serves again; it does not change any data.
 
 ### Chats bound to an agent
 
@@ -254,17 +275,21 @@ own Knowledge collection and its chats may read its other shared chats
   with standing `instructions` and an optional `firstMessage` (the older
   `setupInstructions` argument is taken as the First message), shared like
   the chat it was made from, with Memory off.
-- Slack agents are the agents available in that installation. Deleting one
-  through the old endpoint deletes the agent.
+- Slack agents are the agents available in that installation, one record
+  per installation (an agent in two installations shows in both lists, with
+  the agent's own `version`). Item routes take `?connectionId=` for the
+  installation; opening, deleting, channels and intros of an agent in several
+  installations need it (`slack_agent_installation_required`). Deleting one
+  through the old endpoint takes the agent out of that installation, and
+  deletes the agent with its last one.
 
 ### Contract follow-ups
 
-- Point `slack_channel_routes` (and the other legacy foreign keys) at `agents`
-  and lift the one-installation limit.
-- Store the installation's home workspace on `agent_slack_installs` (today it
-  comes from the legacy `slack_agents.workspace_id`).
-- Make the old Slack agent `DELETE` turn Slack off instead of deleting the
-  agent, once nothing older depends on it.
+- The legacy drop: drop `bot_templates`, `slack_agents`, the sync and fill
+  functions and the per-agent unique keys, and make
+  `install_workspace_id` NOT NULL.
+- Make the old Slack agent `DELETE` turn Slack off in that installation
+  instead of deleting the agent, once nothing older depends on it.
 
 ## App
 
@@ -284,9 +309,8 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   **Remember across chats**, who can use it, and **Available in**: the app
   always, and one row per connected Slack workspace (`@Opengeni +handle`, open
   use, **Introduce in channels** at `/agents/:agentId/introduce/:connectionId`).
-  While an agent is on in one Slack workspace, the others' switches are off
-  with a reason (`agent_slack_single_install`). Controls follow the agent's
-  `viewer` access.
+  An agent can be on in several Slack workspaces at once. Controls follow the
+  agent's `viewer` access.
 - Form: only the name is required. Lengths are checked on save with a count
   near each limit, never cut while typing. **Only me** is off with a reason
   where Only me chats aren't available.
@@ -311,11 +335,13 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
 2. Worker: the agent Instructions prompt layer and a claim gate so older
    workers never run a chat that needs it (migration 1276; see
    [run lifecycle, "Agent instructions"](run-lifecycle.md#agent-instructions)).
-3. API switch (this step): read `agents`, write both shapes (with
+3. API switch: read `agents`, write both shapes (with
    `opengeni.agents_dual_write`), bind `sessions.agent_id` and the revision when
    a chat starts. Old endpoints and frozen MCP tool names stay as
    compatibility layers.
 4. App: the Agents page replaces bot templates and the Slack agents list.
-5. Contract, once step 3 is the previous release: point the legacy foreign keys
-   at `agents`, stop writing the legacy tables and drop the sync triggers.
-6. Drop the legacy tables a release later.
+5. Contract (this step), once step 3 is the previous release: point the
+   legacy foreign keys at `agent_slack_installs`, stop writing the legacy
+   tables, drop the sync triggers and allow several Slack installations per
+   agent.
+6. Drop the legacy tables once the contract is the previous release.

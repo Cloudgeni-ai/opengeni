@@ -383,7 +383,10 @@ export const AGENT_ERROR_CODES = [
   "agent_slack_name_invalid",
   /** Only shared (`workspace`) agents can be available in Slack. */
   "agent_slack_requires_workspace_visibility",
-  /** For now an agent is available in at most one Slack workspace. */
+  /**
+   * @deprecated Never returned: an agent can be available in several Slack
+   * workspaces. Kept so the exported type does not narrow within a major.
+   */
   "agent_slack_single_install",
   /** The Opengeni Slack app is not available in the agent's workspace. */
   "slack_bot_unavailable",

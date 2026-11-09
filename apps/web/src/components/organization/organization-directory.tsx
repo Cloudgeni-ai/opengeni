@@ -599,9 +599,12 @@ export function OrganizationDirectoryProvider({
   const slackAgentNames = useCallback(
     async (workspaceId: string) => {
       const result = await client.listOpenGeniSlackAgents(identity.workspaceId);
-      return result.agents
-        .filter((agent) => agent.targetWorkspaceId === workspaceId)
-        .map((agent) => agent.name);
+      // An agent in several Slack installations is listed once per installation.
+      const names = new Map<string, string>();
+      for (const agent of result.agents) {
+        if (agent.targetWorkspaceId === workspaceId) names.set(agent.id, agent.name);
+      }
+      return [...names.values()];
     },
     [client, identity.workspaceId],
   );
