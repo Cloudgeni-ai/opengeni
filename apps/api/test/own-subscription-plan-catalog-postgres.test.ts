@@ -93,8 +93,21 @@ async function modelCatalog(grant: Awaited<ReturnType<typeof organizationOn>>) {
   return (await response.json()) as { ownSubscriptionPlan?: unknown };
 }
 
+/** Pro and Max on sale through Stripe (priced), or with no Stripe price (not buyable). */
+async function sellPaidPlans(priced: boolean) {
+  const { plans } = await readSubscriptionPlanCatalog(client!.db);
+  const catalog = plans.map((plan) =>
+    plan.key === "pro" || plan.key === "max"
+      ? { ...plan, stripePriceId: priced ? `price_${plan.key}` : null }
+      : plan,
+  );
+  await shared!
+    .admin`select set_subscription_plan_catalog(${shared!.admin.json(catalog)}, 'own-subscription-plan-test', 'Own subscription plan hint')`;
+}
+
 test("Free names the cheapest catalog plan that includes own subscriptions, with its price", async () => {
   if (!client) return;
+  await sellPaidPlans(true);
   const { plans } = await readSubscriptionPlanCatalog(client.db);
   const pro = plans.find((plan) => plan.key === "pro")!;
   const expected = { key: "pro", label: pro.label, monthlyPriceMicros: pro.monthlyPriceMicros };
@@ -129,4 +142,13 @@ test("Pro and above, legacy terms, and deployments without paid plans need nothi
       free.accountId,
     ),
   ).toBe(null);
+}, 180_000);
+
+test("a catalog that sells no such plan names none", async () => {
+  if (!client) return;
+  await sellPaidPlans(false);
+  const free = await organizationOn("free");
+  expect(await ownSubscriptionPlanNeeded(client.db, settings, free.accountId)).toBe(null);
+  expect((await modelCatalog(free)).ownSubscriptionPlan).toBeUndefined();
+  await sellPaidPlans(true);
 }, 180_000);
