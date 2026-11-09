@@ -242,6 +242,8 @@
     "hono": "4.12.30",
     "ip-address": "10.7.5",
     "js-yaml": "3.15.2",
+    "linkify-it": "5.0.2",
+    "markdown-it": "14.3.1",
     "mermaid": "11.16.0",
     "modal": "0.9.0",
     "protobufjs": "7.6.5",
