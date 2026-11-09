@@ -238,3 +238,27 @@ test("a claim that ran against the old access is not parked after access changed
   // Re-read and refused again with nothing changed: now it is parked.
   await block(f);
 });
+
+test("a workspace-wide change also reaches a claim refused before it was recorded", async () => {
+  const f = await fixture();
+  // Restoring membership names no chat. A claim refused just before it must
+  // not park afterwards with the old access, or nothing would ever start it.
+  const peek = await runnablePeek(f);
+  const nudged = await release(f, "membership", false);
+  expect(nudged.nudged).toContain(f.sessionId);
+  const stale = await blockSessionWorkBeforeAttemptClaim(client.db, f.workspaceId, {
+    accountId: f.grant.accountId,
+    sessionId: f.sessionId,
+    workflowId: `session-${f.sessionId}`,
+    attemptId: crypto.randomUUID(),
+    fence: peek.admissionFence!,
+    wakeRevision: peek.admissionWakeRevision!,
+    reason: "initiator_membership_required",
+    sqlState: "OG001",
+  });
+  expect(stale.action).toBe("stale");
+  expect((await getSession(client.db, f.workspaceId, f.sessionId))?.admissionBlock).toBeNull();
+  // A chat already running its message is not woken.
+  expect(await claim(f)).toMatchObject({ action: "claimed" });
+  expect((await release(f, "membership", false)).nudged).not.toContain(f.sessionId);
+});

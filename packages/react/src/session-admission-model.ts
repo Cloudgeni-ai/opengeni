@@ -295,14 +295,19 @@ export function sessionAdmissionNeedsMachineAccess(
 export function sessionAdmissionMachineAccessCopy(
   t: OpenGeniText,
   access: Pick<SessionMachineAccess, "machineName" | "ownerName" | "isOwner">,
+  options: { canAllowHere?: boolean } = {},
 ): SessionAdmissionCopy {
   const machine = access.machineName;
   if (access.isOwner) {
+    // Without the button here, the owner allows it from the machine's settings.
+    const canAllowHere = options.canAllowHere ?? true;
     return {
       title: t("sessionAdmission.machineAccessTitle"),
       body: t("sessionAdmission.machineAccessBody", { machine }),
-      next: t("sessionAdmission.machineAccessOwnerNext"),
-      action: t("sessionAdmission.allowForThisChat"),
+      next: canAllowHere
+        ? t("sessionAdmission.machineAccessOwnerNext")
+        : t("sessionAdmission.machineAccessOwnerSettingsNext"),
+      action: canAllowHere ? t("sessionAdmission.allowForThisChat") : null,
     };
   }
   const owner = access.ownerName?.trim() || t("sessionAdmission.theMachineOwner");

@@ -750,7 +750,9 @@ function StuckCard({
   // Allow for this chat, and only an unknown failure gets Try again.
   const copy = reason
     ? start.needsMachineAccess && start.machineAccess
-      ? sessionAdmissionMachineAccessCopy(t, start.machineAccess)
+      ? sessionAdmissionMachineAccessCopy(t, start.machineAccess, {
+          canAllowHere: start.allowMachine !== undefined,
+        })
       : sessionAdmissionCopy(t, reason)
     : null;
   const allowing = start.needsMachineAccess && start.machineAccess?.isOwner === true;

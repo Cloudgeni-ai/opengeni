@@ -156,6 +156,41 @@ describe("session admission notice", () => {
     expect(onRecheck).not.toHaveBeenCalled();
   });
 
+  test("the owner can Allow without permission to control the chat", async () => {
+    const onAllowMachine = mock(async () => {});
+    await render({
+      canControl: false,
+      machineAccess: {
+        sandboxId: "new-machine",
+        machineName: "My machine",
+        ownerName: "Sam",
+        isOwner: true,
+        queuedTurnBlocked: false,
+      },
+      onAllowMachine,
+    });
+    const button = container.querySelector("button")!;
+    expect(button.textContent).toBe("Allow for this chat");
+    await act(async () => button.click());
+    expect(onAllowMachine).toHaveBeenCalledTimes(1);
+  });
+
+  test("without Allow here, the owner is told where to allow it, never to press a missing button", async () => {
+    await render({
+      machineAccess: {
+        sandboxId: "new-machine",
+        machineName: "My machine",
+        ownerName: "Sam",
+        isOwner: true,
+        queuedTurnBlocked: false,
+      },
+    });
+    expect(container.textContent).toContain("Machine access needed");
+    expect(container.textContent).toContain("You can allow it in the machine’s settings.");
+    expect(container.textContent).not.toContain("Allow it for this chat");
+    expect(container.querySelector("button")).toBeNull();
+  });
+
   test("someone else sees who can allow the machine, with no button", async () => {
     await render({
       session: session("personal_resource_grant_required"),

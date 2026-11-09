@@ -41,6 +41,7 @@ import {
 } from "@opengeni/db";
 import { personalGitHubRepositoryResources } from "./resources";
 import { connectAutoConnectLoginsForTurn } from "./mcp-auto-connect";
+import { releaseAdmissionBlocksAfterAccessChange } from "../application/admission-release";
 import { ConnectionAccountSelectionError } from "./connection-account-selection-error";
 export { ConnectionAccountSelectionError } from "./connection-account-selection-error";
 import {
@@ -330,6 +331,11 @@ export async function turnOnOwnLoginHere(
     context: "workspace_shared",
     workspaceSharedAcknowledged: true,
   });
+  // A saved message may have been waiting for this login.
+  await releaseAdmissionBlocksAfterAccessChange(
+    { db },
+    { accountId: input.accountId, workspaceId: input.workspaceId, change: "personal_resource" },
+  );
 }
 
 export async function authorizedSocialConnectionsForGrant(input: {

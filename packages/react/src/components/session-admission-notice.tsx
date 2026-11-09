@@ -368,7 +368,9 @@ export function SessionAdmissionNotice({
   const copy = machineChanged
     ? sessionAdmissionMachineChangedCopy(t)
     : needsMachineAccess && machineAccess
-      ? sessionAdmissionMachineAccessCopy(t, machineAccess)
+      ? sessionAdmissionMachineAccessCopy(t, machineAccess, {
+          canAllowHere: onAllowMachine !== undefined,
+        })
       : sessionAdmissionCopy(t, reason);
   const allowing = !machineChanged && needsMachineAccess && machineAccess?.isOwner === true;
   // The one action: the owner allows the machine, or, for a failure nothing
@@ -385,8 +387,10 @@ export function SessionAdmissionNotice({
           : copy.action
         : null;
 
-  async function run(work: () => Promise<void>, failed: string) {
-    if (pending.current || busy || !canControl) return;
+  // Allowing is the owner's own grant, not a session control: it needs no
+  // control permission. Retrying and moving the chat do.
+  async function run(work: () => Promise<void>, failed: string, needsControl = true) {
+    if (pending.current || busy || (needsControl && !canControl)) return;
     pending.current = true;
     setChecking(true);
     setFailure(null);
@@ -402,7 +406,7 @@ export function SessionAdmissionNotice({
 
   function act() {
     if (allowing && onAllowMachine) {
-      void run(onAllowMachine, t("sessionAdmission.allowFailed"));
+      void run(onAllowMachine, t("sessionAdmission.allowFailed"), false);
     } else if (!paused || refreshRequired) {
       void run(
         onRecheck,

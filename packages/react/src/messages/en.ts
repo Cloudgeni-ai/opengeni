@@ -4434,6 +4434,8 @@ export const englishMessages = {
     "Only {owner} can allow it. It starts by itself once they do.",
   "sessionAdmission.machineAccessOwnerNext":
     "Allow it for this chat and your message starts right away.",
+  "sessionAdmission.machineAccessOwnerSettingsNext":
+    "You can allow it in the machine’s settings. Your message starts by itself once you do.",
   "sessionAdmission.machineAccessTitle": "Machine access needed",
   "sessionAdmission.machineChangeFailed":
     "The machine change could not be confirmed. Refresh and try again.",

@@ -84641,6 +84641,14 @@ export async function releaseSessionAdmissionBlocksAfterAccessChange(
   const result: ReleaseSessionAdmissionBlocksResult = { released: [], nudged: [] };
   const listed = input.sessionIds ? [...new Set(input.sessionIds)] : null;
   if (listed && listed.length === 0) return result;
+  // Workspace-wide changes also wake chats whose next message is queued and not
+  // yet claimed: a claim refused just before this change may record its block
+  // after this scan, and the wake makes that block stale so the claim retries.
+  const awaitingClaim = sql`(${schema.sessions.activeTurnId} is null and exists (
+    select 1 from ${schema.sessionTurns}
+    where ${schema.sessionTurns.workspaceId} = ${schema.sessions.workspaceId}
+      and ${schema.sessionTurns.sessionId} = ${schema.sessions.id}
+      and ${schema.sessionTurns.status} = 'queued'))`;
   const candidates = await withWorkspaceSessionActivityRls(
     db,
     input.workspaceId,
@@ -84654,10 +84662,10 @@ export async function releaseSessionAdmissionBlocksAfterAccessChange(
             eq(schema.sessions.accountId, input.accountId),
             listed
               ? inArray(schema.sessions.id, listed)
-              : sql`${schema.sessions.admissionBlock} is not null`,
+              : sql`(${schema.sessions.admissionBlock} is not null or ${awaitingClaim})`,
           ),
         )
-        .orderBy(asc(schema.sessions.id))
+        .orderBy(sql`(${schema.sessions.admissionBlock} is null)`, asc(schema.sessions.id))
         .limit(200),
   );
   for (const candidate of candidates) {
@@ -84682,7 +84690,7 @@ export async function releaseSessionAdmissionBlocksAfterAccessChange(
           const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
           const block = session.admissionBlock;
           if (!block) {
-            if (!listed || session.activeTurnId !== null) return null;
+            if (session.activeTurnId !== null) return null;
             const [queued] = await tx
               .select({ id: schema.sessionTurns.id })
               .from(schema.sessionTurns)
