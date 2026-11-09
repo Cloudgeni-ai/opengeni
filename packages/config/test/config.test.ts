@@ -240,11 +240,13 @@ describe("deployment credit margin override", () => {
 });
 
 describe("usage allowance rolling activation", () => {
-  test("defaults producers off in every environment", () => {
+  test("defaults producers on in every environment", () => {
+    // Every database this release runs on is past the 0977 baseline, which
+    // includes the allowance migrations, so no older consumer can be running.
     for (const environment of ["local", "test", "production"]) {
       expect(
         withEnv({ OPENGENI_ENVIRONMENT: environment }, () => getSettings()).usageAllowancesEnabled,
-      ).toBe(false);
+      ).toBe(true);
     }
   });
   test("parses explicit activation and opt-out without boolean coercion", () => {

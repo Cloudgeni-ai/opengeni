@@ -1,5 +1,38 @@
 # @opengeni/example-northstar-support
 
+## 0.0.213
+
+### Patch Changes
+
+- eead913: Redesign the Northstar demo: Northstar gets its own night-sky identity (navy, star-gold, Schibsted Grotesk), the embedded agent wears Opengeni's brand (ink, aqua, DM Sans, layered mark), and the panel's idle state shows the exact request the agent will run and what it may read or change.
+- Updated dependencies [64fd53f]
+- Updated dependencies [7332869]
+- Updated dependencies [2e7c01e]
+- Updated dependencies [b01c6c8]
+- Updated dependencies [3c94d65]
+- Updated dependencies [6c69279]
+- Updated dependencies [81642f5]
+- Updated dependencies [281af3a]
+- Updated dependencies [2117a2d]
+- Updated dependencies [b2c6c04]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [fccf354]
+- Updated dependencies [906407a]
+- Updated dependencies [c63eeb2]
+- Updated dependencies [98938f0]
+- Updated dependencies [3929153]
+- Updated dependencies [60ed55d]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [8099970]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [65e1fb9]
+- Updated dependencies [c0b9f88]
+  - @opengeni/react@6.12.0
+  - @opengeni/sdk@6.12.0
+
 ## 0.0.212
 
 ### Patch Changes

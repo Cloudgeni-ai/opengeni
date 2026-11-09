@@ -624,9 +624,12 @@ const SettingsSchema = z.object({
   creditPromotionPolicy: EnvCreditPromotionPolicy,
   entitlementsMode: EntitlementsMode.default("none"),
   usageLimitsMode: UsageLimitsMode.default("none"),
-  // Gate new allowance policies until every API/worker in the fleet enforces
-  // them. Persisted-policy enforcement and recovery reads/clears stay active.
-  usageAllowancesEnabled: EnvBoolean.default(false),
+  // New allowance policies (workspace budgets, member and per-person limits).
+  // On by default: this release only runs on a database past the 0977
+  // migration baseline, so every API and worker beside it already enforces
+  // them. `false` is an operator opt-out of new policies only; persisted ones
+  // stay enforced and can still be cleared.
+  usageAllowancesEnabled: EnvBoolean.default(true),
   staticEntitlementsJson: z.string().default("{}"),
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
