@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 import {
+  SESSION_ARCHIVE_FORMAT_VERSION,
   SESSION_ARCHIVE_RESTORE_TABLES,
+  SESSION_ARCHIVE_TRANSCRIPT_FORMAT,
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -12,10 +14,13 @@ import {
   createSession,
   getSession,
   persistModelContextSnapshot,
+  readSessionArchiveTranscriptEvents,
   submitHumanPromptInTransaction,
+  toPostgresLosslessJson,
   unarchiveSession,
   withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
+import { writeCompressedJsonLines } from "@opengeni/storage";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createSessionArchiveActivities } from "../src/activities/session-archive";
@@ -291,6 +296,81 @@ describe("idle-session archive worker", () => {
     const [deltas] = await shared.admin`select count(*)::int as count from session_events
       where session_id = ${scope.sessionId} and type = 'agent.message.delta'`;
     expect((deltas as { count: number }).count).toBe(0);
+  }, 120_000);
+
+  test("the stored transcript is byte for byte what reading the kept events again writes", async () => {
+    const scope = await idleSession();
+    const types = [
+      "agent.message.delta",
+      "agent.message.completed",
+      "agent.model.request",
+      "user.message",
+      "system.update.pending",
+      "turn.completed",
+    ];
+    const encoded = toPostgresLosslessJson({ text: "nul \u0000 and lone \ud800", big: 2 ** 60 });
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      // More events than one bundle page (200) or one old transcript page (500).
+      await sql`insert into session_events (account_id, workspace_id, session_id, sequence, type,
+          payload, payload_codec_version, occurred_at, client_event_id)
+        select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
+          (${types}::text[])[1 + n % ${types.length}],
+          case when n % 5 = 0 then ${sql.json(encoded as never)}::jsonb
+            else jsonb_build_object('text', 'event ' || n, 'n', n) end,
+          case when n % 5 = 0 then 1 end,
+          now() - interval '40 days' + n * interval '1.0004567 seconds',
+          case when n % 3 = 0 then 'client-' || n end
+        from (select max(sequence) as last from session_events
+          where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
+          generate_series(1, 2100) n`;
+    });
+    // What the archive wrote before it made the transcript from the bundle's
+    // rows: a second read of every kept event, 500 at a time.
+    const directory = await mkdtemp(join(tmpdir(), "session-archive-transcript-"));
+    let expectedEvents = 0;
+    const expected = await writeCompressedJsonLines(
+      join(directory, "transcript.jsonl.zst"),
+      async (write) => {
+        await write(
+          JSON.stringify({
+            format: SESSION_ARCHIVE_TRANSCRIPT_FORMAT,
+            version: SESSION_ARCHIVE_FORMAT_VERSION,
+            workspaceId: scope.workspaceId,
+            sessionId: scope.sessionId,
+          }),
+        );
+        for (let afterSequence = 0; ;) {
+          const page = await readSessionArchiveTranscriptEvents(client.db, scope, {
+            afterSequence,
+            limit: 500,
+          });
+          for (const event of page) await write(JSON.stringify({ event }));
+          expectedEvents += page.length;
+          if (page.length < 500) break;
+          afterSequence = page.at(-1)!.sequence;
+        }
+        await write(JSON.stringify({ end: true, events: expectedEvents }));
+      },
+    );
+    const expectedBytes = new Uint8Array(await readFile(expected.path));
+    await rm(directory, { recursive: true, force: true });
+
+    const objects = new Map<string, Uint8Array>();
+    const result = await inMemoryArchive(objects).archiveIdleSessions();
+    expect(result.failed).toBe(0);
+    const [row] =
+      await shared.admin`select content_archive from sessions where id = ${scope.sessionId}`;
+    const manifest = row!.content_archive as {
+      transcript: { key: string; bytes: number; sha256: string; events: number };
+    };
+    expect(expectedEvents).toBeGreaterThan(1000);
+    expect(manifest.transcript).toMatchObject({
+      bytes: expected.byteSize,
+      sha256: expected.sha256,
+      events: expectedEvents,
+    });
+    expect(Buffer.compare(objects.get(manifest.transcript.key)!, expectedBytes)).toBe(0);
   }, 120_000);
 
   test("one pass keeps taking batches until no idle session is left", async () => {
