@@ -91,6 +91,11 @@ import {
   accountIdentityKeysFor,
   accountIdentityVerifierFor,
   accountMcpUrlGroup,
+  GMAIL_SEND_AS_URL,
+  GOOGLE_TOKENINFO_URL,
+  gmailAcceptedSendAsAddresses,
+  googleSubjectFromTokenInfo,
+  stableAccountSubjectKeyFor,
   assertAuthorizationServerNotReserved,
   assertAuthorizationServerPins,
   builtInOAuthProfileFor,
@@ -1109,6 +1114,9 @@ async function completeMcpOAuthCallbackWithinDeadline(
       deadline,
       scopes,
     );
+    const stableAccount = verification.providerIdentity
+      ? await stableAccountIdentity(observability, settings, state, token, client.clientId, deadline)
+      : { identity: {}, ownedAddresses: [] };
     const credential = credentialBundle(token, state, client);
     const metadata = {
       resource: state.resource,
@@ -1135,6 +1143,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
         ? { accountIdentityMethod: verification.identityMethod }
         : {}),
       ...(verification.providerIdentity ?? {}),
+      ...stableAccount.identity,
       ...(verification.tools ? { mcpTools: verification.tools } : {}),
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
@@ -1213,6 +1222,8 @@ async function completeMcpOAuthCallbackWithinDeadline(
           state.mcpUrl,
           verification.identityMethod === "oidc",
         ),
+        subjectKey: stableAccountSubjectKeyFor(state.mcpUrl),
+        ownedAddresses: stableAccount.ownedAddresses,
         requestedConnectionId: state.connectionId,
       });
       if (decision.kind === "reject") {
@@ -3077,6 +3088,82 @@ function mcpToolResultObject(result: {
     }
   }
   return {};
+}
+
+/**
+ * The stable account ID of a sign-in whose account was just verified, for the
+ * services that have one (see stableAccountSubjectKeyFor), plus, for Gmail, the
+ * addresses the account proved it owns. Both are bounded reads with the new
+ * token, and any failure leaves them unknown: the verified email still
+ * identifies the account, as it did before. Exported for tests.
+ */
+export async function stableAccountIdentity(
+  observability: Observability | undefined,
+  settings: Settings,
+  state: Pick<OAuthStatePayload, "mcpUrl">,
+  token: Pick<TokenResponse, "accessToken" | "tokenType">,
+  clientId: string,
+  deadline: Pick<OAuthCallbackDeadline, "signal" | "remainingMs">,
+): Promise<{ identity: Record<string, string>; ownedAddresses: string[] }> {
+  const subjectKey = stableAccountSubjectKeyFor(state.mcpUrl);
+  const budgetMs = Math.min(IDENTITY_MAX_MS, deadline.remainingMs() - IDENTITY_RESERVE_MS);
+  if (!subjectKey || budgetMs <= 0) return { identity: {}, ownedAddresses: [] };
+  const signal = AbortSignal.any([deadline.signal, AbortSignal.timeout(budgetMs)]);
+  const readJson = async (url: string, init: RequestInit, label: string) => {
+    const response = await fetchOAuth(url, settings, { ...init, signal });
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      throw new Error(`${label} returned HTTP ${response.status}`);
+    }
+    const payload = await readResponseJsonBounded<Record<string, unknown>>(
+      response,
+      OAUTH_MAX_RESPONSE_BYTES,
+      label,
+      { signal },
+    );
+    return isRecord(payload) ? payload : {};
+  };
+  const [subject, addresses] = await Promise.allSettled([
+    // POSTed so the token never appears in a URL.
+    readJson(
+      GOOGLE_TOKENINFO_URL,
+      {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ access_token: token.accessToken }).toString(),
+      },
+      "Google token info",
+    ).then((payload) => googleSubjectFromTokenInfo(payload, clientId)),
+    state.mcpUrl === OFFICIAL_GMAIL_MCP_URL
+      ? readJson(
+          GMAIL_SEND_AS_URL,
+          {
+            method: "GET",
+            headers: {
+              accept: "application/json",
+              authorization: `${normalizeBearerScheme(token.tokenType)} ${token.accessToken}`,
+            },
+          },
+          "Gmail send-as addresses",
+        ).then(gmailAcceptedSendAsAddresses)
+      : Promise.resolve([]),
+  ]);
+  for (const [name, result] of [
+    ["account_id", subject],
+    ["owned_addresses", addresses],
+  ] as const)
+    if (result.status === "rejected")
+      observability?.warn("MCP OAuth stable account identity stayed unknown", {
+        part: name,
+        reason: identityFailureReason(result.reason),
+      });
+  return {
+    identity: subject.status === "fulfilled" ? { [subjectKey]: subject.value } : {},
+    ownedAddresses: addresses.status === "fulfilled" ? addresses.value : [],
+  };
 }
 
 /** Reviewed authenticated REST identity read; any failure leaves identity unknown. */

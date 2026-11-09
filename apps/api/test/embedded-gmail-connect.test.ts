@@ -140,6 +140,11 @@ test.each([
     let profileChecks = 0;
     let previewRequests = 0;
     let profileResponse: "valid" | "malformed" | "rejected" | "unavailable" = "valid";
+    // Google's account ID and the account's current address: the ID stays when
+    // the address changes (a renamed Workspace account).
+    let mailboxEmail = "mailbox@example.test";
+    let googleAccountId = "google-account-1001";
+    let sendAsAddresses: string[] = [];
     let hasRefreshToken = true;
     let reportedScopes: unknown = OFFICIAL_GMAIL_MCP_SCOPES.join(" ");
     let tokenRejected = false;
@@ -173,12 +178,29 @@ test.each([
             profileResponse === "malformed"
               ? {}
               : {
-                  emailAddress: "mailbox@example.test",
+                  emailAddress: mailboxEmail,
                   messagesTotal: 99,
                   historyId: "private-history",
                 },
           );
         }
+        if (url === "https://oauth2.googleapis.com/tokeninfo") {
+          expect(init?.method).toBe("POST");
+          expect(new URLSearchParams(String(init?.body)).get("access_token")).toBe(
+            "synthetic-access",
+          );
+          return Response.json({ sub: googleAccountId, aud: "fixture-client" });
+        }
+        if (url === "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs")
+          return Response.json({
+            sendAs: [
+              { sendAsEmail: mailboxEmail, isPrimary: true },
+              ...sendAsAddresses.map((sendAsEmail) => ({
+                sendAsEmail,
+                verificationStatus: "accepted",
+              })),
+            ],
+          });
         if (url === "https://oauth2.googleapis.com/token") {
           exchanges++;
           const body = new URLSearchParams(String(init?.body));
@@ -394,6 +416,7 @@ test.each([
       expect(saved?.subjectId).toBe(ownership === "personal" ? identity.subjectId : null);
       expect(saved?.metadata).toMatchObject({
         gmailEmail: "mailbox@example.test",
+        googleSubject: "google-account-1001",
         // watch_mailbox is omitted: these settings configure no Pub/Sub topic.
         mcpToolsVerification: { status: "ok", toolCount: 36 },
       });
@@ -505,6 +528,63 @@ test.each([
         account: { id: completed.account.id, version: saved!.version + 1, ownership },
       });
       expect(profileChecks).toBeGreaterThan(1);
+
+      // The account's address changed but Google's account ID didn't: it is
+      // the same login, so reconnecting it works and records the new address.
+      const savedLogin = () =>
+        getConnectionMetadata(
+          client.db,
+          identity.personalWorkspaceId,
+          completed.account.id,
+          identity.subjectId,
+        );
+      mailboxEmail = "renamed@example.test";
+      const renamed = await begin("gmail", completed.account.id);
+      await callback(renamed.state);
+      expect(await read(renamed.attempt.id)).toMatchObject({
+        state: "complete",
+        account: { id: completed.account.id },
+      });
+      expect((await savedLogin())?.metadata).toMatchObject({
+        gmailEmail: "renamed@example.test",
+        googleSubject: "google-account-1001",
+      });
+      // The same address on another Google account is a different account.
+      googleAccountId = "google-account-2002";
+      const otherAccount = await begin("gmail", completed.account.id);
+      await callback(otherAccount.state);
+      expect(await read(otherAccount.attempt.id)).toMatchObject({
+        state: "failed",
+        credentialsCommitted: false,
+        error: { code: "account_mismatch" },
+      });
+      // A login saved before the account ID was recorded adopts it when its
+      // address is one the signed-in account owns (here, an accepted alias).
+      googleAccountId = "google-account-1001";
+      const { googleSubject: _recorded, ...withoutAccountId } = (await savedLogin())!.metadata;
+      await fixture.admin`update connections set metadata = ${fixture.admin.json({
+        ...withoutAccountId,
+        gmailEmail: "mailbox@example.test",
+      } as Parameters<typeof fixture.admin.json>[0])} where id = ${completed.account.id}::uuid`;
+      const noAlias = await begin("gmail", completed.account.id);
+      await callback(noAlias.state);
+      expect(await read(noAlias.attempt.id)).toMatchObject({
+        state: "failed",
+        error: { code: "account_mismatch" },
+      });
+      sendAsAddresses = ["mailbox@example.test"];
+      const adopted = await begin("gmail", completed.account.id);
+      await callback(adopted.state);
+      expect(await read(adopted.attempt.id)).toMatchObject({ state: "complete" });
+      expect((await savedLogin())?.metadata).toMatchObject({
+        gmailEmail: "renamed@example.test",
+        googleSubject: "google-account-1001",
+      });
+      mailboxEmail = "mailbox@example.test";
+      sendAsAddresses = [];
+      const restored = await begin("gmail", completed.account.id);
+      await callback(restored.state);
+      expect(await read(restored.attempt.id)).toMatchObject({ state: "complete" });
 
       // Incremental consent. A plain reconnect keeps exactly what the account
       // holds; here Google grants only read access this time.

@@ -237,6 +237,20 @@ Drive and Atlassian duplicates saved under different clients before this rule
 keeps the one that refreshed most recently, since that proves its client still
 works; a login a Slack agent depends on is also left in place.
 
+Google accounts also have a stable account ID. Gmail, Google Calendar and
+Google Drive sign-ins record Google's OpenID subject as `metadata.googleSubject`
+beside the verified email, read from Google's tokeninfo for the new access
+token (accepted only when the token's audience is this deployment's client; no
+extra scope, so the consent screen is unchanged). When both logins have it, the
+ID alone decides: an account whose address changed (a renamed Workspace user or
+domain) reconnects its existing login, and an address now held by another
+Google account is a different account. If the read fails, the email decides as
+before. A login saved before the ID was recorded is matched by its email, or,
+for Gmail, by its recorded address being one of the signed-in account's
+accepted send-as addresses (its primary address or a verified alias); saving
+that sign-in records the ID on it. Nothing is backfilled: older logins adopt the
+ID the next time they are signed in to.
+
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
 `accountSelection: "all_eligible"` mode cannot be combined with a connection ID,

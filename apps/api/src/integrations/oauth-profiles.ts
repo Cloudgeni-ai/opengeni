@@ -682,6 +682,66 @@ export function accountIdentityVerifierFor(mcpUrl: string): AccountIdentityVerif
  * neither a profile nor a reviewed verifier identifies the account. */
 export const OIDC_IDENTITY_KEYS: readonly string[] = ["oidcSubject"];
 
+/**
+ * Google's account ID (the OpenID `sub`), recorded beside the email the
+ * Gmail, Calendar and Drive checks read. Google never changes or reuses it,
+ * while an account's email can change (a renamed Workspace user or domain), so
+ * once two logins both have it, it alone decides whether they are the same
+ * account. Read from Google's tokeninfo for the new access token, which needs
+ * no extra scope and so leaves the consent screen unchanged.
+ */
+export const GOOGLE_SUBJECT_KEY = "googleSubject";
+export const GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo";
+const GOOGLE_SUBJECT_MCP_URLS: ReadonlySet<string> = new Set([
+  OFFICIAL_GMAIL_MCP_URL,
+  OFFICIAL_DRIVE_MCP_URL,
+  OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
+]);
+
+/** The stable account-ID key recorded for an exact MCP URL, when it has one. */
+export function stableAccountSubjectKeyFor(mcpUrl: string): string | undefined {
+  return GOOGLE_SUBJECT_MCP_URLS.has(mcpUrl) ? GOOGLE_SUBJECT_KEY : undefined;
+}
+
+/** The account ID from a tokeninfo answer, only for a token issued to our own
+ * client; anything else proves nothing and throws. */
+export function googleSubjectFromTokenInfo(
+  payload: Record<string, unknown>,
+  clientId: string,
+): string {
+  const sub = payload.sub;
+  if (
+    typeof sub !== "string" ||
+    !sub.trim() ||
+    sub.length > 255 ||
+    !clientId ||
+    (payload.aud !== clientId && payload.azp !== clientId)
+  )
+    throw new Error("Google account verification failed");
+  return sub;
+}
+
+/** Gmail's send-as addresses, which list the account's own addresses. */
+export const GMAIL_SEND_AS_URL = "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs";
+
+/**
+ * The addresses a Gmail account has proven it owns: its primary address plus
+ * every send-as address Gmail accepted (a verified address, or a Workspace
+ * alias such as the address a renamed account had before). Lower-cased.
+ */
+export function gmailAcceptedSendAsAddresses(payload: Record<string, unknown>): string[] {
+  const entries = Array.isArray(payload.sendAs) ? payload.sendAs : [];
+  const addresses = new Set<string>();
+  for (const entry of entries) {
+    const alias = record(entry);
+    const email = alias.sendAsEmail;
+    if (!nonEmpty(email) || !/^[^\s@]+@[^\s@]+$/u.test(email.trim())) continue;
+    if (alias.isPrimary === true || alias.verificationStatus === "accepted")
+      addresses.add(email.trim().toLowerCase());
+  }
+  return [...addresses];
+}
+
 /** Identity keys for a connection: the profile's own, else the reviewed verifier's,
  * else OpenID Connect when this connection's sign-in can use it. */
 export function accountIdentityKeysFor(
