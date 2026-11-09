@@ -12,6 +12,7 @@ import {
   mutateSessionControlInTransaction,
   peekSessionWork,
   releaseSessionAdmissionBlocksAfterAccessChange,
+  withWorkspaceSessionActivityRls,
   withWorkspaceRls,
   type StoredSessionAdmissionBlock,
 } from "../src";
@@ -130,7 +131,7 @@ function claim(f: Fixture) {
 }
 
 function control(f: Fixture, action: "pause" | "resume") {
-  return withWorkspaceRls(client.db, f.workspaceId, (db) =>
+  return withWorkspaceSessionActivityRls(client.db, f.workspaceId, (db) =>
     db.transaction((tx) =>
       mutateSessionControlInTransaction(tx as unknown as typeof db, {
         accountId: f.grant.accountId,
