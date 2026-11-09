@@ -486,7 +486,8 @@ describe("bots through the API (real PostgreSQL)", () => {
       origin: "app",
       sourceSessionId: sessionId,
       avatar: { kind: "icon", icon: "rocket", hue: 30 },
-      memoryEnabled: false,
+      // New agents remember by default, wherever they are made.
+      memoryEnabled: true,
       content: {
         instructions: "You own releases. Keep the checklist current.",
         firstMessage: "Install the release Skill and ask about their cadence.",

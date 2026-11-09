@@ -409,8 +409,50 @@ test("Make this an agent starts from the chat's name and links the new agent to 
     description: "Weekly release review",
     sourceSessionId: sessionId,
     visibility: "workspace",
+    memoryEnabled: true,
   });
   expect(path).toMatch(new RegExp(`/workspaces/${WORKSPACE_ID}/agents/[0-9a-f-]{36}$`));
+});
+
+test("a new agent remembers by default, with a switch to turn Memory off", async () => {
+  const client = fakeAgentsClient([]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  const memory = container.querySelector<HTMLElement>(
+    "[role='switch'][aria-label='Remember across chats']",
+  );
+  expect(memory?.getAttribute("aria-checked")).toBe("true");
+  expect(container.querySelector("[role='checkbox']")).toBeNull();
+  await act(async () => memory!.click());
+  expect(memory?.getAttribute("aria-checked")).toBe("false");
+  expect(container.textContent).toContain("Each chat starts fresh.");
+});
+
+test("the icon picker of a new agent opens on the emoji choices and colours", async () => {
+  const client = fakeAgentsClient([]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  await act(async () => button(container, "Change icon").click());
+  await flush();
+  const picker = document.querySelector<HTMLElement>("[role='dialog'][aria-label='Icon']")!;
+  expect(picker).not.toBeNull();
+  const emoji = [
+    ...picker.querySelectorAll<HTMLButtonElement>("[aria-label='Suggested emoji'] button"),
+  ];
+  expect(emoji.length).toBeGreaterThan(0);
+  expect(
+    picker.querySelectorAll("[role='radiogroup'][aria-label='Colour'] [role='radio']").length,
+  ).toBeGreaterThan(0);
+  // Nothing is chosen until the person picks.
+  expect(emoji.some((candidate) => candidate.getAttribute("aria-pressed") === "true")).toBe(false);
+  await act(async () => emoji[1]!.click());
+  expect(emoji[1]!.getAttribute("aria-pressed")).toBe("true");
 });
 
 test("a name is the only required field", async () => {

@@ -341,6 +341,8 @@ function Screen() {
       return <AgentRoute workspaceId={WORKSPACE_ID} agentId={notes.id} />;
     case "make-agent":
       return <NewAgentRoute workspaceId={WORKSPACE_ID} sourceSessionId={SESSION_ID} />;
+    case "new-agent":
+      return <NewAgentRoute workspaceId={WORKSPACE_ID} />;
     case "composer":
       return <Composer initialAgentId={onboarding.id} />;
     case "composer-only-me":

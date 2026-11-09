@@ -19,9 +19,11 @@ import type { SessionAvatar as SessionAvatarValue } from "@opengeni/sdk";
 import { apiErrorDetails, userErrorText } from "../../../ui/api-error";
 import { Button } from "../../../ui/button";
 import { ErrorMessage } from "../../../ui/error-message";
-import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "../../../ui/field";
+import { Field, FieldStack, TextArea, TextInput } from "../../../ui/field";
 import { FormPage } from "../../../ui/form-dialog";
 import { SegmentedControl } from "../../../ui/segmented-control";
+import { SettingRow } from "../../../ui/setting-row";
+import { Switch } from "../../../ui/switch";
 import { useAppContext } from "../../app-context";
 import { agentErrorCode, useAgent } from "../../lib/agents";
 import { useNavigate } from "../../lib/navigation";
@@ -60,7 +62,8 @@ const EMPTY: AgentFormValues = {
   avatar: null,
   instructions: "",
   firstMessage: "",
-  memoryEnabled: false,
+  // New agents remember by default; an existing agent keeps its own setting.
+  memoryEnabled: true,
   visibility: "workspace",
 };
 
@@ -361,11 +364,20 @@ function AgentForm({
             }}
           />
         </Field>
-        <CheckboxField
+        <SettingRow
           label="Remember across chats"
-          description="Its chats save what they learn to its Memory and read it in later chats."
-          checked={memoryEnabled}
-          onCheckedChange={setMemoryEnabled}
+          description={
+            memoryEnabled
+              ? "Its chats save what they learn to its Memory and read it in later chats."
+              : "Each chat starts fresh."
+          }
+          control={
+            <Switch
+              aria-label="Remember across chats"
+              checked={memoryEnabled}
+              onCheckedChange={setMemoryEnabled}
+            />
+          }
         />
         <Field label="Who can use it" group>
           <SegmentedControl

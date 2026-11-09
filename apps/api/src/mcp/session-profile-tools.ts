@@ -11,15 +11,22 @@ import {
   SessionAvatar,
   type AccessGrant,
 } from "@opengeni/contracts";
-import { agentViewerForGrant, updateSessionProfile, type ApiRouteDeps } from "@opengeni/core";
+import {
+  agentViewerForGrant,
+  requireLiveAgentAttemptAuthorization,
+  updateSessionProfile,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   AgentLimitError,
   AgentPrivateOwnerError,
   createAgent,
   getSessionVisibility,
+  withSessionRlsActorContext,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
+import { ensureAgentMemoryCollection } from "../integrations/agent-memory-collection";
 import { requireUsableSessionAvatar } from "../routes/session-avatar";
 
 /**
@@ -194,24 +201,44 @@ export function registerBotTemplateTools(input: {
         sharedWithWorkspace: visibility === "workspace",
       });
       try {
-        const { agent } = await createAgent(
-          deps.db,
-          { accountId: grant.accountId, workspaceId: grant.workspaceId },
-          {
-            visibility: request.visibility,
-            ownerSubjectId: request.visibility === "private" ? viewer.subjectId : null,
-            name: request.name,
-            description: request.description,
-            avatar: request.avatar,
-            instructions: request.instructions,
-            firstMessage: request.firstMessage,
-            memoryEnabled: false,
-            origin: "app",
-            sourceSessionId: sessionId,
-            createdBySubjectId: viewer.subjectId,
-            maxPerWorkspace: AGENTS_PER_WORKSPACE_MAX,
-          },
-        );
+        const home = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+        const { agent: created } = await createAgent(deps.db, home, {
+          visibility: request.visibility,
+          ownerSubjectId: request.visibility === "private" ? viewer.subjectId : null,
+          name: request.name,
+          description: request.description,
+          avatar: request.avatar,
+          instructions: request.instructions,
+          firstMessage: request.firstMessage,
+          // New agents remember by default, wherever they are made.
+          memoryEnabled: true,
+          origin: "app",
+          sourceSessionId: sessionId,
+          createdBySubjectId: viewer.subjectId,
+          maxPerWorkspace: AGENTS_PER_WORKSPACE_MAX,
+        });
+        // Its Memory collection is saved by this chat, under its Agent learning.
+        const agent = await ensureAgentMemoryCollection(deps.db, home, created, async (save) => {
+          const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+          return await withSessionRlsActorContext(
+            {
+              subjectId: attempt.subjectId,
+              initiatingHumanSubjectId: attempt.initiatingHumanSubjectId,
+            },
+            () =>
+              save({
+                accountId: grant.accountId,
+                workspaceId: grant.workspaceId,
+                actor: {
+                  kind: "agent",
+                  sessionId: attempt.callerSessionId,
+                  turnId: attempt.turnId,
+                  attemptId: attempt.attemptId,
+                  executionGeneration: attempt.executionGeneration,
+                },
+              }),
+          );
+        });
         return input.json({
           ok: true,
           agent: {

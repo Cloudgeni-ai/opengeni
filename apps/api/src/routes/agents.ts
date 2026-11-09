@@ -9,7 +9,6 @@
  * request's organization admin proof. The Slack name rules apply when Slack
  * is turned on, and to a rename while it is on.
  */
-import { createHash } from "node:crypto";
 
 import {
   AgentChatsFilter,
@@ -51,8 +50,6 @@ import {
   listAgentSlackInstalls,
   listSlackInstallationBindings,
   putAgentSlackInstall,
-  saveKnowledgeEntry,
-  setAgentMemoryCollection,
   updateAgent,
   type AgentRecord,
   type AgentSlackInstallRecord,
@@ -81,6 +78,7 @@ import { z } from "zod";
 import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
+import { ensureAgentMemoryCollection } from "../integrations/agent-memory-collection";
 import { slackAgentInstallationFor } from "../integrations/slack-agent-create";
 import { requireUsableSessionAvatar } from "./session-avatar";
 import { postSlackAgentIntro, slackAgentChannelList } from "./slack-agents";
@@ -119,14 +117,6 @@ function notFound(): ApiHttpError {
   return new ApiHttpError(404, { code: "not_found", message: "Agent not found", retryable: false });
 }
 
-function deterministicUuid(value: string): string {
-  const bytes = createHash("sha256").update(value).digest().subarray(0, 16);
-  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
-  const hex = bytes.toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
 /** Cursor of a chat list: the last chat's start and id. */
 function encodeChatCursor(chat: { cursorAt: string; sessionId: string }): string {
   return Buffer.from(`${chat.cursorAt}|${chat.sessionId}`).toString("base64url");
@@ -158,55 +148,17 @@ function limitParam(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed >= 1 ? Math.min(100, Math.trunc(parsed)) : fallback;
 }
 
-/** The agent's Memory collection, named after it: workspace scope, or personal for Only me. */
-function memoryOperationId(agent: AgentRecord): string {
-  // A shared agent reuses the id Slack agents always used, so a retry (or an
-  // older release) finds the same collection.
-  return agent.visibility === "private"
-    ? deterministicUuid(`agent-memory:personal:${agent.id}:${agent.ownerSubjectId ?? ""}`)
-    : deterministicUuid(`slack-agent-memory:${agent.id}`);
-}
-
-/**
- * Create the agent's Memory collection when Memory is on and it has none.
- * Best effort, like a Slack agent's: a failure leaves Memory without a
- * collection rather than failing the save. Under Review-first the collection
- * itself may wait for review; its id is kept either way.
- */
+/** Create the agent's Memory collection, as the person or key making the request. */
 async function ensureAgentMemory(
   deps: ApiRouteDeps,
   context: RequestContext,
   agent: AgentRecord,
 ): Promise<AgentRecord> {
-  if (!agent.memoryEnabled || agent.memoryCollectionId) return agent;
-  try {
-    const receipt = await withAccessGrantSessionRlsContext(deps, context.grant, async () =>
-      saveKnowledgeEntry(
-        deps.db,
-        await knowledgeContextForAccess(deps, context.access, "documents:manage"),
-        {
-          operationId: memoryOperationId(agent),
-          expectedVersion: 0,
-          scope: agent.visibility === "private" ? "personal" : "workspace",
-          entry: {
-            title: agent.name,
-            kind: "group",
-            content: `Memory of the agent ${agent.name}: lasting facts, decisions and preferences people shared with it.`,
-          },
-        },
-      ),
-    );
-    const entryId = z.object({ entryId: z.string().uuid() }).safeParse(receipt);
-    if (!entryId.success) return agent;
-    return (
-      (await setAgentMemoryCollection(deps.db, context.home, {
-        agentId: agent.id,
-        collectionId: entryId.data.entryId,
-      })) ?? agent
-    );
-  } catch {
-    return agent;
-  }
+  return await ensureAgentMemoryCollection(deps.db, context.home, agent, (save) =>
+    withAccessGrantSessionRlsContext(deps, context.grant, async () =>
+      save(await knowledgeContextForAccess(deps, context.access, "documents:manage")),
+    ),
+  );
 }
 
 export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {

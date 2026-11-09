@@ -203,7 +203,10 @@ agent needs Only me chats enabled in the organization to be used.
 
 One switch, "Remember across chats" (`memoryEnabled`). On: the agent has its
 own Knowledge collection and its chats may read its other shared chats
-(`slack_agent_chats`). Off: neither. The rules live in
+(`slack_agent_chats`). Off: neither. New agents start with it on in the app
+form, from a chat (`bot_template_save`) and from Slack; existing agents keep
+their setting, and the API's `CreateAgentRequest.memoryEnabled` still
+defaults to off when omitted. The rules live in
 `packages/core/src/domain/agent-memory.ts` and are enforced by the tools:
 
 - Every chat of the agent with Knowledge tools reads its Memory, including
@@ -253,7 +256,8 @@ own Knowledge collection and its chats may read its other shared chats
 - `bot_template_save` ("Make this an agent") creates an agent from the chat
   with standing `instructions` and an optional `firstMessage` (the older
   `setupInstructions` argument is taken as the First message), shared like
-  the chat it was made from, with Memory off.
+  the chat it was made from, with Memory on and its collection saved by the
+  chat's live turn (under that chat's Agent learning).
 - Slack agents are the agents available in that installation. Deleting one
   through the old endpoint deletes the agent.
 
