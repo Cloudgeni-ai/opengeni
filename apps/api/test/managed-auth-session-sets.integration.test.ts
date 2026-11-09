@@ -378,6 +378,9 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       body: logoutBody,
     });
     expect(logout.status).toBe(200);
+    // CASA 6.6.1: the browser drops its HTTP cache; storage and cookies stay
+    // for the sake of unfinished uploads and embedding hosts.
+    expect(logout.headers.get("clear-site-data")).toBe('"cache"');
     const logoutReceipt = await logout.json();
     expect(logoutReceipt).toMatchObject({
       actorEpoch: "2",

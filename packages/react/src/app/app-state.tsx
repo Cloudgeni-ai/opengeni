@@ -46,7 +46,8 @@ import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/brow
 import { composerSubmissionErrorMessage } from "../lib/format";
 import { isTransientServiceFailure } from "../lib/transient-retry";
 import { createQuietRetry } from "./lib/quiet-retry";
-import { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "../human-input-draft-store";
+import { claimHumanInputDraftOwner } from "../human-input-draft-store";
+import { forgetSignedOutBrowserData } from "../sign-out-browser-data";
 import type { SessionEventsConnectionState } from "../hooks/use-session-events";
 import type { BrowserAccountTransition } from "../accounts";
 import {
@@ -2542,8 +2543,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       setWorkspaces([]);
       setAccessError(null);
     });
-    // The next person in this tab never sees this person's unsent answers.
-    forgetAllHumanInputDrafts();
+    // The next person in this tab never sees this person's unsent answers,
+    // messages or other per-person session storage.
+    forgetSignedOutBrowserData();
     const acceptedPrincipal = principalTransitionIdentity.current;
     const ownsInvocation = () =>
       ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal);
@@ -2599,6 +2601,8 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       // Remove the revoked workspace/session deep link from browser history;
       // the earlier null transition is only a precommit hold and must not
       // navigate because its initiating mutation can still fail.
+      // Nobody is signed in any more, so forget what this tab kept for them.
+      forgetSignedOutBrowserData();
       authPrincipalIdRef.current = null;
       setAuthSession(null);
       setSession(null);
