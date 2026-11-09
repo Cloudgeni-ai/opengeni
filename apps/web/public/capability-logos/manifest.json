@@ -2,6 +2,13 @@
   "version": 1,
   "entries": [
     {
+      "capabilityId": "api:1password",
+      "file": "1password.svg",
+      "sourceUrl": "https://github.com/simple-icons/simple-icons/blob/13.21.0/icons/1password.svg",
+      "sourceLicense": "CC0-1.0 icon data; 1Password mark remains property of AgileBits Inc.",
+      "modifications": "Applied the brand blue Simple Icons records (#3B66BC) so the mark shows on the light logo plate in both themes."
+    },
+    {
       "capabilityId": "api:excel-addin",
       "file": "excel.svg",
       "sourceUrl": "https://learn.microsoft.com/office/dev/add-ins/",
@@ -35,6 +42,13 @@
       "sourceUrl": "https://github.com/simple-icons/simple-icons/blob/34c22501f9ac9f22b12f825677ccbab1fb22e14b/icons/x.svg",
       "sourceLicense": "CC0-1.0 icon data; X mark remains property of X Corp.",
       "modifications": "Added a white backing tile so the black mark remains visible in dark mode."
+    },
+    {
+      "capabilityId": "mcp:codex_apps",
+      "file": "codex-apps.svg",
+      "sourceUrl": "https://github.com/simple-icons/simple-icons/blob/13.21.0/icons/openai.svg",
+      "sourceLicense": "CC0-1.0 icon data; OpenAI mark remains property of OpenAI",
+      "modifications": "None beyond a black fill; Codex Apps are ChatGPT Apps, identified by the OpenAI mark."
     }
   ]
 }

@@ -268,7 +268,10 @@ export function toolReviewFields(
   // An app action's card lists what it changes, as the server found it, and
   // says what it does in one plain line (its consequence); its raw arguments
   // (action id, path, body) stay in Details.
-  if (toolName === APP_ACTION_REVIEW_TOOL)
+  // Any other call whose review states its target facts (the repository an
+  // attach adds, the channel a bot message goes to) lists those facts the
+  // same way, so the app card and Slack show what the approval does.
+  if (toolName === APP_ACTION_REVIEW_TOOL || (context?.targetFacts?.length ?? 0) > 0)
     return {
       fields: (context?.targetFacts ?? []).map((fact, index) => ({
         path: `/$target/${index}`,

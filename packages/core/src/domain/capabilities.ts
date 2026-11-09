@@ -200,10 +200,11 @@ export async function buildCapabilityCatalog(input: {
   );
   const builtIns = [
     ...configuredMcpCatalogItems(input.settings),
-    ...providerIntegrationCatalogItems(socialConnections),
-    fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
-    onePasswordCatalogItem(workspaceConnections.filter(isOnePasswordConnection)),
-    excelAddinCatalogItem(excelAddin(input.settings)),
+    ...builtInConnectorCatalogItems({
+      settings: input.settings,
+      socialConnections,
+      workspaceConnections,
+    }),
     ...curatedLibrarySkills.filter((item) => installedSkillById.has(item.id)),
     ...installedSkills
       .filter(
@@ -2464,6 +2465,26 @@ const SOCIAL_PROVIDER_TOOL_NAMES = {
 } as const;
 
 /**
+ * Opengeni's own connector rows. No registry import supplies them, so each
+ * needs a mark bundled with the shared UI (see capability-logo-source); a
+ * test fails when one is added without it. Codex Apps is the other built-in
+ * connector (codexAppsCatalogItem); deployment-configured MCP servers are the
+ * operator's own and carry no known brand.
+ */
+export function builtInConnectorCatalogItems(input: {
+  settings: Parameters<typeof excelAddin>[0];
+  socialConnections: SocialConnection[];
+  workspaceConnections: ConnectionMetadata[];
+}): CapabilityCatalogItem[] {
+  return [
+    ...providerIntegrationCatalogItems(input.socialConnections),
+    fikenCatalogItem(input.workspaceConnections.filter(isFikenConnection)),
+    onePasswordCatalogItem(input.workspaceConnections.filter(isOnePasswordConnection)),
+    excelAddinCatalogItem(excelAddin(input.settings)),
+  ];
+}
+
+/**
  * The first-party Fiken accounting connector tile. Enablement is derived from
  * the workspace-shared verified Fiken connection (either lane), mirroring how
  * the social provider tiles derive theirs from social connections.
@@ -2856,7 +2877,11 @@ export function nativeConnectionCapabilityRecommendations(
       actions: ["connect", "inspect"],
       metadata: {
         endpointPath: "/v1/workspaces/{workspaceId}/github/app",
-        firstPartyMcpTools: ["github_connect_link", "github_repositories_list"],
+        firstPartyMcpTools: [
+          "github_connect_link",
+          "github_repositories_list",
+          "github_repository_attach",
+        ],
         recommendationOnly: true,
       },
     }),

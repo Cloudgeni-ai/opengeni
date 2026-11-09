@@ -2897,6 +2897,7 @@ export const SESSION_EVENT_TYPES = [
   "session.agent.updated",
   "session.skills.updated",
   "session.resources.removed",
+  "session.resources.added",
   "session.model_settings.updated",
   // An authorized person or host changed the task root's usage limit.
   "session.usage_limit.updated",
@@ -4435,6 +4436,7 @@ export type FirstPartyMcpToolName =
   | "custom_mcp_setup_request"
   | "github_connect_link"
   | "github_repositories_list"
+  | "github_repository_attach"
   | "social_connections_list"
   | "social_posts_recent"
   | "social_daily_analysis_context"
@@ -5989,6 +5991,8 @@ export type ClientConfig = {
   apiContractRevision: string;
   serverVersion?: string | undefined;
   claudeSubscriptionEnabled?: boolean | undefined;
+  /** Connect provider offers "Claude Code (API key)". Absent when not offered. */
+  claudeCodeApiKeyEnabled?: boolean | undefined;
   /**
    * Organization admins may connect Azure OpenAI as this deployment's own
    * Microsoft Entra identity (the operator offers it). Absent otherwise.

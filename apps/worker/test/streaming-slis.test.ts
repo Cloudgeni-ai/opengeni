@@ -659,6 +659,50 @@ describe("turn startup phase diagnostics", () => {
     expect(metrics).not.toContain("turnId");
   });
 
+  test("records milestones since turn start separately, excluding time behind an active turn", async () => {
+    const observability = worker();
+    recordTurnStartupMilestone(observability, {
+      milestone: "queue",
+      provider: "codex-subscription",
+      backend: "modal",
+      outcome: "completed",
+      durationSeconds: 900,
+      sinceAttemptStartSeconds: 0,
+    });
+    recordTurnStartupMilestone(observability, {
+      milestone: "provider_dispatch",
+      provider: "codex-subscription",
+      backend: "modal",
+      outcome: "completed",
+      durationSeconds: 903.5,
+      sinceAttemptStartSeconds: 3.5,
+    });
+    recordTurnStartupMilestone(observability, {
+      milestone: "first_byte",
+      provider: "codex-subscription",
+      backend: "modal",
+      outcome: "completed",
+      durationSeconds: 910,
+      sinceAttemptStartSeconds: null,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_milestone_duration_seconds_sum\{[^}]*milestone="provider_dispatch"[^}]*\} 903\.5\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_turn_startup_since_attempt_start_seconds_sum\{[^}]*milestone="provider_dispatch"[^}]*outcome="completed"[^}]*\} 3\.5\b/,
+    );
+    // The queue milestone has no since-start meaning, and a missing start is
+    // never recorded as a fabricated sample.
+    expect(metrics).not.toMatch(
+      /opengeni_turn_startup_since_attempt_start_seconds_count\{[^}]*milestone="queue"/,
+    );
+    expect(metrics).not.toMatch(
+      /opengeni_turn_startup_since_attempt_start_seconds_count\{[^}]*milestone="first_byte"/,
+    );
+  });
+
   test("records one bounded phase series without request identity", async () => {
     const observability = worker();
     recordTurnStartupPhase(observability, {
