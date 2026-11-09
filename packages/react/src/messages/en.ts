@@ -1186,6 +1186,8 @@ export const englishMessages = {
   "composerMessages.messageTheAgent2": "Message the agent",
   "composerMessages.messageTheAgentItWill": "Message the agent — it will wait in the queue…",
   "composerMessages.model": "Model",
+  "composerMessages.openFailed": "Couldn't open it. Select to try again.",
+  "composerMessages.openName": "Open {name}",
   "composerMessages.pausedBy": "Paused by",
   "composerMessages.pausedByDisplayname": "Paused by {displayName}",
   "composerMessages.pausedHere": "Paused here",
@@ -1247,6 +1249,7 @@ export const englishMessages = {
   "composerMessages.thisSessionWillBeAble": "This session will be able to run",
   "composerMessages.thisWorkstreamWasPausedWhile":
     "This workstream was paused while you were sending. Nothing was sent, and your draft is still here.",
+  "composerMessages.unavailable": "Unavailable",
   "composerMessages.uploadFailed": "Upload failed",
   "composerMessages.uploading": "Uploading",
   "composerMessages.useOtherDraft": "Use other draft",

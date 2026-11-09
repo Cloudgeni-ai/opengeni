@@ -3936,14 +3936,7 @@ function SessionChatPane(props: {
             />
           );
         }
-        return (
-          <UserMessageBody
-            sessionId={props.session.id}
-            workspaceId={props.session.workspaceId}
-            item={item}
-            searchTarget={renderContext.searchTarget}
-          />
-        );
+        return <UserMessageBody item={item} searchTarget={renderContext.searchTarget} />;
       }
       return (
         <div data-testid="assistant-markdown">
@@ -3964,7 +3957,6 @@ function SessionChatPane(props: {
       context.accessContext.subjectId,
       context.client,
       props.onOpenSandboxFile,
-      props.session.id,
       props.session.workspaceId,
       renderInteractiveBlock,
       renderImage,
