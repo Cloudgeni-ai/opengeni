@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { machineAccessNeededMessage } from "@opengeni/contracts/machine-access";
 import {
   chatComposerPlaceholder,
   failedSessionCopy,
@@ -593,4 +594,9 @@ test("a turn refused for machine access says so, never a database error", () => 
     unavailableModel: false,
     machineAccess: true,
   });
+  // The banner, this fallback and the worker's recorded reason share one sentence.
+  expect(machineAccessNeededMessage("Studio Mac")).toBe(recorded);
+  expect(
+    failedSessionCopy({ ...summary, reason: null, failureCode: "machine_access_required" }).reason,
+  ).toBe(machineAccessNeededMessage());
 });

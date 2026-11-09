@@ -11529,6 +11529,7 @@ export type SwapActiveSandboxResponse = {
     | "concurrent_swap"
     | "personal_machine_permission_required"
     | "personal_machine_not_permitted"
+    | "machine_access_required"
     | "recovery_in_progress"
     | "recovery_degraded"
     | "recovery_unrecoverable";

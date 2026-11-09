@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./machine-access": {
+      "types": "./src/machine-access.ts",
+      "default": "./src/machine-access.ts"
+    },
     "./browser-response-headers": {
       "types": "./src/browser-response-headers.ts",
       "default": "./src/browser-response-headers.ts"
