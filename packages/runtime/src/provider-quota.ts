@@ -245,17 +245,37 @@ export function providerQuotaExhaustedMessage(scope: ProviderQuotaScope): string
 
 const MAX_RESPONSE_BODY_BYTES = 64 * 1024;
 
-/** Read at most `maxBytes` of a cloned body; the original stays unread. */
-async function boundedCloneText(response: Response, maxBytes: number): Promise<string | null> {
+/**
+ * Read at most `maxBytes` of a cloned body; the original stays unread. With a
+ * deadline, a body that stalls past it yields null instead of waiting forever.
+ */
+async function boundedCloneText(
+  response: Response,
+  maxBytes: number,
+  deadlineMs?: number,
+): Promise<string | null> {
   const body = response.clone().body;
   if (!body) return "";
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let text = "";
   let bytes = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut =
+    deadlineMs === undefined
+      ? null
+      : new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), deadlineMs);
+        });
   try {
     for (;;) {
-      const chunk = await reader.read();
+      const read = reader.read();
+      const chunk = timedOut ? await Promise.race([read, timedOut]) : await read;
+      if (chunk === "timeout") {
+        // The pending read settles once the cancel below lands.
+        read.catch(() => undefined);
+        return null;
+      }
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
       if (bytes > maxBytes) return null;
@@ -263,7 +283,10 @@ async function boundedCloneText(response: Response, maxBytes: number): Promise<s
     }
     return text + decoder.decode();
   } finally {
-    await reader.cancel().catch(() => undefined);
+    if (timer !== undefined) clearTimeout(timer);
+    // A cancelled clone branch settles only once the caller's branch is also
+    // done, so never wait for it here.
+    void reader.cancel().catch(() => undefined);
   }
 }
 
@@ -443,6 +466,13 @@ const BYOK_CAPACITY_RESTRICTED_TEXT =
 // Vercel AI Gateway's structured type for an account that must add a payment
 // method before it can be served.
 const CUSTOMER_VERIFICATION_REQUIRED_TYPE = "customer_verification_required";
+// OpenRouter's refusal when the customer's own API key has reached the credit
+// or budget limit the customer set on it (HTTP 403, for example "Key limit
+// exceeded (total limit)" or "Budget limit exceeded (monthly limit)").
+const KEY_LIMIT_EXCEEDED_TEXT = /\b(?:key|budget) limit exceeded\b/;
+
+/** How long attribution waits for a refused response body before counting the call unclassified. */
+export const PROVIDER_ACCOUNT_REFUSAL_READ_DEADLINE_MS = 5_000;
 
 /**
  * Decide whether a provider refusal comes from the customer's own provider
@@ -474,6 +504,9 @@ export function classifyProviderAccountRefusal(evidence: {
     fields.some((value) => value.trim() === CUSTOMER_VERIFICATION_REQUIRED_TYPE)
   ) {
     return "customer_verification_required";
+  }
+  if (status === 403 && fields.some((value) => KEY_LIMIT_EXCEEDED_TEXT.test(value))) {
+    return "key_limit_exceeded";
   }
   return null;
 }
@@ -512,9 +545,10 @@ export function classifyProviderAccountRefusalError(error: unknown): ProviderAcc
  */
 export async function classifyProviderAccountRefusalResponse(
   response: Response,
+  deadlineMs: number = PROVIDER_ACCOUNT_REFUSAL_READ_DEADLINE_MS,
 ): Promise<ProviderAccountRefusal | null> {
   if (response.status !== 403 && response.status !== 404) return null;
-  const text = await boundedCloneText(response, MAX_RESPONSE_BODY_BYTES);
+  const text = await boundedCloneText(response, MAX_RESPONSE_BODY_BYTES, deadlineMs);
   if (text === null) return null;
   let json: unknown;
   try {

@@ -1,14 +1,21 @@
-import { settledTurnFailureOrigin } from "../src/activities/agent-turn/failure-attribution";
+import {
+  recordSettledTurnFailureOrigin,
+  settledTurnFailureOrigin,
+  turnFailureOriginMetricFields,
+} from "../src/activities/agent-turn/failure-attribution";
 import { expect, test } from "bun:test";
 import { APIError } from "openai";
-import { failureOrigin, createObservability } from "@opengeni/observability";
+import { failureOrigin, createObservability, type FailureOrigin } from "@opengeni/observability";
 import { CompactionProviderResponseError } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing/settings";
 import {
   agentRunFailurePayload,
   compactionFailureTurnEventPayload,
 } from "../src/activities/agent-turn/errors";
-import { runtimeMetricsHooksForObservability } from "../src/observability-metrics";
+import {
+  runtimeMetricsHooksForObservability,
+  TurnLifecycleMetrics,
+} from "../src/observability-metrics";
 
 test("production quota payload excludes customer quota but keeps deployment quota and uncertain transport", () => {
   const quota = agentRunFailurePayload({
@@ -176,6 +183,22 @@ test("Vercel AI Gateway credit and budget refusals on a customer's gateway are c
     ),
   );
   expect(verification.providerAccountRefusal).toBe("customer_verification_required");
+  // OpenRouter refuses a customer's own key at the limit the customer set on it.
+  const keyLimit = agentRunFailurePayload(
+    APIError.generate(
+      403,
+      { error: { message: "Key limit exceeded (total limit)", code: 403 } },
+      undefined,
+      new Headers(),
+    ),
+  );
+  expect(keyLimit.retryable).not.toBe(true);
+  expect(keyLimit.providerAccountRefusal).toBe("key_limit_exceeded");
+  const keyLimitEvents = [{ type: "turn.failed", payload: keyLimit }];
+  expect(settledTurnFailureOrigin(customerBilling, "failed", keyLimitEvents)).toBe(
+    "customer_provider",
+  );
+  expect(settledTurnFailureOrigin(deploymentBilling, "failed", keyLimitEvents)).toBe("platform");
 });
 
 test("model-call metrics exclude a customer's BYOK restriction only on customer providers", async () => {
@@ -212,4 +235,52 @@ test("model-call metrics exclude a customer's BYOK restriction only on customer 
   expect(origin("organization-openrouter")).toBe("customer_provider");
   expect(origin("openrouter")).toBe("platform");
   expect(origin("workspace-gateway")).toBe("platform");
+});
+
+test("settlement attribution reaches the terminal turn counter through the turn control", async () => {
+  const observability = createObservability(testSettings(), { component: "worker" });
+  const tracker = new TurnLifecycleMetrics(observability);
+  const byok = compactionFailureTurnEventPayload(
+    new CompactionProviderResponseError(
+      { httpStatus: 404 },
+      APIError.generate(
+        404,
+        {
+          error: {
+            message:
+              "No endpoints found that can be served by your own provider keys. This workspace is restricted to BYOK capacity.",
+          },
+        },
+        undefined,
+        new Headers(),
+      ),
+    ),
+  );
+  const events = [{ type: "turn.failed", payload: byok }];
+  const cases = [
+    { attemptId: "customer", upstreamPayer: "organization" as const },
+    { attemptId: "deployment", upstreamPayer: "deployment" as const },
+  ];
+  for (const { attemptId, upstreamPayer } of cases) {
+    const control: { turnFailureOrigin?: FailureOrigin } = {};
+    tracker.start({ attemptId });
+    recordSettledTurnFailureOrigin(
+      control,
+      { upstreamPayer, metering: "external" },
+      "failed",
+      events,
+    );
+    tracker.finish({ attemptId, outcome: "failed", ...turnFailureOriginMetricFields(control) });
+  }
+  const lines = (await observability.prometheusMetrics())
+    .split("\n")
+    .filter(
+      (line) => line.startsWith("opengeni_turns_total{") && line.includes('outcome="failed"'),
+    );
+  expect(lines.filter((line) => line.includes('failure_origin="customer_provider"'))).toEqual([
+    expect.stringMatching(/ 1$/),
+  ]);
+  expect(lines.filter((line) => line.includes('failure_origin="platform"'))).toEqual([
+    expect.stringMatching(/ 1$/),
+  ]);
 });

@@ -1,3 +1,5 @@
+import { isDirectModelProviderId } from "@opengeni/contracts";
+
 /** Bounded operational attribution, never an authorization or retry decision. */
 export type FailureOrigin = "none" | "platform" | "customer_provider";
 
@@ -23,10 +25,13 @@ const CUSTOMER_CAPACITY_REASONS = new Set([
  * provider keys has no key eligible for the request (HTTP 404).
  * `customer_verification_required`: Vercel AI Gateway requires the account to
  * add a payment method (HTTP 403 with that structured type).
+ * `key_limit_exceeded`: the customer's own OpenRouter key reached the credit or
+ * budget limit the customer set on it (HTTP 403).
  */
 export const PROVIDER_ACCOUNT_REFUSALS = [
   "byok_capacity_restricted",
   "customer_verification_required",
+  "key_limit_exceeded",
 ] as const;
 export type ProviderAccountRefusal = (typeof PROVIDER_ACCOUNT_REFUSALS)[number];
 export function isProviderAccountRefusal(value: unknown): value is ProviderAccountRefusal {
@@ -102,5 +107,12 @@ const CUSTOMER_PROVIDER_IDS = new Set([
   "claude-subscription",
 ]);
 export function isCustomerManagedMetricProvider(provider: string): boolean {
-  return CUSTOMER_PROVIDER_IDS.has(provider) || /^workspace-compatible-.+$/.test(provider);
+  // Direct connections (workspace-openai-*, workspace-azure-openai-*,
+  // workspace-compatible-*) and organization compatible connections use the
+  // customer's own key.
+  return (
+    CUSTOMER_PROVIDER_IDS.has(provider) ||
+    (isDirectModelProviderId(provider) && !provider.endsWith("-")) ||
+    /^organization-compatible-.+$/.test(provider)
+  );
 }

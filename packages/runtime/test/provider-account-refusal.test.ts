@@ -108,4 +108,40 @@ describe("provider account refusals", () => {
       ),
     ).toBeNull();
   });
+
+  test("OpenRouter key and budget limits on the customer's own key are account refusals only on 403", () => {
+    for (const message of [
+      "Key limit exceeded (total limit). Manage it using https://openrouter.ai/settings/keys",
+      "Key limit exceeded (monthly limit)",
+      "Budget limit exceeded (monthly limit)",
+      "API key budget limit exceeded",
+    ]) {
+      expect(classifyProviderAccountRefusalError(sdkError(403, { message, code: 403 }))).toBe(
+        "key_limit_exceeded",
+      );
+      for (const status of [400, 401, 404, 500]) {
+        expect(classifyProviderAccountRefusalError(sdkError(status, { message }))).toBeNull();
+      }
+    }
+    // Other 403s (moderation, region, model allowlists) stay unclassified.
+    for (const message of ["Forbidden", "Your input was flagged by moderation", "Key disabled"]) {
+      expect(classifyProviderAccountRefusalError(sdkError(403, { message }))).toBeNull();
+    }
+  });
+
+  test("a refused body that stalls is left unclassified after the read deadline", async () => {
+    let cancelled = false;
+    const stalled = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"error":{"message":"No endpoints'));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const response = new Response(stalled, { status: 404 });
+    expect(await classifyProviderAccountRefusalResponse(response, 20)).toBeNull();
+    await response.body?.cancel();
+    expect(cancelled).toBe(true);
+  });
 });

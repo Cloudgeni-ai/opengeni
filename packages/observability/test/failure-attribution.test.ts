@@ -6,6 +6,7 @@ describe("failure ownership", () => {
     for (const providerAccountRefusal of [
       "byok_capacity_restricted",
       "customer_verification_required",
+      "key_limit_exceeded",
     ]) {
       expect(
         failureOrigin({ customerManaged: true, outcome: "failed", providerAccountRefusal }),
@@ -128,6 +129,9 @@ describe("failure ownership", () => {
       "organization-openrouter",
       "workspace-gateway",
       "workspace-compatible-123",
+      "workspace-openai-123",
+      "workspace-azure-openai-123",
+      "organization-compatible-123",
       "codex-subscription",
       "supergrok-subscription",
       "organization-claude-subscription",
@@ -139,6 +143,8 @@ describe("failure ownership", () => {
       "openrouter",
       "vertex-gateway",
       "organization-openrouter-pretend",
+      "workspace-openai-",
+      "organization-compatible-",
     ])
       expect(isCustomerManagedMetricProvider(provider)).toBe(false);
   });
