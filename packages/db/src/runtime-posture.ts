@@ -2451,6 +2451,7 @@ export const FORCE_RLS_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
+  "turn_timing_profiles",
   "usage_events",
   "vault_field_versions",
   "vault_item_fields",
@@ -2815,6 +2816,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "transcription_recording_objects",
   "transcription_recording_segments",
   "transcription_recordings",
+  // 1351_turn_timing_profiles: per-turn timing profiles written by the maintenance sweep.
+  "turn_timing_profiles",
   "usage_events",
   "video_generation_operations",
   "video_generation_references",

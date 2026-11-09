@@ -38,18 +38,21 @@ describe("turn-capacity Prometheus alerts", () => {
         release: {{ .Release.Name | quote }}`);
   });
 
-  test("alerts on cumulative queue, provider-dispatch, and first-byte p95 SLOs", async () => {
+  test("alerts on provider-dispatch and first-byte p95 measured from the attempt start", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",
     );
     for (const [name, milestone] of [
-      ["OpenGeniTurnStartupQueueP95High", "queue"],
       ["OpenGeniTurnStartupProviderDispatchP95High", "provider_dispatch"],
+      ["OpenGeniTurnStartupProviderDispatchP95Critical", "provider_dispatch"],
       ["OpenGeniTurnStartupFirstByteP95High", "first_byte"],
     ] as const) {
       const expression = alertExpression(template, name);
-      expect(expression).toContain("opengeni_turn_startup_milestone_duration_seconds_bucket");
+      // Time queued behind an earlier turn in the same chat is serialization,
+      // not latency we can act on, so the cumulative clock never alerts.
+      expect(expression).toContain("opengeni_turn_startup_since_attempt_start_seconds_bucket");
+      expect(expression).not.toContain("opengeni_turn_startup_milestone_duration_seconds");
       expect(expression).toContain(`milestone="${milestone}"`);
       expect(expression).toContain("histogram_quantile(");
       expect(expression).toContain("turnStartupMinSamples");
@@ -59,6 +62,41 @@ describe("turn-capacity Prometheus alerts", () => {
       expect(expression).not.toContain("sessionId");
       expect(expression).not.toContain("turnId");
     }
+    expect(template).not.toContain("OpenGeniTurnStartupQueueP95High");
+    expect(template).not.toContain("turnStartupQueueP95Seconds");
+  });
+
+  test("alerts on runnable prompts waiting, not prompts held behind an active turn", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const warning = ruleBlock(template, "alert", "OpenGeniTurnReadyPromptWaiting");
+    const critical = ruleBlock(template, "alert", "OpenGeniTurnReadyPromptWaitingCritical");
+    for (const name of [
+      "OpenGeniTurnReadyPromptWaiting",
+      "OpenGeniTurnReadyPromptWaitingCritical",
+    ]) {
+      const expression = alertExpression(template, name);
+      expect(expression).toContain("opengeni_turns_queued_oldest_age_seconds");
+      expect(expression).toContain('hold="ready"');
+      expect(expression).not.toContain("behind_active_turn");
+      for (const selector of metricSelectors(expression)) {
+        expect(selector).toContain(DEPLOYMENT_SCOPE);
+      }
+    }
+    expect(warning).toContain("> {{ $turnReadyPromptAgeSeconds }}");
+    expect(warning).toContain("unless on()");
+    expect(warning).toContain("> {{ $turnReadyPromptAgeCriticalSeconds }}");
+    expect(warning).toContain("notification_policy: investigate");
+    expect(critical).toContain("severity: critical");
+    expect(critical).toContain("notification_policy: page");
+    expect(critical).toContain("opengeni_turn_eligible_backlog");
+    expect(template).toContain("{{- $turnReadyPromptAgeSeconds := int (default 60 ");
+    expect(template).toContain("{{- $turnReadyPromptAgeCriticalSeconds := int (default 300 ");
+    expect(template).toContain(
+      "(le $turnReadyPromptAgeCriticalSeconds $turnReadyPromptAgeSeconds)",
+    );
   });
 
   test("renders disjoint startup alert scopes for separate releases and environments", async () => {
@@ -444,7 +482,7 @@ describe("turn-capacity Prometheus alerts", () => {
     );
   });
 
-  test("tiers cumulative dispatch latency tightly and without duplicate incidents", async () => {
+  test("tiers attempt preparation latency tightly and without duplicate incidents", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",
@@ -481,30 +519,22 @@ describe("turn-capacity Prometheus alerts", () => {
     );
   });
 
-  test("does not attribute cumulative startup waits to worker or provider capacity alone", async () => {
+  test("describes dispatch latency as attempt preparation, excluding queue and capacity waits", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",
     );
-    const queue = ruleBlock(template, "alert", "OpenGeniTurnStartupQueueP95High");
-    expect(queue).toContain("including time queued behind an active turn");
-    expect(queue).toContain("not when the turn becomes runnable");
-    expect(queue).toContain("opengeni_turns_queued_by_hold");
-    expect(queue).toContain("Current gauges cannot explain historical samples alone");
-    expect(queue).not.toContain("before a worker picks them up");
-
     for (const name of [
       "OpenGeniTurnStartupProviderDispatchP95High",
       "OpenGeniTurnStartupProviderDispatchP95Critical",
     ]) {
       const dispatch = ruleBlock(template, "alert", name);
-      expect(dispatch).toContain("behind an active turn");
-      expect(dispatch).toContain("preceding-turn completion");
-      expect(dispatch).toContain("Only this turn's own provider think time is excluded");
+      expect(dispatch).toContain("start of the turn attempt");
+      expect(dispatch).toContain("time behind an earlier turn");
+      expect(dispatch).toContain("capacity waits");
+      expect(dispatch).toContain("opengeni_turn_startup_phase_duration_seconds");
       expect(dispatch).toContain("opengeni_model_request_pre_dispatch_stage_seconds");
       expect(dispatch).toContain("Do not subtract histogram quantiles");
-      expect(dispatch).not.toContain("before the agent even starts thinking");
-      expect(dispatch).not.toContain("never provider think time");
     }
   });
 

@@ -328,6 +328,7 @@ const context: {
     billingMode: "disabled" | "stripe";
     models: unknown[];
     claudeSubscriptionEnabled?: boolean;
+    claudeCodeApiKeyEnabled?: boolean;
   };
   accessContext: { accountGrants: { accountId: string; permissions: string[] }[] } | null;
   [key: string]: unknown;
@@ -598,6 +599,9 @@ const ALL_CONNECT_CHOICES = [
   "Custom endpoint",
 ];
 
+/** The deployment-flagged "Claude Code (API key)" row, when the flag is on. */
+const CLAUDE_CODE_API_CHOICE = "Claude Code (API key)";
+
 function connectChoiceRows(container: HTMLElement): HTMLElement[] {
   return [
     ...container.querySelectorAll<HTMLElement>('[aria-label="Providers"] [data-slot=list-row]'),
@@ -607,7 +611,10 @@ function connectChoiceRows(container: HTMLElement): HTMLElement[] {
 /** The providers Connect provider lists, by name. */
 function connectChoiceTitles(container: HTMLElement): string[] {
   return connectChoiceRows(container).map(
-    (row) => ALL_CONNECT_CHOICES.find((title) => row.textContent?.startsWith(title)) ?? "?",
+    (row) =>
+      [...ALL_CONNECT_CHOICES, CLAUDE_CODE_API_CHOICE].find((title) =>
+        row.textContent?.startsWith(title),
+      ) ?? "?",
   );
 }
 
@@ -2585,6 +2592,70 @@ describe("One Models page for the organization and the workspace", () => {
         "It will belong to Design preview: everyone here can use it. Design preview's admins and Acme's owners and admins can change or remove it.",
       );
       expect(view.container.textContent).not.toContain("Available in");
+    } finally {
+      await cleanup(view);
+    }
+  });
+
+  test("Claude Code (API key) is listed only when the deployment offers it, and opens the Anthropic API-key step with its explanation", async () => {
+    context.clientConfig.claudeSubscriptionEnabled = true;
+    context.clientConfig.claudeCodeApiKeyEnabled = true;
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect provider/)!.click());
+      await flush();
+      // Next to the Claude subscription row, which is unchanged.
+      expect(connectChoiceTitles(view.container)).toEqual([
+        "Codex",
+        "Claude subscription",
+        CLAUDE_CODE_API_CHOICE,
+        ...ALL_CONNECT_CHOICES.slice(2),
+      ]);
+      await act(async () => navigateTo({ view: "connect:claude_code_api" }));
+      await flush();
+      // The same API-key connection as the Anthropic row, introduced.
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Anthropic API");
+      expect(view.container.textContent).toContain("Max, Ultra and Team plans include monthly API");
+      expect(view.container.textContent).toContain("Paste the key below.");
+      await act(async () => navigateTo({ view: "connect:anthropic" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Anthropic API");
+      expect(view.container.textContent).not.toContain("Paste the key below.");
+    } finally {
+      context.clientConfig.claudeCodeApiKeyEnabled = false;
+      await cleanup(view);
+    }
+  });
+
+  test("an organization admin's Claude Code (API key) step explains the credits above who can use it", async () => {
+    asOrganizationAdmin();
+    context.clientConfig.claudeCodeApiKeyEnabled = true;
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect-org:claude_code_api" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Anthropic API");
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Paste the key below.");
+      expect(text).toContain("Available in");
+      expect(text.indexOf("Paste the key below.")).toBeLessThan(text.indexOf("Available in"));
+    } finally {
+      context.clientConfig.claudeCodeApiKeyEnabled = false;
+      await cleanup(view);
+    }
+  });
+
+  test("Claude Code (API key) is not reachable while the deployment does not offer it", async () => {
+    const view = await render();
+    try {
+      await act(async () => button(view.container, /Connect provider/)!.click());
+      await flush();
+      expect(connectChoiceTitles(view.container)).not.toContain(CLAUDE_CODE_API_CHOICE);
+      await act(async () => navigateTo({ view: "connect:claude_code_api" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe(
+        "Claude Code (API key) is not enabled",
+      );
     } finally {
       await cleanup(view);
     }

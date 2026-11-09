@@ -14607,6 +14607,7 @@
         "$.browserExtension": "object?",
         "$.browserExtension.installUrl": "string!",
         "$.browserExtension.name": "string!",
+        "$.claudeCodeApiKeyEnabled": "boolean?",
         "$.claudeSubscriptionEnabled": "boolean?",
         "$.codeSearch": "object!",
         "$.codeSearch.available": "boolean!",
@@ -40455,6 +40456,7 @@
       "defaultChatComposerMessages": "value"
     },
     "@opengeni/react/connect": {
+      "attentionFirst": "value",
       "CapabilityCatalogIndicator": "value",
       "CapabilityCatalogRow": "value",
       "CapabilityCatalogRowProps": "type",
@@ -40476,6 +40478,7 @@
       "ConnectionInstalled": "value",
       "ConnectionInstalledItem": "type",
       "ConnectionLogo": "value",
+      "connectionOptionNeedsAttention": "value",
       "ConnectionOptionRow": "value",
       "ConnectionServiceRow": "value",
       "ConnectionType": "type",

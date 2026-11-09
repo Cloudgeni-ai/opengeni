@@ -984,6 +984,11 @@ const SettingsSchema = z.object({
   // that may call the unauthenticated API besides this stack's own web and
   // public origins. Local access mode ignores `corsAllowOriginRegex`.
   localAllowedOrigins: z.string().optional(),
+  // Exact marketing-site origins, comma-separated, that may read the signed-in
+  // visitor's display name and avatar from `GET /v1/auth/display-identity` with
+  // cookies. Grants credentialed CORS on that one read-only path only; empty
+  // (the default) disables it. Never widens `corsAllowOriginRegex`.
+  landingOrigins: z.string().optional(),
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
@@ -1298,6 +1303,10 @@ const SettingsSchema = z.object({
   // account pool and a distinct rail from the existing xai/* API-key provider.
   supergrokSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
   claudeSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED
+  // Offers "Claude Code (API key)" in Connect provider: the Anthropic API key
+  // connection, explained for people whose Claude plan includes monthly API
+  // credits. Display only; it is independent of the Claude subscription.
+  claudeCodeApiKeyEnabled: EnvBoolean.default(false), // OPENGENI_CLAUDE_CODE_API_KEY_ENABLED
   // Maximum silence between complete, valid SuperGrok SSE data events. This is
   // not a request/run duration cap; every valid event resets the timer.
   supergrokResponseStreamIdleTimeoutMs: z.coerce
@@ -6042,6 +6051,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),
     corsAllowOriginRegex: optional("OPENGENI_CORS_ALLOW_ORIGIN_REGEX"),
     localAllowedOrigins: optional("OPENGENI_LOCAL_ALLOWED_ORIGINS"),
+    landingOrigins: optional("OPENGENI_LANDING_ORIGINS"),
     openaiProvider: optional("OPENGENI_OPENAI_PROVIDER"),
     openaiApiKey: optional("OPENGENI_OPENAI_API_KEY") ?? optional("OPENAI_API_KEY"),
     openaiBaseUrl: optional("OPENGENI_OPENAI_BASE_URL") ?? optional("OPENAI_BASE_URL"),
@@ -6140,6 +6150,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
+    claudeCodeApiKeyEnabled: optional("OPENGENI_CLAUDE_CODE_API_KEY_ENABLED"),
     supergrokResponseStreamIdleTimeoutMs: optional(
       "OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS",
     ),
@@ -12354,6 +12365,19 @@ export function trustedProxyCidrEntries(raw: string): TrustedProxyCidr[] {
  * browser boundary.
  */
 export function localAllowedOriginEntries(raw: string | undefined): string[] {
+  return exactOriginEntries(raw, "OPENGENI_LOCAL_ALLOWED_ORIGINS", "http://127.0.0.1:5173");
+}
+
+/**
+ * Parse `OPENGENI_LANDING_ORIGINS`: comma-separated exact marketing-site origins
+ * allowed to read `GET /v1/auth/display-identity` with cookies. Same strict
+ * exact-origin rules as {@link localAllowedOriginEntries}.
+ */
+export function landingOriginEntries(raw: string | undefined): string[] {
+  return exactOriginEntries(raw, "OPENGENI_LANDING_ORIGINS", "https://www.example.com");
+}
+
+function exactOriginEntries(raw: string | undefined, variable: string, example: string): string[] {
   const origins: string[] = [];
   for (const entry of (raw ?? "").split(",")) {
     const value = entry.trim();
@@ -12377,7 +12401,7 @@ export function localAllowedOriginEntries(raw: string | undefined): string[] {
       value.endsWith("#")
     ) {
       throw new Error(
-        `OPENGENI_LOCAL_ALLOWED_ORIGINS entry "${value.slice(0, 64)}" is not an exact http(s) origin such as http://127.0.0.1:5173`,
+        `${variable} entry "${value.slice(0, 64)}" is not an exact http(s) origin such as ${example}`,
       );
     }
     origins.push(url.origin);
@@ -12472,6 +12496,7 @@ function validateRecordingTranscriptionSettings(settings: Settings): void {
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
+  landingOriginEntries(settings.landingOrigins);
   validateSitesDomain(settings);
   if (
     settings.organizationUserSetupEmailTokenTransport === "query" &&

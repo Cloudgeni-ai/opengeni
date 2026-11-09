@@ -2631,6 +2631,12 @@ this flag. When off, subscription setup endpoints and catalog/credential resolut
 are disabled, and subscription setup is hidden from model settings. Stored credentials
 are retained. Anthropic API keys, Codex, SuperGrok, OpenRouter and Vercel are unchanged.
 
+`OPENGENI_CLAUDE_CODE_API_KEY_ENABLED=true` adds a "Claude Code (API key)" row to Connect
+provider (default off). It opens the same Anthropic API-key connection as the Anthropic row,
+with a short explanation that some Claude plans include monthly API credits and how to claim
+them and create the key. It is display only: it adds no provider, credential kind or
+billing path, and it is independent of `OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED`.
+
 Workspace Claude custom models use `/v1/workspaces/:workspaceId/model-providers/
 :providerKind/custom-models` (`anthropic` or `claude_subscription`) and the shared subscription account APIs for Claude. Anthropic API keys keep the
 workspace connection create/rotate/revoke API. Model IDs are scoped under

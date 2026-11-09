@@ -8022,6 +8022,11 @@ export const sessionTurns = pgTable(
         table.createdAt.desc(),
       )
       .where(sql`${table.finishedAt} is not null`),
+    // Finished turns of a workspace by finish time, for the turn timing
+    // profile sweep's recent window (migration 1352).
+    workspaceFinished: index("session_turns_workspace_finished_idx")
+      .on(table.workspaceId, table.finishedAt)
+      .where(sql`${table.finishedAt} is not null`),
     // "Mine" session-list filter (migration 0799): prompts a person sent
     // directly, by sender, so a workstream probe is one index lookup per tree
     // session. Agent-relayed and service turns are excluded by the predicate.
@@ -10178,6 +10183,85 @@ export const sessionEvents = pgTable(
     duplicateReasonBytes: check(
       "session_events_duplicate_reason_bytes_check",
       sql`${table.duplicateReason} is null or octet_length(${table.duplicateReason}) <= 4096`,
+    ),
+  }),
+);
+
+/**
+ * Where the wall time of one finished logical turn went (migration 1351).
+ * Computed from the session event log by a control maintenance sweep after
+ * the turn settles, never on the turn's own path. The `*_ms` segments are
+ * exclusive and add up to `wall_ms`; `steps` lists model requests, tool
+ * calls, sandbox operations and waits with their start, end and duration.
+ * Dimensions are frozen copies of the turn row. Rows outlive the turn's raw
+ * events (which an idle archive may purge) and go with the turn.
+ */
+export const turnTimingProfiles = pgTable(
+  "turn_timing_profiles",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    version: integer("version").notNull(),
+    status: text("status").notNull(),
+    model: text("model").notNull(),
+    provider: text("provider"),
+    reasoningEffort: text("reasoning_effort").notNull(),
+    latencyMode: text("latency_mode").notNull(),
+    surface: text("surface"),
+    source: text("source").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    finishedAt: timestamp("finished_at", { withTimezone: true }).notNull(),
+    wallMs: bigint("wall_ms", { mode: "number" }).notNull(),
+    queueMs: bigint("queue_ms", { mode: "number" }).notNull(),
+    turnStartMs: bigint("turn_start_ms", { mode: "number" }).notNull(),
+    dispatchMs: bigint("dispatch_ms", { mode: "number" }).notNull(),
+    modelInferenceMs: bigint("model_inference_ms", { mode: "number" }).notNull(),
+    modelProviderOtherMs: bigint("model_provider_other_ms", { mode: "number" }).notNull(),
+    modelNetworkMs: bigint("model_network_ms", { mode: "number" }).notNull(),
+    modelUnsplitMs: bigint("model_unsplit_ms", { mode: "number" }).notNull(),
+    modelStalledMs: bigint("model_stalled_ms", { mode: "number" }).notNull(),
+    webSearchMs: bigint("web_search_ms", { mode: "number" }).notNull(),
+    mcpToolMs: bigint("mcp_tool_ms", { mode: "number" }).notNull(),
+    sandboxToolMs: bigint("sandbox_tool_ms", { mode: "number" }).notNull(),
+    ownToolMs: bigint("own_tool_ms", { mode: "number" }).notNull(),
+    sandboxSetupMs: bigint("sandbox_setup_ms", { mode: "number" }).notNull(),
+    humanWaitMs: bigint("human_wait_ms", { mode: "number" }).notNull(),
+    capacityWaitMs: bigint("capacity_wait_ms", { mode: "number" }).notNull(),
+    afterModelMs: bigint("after_model_ms", { mode: "number" }).notNull(),
+    afterToolMs: bigint("after_tool_ms", { mode: "number" }).notNull(),
+    recoveryMs: bigint("recovery_ms", { mode: "number" }).notNull(),
+    turnEndMs: bigint("turn_end_ms", { mode: "number" }).notNull(),
+    attempts: integer("attempts").notNull(),
+    modelRequests: integer("model_requests").notNull(),
+    toolCalls: integer("tool_calls").notNull(),
+    steps: jsonb("steps").$type<unknown[]>().notNull(),
+    computedAt: timestamp("computed_at", { withTimezone: true })
+      .notNull()
+      .default(sql`statement_timestamp()`),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.turnId] }),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "turn_timing_profiles_workspace_account_fk",
+    }).onDelete("cascade"),
+    workspaceTurn: foreignKey({
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+      name: "turn_timing_profiles_workspace_turn_fk",
+    }).onDelete("cascade"),
+    workspaceFinished: index("turn_timing_profiles_workspace_finished_idx").on(
+      table.workspaceId,
+      table.finishedAt,
+    ),
+    finished: index("turn_timing_profiles_finished_idx").on(table.finishedAt),
+    stepsArray: check(
+      "turn_timing_profiles_steps_array_chk",
+      sql`jsonb_typeof(${table.steps}) = 'array'`,
     ),
   }),
 );
