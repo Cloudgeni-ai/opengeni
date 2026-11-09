@@ -18,7 +18,7 @@ const {
   reconcileSubscriptionCoreCapacityWait,
   withSessionRlsActorContext,
   withRlsContext,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
 } = await import("../src");
 import { rawRows } from "../src/database";
@@ -382,7 +382,7 @@ describe.skipIf(!realDb)("SUB-WAIT-01/02 candidate-provider waiter persistence",
 
   test("workspace Pause keeps the waiter and defers delivery; workspace Resume reconstructs the wait", async () => {
     const f = await fixture([]);
-    await withWorkspaceRls(client.db, f.workspaceId, (db) =>
+    await withWorkspaceSessionActivityRls(client.db, f.workspaceId, (db) =>
       db.transaction((tx) =>
         mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: f.accountId,
@@ -406,7 +406,7 @@ describe.skipIf(!realDb)("SUB-WAIT-01/02 candidate-provider waiter persistence",
     await shared.admin`update session_workflow_wake_outbox set delivered_revision = wake_revision
       where session_id=${f.sessionId}::uuid`;
     baseline = await deliveries(f);
-    await withWorkspaceRls(client.db, f.workspaceId, (db) =>
+    await withWorkspaceSessionActivityRls(client.db, f.workspaceId, (db) =>
       db.transaction((tx) =>
         mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: f.accountId,
