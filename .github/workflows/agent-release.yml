@@ -1,8 +1,13 @@
 name: Agent Release
 
 # Cross-platform signed release of the opengeni-agent binary.
-# Triggered on a pushed `agent-v*` tag (decoupled from the npm changesets release so
-# the Rust binary versions independently) or a manual dispatch. Reuses release.yml's
+# Triggered when main's agent/Cargo.toml names a version that has no `agent-v*`
+# release yet, on a pushed `agent-v*` tag (decoupled from the npm changesets
+# release so the Rust binary versions independently) or a manual dispatch.
+# Deployments serve and update Connected Machines to the agent version of their
+# own build, so every agent version that lands on main is published without a
+# hand-pushed tag (the protected agent-release environment still approves it).
+# Reuses release.yml's
 # conventions: actions/checkout@v6, the built-in GITHUB_TOKEN, version-as-source-of-
 # truth, and a dormant-until-opted-in guard (RELEASE_ENABLED) for tag pushes.
 #
@@ -18,6 +23,13 @@ name: Agent Release
 
 on:
   push:
+    branches:
+      - main
+    # Branch pushes only; tag pushes ignore path filters. GitHub evaluates the
+    # first 300 changed files of a push, and the merge batcher lands each PR as
+    # its own commit, so only a single PR touching more files could miss this.
+    paths:
+      - agent/Cargo.toml
     tags:
       - "agent-v*"
   workflow_dispatch:
@@ -29,6 +41,9 @@ on:
 concurrency:
   group: agent-release-${{ github.ref }}
   cancel-in-progress: false
+  # Every version that lands on main is published, so a later push waits in
+  # line instead of replacing an earlier run still waiting for approval.
+  queue: max
 
 permissions:
   contents: read
@@ -43,6 +58,7 @@ jobs:
     if: ${{ vars.RELEASE_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
     outputs:
       version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -50,24 +66,54 @@ jobs:
       - name: Resolve + verify the version
         id: v
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            version="${{ github.event.inputs.version }}"
+          crate_version="$(grep -m1 '^version' agent/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$DISPATCH_VERSION"
+          elif [ "$REF_TYPE" = "branch" ]; then
+            # main changed agent/Cargo.toml: publish its version unless its
+            # release already exists.
+            version="$crate_version"
+            release_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/agent-v$version")" || release_status=error
+            if [ "$release_status" = 200 ]; then
+              echo "agent-v$version is already released; nothing to publish"
+              echo "version=$version" >> "$GITHUB_OUTPUT"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            [ "$release_status" = 404 ] || { echo "::error::could not look up the agent-v$version release (HTTP $release_status)" >&2; exit 1; }
+            # 0: the tag exists; 2: it does not; anything else is an error.
+            tag_status=0
+            git ls-remote --exit-code --tags origin "refs/tags/agent-v$version" >/dev/null || tag_status=$?
+            if [ "$tag_status" = 0 ]; then
+              echo "::error::tag agent-v$version exists without a release; re-run that tag's Agent Release workflow" >&2
+              exit 1
+            fi
+            [ "$tag_status" = 2 ] || { echo "::error::could not list agent release tags" >&2; exit 1; }
           else
             version="${GITHUB_REF_NAME#agent-v}"
           fi
-          crate_version="$(grep -m1 '^version' agent/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
           echo "tag/input version: $version ; crate version: $crate_version"
           if [ "$version" != "$crate_version" ]; then
             echo "::error::version mismatch — tag $version != agent/Cargo.toml $crate_version" >&2
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.target }}
     needs: guard
+    if: ${{ needs.guard.outputs.publish == 'true' }}
     environment: agent-release
     permissions:
       contents: read
@@ -644,6 +690,7 @@ jobs:
     environment: agent-release
     name: Publish release
     needs: [guard, build]
+    if: ${{ needs.guard.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -778,6 +825,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # `/agent/latest/<asset>` is an API compatibility route, not a moving
-      # provider tag. Deployments promote or roll back that route by changing
-      # OPENGENI_AGENT_STABLE_VERSION after this immutable versioned release
-      # exists. Never delete or move an agent release tag.
+      # provider tag. Each deployment serves its own build's agent release
+      # once this immutable versioned release exists; an operator's
+      # OPENGENI_AGENT_STABLE_VERSION pin holds or rolls it back. Never delete
+      # or move an agent release tag.
