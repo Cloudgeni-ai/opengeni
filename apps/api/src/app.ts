@@ -1766,6 +1766,7 @@ export function createAppComposition(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
         claudeSubscriptionEnabled: deps.settings.claudeSubscriptionEnabled,
+        ...(deps.settings.claudeCodeApiKeyEnabled ? { claudeCodeApiKeyEnabled: true } : {}),
         ...(azureOpenAIDeploymentIdentityAvailable(deps.settings)
           ? { azureOpenAIDeploymentIdentity: true }
           : {}),

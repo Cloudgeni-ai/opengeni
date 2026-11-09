@@ -5968,6 +5968,8 @@ export type ClientConfig = {
   apiContractRevision: string;
   serverVersion?: string | undefined;
   claudeSubscriptionEnabled?: boolean | undefined;
+  /** Connect provider offers "Claude Code (API key)". Absent when not offered. */
+  claudeCodeApiKeyEnabled?: boolean | undefined;
   /**
    * Organization admins may connect Azure OpenAI as this deployment's own
    * Microsoft Entra identity (the operator offers it). Absent otherwise.
