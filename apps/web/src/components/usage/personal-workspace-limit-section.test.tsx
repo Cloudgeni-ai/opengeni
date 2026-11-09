@@ -65,7 +65,11 @@ async function setLimitAndSave(): Promise<string> {
   )!;
   await act(async () => {
     Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")!.set!.call(input, "10");
-    input.dispatchEvent(new Event("input", { bubbles: true }));
+    // Call React's own change handler, as the other settings tests do.
+    const propsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
+    (input as unknown as Record<string, { onChange: (event: { target: HTMLInputElement }) => void }>)[
+      propsKey
+    ]!.onChange({ target: input });
   });
   const button = [...container.querySelectorAll("button")].find(
     (candidate) => candidate.textContent === "Set limit",
