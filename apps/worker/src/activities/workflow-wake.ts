@@ -1,14 +1,15 @@
 import {
   fireWorkspacePauseTimerInTransaction,
   listDueWorkspacePauseTimers,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
+  getSessionEvent,
   getWorkspaceControlEvent,
-  type Database,
 } from "@opengeni/db";
 import { publishDurableWorkspaceControlEvent } from "@opengeni/events";
 import { recordWorkflowWakeReconciliation } from "@opengeni/observability";
 import type { ControlActivityServices } from "./types";
 import { currentActivityContext } from "./streaming";
+import { publishDurableSessionEvents } from "../session-event-fanout";
 import {
   reconcileAutomaticSessionTitleFanout,
   reconcilePendingSessionWorkflowWakes,
@@ -46,13 +47,16 @@ export function createWorkflowWakeActivities(services: () => Promise<ControlActi
       const timers = await listDueWorkspacePauseTimers(service.db, 100);
       for (const timer of timers) {
         try {
-          const result = await withWorkspaceRls(service.db, timer.workspace_id, (scoped) =>
-            scoped.transaction((tx) =>
-              fireWorkspacePauseTimerInTransaction(tx as unknown as Database, {
-                workspaceId: timer.workspace_id,
-                timerId: timer.timer_id,
-              }),
-            ),
+          const result = await withWorkspaceSessionActivityRls(
+            service.db,
+            timer.workspace_id,
+            (scoped) =>
+              scoped.transaction((tx) =>
+                fireWorkspacePauseTimerInTransaction(tx as unknown as typeof scoped, {
+                  workspaceId: timer.workspace_id,
+                  timerId: timer.timer_id,
+                }),
+              ),
           );
           if (result?.workspaceControlEventId) {
             const event = await getWorkspaceControlEvent(
@@ -63,6 +67,24 @@ export function createWorkflowWakeActivities(services: () => Promise<ControlActi
             if (event)
               await publishDurableWorkspaceControlEvent(service.bus, timer.workspace_id, event);
           }
+          // A timed Pause releases capacity waits: their events go out live too.
+          const released = await Promise.all(
+            (result?.affectedSessionEvents ?? []).flatMap((affected) =>
+              affected.eventIds.map((eventId) =>
+                getSessionEvent(service.db, timer.workspace_id, eventId),
+              ),
+            ),
+          );
+          await publishDurableSessionEvents(
+            service.bus,
+            timer.workspace_id,
+            released.filter((event) => event !== null),
+            (error) =>
+              service.observability.warn("Workspace pause timer event fanout failed", {
+                workspaceId: timer.workspace_id,
+                error: String(error),
+              }),
+          );
         } catch (error) {
           service.observability.warn("Workspace pause timer will retry", {
             workspaceId: timer.workspace_id,
