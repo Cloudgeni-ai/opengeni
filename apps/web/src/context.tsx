@@ -35,6 +35,7 @@ import {
   signUpEmail,
   signUpPasskey,
   startManagedSocialSignIn,
+  subscribeSignInLost,
 } from "@/api";
 import { LoadingPanel, ProblemPanel, WaitingPanel } from "@opengeni/react/app/components/common";
 import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
@@ -154,6 +155,7 @@ const webAppStateHost: AppStateHost = {
   startManagedSocialSignIn,
   signInPasskey,
   signUpPasskey,
+  subscribeSignInLost,
   configureManagedActorEpoch,
   getStoredAccessKey,
   setStoredAccessKey,

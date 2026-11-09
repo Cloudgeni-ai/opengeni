@@ -177,6 +177,7 @@ import {
   githubRepositoryUnavailableHttpError,
   connectionAccountSelectionHttpError,
   regionRestrictedHttpError,
+  authenticationRequiredHttpError,
   missingPermissionHttpError,
   scheduledTaskTargetAccessHttpError,
   sessionUsageLimitHttpError,
@@ -2756,6 +2757,7 @@ export function createAppComposition(
               details: { code: rawError.code },
             })
           : (missingPermissionHttpError(rawError) ??
+            authenticationRequiredHttpError(rawError) ??
             sessionUsageLimitHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??
             insufficientCreditsHttpError(rawError) ??
