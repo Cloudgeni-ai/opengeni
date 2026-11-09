@@ -10,7 +10,7 @@
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "98a2bef7fc68945f6ecbd3bfbfbc8828658e4d2e1001cd1c1a1169c33572357c"
+      "sha256": "ff9173d6a4cfb346658d1c98cf611b018a057eaebd0e6f5c6d8519bc5c4f689a"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -473,7 +473,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "guard",
       "step": "Resolve + verify the version",
-      "sha256": "0e03cb9a6c1d0a47d59984b9b1b5ec0bf32fa53e18389e77aa6e7bee4dadbc28"
+      "sha256": "070d0d892697491537d56f6f84f0e36367ced0f6d9d9cfa40d38ec53c0c027dc"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",
