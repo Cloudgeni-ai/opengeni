@@ -6,6 +6,7 @@ import {
   personalMachineCopy,
   sessionAdmissionApprovedElsewhereCopy,
   sessionAdmissionCopy,
+  sessionAdmissionMachineAccessCopy,
   timelineLivePause,
   useSessionStart,
   useSessionStartupTimeline,
@@ -698,9 +699,9 @@ function LoadFailure({ message, onRetry }: { message?: string | undefined; onRet
 }
 
 /**
- * The runtime could not start this session's next step. It is not waiting on
- * the person, so it says so plainly and offers one recheck (Resume), which
- * starts the kept work again.
+ * The runtime could not start this session's next step. It says what is
+ * blocking it plainly; the kept work starts by itself once that is fixed. The
+ * machine's owner can allow it here, and an unknown failure offers Try again.
  */
 function StuckCard({
   session,
@@ -719,7 +720,7 @@ function StuckCard({
   const m = useNativeTimelineMessages();
   const t = useOpenGeniText();
   // The same state as the web notice: why the saved message didn't start, the
-  // machines this person may move the chat to, and one fenced recheck.
+  // machines this person may move the chat to, and the one action that fixes it.
   const start = useSessionStart({ session, onSessionChanged, client, workspaceId });
   const [failed, setFailed] = useState(false);
   // The recheck is one fenced Resume outside the session control runner, so
@@ -744,9 +745,34 @@ function StuckCard({
       : null;
   const runOnApprovedMachine = start.runOnApprovedMachine;
   // The web notice's words for the known refusal; the native stuck copy when
-  // the block is only known from its status event.
-  const copy = reason ? sessionAdmissionCopy(t, reason) : null;
-  const tone = approved ? c["status-waiting"] : c["status-failed"];
+  // the block is only known from its status event. Most refusals start by
+  // themselves once fixed, so they offer no button; the machine's owner gets
+  // Allow for this chat, and only an unknown failure gets Try again.
+  const copy = reason
+    ? start.needsMachineAccess && start.machineAccess
+      ? sessionAdmissionMachineAccessCopy(t, start.machineAccess, {
+          canAllowHere: start.allowMachine !== undefined,
+        })
+      : sessionAdmissionCopy(t, reason)
+    : null;
+  const allowing = start.needsMachineAccess && start.machineAccess?.isOwner === true;
+  const paused = session.effectiveControl.state === "paused";
+  const actionLabel = !copy
+    ? paused
+      ? null
+      : m.stuckRetry
+    : allowing
+      ? start.allowMachine
+        ? copy.action
+        : null
+      : copy.action && !paused
+        ? copy.action
+        : null;
+  const runAction = allowing ? start.allowMachine : start.recheck;
+  const tone =
+    approved || (copy && (copy.action === null || allowing))
+      ? c["status-waiting"]
+      : c["status-failed"];
   const textStyle = { ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] };
   return (
     <View
@@ -859,6 +885,7 @@ function StuckCard({
         <>
           <Text style={textStyle}>{copy.body}</Text>
           <Text style={textStyle}>{copy.next}</Text>
+          {paused ? <Text style={textStyle}>{t("sessionAdmission.pausedNote")}</Text> : null}
         </>
       ) : (
         <Text style={textStyle}>{m.stuckBody}</Text>
@@ -872,12 +899,12 @@ function StuckCard({
             color: c["status-failed"],
           }}
         >
-          {m.stuckRetryFailed}
+          {allowing ? t("sessionAdmission.allowFailed") : m.stuckRetryFailed}
         </Text>
       ) : null}
-      {machine || approved ? null : (
+      {machine || approved || actionLabel === null || !runAction ? null : (
         <Button
-          label={m.stuckRetry}
+          label={actionLabel}
           variant="primary"
           busy={busy || rechecking}
           disabled={busy || rechecking}
@@ -887,8 +914,7 @@ function StuckCard({
             recheckPending.current = true;
             setRechecking(true);
             setFailed(false);
-            start
-              .recheck()
+            runAction()
               .catch(() => setFailed(true))
               .finally(() => {
                 recheckPending.current = false;

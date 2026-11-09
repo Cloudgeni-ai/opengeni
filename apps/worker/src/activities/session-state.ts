@@ -217,6 +217,9 @@ export function createSessionStateActivities(
           workflowId,
           attemptId: input.attemptId,
           fence: input.admissionFence,
+          ...(input.admissionWakeRevision !== undefined
+            ? { wakeRevision: input.admissionWakeRevision }
+            : {}),
           reason: input.preClaimFailure.reason,
           sqlState: input.preClaimFailure.sqlState ?? null,
         });

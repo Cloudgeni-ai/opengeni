@@ -4,5 +4,6 @@ export { SessionAdmissionNotice } from "../../../components/session-admission-no
 export {
   admissionControlNeedsRefresh,
   admissionRecheckControl,
+  allowMachineForChat,
   recheckSessionAdmission,
 } from "../../../session-admission-model";

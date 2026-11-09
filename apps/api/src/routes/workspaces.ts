@@ -84,7 +84,10 @@ import {
   type WorkspaceMemberCandidate,
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
-import { loadWorkspaceCodexCatalogReadiness } from "@opengeni/core";
+import {
+  loadWorkspaceCodexCatalogReadiness,
+  releaseAdmissionBlocksAfterAccessChange,
+} from "@opengeni/core";
 import { REGION_RESTRICTED, REGION_RESTRICTED_MESSAGE } from "@opengeni/contracts";
 import {
   allWorkspacePermissions,
@@ -1822,6 +1825,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch (error) {
       rethrowWorkspaceMemberCandidateError(error);
     }
+    // Restored access lets that person's saved messages start by themselves.
+    await releaseAdmissionBlocksAfterAccessChange(
+      {
+        db: deps.db,
+        requestSessionWorkflowWakeDispatch: () =>
+          deps.workflowClient.requestSessionWorkflowWakeDispatch(),
+      },
+      { accountId: grant.accountId, workspaceId, change: "membership" },
+    );
     const members = await listWorkspacePeople(deps, workspaceId);
     const member = members.find((addedMember) => addedMember.subjectId === subjectId);
     if (!member) {
@@ -1867,6 +1879,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch (error) {
       rethrowWorkspaceMemberCandidateError(error);
     }
+    // Restored access lets that person's saved messages start by themselves.
+    await releaseAdmissionBlocksAfterAccessChange(
+      {
+        db: deps.db,
+        requestSessionWorkflowWakeDispatch: () =>
+          deps.workflowClient.requestSessionWorkflowWakeDispatch(),
+      },
+      { accountId: grant.accountId, workspaceId, change: "membership" },
+    );
     const members = await listWorkspacePeople(deps, workspaceId);
     const member = members.find((candidate) => candidate.subjectId === subjectId);
     if (!member) {

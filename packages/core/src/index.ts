@@ -198,6 +198,7 @@ export * from "./application/organization-privacy";
 export * from "./application/session-share-links";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
+export * from "./application/admission-release";
 export * from "./application/api-integration-servers";
 
 // Durable editable-artifact live broker, ticket, ports, and projection types.
