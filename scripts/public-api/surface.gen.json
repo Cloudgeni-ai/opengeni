@@ -40455,6 +40455,7 @@
       "defaultChatComposerMessages": "value"
     },
     "@opengeni/react/connect": {
+      "attentionFirst": "value",
       "CapabilityCatalogIndicator": "value",
       "CapabilityCatalogRow": "value",
       "CapabilityCatalogRowProps": "type",
@@ -40476,6 +40477,7 @@
       "ConnectionInstalled": "value",
       "ConnectionInstalledItem": "type",
       "ConnectionLogo": "value",
+      "connectionOptionNeedsAttention": "value",
       "ConnectionOptionRow": "value",
       "ConnectionServiceRow": "value",
       "ConnectionType": "type",
