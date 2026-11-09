@@ -134,7 +134,7 @@ describe("session capability preview parity in Chromium", () => {
                   .locator('[aria-hidden="true"]')
                   .first()
                   .innerText(),
-              ).toBe("WR");
+              ).toBe("WS");
               expect(await card.locator("img").count()).toBe(0);
             }
           }

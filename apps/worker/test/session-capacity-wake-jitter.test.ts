@@ -1,9 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import {
   CAPACITY_TIMER_WAKE_JITTER_MAX_MS,
   CAPACITY_WAKE_JITTER_MAX_MS,
-  CAPACITY_WAKE_JITTER_PATCH,
   capacityWakeJitterMs,
 } from "../src/workflows/session";
 
@@ -60,22 +58,6 @@ describe("capacity-wait wake jitter", () => {
     for (const count of buckets) {
       expect(count).toBeGreaterThan(0);
       expect(count).toBeLessThan(95);
-    }
-  });
-
-  test("every jitter draw is gated by the replay patch", () => {
-    // Temporal seeds workflow Math.random deterministically, but a new draw or
-    // timer on a history recorded before this change would break replay. Keep
-    // every draw behind the patch marker.
-    const source = readFileSync(new URL("../src/workflows/session.ts", import.meta.url), "utf8");
-    expect(CAPACITY_WAKE_JITTER_PATCH).toBe("session-capacity-wake-jitter-v1");
-    const draws = [...source.matchAll(/Math\.random\(\)/g)];
-    expect(draws.length).toBe(2);
-    for (const draw of draws) {
-      // The nearest enclosing branch of every draw is the patch check itself.
-      const preceding = source.slice(0, draw.index!);
-      const guard = preceding.slice(preceding.lastIndexOf("if ("));
-      expect(guard.split("\n")[0]).toContain("patched(CAPACITY_WAKE_JITTER_PATCH)");
     }
   });
 });

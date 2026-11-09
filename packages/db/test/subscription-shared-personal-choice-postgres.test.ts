@@ -102,9 +102,6 @@ async function fixture(): Promise<Fixture> {
     personal_connections_allowed, personal_fallback_allowed)
     values (${accountId}::uuid, ${admin.json({ codex: { mode: "spread" } })}::jsonb,
       '{}'::jsonb, false, '{}'::jsonb, true, true)`;
-  await admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', true)
-    on conflict (account_id, provider) do update set enabled = true`;
   const session = await withSessionRlsActorContext({ subjectId: creatorSubject }, () =>
     createSession(client!.db, {
       accountId,

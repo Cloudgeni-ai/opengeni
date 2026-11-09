@@ -2,6 +2,7 @@ import {
   adminAccessDurationHours,
   type AdminAccessDuration,
 } from "@opengeni/react/session-admin-access-model";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniClient, SessionAdminAccess } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -18,7 +19,7 @@ export type SessionFullAccess = {
 };
 
 export function useSessionFullAccess(
-  client: OpenGeniClient,
+  client: ChatClient<OpenGeniClient>,
   workspaceId: string,
   sessionId: string,
 ): SessionFullAccess | null {

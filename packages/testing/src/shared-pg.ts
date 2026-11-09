@@ -1225,13 +1225,12 @@ export async function acquireSharedTestDatabase(
 /**
  * Grant the runtime role what a migration withholds until the previous
  * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES):
- * EXECUTE on the personal-machine owner lookup (0978), the queued-turn hold
- * summary (0988), the held browser
+ * EXECUTE on the personal-machine owner lookup (0978), the held browser
  * routines (1002), the secret history scrub's reader and cell writer (1091),
  * the agent call and native push v2 routines (1107), the lock-free external
- * identity read (1172), the organization vault list (1218), the names-only
- * member list (1211) and the organization machine and rig list (1224). Tests
- * that exercise them run as they will once they are granted.
+ * identity read (1172), the names-only member list (1211) and the inventory
+ * of meeting tracks not yet kept compact (1240). Tests that
+ * exercise them run as they will once they are granted.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,
@@ -1240,8 +1239,6 @@ export async function grantDeferredRuntimeAccess(
   const grantee = `"${role.replaceAll('"', '""')}"`;
   await admin.unsafe(`
     GRANT EXECUTE ON FUNCTION opengeni_private.session_machine_owner_subject_v1(uuid, uuid, uuid)
-      TO ${grantee};
-    GRANT EXECUTE ON FUNCTION opengeni_private.summarize_queued_turns_by_hold()
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)
       TO ${grantee};
@@ -1257,11 +1254,11 @@ export async function grantDeferredRuntimeAccess(
       opengeni_private.agent_call_ringing_v1(text),
       opengeni_private.ring_agent_call_v1(uuid, boolean)
       TO ${grantee};
-    GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_vaults_v1(uuid, jsonb)
-      TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_member_names_v1(uuid)
       TO ${grantee};
-    GRANT EXECUTE ON FUNCTION opengeni_private.list_organization_compute_v1(uuid, uuid, text)
+    GRANT EXECUTE ON FUNCTION opengeni_private.list_uncompacted_recording_tracks_v1(integer, text)
+      TO ${grantee};
+    GRANT EXECUTE ON FUNCTION opengeni_private.end_agent_call_rings_v1(uuid)
       TO ${grantee};
   `);
 }
@@ -1394,6 +1391,8 @@ export type RestrictedRuntimeTestDatabase = {
   schema: string;
   /** opengeni_app URL; pass `{ searchPath: schema }` to createDb. */
   appUrl: string;
+  /** Non-superuser migration owner URL; set `search_path` to `schema`. */
+  ownerUrl: string;
   /** Superuser pool on the same database with `search_path` set to the schema. */
   admin: postgres.Sql;
   /** Name of the NOSUPERUSER NOBYPASSRLS migration owner. */
@@ -1439,6 +1438,7 @@ export async function acquireRestrictedRuntimeTestDatabase(
     return {
       schema,
       appUrl: appUrl.toString(),
+      ownerUrl: owner.ownerUrl,
       admin: pool,
       ownerRole: owner.ownerRole,
       release: async () => {

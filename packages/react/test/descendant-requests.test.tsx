@@ -521,6 +521,43 @@ describe("DescendantRequests", () => {
     expect(resolved).toBe(1);
   });
 
+  test("Approve all sends each of a sub-session's approvals to the sub-session, one decision each", async () => {
+    sequence = 0;
+    const child = summary("child", { title: "Bundle tools" });
+    const approvals = ["push-a", "push-b", "push-c"].map((id) => ({
+      id,
+      name: "projects.update",
+      arguments: { projectId: id },
+    }));
+    const state: { events: Record<string, SessionEvent[]> } = {
+      events: { child: [event("session.requiresAction", { approvals })] },
+    };
+    const { client, calls } = fakeClient(state);
+    // Each decision is recorded on the sub-session, which keeps the rest waiting.
+    (client as unknown as Record<string, unknown>).sendApprovalDecision = async (
+      _workspaceId: string,
+      sessionId: string,
+      body: { approvalId: string; decision: string },
+    ) => {
+      calls.decisions.push({ sessionId, ...body });
+      state.events = {
+        child: [...(state.events.child ?? []), event("user.approvalDecision", body)],
+      };
+      return {};
+    };
+    await render({ client, waiting: [child] });
+    await click(button("Approve all 3")!);
+    await flush(0);
+    await flush(0);
+    expect(calls.decisions).toEqual(
+      approvals.map((approval) => ({
+        sessionId: "child",
+        approvalId: approval.id,
+        decision: "approve",
+      })),
+    );
+  });
+
   test("opens the sub-session where it asked", async () => {
     sequence = 0;
     const child = summary("child", { title: "Review PR #4418" });

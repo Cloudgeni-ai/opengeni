@@ -1,7 +1,8 @@
 import { and, eq } from "drizzle-orm";
-import { LatencyMode, ReasoningEffort } from "@opengeni/contracts";
+import { LatencyMode, ReasoningEffort, type TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import type { SessionActivityDatabase } from "./database";
 import * as schema from "./schema";
+import { releaseCapacityWaitingTurnInTransaction } from "./capacity-wait-release";
 import { withLosslessContentWriteVersion } from "./lossless-json";
 import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import {
@@ -14,7 +15,11 @@ import {
   type SessionCommandActor,
 } from "./session-control";
 
-/** Caller owns the RLS transaction. This never accepts, wakes or changes a turn. */
+/**
+ * Caller owns the RLS transaction. This never accepts a turn. With
+ * `capacityRelease`, the chat's turn that is waiting for subscription
+ * capacity moves onto the new model in the same commit and continues.
+ */
 export async function setSessionModelInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -27,6 +32,8 @@ export async function setSessionModelInTransaction(
     reasoningEffort: ReasoningEffort;
     /** Synchronous validation against the locked session, not an earlier read. */
     validate?: (session: typeof schema.sessions.$inferSelect) => void;
+    /** The chat's capacity-waiting turn and its policy on the new model. */
+    capacityRelease?: { turnId: string; executionPolicy: TurnExecutionPolicyV1 };
   },
 ) {
   const agent = input.actor.type === "agent_attempt" ? input.actor : null;
@@ -34,7 +41,10 @@ export async function setSessionModelInTransaction(
     workspaceId: input.workspaceId,
     controlLock: "share",
     sessionIds: [input.sessionId, ...(agent ? [agent.sessionId] : [])],
-    turnIds: agent ? [agent.turnId] : [],
+    turnIds: [
+      ...(agent ? [agent.turnId] : []),
+      ...(input.capacityRelease ? [input.capacityRelease.turnId] : []),
+    ],
     attemptIds: agent ? [agent.attemptId] : [],
   });
   const session = locks.sessions.find((row) => row.id === input.sessionId);
@@ -99,6 +109,11 @@ export async function setSessionModelInTransaction(
       reasoningEffort: ReasoningEffort.parse(result.reasoningEffort),
       latencyMode: LatencyMode.parse(result.latencyMode),
       eventId: result.eventId,
+      releasedCapacityWaitTurnId:
+        typeof result.releasedCapacityWaitTurnId === "string"
+          ? result.releasedCapacityWaitTurnId
+          : null,
+      releaseEventIds: [] as string[],
       receiptId: reserved.receipt.id,
       timestamp: reserved.receipt.createdAt.toISOString(),
       replay: true,
@@ -141,12 +156,30 @@ export async function setSessionModelInTransaction(
     )
     .returning({ id: schema.sessionEvents.id });
   if (!event) throw new Error("Session model settings event was not persisted");
+  const released = input.capacityRelease
+    ? await releaseCapacityWaitingTurnInTransaction(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.capacityRelease.turnId,
+        trigger: "model_switch",
+        executionPolicy: input.capacityRelease.executionPolicy,
+        now,
+      })
+    : null;
+  const releasedCapacityWaitTurnId = released ? input.capacityRelease!.turnId : null;
   await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
-    result: { ...settings, eventId: event.id },
+    result: {
+      ...settings,
+      eventId: event.id,
+      ...(releasedCapacityWaitTurnId ? { releasedCapacityWaitTurnId } : {}),
+    },
   });
   return {
     ...settings,
     eventId: event.id,
+    releasedCapacityWaitTurnId,
+    releaseEventIds: released?.eventIds ?? [],
     receiptId: reserved.receipt.id,
     timestamp: reserved.receipt.createdAt.toISOString(),
     replay: false,

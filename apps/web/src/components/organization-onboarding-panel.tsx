@@ -8,6 +8,7 @@ import {
   MailIcon,
   RefreshCwIcon,
 } from "lucide-react";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { toast } from "sonner";
 import type { ClientModel } from "@opengeni/sdk";
@@ -81,7 +82,7 @@ export function OrganizationOnboardingPanel({
 }: {
   /** Leaves onboarding; a destination opens that chat instead of the home page. */
   onComplete: (destination?: OnboardingDestination) => void;
-  client?: OpenGeniBrowserClient;
+  client?: ChatClient<OpenGeniBrowserClient>;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
   supergrokEnabled?: boolean;
@@ -830,7 +831,7 @@ export function OnboardingAccountHeader({
 }
 
 async function listAllOrganizationInvitations(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
 ): Promise<OrganizationInvitation[]> {
   const invitations: OrganizationInvitation[] = [];
   const seenCursors = new Set<string>();

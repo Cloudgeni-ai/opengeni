@@ -23,6 +23,12 @@ export type TarWorkspaceArchiveDescriptor = {
   archiveBytes: number;
   capturedAt: string;
   workspace: WorkspaceTreeFingerprint;
+  /**
+   * Workspace-relative folders this archive deliberately left out: a drain's
+   * reduced save after full snapshots kept failing (rebuildable dependency
+   * and cache folders). Absent on a complete save.
+   */
+  omittedPaths?: string[];
 };
 
 export type NativeSnapshotProvider =
@@ -269,7 +275,29 @@ export function parseWorkspaceArchiveDescriptor(value: unknown): WorkspaceArchiv
     ) {
       return null;
     }
-    return tar as TarWorkspaceArchiveDescriptor;
+    if (tar.omittedPaths === undefined) return tar as TarWorkspaceArchiveDescriptor;
+    // Display-only metadata: a malformed list never makes the archive itself
+    // unreadable; only well-formed workspace-relative folders are kept.
+    const omittedPaths = Array.isArray(tar.omittedPaths)
+      ? tar.omittedPaths
+          .filter(
+            (path): path is string =>
+              typeof path === "string" &&
+              path.length > 0 &&
+              path.length <= 4096 &&
+              !path.startsWith("/") &&
+              !/[\u0000-\u001f\u007f]/u.test(path) &&
+              path.split("/").every((part) => part !== "" && part !== "." && part !== ".."),
+          )
+          .slice(0, 4096)
+      : [];
+    if (Array.isArray(tar.omittedPaths) && omittedPaths.length === tar.omittedPaths.length) {
+      return tar as TarWorkspaceArchiveDescriptor;
+    }
+    const { omittedPaths: _raw, ...rest } = tar;
+    return (
+      omittedPaths.length > 0 ? { ...rest, omittedPaths } : rest
+    ) as TarWorkspaceArchiveDescriptor;
   }
 
   if (candidate.version === WORKSPACE_ARCHIVE_DESCRIPTOR_VERSION) {

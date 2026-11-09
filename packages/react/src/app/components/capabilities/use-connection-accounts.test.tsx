@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -35,7 +36,7 @@ function Harness({
   items = catalog,
   transientRetry,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   id?: string | undefined;
   workspaceId?: string | undefined;
   selectedIds?: string[] | undefined;
@@ -56,7 +57,7 @@ function Harness({
   return null;
 }
 function clientFor(load: () => Promise<ConnectionMetadata[]>) {
-  return { listOwnConnectionAccounts: load } as unknown as OpenGeniBrowserClient;
+  return { listOwnConnectionAccounts: load } as unknown as ChatClient<OpenGeniBrowserClient>;
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;

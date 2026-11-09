@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# Sets up the host's state volume at /var/lib/compute and records it. Run
+# by install.sh (its --state-device and --reformat-state-device):
+#
+#   state-volume                  /var/lib/compute must be mounted already
+#   state-volume --device DEV     use DEV as the state volume
+#   state-volume --reformat DEV   format DEV, losing everything on it
+#
+# The record is the volume's file system UUID, kept twice: in
+# /etc/compute/state-volume.uuid, which the agent checks at every start
+# (check-host), and on the volume itself, in .compute-state-volume at its
+# root. The first goes with the boot disk; the second survives a boot disk
+# rebuilt from a newer image, as when a cloud restarts the machine with a
+# fresh boot disk and the same state disk.
+#
+# With --device, a host with no record on its boot disk takes DEV as it
+# is: a file system on it, such as the state volume the host had before its
+# boot disk was rebuilt, is mounted and kept, never formatted. Only a blank
+# DEV (no file system, partition table or other signature on it) is
+# formatted. A file system with other files on it and not a state volume,
+# or anything that is not a file system, is refused: --reformat names the
+# device to format all the same.
+#
+# COMPUTE_ETC, COMPUTE_VAR and COMPUTE_FSTAB (tests) stand for
+# /etc/compute, /var/lib/compute and /etc/fstab.
+set -euo pipefail
+
+etc=${COMPUTE_ETC:-/etc/compute}
+var=${COMPUTE_VAR:-/var/lib/compute}
+fstab=${COMPUTE_FSTAB:-/etc/fstab}
+record=$etc/state-volume.uuid
+marker=$var/.compute-state-volume
+
+log() { printf '[compute-install %s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+fail() { echo "install.sh: $*" >&2; exit 1; }
+
+# put PART FINAL: gives PART, written in full, the name FINAL in one
+# rename, durably (as install.sh's put): a reset leaves FINAL as it was or
+# whole, never named but empty.
+put() {
+  sync -- "$1"
+  mv -T -- "$1" "$2"
+  sync -- "$(dirname -- "$2")"
+}
+
+device=
+reformat=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --device) device=$2; shift 2 ;;
+    --reformat) reformat=$2; shift 2 ;;
+    *) echo "state-volume: unknown argument $1" >&2; exit 2 ;;
+  esac
+done
+[ -z "$device" ] || [ -z "$reformat" ] ||
+  fail "pass --state-device or --reformat-state-device, not both"
+
+install -d -m 700 "$etc"
+install -d -m 755 "$var"
+
+# blkid's low-level probe of a device, without its cache: FS_TYPE, FS_UUID,
+# FS_USAGE and FS_PTTYPE, and FS_BLANK=1 when nothing at all is on it.
+probe() {
+  local out status=0 key value
+  FS_TYPE='' FS_UUID='' FS_USAGE='' FS_PTTYPE='' FS_BLANK=''
+  out=$(blkid -p -o export "$1" 2>/dev/null) || status=$?
+  case "$status" in
+    0) ;;
+    2) FS_BLANK=1; return ;; # nothing identified
+    # Several signatures that contradict each other (blkid's 8), or a
+    # device it cannot read: not blank, and nothing to adopt.
+    *) FS_USAGE="signatures blkid cannot read or tell apart (status $status)"; return ;;
+  esac
+  while IFS='=' read -r key value; do
+    case "$key" in
+      TYPE) FS_TYPE=$value ;;
+      UUID) FS_UUID=$value ;;
+      USAGE) FS_USAGE=$value ;;
+      PTTYPE) FS_PTTYPE=$value ;;
+    esac
+  done <<<"$out"
+}
+
+# The mount entry for the volume, in place of any earlier one, so the
+# volume is mounted at every boot.
+mount_entry() {
+  local line="UUID=$1 $var $2 noatime,nofail 0 2"
+  grep -qxF "$line" "$fstab" 2>/dev/null && return
+  # Written whole in place of the old one: an emptied /etc/fstab would
+  # lose the machine's other mounts too.
+  if [ -e "$fstab" ]; then
+    cp -p "$fstab" "$fstab.part"
+    sed -i "\\# $var #d" "$fstab.part"
+  else
+    install -m 644 /dev/null "$fstab.part"
+  fi
+  echo "$line" >>"$fstab.part"
+  put "$fstab.part" "$fstab"
+  systemctl daemon-reload
+}
+
+# format DEV FORCE: a new XFS on DEV, mounted and entered. Without FORCE
+# mkfs.xfs itself refuses a device with a signature on it, so a device
+# found blank is never formatted over something blkid missed.
+format() {
+  local uuid
+  if [ -n "$2" ]; then
+    mkfs.xfs -q -f -m reflink=1 "$1"
+  else
+    mkfs.xfs -q -m reflink=1 "$1"
+  fi
+  uuid=$(blkid -p -s UUID -o value "$1" 2>/dev/null || true)
+  [ -n "$uuid" ] || fail "$1 has no file system UUID after formatting"
+  mount -t xfs -o noatime "$1" "$var"
+  mount_entry "$uuid" xfs
+}
+
+not_mounted_elsewhere() {
+  local where
+  where=$(findmnt -rno TARGET -S "$1" 2>/dev/null | head -n 1 || true)
+  [ -z "$where" ] || fail "$2 is mounted at $where; unmount it first"
+}
+
+# A record with no UUID in it, from an interrupted older write, counts as
+# none (the GCP startup script uses the same test).
+recorded=$(tr -d '[:space:]' 2>/dev/null <"$record" || true)
+
+if [ -n "$reformat" ]; then
+  [ -b "$reformat" ] || fail "$reformat is not a block device"
+  mountpoint -q "$var" && fail "$var is mounted; unmount it before reformatting $reformat"
+  not_mounted_elsewhere "$reformat" "$reformat"
+  log "formatting $reformat as a new state volume: what it held is lost"
+  format "$reformat" force
+  rm -f "$record"
+  recorded=
+elif [ -z "$recorded" ] && [ -n "$device" ]; then
+  [ -b "$device" ] || fail "$device is not a block device"
+  probe "$device"
+  if mountpoint -q "$var"; then
+    # An earlier attempt mounted this device but stopped before
+    # recording it; anything else mounted there is refused.
+    have=$(findmnt -no UUID "$var" || true)
+    [ -n "$have" ] && [ "$have" = "$FS_UUID" ] ||
+      fail "$var is mounted already, not from $device; leave out --state-device"
+    mount_entry "$FS_UUID" "$FS_TYPE"
+  elif [ -n "$FS_BLANK" ]; then
+    log "formatting $device, which is blank, as the state volume"
+    format "$device" ""
+  elif [ "$FS_USAGE" = filesystem ] && [ -n "$FS_UUID" ]; then
+    not_mounted_elsewhere "UUID=$FS_UUID" "$device"
+    mount -t "$FS_TYPE" -o noatime "$device" "$var"
+    if [ -f "$marker" ]; then
+      log "keeping the state volume on $device ($FS_TYPE $FS_UUID), as recorded on it"
+    elif [ -d "$var/state" ]; then
+      log "keeping the state volume on $device ($FS_TYPE $FS_UUID), set up before volumes carried their record"
+    elif [ -z "$(find "$var" -mindepth 1 -maxdepth 1 ! -name lost+found -print -quit)" ]; then
+      log "taking the empty file system on $device ($FS_TYPE $FS_UUID) as the state volume"
+    else
+      umount "$var"
+      fail "$device holds a $FS_TYPE file system ($FS_UUID) with other files on it, not a state volume;" \
+        "mount the state volume at $var yourself, or pass --reformat-state-device $device to format it, losing what it holds"
+    fi
+    mount_entry "$FS_UUID" "$FS_TYPE"
+  else
+    what=${FS_PTTYPE:+a $FS_PTTYPE partition table}
+    what=${what:-${FS_TYPE:+$FS_TYPE ($FS_USAGE)}}
+    fail "$device holds ${what:-$FS_USAGE}, not a file system to keep;" \
+      "pass --reformat-state-device $device to format it, losing what it holds"
+  fi
+fi
+
+mountpoint -q "$var" || fail "$var is not a mount point: mount the state volume there, or pass --state-device"
+mounted=$(findmnt -no UUID "$var" || true)
+[ -n "$mounted" ] || fail "the file system on $var has no UUID; use one that has (XFS does)"
+if [ -n "$recorded" ]; then
+  [ "$recorded" = "$mounted" ] ||
+    fail "$var holds $mounted, not the state volume $recorded recorded for this host"
+else
+  echo "$mounted" >"$record.part"
+  put "$record.part" "$record"
+fi
+# The volume's own record, written whole like the one above.
+if [ "$(tr -d '[:space:]' 2>/dev/null <"$marker" || true)" != "$mounted" ]; then
+  echo "$mounted" >"$marker.part"
+  put "$marker.part" "$marker"
+fi
+[ "$(findmnt -no FSTYPE "$var")" = xfs ] ||
+  log "warning: the state volume is not XFS; saves and clones copy instead of sharing extents"
+install -d -m 700 "$var/state"

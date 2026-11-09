@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WorkspaceBackgroundCommand } from "@opengeni/sdk";
 import { useOpenGeni, type ClientOverride } from "../provider";
@@ -5,7 +6,7 @@ import { usePolledValue } from "./internal";
 
 /** Live workspace projection; Stop remains the existing session command action. */
 export function useWorkspaceBackgroundCommands(
-  options: ClientOverride & { enabled?: boolean; pollIntervalMs?: number } = {},
+  options: ClientOverride<ChatClient> & { enabled?: boolean; pollIntervalMs?: number } = {},
 ) {
   const { client, workspaceId } = useOpenGeni(options);
   const [pages, setPages] = useState(1);

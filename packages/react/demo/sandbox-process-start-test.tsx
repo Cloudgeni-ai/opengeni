@@ -20,12 +20,20 @@ const englishText = createOpenGeniText();
  * events in the worker's exact shapes, no API calls.
  * `?state=restarting|stopped`, `?theme=light|dark`, `?desktop=macos` (the
  * desktop shell's platform attribute, inside a macOS window frame).
+ * `?machine=modal`: a Modal box whose /bin/sh was removed. It is replaced
+ * with a fresh box restored from the saved /workspace (`restarting`), or its
+ * files could not be saved yet and the turn stops (`stopped`).
+ * `?call=waiting|started` (Modal): the model's command when the replacement
+ * began. A command still waiting for the box settles as not started; one that
+ * had reached the box keeps its unknown outcome.
  */
 
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
 const stopped = params.get("state") === "stopped";
 const desktop = params.get("desktop") === "macos";
+const modal = params.get("machine") === "modal";
+const call = params.get("call");
 document.documentElement.dataset.ogTheme = theme;
 document.documentElement.classList.toggle("dark", theme === "dark");
 if (desktop) document.documentElement.dataset.desktop = "macos";
@@ -52,7 +60,7 @@ const RESTART = "sandbox.process_start_restart";
 const AGENT_TEXT =
   "not found: start the program for a shell command: No such file or directory (os error 2); /dev/null is missing";
 
-const events: SessionEvent[] = [
+const computeEvents: SessionEvent[] = [
   event(
     "user.message",
     {
@@ -83,8 +91,8 @@ const events: SessionEvent[] = [
     6,
   ),
 ];
-if (stopped) {
-  events.push(
+if (stopped && !modal) {
+  computeEvents.push(
     event("turn.started", {}, 9),
     event("turn.startup.phase.started", { phase: "credential_seed" }, 9),
     event(
@@ -105,6 +113,126 @@ if (stopped) {
     ),
   );
 }
+
+const MODAL_AGENT_TEXT =
+  "Modal could not start the sandbox shell: failed to load /bin/sh: no such file or directory";
+const MODAL_GROUP = "group-demo";
+const CALL = "call-tests";
+
+const withCall = call === "waiting" || call === "started";
+
+// Built in place so sequences follow the timeline: the model's command, then
+// the restart, then the settlement's exact `agent.toolCall.output`.
+const callCreated = (): SessionEvent[] =>
+  withCall
+    ? [
+        event(
+          "agent.toolCall.created",
+          { id: CALL, name: "exec_command", arguments: { cmd: "bun test" } },
+          1.1,
+        ),
+      ]
+    : [];
+const callSettled = (): SessionEvent[] =>
+  withCall
+    ? [
+        event(
+          "agent.toolCall.output",
+          call === "waiting"
+            ? {
+                id: CALL,
+                output: {
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: "The command was not started because the workspace machine was not ready. Nothing ran, so it is safe to run again.",
+                    },
+                  ],
+                },
+                recovery: {
+                  interrupted: true,
+                  outcome: "not_started",
+                  reason: "sandbox_lifecycle_transition",
+                  unsupportedCallShape: false,
+                },
+              }
+            : {
+                id: CALL,
+                output: {
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: "Tool execution was interrupted by sandbox_lifecycle_transition; its side-effect outcome is unknown.",
+                    },
+                  ],
+                },
+                recovery: {
+                  interrupted: true,
+                  outcome: "unknown",
+                  reason: "sandbox_lifecycle_transition",
+                  unsupportedCallShape: false,
+                },
+              },
+          1.4,
+        ),
+      ]
+    : [];
+
+const modalEvents: SessionEvent[] = [
+  event(
+    "user.message",
+    {
+      text: "Okay can we build what you said about making a tool that the agents have access to for Opengeni and then we make the read replica only accessible from within our network?",
+    },
+    0,
+    null,
+  ),
+  event("turn.started", {}, 1),
+  ...callCreated(),
+  event(
+    "sandbox.operation.started",
+    {
+      name: RESTART,
+      reason: "process_start_failed",
+      sandboxGroupId: MODAL_GROUP,
+      leaseEpoch: 6,
+    },
+    1.3,
+  ),
+  ...callSettled(),
+  // Not completed: the drain replaces the box, and the row settles with the turn.
+  event(
+    "turn.recovery.requested",
+    {
+      sandboxGroupId: MODAL_GROUP,
+      leaseEpoch: 6,
+      rotationReason: "operator",
+      transitionReason: "rotation_in_progress",
+      reason: "sandbox_lifecycle_transition",
+    },
+    1.5,
+  ),
+];
+if (stopped && modal) {
+  modalEvents.push(
+    event("turn.started", {}, 30),
+    event(
+      "turn.failed",
+      {
+        error:
+          "The workspace machine can't start programs and its files couldn't be saved yet. Opengeni will replace it once they're saved; retry then.",
+        code: "sandbox_process_start_failed",
+        retryable: false,
+        detail: MODAL_AGENT_TEXT,
+      },
+      30.2,
+    ),
+  );
+}
+
+const events = modal ? modalEvents : computeEvents;
 
 const status = stopped ? "failed" : "recovering";
 const items = buildTimeline(englishText, events);

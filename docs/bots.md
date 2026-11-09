@@ -31,20 +31,18 @@ its own chat and `set_other_session_title` for another, both of which now also
 take `description` and `avatar`. A rename through either tool is a deliberate
 name, like a person's: the title is cleaned like any model-written title, then
 kept, so automatic titling never replaces it. The tools tell the agent to keep
-a name a person or bot template chose unless the person asks for a new one.
+a name a person or agent chose unless the person asks for a new one.
 
 An image avatar must be a finished image in the workspace that the writer can
 open. In a chat shared with the workspace, and in any bot template, an Only me
-image is refused, because everyone else would see only initials; the agent is
-told to share the image first. Each viewer opens the image with their own
-access, and anyone who cannot sees the name's initials instead.
+image is refused, because everyone else would see only initials; the refusal
+tells the agent to share the image first. Each viewer opens the image with their
+own access, and anyone who cannot sees the name's initials instead.
 
 Avatars are mostly seen small: 16 pixels in the sidebar list and 20 in the
 chat header. Detailed pictures, such as characters told apart by a hat or a
-held object, all look alike at that size. The tools therefore ask the agent to
-make an image avatar a flat icon that fills the square: one bold symbol for the
-chat's job on a solid, strong colour that differs from other bots' avatars,
-with no frame, faces, fine detail or text.
+held object, all look alike at that size. The tools therefore ask the agent for
+one bold symbol on a solid colour, with no text or fine detail.
 
 Forking a chat copies its description and avatar along with its title and
 agent settings (the fork routines copy the whole source row), so forking a bot
@@ -76,8 +74,11 @@ The agent then sets itself up with its ordinary tools (installing Skills,
 offering plugins and connections, creating schedules and event triggers,
 choosing a machine) and the chat simply continues as the bot.
 
-Bot templates are being merged with Slack agents into [agents](agents.md);
-every template is already mirrored into the `agents` tables.
+Bot templates are being merged with Slack agents into [agents](agents.md).
+The routes below are a compatibility layer over `agents`: they list every
+agent the reader can see, a template's setup instructions are the agent's
+First message, and a new template is an agent with empty Instructions (the
+legacy `bot_templates` row is still written for older releases).
 
 Setup instructions can be exact ("install these Skills and create this
 schedule") so the agent sets itself up without asking, or open-ended ("ask how
@@ -103,10 +104,10 @@ Templates are stored per workspace (`bot_templates`, visibility in migration
 shared with the workspace, so everyone can start bots from it, or **Only me**,
 so only whoever saved it can see, find or use it. A template the agent saves
 from an Only me chat is Only me; one saved from a shared chat is shared. People
-choose in the template dialog and can change it later. A shared template is
-shared work, like a shared Skill or Site: anyone who may start chats in the
-workspace (`sessions:create`) may change or delete it, but only whoever saved
-it or a workspace admin may make it Only me; each template's
+choose in the template dialog and can change it later. Like any agent, a
+template can be changed or deleted only by whoever saved it or a workspace
+admin, and only they may make it Only me (not while it is available in Slack);
+each template's
 `viewerCanMakePrivate` says whether the reader may, and the Edit dialog offers
 Only me only then. An Only me template belongs to the
 person who saved it. Routes:
@@ -115,21 +116,19 @@ person who saved it. Routes:
 | --- | --- |
 | `GET /v1/workspaces/:workspaceId/bot-templates` and `/:templateId` | `sessions:read` |
 | `POST /v1/workspaces/:workspaceId/bot-templates` | `sessions:create`; a `sourceSessionId` must be a chat in the workspace the caller can open |
-| `PATCH` and `DELETE /v1/workspaces/:workspaceId/bot-templates/:templateId` | `sessions:create`, and manage access |
+| `PATCH` and `DELETE /v1/workspaces/:workspaceId/bot-templates/:templateId` | `sessions:create`, and whoever saved it or a workspace admin |
 
-A workspace keeps at most 200 templates.
+A workspace keeps at most 500 agents, templates included (they share the limit with app and Slack agents).
 
-In the web app, **Bot templates** sits in the sidebar's More section, next to
-Automations; once a workspace has templates, the new-chat page also shows them
-under the composer as one-tap "Start a bot" shortcuts. Starting one shows the
-template above the composer with its setup instructions filled in; closing that
-strip (or leaving the page) takes the untouched instructions out again, so they
-never become an ordinary chat's first message by accident.
+In the web app, templates are agents: the sidebar's **Agents** page replaces
+**Bot templates** (the old `/bot-templates` URL opens it), and a template's
+setup instructions are its First message. See [agents, "App"](agents.md#app).
 
-The agent saves a template of itself with `bot_template_save` (capability
+The agent makes an agent of itself with `bot_template_save` (capability
 `subagents`, needs `sessions:create`), usually when the person asks. It writes
-the setup instructions from what the chat has established and leaves out
-one-off tasks, history, personal details and secrets.
+standing Instructions from what the chat has established, puts one-time setup
+in an optional First message, and leaves out one-off tasks, history, personal
+details and secrets ([agents](agents.md#compatibility)).
 
 ### Sharing a template as a file
 

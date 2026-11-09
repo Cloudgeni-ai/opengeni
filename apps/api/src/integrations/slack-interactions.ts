@@ -39,6 +39,8 @@ import {
   type SessionEvent,
   type WorkspaceSlackReactionSummonSettings,
   workspaceSlackReactionChannelAllowed,
+  isNoReplyText,
+  NO_REPLY_SENTINEL,
 } from "@opengeni/contracts";
 import {
   allowanceExhaustedMessage,
@@ -97,6 +99,8 @@ import {
   getSlackInteractionInboxByProviderEvent,
   getSlackProviderEventIdForTurn,
   getSlackInteractionForSession,
+  getSessionAgentMemoryState,
+  SessionAgentNotFoundError,
   listSlackAgentChats,
   listSlackAgentsForConnection,
   recordSlackInteractionInbound,
@@ -136,7 +140,7 @@ import {
   listPendingSlackUserLinkAccessRequests,
   listSlackInstallationBindings,
   slackUserLinkAccessRequestTeam,
-  slackUserLinkOrganizationMemberMayLink,
+  slackUserLinkConfirmationVia,
   rekeySlackInteractionRoute,
   reopenSlackInteractionDelivery,
   reserveSlackInteractionActionHandles,
@@ -167,9 +171,10 @@ import {
 } from "@opengeni/db";
 import {
   acceptSessionUserMessage,
+  agentMemoryAccess,
   controlHumanSessionWorkstream,
   createSessionForRequest,
-  getActorNewSessionModelChoice,
+  getActorNewSessionStartChoices,
   hasPermission,
   recordSlackEvent,
   requireAccessContext,
@@ -179,10 +184,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import {
-  otherDeploymentLinkContext,
-  slackRecentRepositoryResources,
-} from "./slack-session-defaults";
+import { otherDeploymentLinkContext, slackFormRepositoryResources } from "./slack-session-defaults";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
@@ -375,15 +377,13 @@ export const SLACK_SESSION_INSTRUCTIONS = [
 /**
  * The final response that ends a Slack task's turn without posting. A model
  * cannot reliably end with blank output, and blank output already means "no
- * result yet" to the delivery pump, so silence is an explicit token.
+ * result yet" to the delivery pump, so silence is an explicit token. It is the
+ * same token that keeps a quiet automation run out of a chat.
  */
-export const SLACK_NO_REPLY_SENTINEL = "NO_REPLY";
+export const SLACK_NO_REPLY_SENTINEL = NO_REPLY_SENTINEL;
 
 /** Whether model text is the no-reply token, tolerating Markdown wrapping. */
-export function isSlackNoReplyText(text: string): boolean {
-  const normalized = text.trim().replace(/^[\s`*_"'“”]+|[\s`*_"'“”.!]+$/gu, "");
-  return normalized.toUpperCase() === SLACK_NO_REPLY_SENTINEL;
-}
+export const isSlackNoReplyText = isNoReplyText;
 
 /**
  * How a person continues a task where its messages are posted. In a bot DM
@@ -708,12 +708,12 @@ type SlackLinkTargetInstallation = NonNullable<
 >;
 
 /**
- * What the person linking is offered when they may link this Slack account as
- * a member of the organization, without workspace access: a confirmation
- * naming the Slack account, so a link someone else sent them can't link the
- * sender's account to them unnoticed. Null otherwise.
+ * What the person linking a prepared request is shown: the Slack account it
+ * links, and whether confirming it links that account now. Preparing never
+ * links, so a link someone else sent them can't link the sender's account to
+ * them unnoticed. Nothing for a request that is no longer prepared.
  */
-async function slackOrganizationMemberLinkOffer(
+async function slackUserLinkOffer(
   deps: ApiRouteDeps,
   installation: SlackLinkTargetInstallation,
   input: {
@@ -723,15 +723,18 @@ async function slackOrganizationMemberLinkOffer(
     subjectId: string;
     slackUserId: string;
   },
-): Promise<{ slackAccountLabel: string | null } | null> {
-  if (input.status !== "prepared") return null;
-  const mayLink = await slackUserLinkOrganizationMemberMayLink(deps.db, {
+): Promise<{
+  slackAccountLabel?: string | null;
+  canLink?: boolean;
+  organizationMemberLink?: { slackAccountLabel: string | null } | null;
+}> {
+  if (input.status !== "prepared") return {};
+  const via = await slackUserLinkConfirmationVia(deps.db, {
     workspaceId: input.workspaceId,
     requestId: input.requestId,
     subjectId: input.subjectId,
     identityHome: installation.identityHome,
   });
-  if (!mayLink) return null;
   // Best effort: without a name the confirmation still asks.
   const label = await createOpenGeniSlackBotInteractionClient(deps, {
     ...installation.identityHome,
@@ -740,7 +743,11 @@ async function slackOrganizationMemberLinkOffer(
   })
     .then(async (client) => (await client.userLinkLabel(input.slackUserId)).label)
     .catch(() => null);
-  return { slackAccountLabel: label };
+  return {
+    slackAccountLabel: label,
+    canLink: via !== null,
+    organizationMemberLink: via === "organization_membership" ? { slackAccountLabel: label } : null,
+  };
 }
 
 /**
@@ -1014,25 +1021,20 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
         subjectLabel: boundedString(context.subjectLabel, 512),
         expiresAt: new Date(link.expiresAt),
       });
-      const completed = await completeSlackUserLinkAccessIfGranted(deps.db, {
+      // Preparing never links: the person confirms which Slack account it is
+      // first (`…/link`), whatever access they already have.
+      const offer = await slackUserLinkOffer(deps, installation, {
         workspaceId,
         requestId: prepared.id,
-        subjectId: context.subjectId,
-        identityHome: installation.identityHome,
-      });
-      if (!completed) throw freshSlackLinkRequired();
-      const organizationMemberLink = await slackOrganizationMemberLinkOffer(deps, installation, {
-        workspaceId,
-        requestId: completed.id,
-        status: completed.status,
+        status: prepared.status,
         subjectId: context.subjectId,
         slackUserId: link.slackUserId,
       });
       return c.json(
         SlackUserLinkAccessRequest.parse({
-          ...completed,
+          ...prepared,
           workspaceDisplayName: installation.workspaceName,
-          organizationMemberLink,
+          ...offer,
         }),
         201,
       );
@@ -1059,20 +1061,20 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
           current.status === "prepared"
             ? await slackLinkRequestInstallation(deps, workspaceId, requestId)
             : null;
-        const organizationMemberLink = stored
-          ? await slackOrganizationMemberLinkOffer(deps, stored.installation, {
+        const offer = stored
+          ? await slackUserLinkOffer(deps, stored.installation, {
               workspaceId,
               requestId,
               status: current.status,
               subjectId: context.subjectId,
               slackUserId: stored.slackUserId,
             })
-          : null;
+          : {};
         return c.json(
           SlackUserLinkAccessRequest.parse({
             ...current,
             workspaceDisplayName: workspace?.name ?? null,
-            organizationMemberLink,
+            ...offer,
           }),
         );
       } catch (error) {
@@ -1082,9 +1084,11 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
   );
 
   /**
-   * Link the Slack account as a member of the organization, without workspace
-   * access, after the person confirmed which account it is. Grants nothing
-   * else; anyone else keeps the access request.
+   * Link the Slack account after the person confirmed which account it is, at
+   * the version they saw. The only way a prepared request links: as someone
+   * whose workspace access already allows it, or as a member of the
+   * organization without workspace access (which grants nothing else). Anyone
+   * else keeps the access request.
    */
   app.post(
     "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/link",
@@ -1101,7 +1105,7 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
           requestId,
           subjectId: context.subjectId,
           identityHome: stored.installation.identityHome,
-          linkAsOrganizationMember: { expectedVersion: payload.expectedVersion },
+          confirmed: { expectedVersion: payload.expectedVersion },
         });
         if (!linked) throw freshSlackLinkRequired();
         // Expired, cancelled or already decided: only a fresh link can link now.
@@ -1265,61 +1269,6 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
       }
     },
   );
-
-  app.post("/v1/workspaces/:workspaceId/integrations/slack/user-links", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
-    const body = record(await c.req.json().catch(() => null));
-    const linkToken = boundedString(body?.linkToken, 2_048);
-    const signingSecret = deps.settings.slackSigningSecret;
-    if (!linkToken || !signingSecret) {
-      throw new HTTPException(400, {
-        message: "invalid or expired Slack identity link",
-      });
-    }
-    const link = verifySlackUserLinkToken(signingSecret, linkToken);
-    if (!link || link.workspaceId !== workspaceId) {
-      throw new HTTPException(400, {
-        message: "invalid or expired Slack identity link",
-      });
-    }
-    const installation = await resolveSlackLinkTargetInstallation(deps, link, workspaceId);
-    if (!installation) {
-      throw new HTTPException(404, {
-        message: "Slack installation not found",
-      });
-    }
-    try {
-      const prepared = await prepareSlackUserLinkAccessRequest(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        tokenDigest: createHash("sha256").update(linkToken).digest("hex"),
-        connectionId: link.connectionId,
-        slackTeamId: link.slackTeamId,
-        slackUserId: link.slackUserId,
-        subjectId: grant.subjectId,
-        subjectLabel: boundedString(grant.subjectLabel, 512),
-        expiresAt: new Date(link.expiresAt),
-      });
-      const completed = await completeSlackUserLinkAccessIfGranted(deps.db, {
-        workspaceId,
-        requestId: prepared.id,
-        subjectId: grant.subjectId,
-        identityHome: installation.identityHome,
-      });
-      if (completed?.status !== "completed") throw freshSlackLinkRequired();
-      const saved = await getSlackBotUserLink(
-        deps.db,
-        workspaceId,
-        link.connectionId,
-        link.slackUserId,
-      );
-      if (!saved || saved.subjectId !== grant.subjectId) throw freshSlackLinkRequired();
-      return c.json(saved, 201);
-    } catch (error) {
-      throw slackLinkAccessHttpError(error);
-    }
-  });
 
   app.delete(
     "/v1/workspaces/:workspaceId/integrations/slack/user-links/:slackUserId",
@@ -3370,20 +3319,30 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
             await requireSlackSharedReadAuthorization(deps, client, entry, policyResolution);
           }
         : undefined;
+    // What a person attaches in a private interaction (their bot DM or a
+    // private handoff) is theirs alone, like the session it starts or continues.
+    const attachmentVisibility = existing
+      ? existing.visibility
+      : openAgent
+        ? "workspace"
+        : routePolicy.visibility;
     const prepared = await prepareSlackInvocationEntry(
       deps,
       client,
       routedEntry,
       target,
       authorizeRead,
-      continuedThread
-        ? {
-            recordedThreadContext: async () => {
-              await authorizeRead?.();
-              return await slackRecordedThreadContext(deps, entry, continuedThread);
-            },
-          }
-        : {},
+      {
+        privateOwnerSubjectId: attachmentVisibility === "private" ? grant.subjectId : null,
+        ...(continuedThread
+          ? {
+              recordedThreadContext: async () => {
+                await authorizeRead?.();
+                return await slackRecordedThreadContext(deps, entry, continuedThread);
+              },
+            }
+          : {}),
+      },
     );
     preparedEntry = prepared.entry;
     preparedModelContext = prepared.modelContext;
@@ -3503,74 +3462,96 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       preparedAttachments,
       preparedModelContext,
     );
-    session = await createSessionForRequest(
-      await withCatalogSettings(deps, grant),
-      grant,
-      interaction.workspaceId,
-      {
-        ...defaults,
-        requestedSessionId: interaction.sessionReservationId,
-        initialMessage: prepared.entry.text,
-        ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
-        instructions: openAgent
-          ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${openSlackAgentInstructions(
-              openAgent,
-              slackAgents.labels.get(openAgent.targetWorkspaceId) ?? null,
-            )}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
-          : slackAgents.records.length > 0
-            ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${slackAgentSessionInstructions({
-                loaded: slackAgents,
-                agent: routedAgent,
-                source: resolution.source,
-                handedOffBy:
-                  slackAgents.records.find(
-                    (agent) => agent.id === interaction.handoffFromSlackAgentId,
-                  ) ?? null,
-              })}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
-            : SLACK_SESSION_INSTRUCTIONS,
-        ...(routedAgent
-          ? {
-              metadata: {
-                [SESSION_SLACK_AGENT_METADATA_KEY]: { id: routedAgent.id, name: routedAgent.name },
-              },
-              profile: { avatar: routedAgent.avatar },
-            }
-          : {}),
-        // The session follows the workspace's built-in defaults, including
-        // tools added later, with the Slack read tools guaranteed on top. Only
-        // a retried create of a shell that pinned an exact list replays it.
-        firstPartyMcpTools:
-          defaults.firstPartyMcpTools !== undefined
-            ? allowedFirstPartyMcpToolsForSession(deps.settings, defaults.firstPartyMcpTools)
-            : undefined,
-        resources: [...defaults.resources, ...preparedAttachments.resources],
-        ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
-        ...(openAgent ? openSlackAgentSessionOptions(deps.settings) : {}),
-        idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
-        clientEventId: `slack:${entry.providerEventId}`,
-      },
-      undefined,
-      {
-        surface: "slack",
-        ...(defaults.firstPartyMcpTools === undefined && !openAgent
-          ? {
-              firstPartyMcpToolAdditions:
-                slackAgents.records.length > 0
-                  ? [
-                      ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
-                      ...SLACK_AGENT_FIRST_PARTY_MCP_TOOLS,
-                    ]
-                  : deps.settings.slackWorkspaceRoutingEnabled &&
-                      slackRequestMentionsAgents(entry.text)
+    // The chat runs on the agent's own Instructions (a prompt layer of its
+    // own); a chat for an agent deleted meanwhile starts as a plain chat.
+    const boundAgent = openAgent ?? routedAgent;
+    const createSlackSession = async (agentId: string | null) =>
+      createSessionForRequest(
+        await withCatalogSettings(deps, grant),
+        grant,
+        interaction.workspaceId,
+        {
+          ...defaults,
+          requestedSessionId: interaction.sessionReservationId,
+          ...(agentId ? { agentId } : {}),
+          initialMessage: prepared.entry.text,
+          ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
+          instructions: openAgent
+            ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${openSlackAgentInstructions(
+                openAgent,
+                slackAgents.labels.get(openAgent.targetWorkspaceId) ?? null,
+              )}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
+            : slackAgents.records.length > 0
+              ? `${SLACK_SESSION_INSTRUCTIONS}\n\n${slackAgentSessionInstructions({
+                  loaded: slackAgents,
+                  agent: routedAgent,
+                  source: resolution.source,
+                  privateChat: interaction.visibility === "private",
+                  handedOffBy:
+                    slackAgents.records.find(
+                      (agent) => agent.id === interaction.handoffFromSlackAgentId,
+                    ) ?? null,
+                })}`.slice(0, SESSION_INSTRUCTIONS_MAX_CHARACTERS)
+              : SLACK_SESSION_INSTRUCTIONS,
+          ...(routedAgent
+            ? {
+                metadata: {
+                  [SESSION_SLACK_AGENT_METADATA_KEY]: {
+                    id: routedAgent.id,
+                    name: routedAgent.name,
+                  },
+                },
+                profile: { avatar: routedAgent.avatar },
+              }
+            : {}),
+          // The session follows the workspace's built-in defaults, including
+          // tools added later, with the Slack read tools guaranteed on top. Only
+          // a retried create of a shell that pinned an exact list replays it.
+          firstPartyMcpTools:
+            defaults.firstPartyMcpTools !== undefined
+              ? allowedFirstPartyMcpToolsForSession(deps.settings, defaults.firstPartyMcpTools)
+              : undefined,
+          resources: [...defaults.resources, ...preparedAttachments.resources],
+          ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
+          ...(openAgent ? openSlackAgentSessionOptions(deps.settings) : {}),
+          idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
+          clientEventId: `slack:${entry.providerEventId}`,
+        },
+        undefined,
+        {
+          surface: "slack",
+          ...(defaults.firstPartyMcpTools === undefined && !openAgent
+            ? {
+                firstPartyMcpToolAdditions:
+                  slackAgents.records.length > 0
                     ? [
                         ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
-                        ...SLACK_AGENT_PROPOSE_FIRST_PARTY_MCP_TOOLS,
+                        ...SLACK_AGENT_FIRST_PARTY_MCP_TOOLS,
                       ]
-                    : SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
-            }
-          : {}),
-      },
-    );
+                    : deps.settings.slackWorkspaceRoutingEnabled &&
+                        slackRequestMentionsAgents(entry.text)
+                      ? [
+                          ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
+                          ...SLACK_AGENT_PROPOSE_FIRST_PARTY_MCP_TOOLS,
+                        ]
+                      : SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
+              }
+            : {}),
+        },
+      );
+    session = await createSlackSession(boundAgent?.id ?? null).catch(async (error: unknown) => {
+      if (boundAgent && error instanceof SessionAgentNotFoundError) {
+        // The agent went away between routing and create: answer as a plain
+        // chat, without its Instructions.
+        console.warn("[slack-interactions] bound agent unavailable; starting a plain chat", {
+          interactionId: interaction.id,
+          agentId: boundAgent.id,
+          reason: error.reason,
+        });
+        return await createSlackSession(null);
+      }
+      throw error;
+    });
   } catch (error) {
     if (error instanceof HTTPException) {
       await withSlackPreviousContinuationCopy(
@@ -4237,22 +4218,42 @@ function boundedSlackInboxText(text: string): string {
   return bounded;
 }
 
-/** The same Slack agent's other recent chats, for the `slack_agent_chats` tool. */
+/**
+ * The same agent's other recent shared chats, for the `slack_agent_chats`
+ * tool (app and Slack chats alike). Reading other chats is part of Memory:
+ * with Memory off the agent reads none. Private chats are never listed.
+ */
 export async function listSlackAgentChatsForSession(
   deps: ApiRouteDeps,
   input: { grant: AccessGrant; sessionId: string; limit?: number | undefined },
 ) {
-  const interaction = await getSlackInteractionForSession(deps.db, {
-    accountId: input.grant.accountId,
+  const state = await getSessionAgentMemoryState(deps.db, {
     workspaceId: input.grant.workspaceId,
     sessionId: input.sessionId,
   });
-  if (!interaction?.slackAgentId) {
-    return { chats: [], message: "This chat is not a Slack agent's chat." };
+  if (!state?.agentChat) {
+    return { chats: [], message: "This chat is not an agent's chat." };
+  }
+  const agentId = state.agent?.id ?? null;
+  if (!state.agent || !agentId) {
+    return { chats: [], message: "This chat's agent was deleted." };
+  }
+  if (!state.agent.memoryEnabled) {
+    return {
+      chats: [],
+      message: "Memory is off for this agent, so it does not read its other chats.",
+    };
+  }
+  if (!agentMemoryAccess(state.agent, state.chat).listChats) {
+    return {
+      chats: [],
+      message: "This Only me agent reads its other chats only in its owner's Only me chats.",
+    };
   }
   const chats = await listSlackAgentChats(deps.db, {
+    accountId: input.grant.accountId,
     workspaceId: input.grant.workspaceId,
-    slackAgentId: interaction.slackAgentId,
+    slackAgentId: agentId,
     excludeSessionId: input.sessionId,
     limit: input.limit ?? 10,
   });
@@ -4429,6 +4430,8 @@ async function prepareSlackInvocationEntry(
      * Slack is read only for the invocation's own attachments.
      */
     recordedThreadContext?: () => Promise<string | null>;
+    /** The private interaction's person, who alone may open its imported attachments. */
+    privateOwnerSubjectId?: string | null;
   } = {},
 ): Promise<{
   entry: SlackInteractionInboxEntry;
@@ -4463,6 +4466,7 @@ async function prepareSlackInvocationEntry(
             target,
             exactMessage.files,
             authorizeRead,
+            options.privateOwnerSubjectId ?? null,
           )
         : {
             resources: [],
@@ -4506,6 +4510,7 @@ async function prepareSlackInvocationEntry(
         target,
         exactMessage.files,
         authorizeRead,
+        options.privateOwnerSubjectId ?? null,
       )
     : {
         resources: [],
@@ -5103,7 +5108,16 @@ async function processSlackReactionInboxEntry(
     target = { accountId: existing.accountId, workspaceId: existing.workspaceId };
     grant = await authorizeTarget();
   }
-  const preparedTask = await prepareSlackReactionTask(deps, client, entry, target, context);
+  // A reaction in a private interaction's thread imports its images for that
+  // interaction's person only; a new reaction route is workspace-visible.
+  const preparedTask = await prepareSlackReactionTask(
+    deps,
+    client,
+    entry,
+    target,
+    context,
+    existing?.visibility === "private" ? grant.subjectId : null,
+  );
   if (existing?.sessionId) {
     const appendedTask = await remountSlackReactionTaskForSession(
       deps,
@@ -5317,14 +5331,14 @@ type SlackNewSessionDefaults = {
  * What a new Slack task starts with.
  *
  * A Slack message is not the website composer, so the person's last composer
- * selection (an explicit connector list, a compute target) never narrows
- * it. Connectors, first-party tools, Sandbox Environment and compute are left
- * to session creation, which applies the
- * workspace defaults and freezes the person's own connections through the
- * ordinary delegation snapshot. Repositories are the person's own recently
- * used repositories that the workspace GitHub App still offers them, attached
- * best effort. Only an explicitly chosen model carries over, because choosing
- * a model narrows nothing.
+ * selection (an explicit connector list, a compute target) never narrows it.
+ * Connectors, first-party tools, Sandbox Environment and compute are left to
+ * session creation, which applies the workspace defaults and freezes the
+ * person's own connections through the ordinary delegation snapshot.
+ * Repositories are those in the person's new-chat form, as a new chat in the
+ * app would start with, limited to what the workspace GitHub App offers them
+ * and attached best effort. The model carries over only when explicitly
+ * chosen, because choosing a model narrows nothing.
  *
  * A create can commit its reserved shell before initial-event acceptance. Keep
  * that shell's exact selections on retry instead of resolving defaults again.
@@ -5343,12 +5357,19 @@ async function slackNewSessionDefaults(
   );
   if (!pending) {
     // An open chat is the agent's, not the asker's: no personal model choice
-    // or recent repositories; the workspace defaults apply.
+    // or form repositories; the workspace defaults apply.
     if (options.open) return { resources: [] };
-    const [modelChoice, resources] = await Promise.all([
-      getActorNewSessionModelChoice(deps, grant, interaction.workspaceId),
-      slackRecentRepositoryResources(deps, grant, interaction.workspaceId),
-    ]);
+    const { modelChoice, repositories } = await getActorNewSessionStartChoices(
+      deps,
+      grant,
+      interaction.workspaceId,
+    );
+    const resources = await slackFormRepositoryResources(
+      deps,
+      grant,
+      interaction.workspaceId,
+      repositories,
+    );
     return { ...modelChoice, resources };
   }
   if (
@@ -5484,6 +5505,7 @@ async function prepareSlackReactionTask(
   entry: SlackInteractionInboxEntry,
   target: { accountId: string; workspaceId: string },
   context: SlackReactionMessageContext,
+  privateOwnerSubjectId: string | null,
 ): Promise<PreparedSlackReactionTask> {
   return await prepareSlackMessageAttachments(
     deps,
@@ -5491,6 +5513,8 @@ async function prepareSlackReactionTask(
     entry,
     target,
     context.reactedMessage.files,
+    undefined,
+    privateOwnerSubjectId,
   );
 }
 
@@ -5500,7 +5524,8 @@ async function prepareSlackMessageAttachments(
   entry: SlackInteractionInboxEntry,
   target: { accountId: string; workspaceId: string },
   exactFiles: readonly { id: string; name: string; title: string }[],
-  authorizeSharedRead?: () => Promise<void>,
+  authorizeSharedRead: (() => Promise<void>) | undefined,
+  privateOwnerSubjectId: string | null,
 ): Promise<PreparedSlackReactionTask> {
   if (exactFiles.length === 0) {
     return { resources: [], attachments: [], omissionCodes: [], omittedCount: 0 };
@@ -5565,6 +5590,7 @@ async function prepareSlackMessageAttachments(
             slackTeamId: entry.slackTeamId,
             slackChannelId: entry.slackChannelId,
             slackMessageTs: entry.slackMessageTs,
+            privateOwnerSubjectId,
           },
           image,
           attachments.length + 1,
@@ -7350,7 +7376,7 @@ async function slackHumanInputCard(
  * question (or the waiting approval count) plus the child link. The child's own
  * Opengeni card remains the place the human actually answers.
  *
- * Every deferred child lifecycle kind (`child_progress`,
+ * Every other child lifecycle kind (`child_progress`,
  * `child_waiting_capacity`, `child_requires_action_resolved`, `child_paused`)
  * returns null here so Slack stays quiet, and so does every non-child machine
  * input that shares the `system.update.pending` event type.

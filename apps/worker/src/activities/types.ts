@@ -6,7 +6,6 @@ import type {
   ScheduledTaskTriggerType,
   TurnInitiator,
 } from "@opengeni/contracts";
-import type { KnowledgeSourceSyncRetirementReason } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import type {
   Database,
   SessionWorkflowWakeDeliveryResult,
@@ -561,7 +560,6 @@ export type DispatchScheduledTaskRunResult =
         | "machine_enrollment_inactive"
         | "rig_version_unavailable"
         | "scheduled_model_unavailable"
-        | KnowledgeSourceSyncRetirementReason
         | "incident_preflight_metadata_missing"
         | "incident_responder_under_capable"
         | "incident_data_source_unsuitable";

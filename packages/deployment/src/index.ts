@@ -342,6 +342,11 @@ export const PAID_HOSTED_TOOLS_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING",
 ];
 
+/** Operator opt-in for API-origin use of connected subscriptions (default off). */
+export const API_CONNECTED_SUBSCRIPTIONS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED",
+];
+
 /** Public workspace MCP OAuth rollout settings. The enable switch is
  * deployment-sensitive because OAuth needs a canonical managed/local human
  * session and one stable public issuer origin. */
@@ -1670,6 +1675,9 @@ export function requiredRuntimeEnvVars(
         "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
         "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
       );
+      if (env.OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED !== undefined) {
+        vars.push("OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED");
+      }
     }
     for (const key of [
       "OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID",
@@ -2597,6 +2605,10 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_TEAMS_BOT_ENABLED", env.OPENGENI_TEAMS_BOT_ENABLED ?? "false"),
     valueEnv("OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS", env.OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS),
     valueEnv("OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS", env.OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS),
+    valueEnv(
+      "OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED",
+      env.OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED ?? "false",
+    ),
     valueEnv("OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS", env.OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS),
     valueEnv(
       "OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS",
@@ -2684,6 +2696,10 @@ function runtimeEnvValues(
           valueEnv(
             "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED",
             env.OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED,
+          ),
+          valueEnv(
+            "OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED",
+            env.OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED,
           ),
           valueEnv(
             "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
@@ -2977,6 +2993,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of PAID_HOSTED_TOOLS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of API_CONNECTED_SUBSCRIPTIONS_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 

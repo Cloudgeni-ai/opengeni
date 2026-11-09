@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type { CapabilityCatalogItem } from "../types";
 import { t } from "../lib/console-text";
 import {
@@ -24,7 +25,7 @@ export type McpCapabilityOAuthReturn = {
  * step cannot be verified, so a failed setup never wakes the agent.
  */
 export async function finishMcpCapabilityOAuthReturn(input: {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   capabilityId: string;

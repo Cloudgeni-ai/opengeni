@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, jest, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, StrictMode, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -55,8 +56,11 @@ const flush = (ms = 10) =>
     await new Promise((resolve) => setTimeout(resolve, ms));
   });
 
-async function harness(read: OpenGeniBrowserClient["searchSessionMessages"], strict = false) {
-  const client = { searchSessionMessages: read } as OpenGeniBrowserClient;
+async function harness(
+  read: ChatClient<OpenGeniBrowserClient>["searchSessionMessages"],
+  strict = false,
+) {
+  const client = { searchSessionMessages: read } as ChatClient<OpenGeniBrowserClient>;
   const root = createRoot(document.createElement("div"));
   let state!: ReturnType<typeof useConversationSearch>;
   const commits: Array<ReturnType<typeof useConversationSearch>> = [];
@@ -74,7 +78,7 @@ async function harness(read: OpenGeniBrowserClient["searchSessionMessages"], str
     workspaceId?: string | undefined;
     enabled?: boolean | undefined;
     archiveStatus?: "active" | "archived" | "all" | undefined;
-    activeClient?: OpenGeniBrowserClient | undefined;
+    activeClient?: ChatClient<OpenGeniBrowserClient> | undefined;
   }) {
     committed = useCommittedSearchQuery(
       query,
@@ -405,7 +409,10 @@ test("disable and reopen never commit old hits, progress, or errors before reaut
 
 test("client replacement resets navigation even when the old client returns later", async () => {
   const cursors: Array<string | undefined> = [];
-  const read: OpenGeniBrowserClient["searchSessionMessages"] = async (_workspace, request) => {
+  const read: ChatClient<OpenGeniBrowserClient>["searchSessionMessages"] = async (
+    _workspace,
+    request,
+  ) => {
     cursors.push(request.cursor);
     return request.cursor
       ? page({ matches: [hit("old page two")] })
@@ -415,7 +422,7 @@ test("client replacement resets navigation even when the old client returns late
           nextCursor: "old-client-cursor",
         });
   };
-  const client = { searchSessionMessages: read } as OpenGeniBrowserClient;
+  const client = { searchSessionMessages: read } as ChatClient<OpenGeniBrowserClient>;
   const view = await harness(read);
   const replacementCursors: Array<string | undefined> = [];
   const replacement = {
@@ -423,7 +430,7 @@ test("client replacement resets navigation even when the old client returns late
       replacementCursors.push(request.cursor);
       return page({ matches: [hit("replacement")] });
     },
-  } as OpenGeniBrowserClient;
+  } as ChatClient<OpenGeniBrowserClient>;
   try {
     await view.render({ activeClient: client });
     await flush();

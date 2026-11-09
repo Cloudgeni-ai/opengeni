@@ -23,6 +23,7 @@ import {
   listFloorSessions,
   getSessionQueueSnapshot,
   getSessionQueueMonitoringSummary,
+  hasPendingSteerForTurn,
   listSessionTurns,
   markSessionAttemptQuiesced,
   moveQueuedTurnInTransaction,
@@ -306,10 +307,6 @@ describe("latest started session policy", () => {
         operationKey: crypto.randomUUID(),
         expectedDraftRevision: draft.revision,
       };
-      await expect(
-        submit({ ...request, expectedDraftRevision: draft.revision + 1 }),
-      ).rejects.toThrow();
-      await expect(submit({ ...request, model: "not-the-saved-choice" })).rejects.toThrow();
       expect(await storedPolicy()).toEqual(original);
 
       const accepted = await submit(request);
@@ -351,6 +348,61 @@ describe("latest started session policy", () => {
       expect(await getSessionTurn(client.db, workspaceId, accepted.turnId)).toMatchObject(desired);
     });
   }
+
+  test("a Send that names no settings leaves the chat's defaults alone, whatever the saved draft holds", async () => {
+    const value = await fixture(0);
+    const workspaceId = value.grant.workspaceId!;
+    const scope = {
+      accountId: value.grant.accountId,
+      workspaceId,
+      sessionId: value.session.id,
+      subjectId: value.grant.subjectId,
+    };
+    const storedPolicy = async () =>
+      (
+        await shared.admin`select model, reasoning_effort as "reasoningEffort",
+        latency_mode as "latencyMode" from sessions where id = ${value.session.id}`
+      )[0];
+    const original = await storedPolicy();
+    // Another device pinned a model in the draft; this one sends without one.
+    const draft = await withWorkspaceSubjectRls(
+      client.db,
+      workspaceId,
+      value.grant.subjectId,
+      (db) =>
+        saveComposerDraftInTransaction(db, {
+          ...scope,
+          expectedRevision: 0,
+          text: "follow up",
+          resources: [],
+          model: "pinned-elsewhere",
+          reasoningEffort: "high",
+          latencyMode: "priority",
+        }),
+    );
+    const accepted = await withWorkspaceSubjectRls(
+      client.db,
+      workspaceId,
+      value.grant.subjectId,
+      (db) =>
+        submitHumanPromptInTransaction(db, {
+          ...scope,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "follow up",
+          resources: [],
+          reasoningEffortFallback: "medium",
+          source: "user",
+          expectedDraftRevision: draft.revision,
+        }),
+    );
+    expect(accepted.draft).toMatchObject({ text: "" });
+    expect(await storedPolicy()).toEqual(original);
+    expect(await storedEvents(workspaceId, accepted.eventIds)).not.toContainEqual(
+      expect.objectContaining({ type: "session.model_settings.updated" }),
+    );
+  });
 
   test("a draft without a pick follows the chat, so an agent's model switch survives the next Send", async () => {
     const value = await fixture(0);
@@ -417,11 +469,14 @@ describe("latest started session policy", () => {
     expect(await read()).toMatchObject({ policyFollowsSession: true, model: "free-model" });
     const next = await save(first.draft!.revision, "second");
     expect(next).toMatchObject({ policyFollowsSession: true, model: "free-model" });
-    // A client still holding the old model is refused rather than undoing the switch.
-    await expect(submit(next.revision, "second", { model: "scripted-model" })).rejects.toThrow(
-      QueueCommandConflictError,
-    );
-    const second = await submit(next.revision, "second");
+    // A Send that names a model runs that message on it, but a draft that made
+    // no pick does not change the chat's settings, so the agent's switch stays.
+    const named = await submit(next.revision, "second", { model: "scripted-model" });
+    expect(await getSessionTurn(client.db, workspaceId, named.turnId)).toMatchObject({
+      model: "scripted-model",
+    });
+    expect(await storedModel()).toBe("free-model");
+    const second = await submit(named.draft!.revision, "second");
     expect(await getSessionTurn(client.db, workspaceId, second.turnId)).toMatchObject({
       model: "free-model",
     });
@@ -723,6 +778,221 @@ describe("compact list model policy", () => {
       })),
     );
     expect(await listPolicy()).toEqual({ model: "settings-model", reasoningEffort: "low" });
+  });
+});
+
+describe("steer_or_send: the server chooses Steer or Send with the turn state", () => {
+  type Fixture = Awaited<ReturnType<typeof fixture>>;
+  const submit = async (
+    value: Fixture,
+    delivery: "send" | "steer" | "steer_or_send",
+    text: string,
+    operationKey: string = crypto.randomUUID(),
+    /** The request fingerprint the API derives from the request, delivery included. */
+    boundaryRequestHash?: string,
+  ) =>
+    await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey,
+            ...(boundaryRequestHash ? { boundaryRequestHash } : {}),
+            delivery,
+            text,
+            resources: [],
+            model: "scripted-model",
+            reasoningEffort: "medium",
+            latencyMode: "standard",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+    );
+  const claimNext = async (value: Fixture) => {
+    const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId!, {
+      sessionId: value.session.id,
+      workflowId: `session-${value.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`nothing claimed: ${claimed.reason}`);
+    return claimed.turn;
+  };
+  const acceptedPayload = async (value: Fixture, result: Awaited<ReturnType<typeof submit>>) =>
+    (await storedEvents(value.grant.workspaceId!, [result.acceptedEventId]))[0]?.payload;
+  const storedTurn = async (value: Fixture, turnId: string) =>
+    (
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+        db.select().from(schema.sessionTurns).where(eq(schema.sessionTurns.id, turnId)),
+      )
+    )[0]!;
+  const pendingSteerFor = async (value: Fixture, turnId: string) =>
+    await hasPendingSteerForTurn(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.session.id,
+      turnId,
+    });
+  /** A chat whose first message is accepted and claimed: its turn runs. */
+  const runningChat = async () => {
+    const value = await fixture(0);
+    const first = await submit(value, "steer_or_send", "first message");
+    expect(first.routing).toBe("accepted_for_execution");
+    expect(await acceptedPayload(value, first)).toMatchObject({
+      delivery: "send",
+      routing: "accepted_for_execution",
+    });
+    const running = await claimNext(value);
+    expect(running.id).toBe(first.turnId);
+    return { value, running };
+  };
+
+  test("a follow-up sent while the turn runs reaches it, even from a sender that saw the chat idle", async () => {
+    // The race: the turn started seconds ago, but the sender's copy of the
+    // session still shows it idle. A client that chose from that copy sent a
+    // plain Send, which waits behind the running turn and runs on its own.
+    const stale = await runningChat();
+    const staleSend = await submit(stale.value, "send", "short follow-up");
+    expect(staleSend.routing).toBe("queued_for_execution");
+    expect(await pendingSteerFor(stale.value, stale.running.id)).toBe(false);
+
+    // With `steer_or_send` the server decides, under the turn's own locks.
+    const { value, running } = await runningChat();
+    const followUp = await submit(value, "steer_or_send", "short follow-up");
+    expect(followUp.routing).toBe("accepted_for_steering");
+    expect(await acceptedPayload(value, followUp)).toMatchObject({
+      delivery: "steer",
+      routing: "accepted_for_steering",
+    });
+    expect((await storedTurn(value, followUp.turnId)).metadata).toMatchObject({
+      delivery: "steer",
+      replacedTurnId: running.id,
+      deferredUntilModelStep: true,
+      interruptionCount: 0,
+    });
+    // The running turn keeps going and hands over at its next model step.
+    expect(await pendingSteerFor(value, running.id)).toBe(true);
+    const session = await getSession(client.db, value.grant.workspaceId!, value.session.id);
+    expect(session).toMatchObject({ activeTurnId: running.id, status: "running" });
+  });
+
+  test("a follow-up to a turn that is just starting steers it once it starts", async () => {
+    const value = await fixture(0);
+    const first = await submit(value, "steer_or_send", "first message");
+    expect(first.routing).toBe("accepted_for_execution");
+    // Accepted, not yet claimed: no turn is current, but one is about to start.
+    const followUp = await submit(value, "steer_or_send", "and also this");
+    expect(followUp.routing).toBe("accepted_for_steering");
+    expect(
+      (await storedOrder(value.grant.workspaceId!, value.session.id)).map((row) => row.id),
+    ).toEqual([first.turnId, followUp.turnId]);
+    const another = await submit(value, "steer_or_send", "one more");
+    expect(
+      (await storedOrder(value.grant.workspaceId!, value.session.id)).map((row) => row.id),
+    ).toEqual([first.turnId, followUp.turnId, another.turnId]);
+    // The first message starts first and, finding the Steers pending, hands
+    // over before its first model request; they are then read together.
+    const started = await claimNext(value);
+    expect(started.id).toBe(first.turnId);
+    expect(await pendingSteerFor(value, started.id)).toBe(true);
+  });
+
+  test("with nothing running it starts a turn, including just after a turn finished", async () => {
+    const { value, running } = await runningChat();
+    await applySessionTurnSettlement(client.db, value.grant.workspaceId!, {
+      sessionId: value.session.id,
+      turnId: running.id,
+      triggerEventId: running.triggerEventId,
+      attemptId: running.activeAttemptId!,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    const next = await submit(value, "steer_or_send", "next question");
+    expect(next.routing).toBe("accepted_for_execution");
+    expect(await acceptedPayload(value, next)).toMatchObject({ delivery: "send" });
+    expect((await storedTurn(value, next.turnId)).metadata).not.toHaveProperty("delivery");
+  });
+
+  test("a paused chat keeps it waiting, as a Send, and is not resumed", async () => {
+    const value = await fixture(0);
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: value.grant.accountId,
+          workspaceId: value.grant.workspaceId!,
+          sessionId: value.session.id,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    const waiting = await submit(value, "steer_or_send", "for later");
+    expect(waiting.routing).toBe("queued_for_execution");
+    expect(waiting.workspaceControlEventId).toBeNull();
+    expect(await acceptedPayload(value, waiting)).toMatchObject({ delivery: "send" });
+    expect(
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+        evaluateSessionControl(db, value.grant.workspaceId!, value.session.id),
+      ),
+    ).toMatchObject({ state: "paused" });
+  });
+
+  test("an exact retry replays the server's first decision, and another delivery is refused", async () => {
+    const { value, running } = await runningChat();
+    const operationKey = crypto.randomUUID();
+    const fingerprint = (delivery: string) => `prompt-boundary-test:${delivery}:follow-up`;
+    const steered = await submit(
+      value,
+      "steer_or_send",
+      "follow-up",
+      operationKey,
+      fingerprint("steer_or_send"),
+    );
+    expect(steered).toMatchObject({ routing: "accepted_for_steering", replay: false });
+    // The turn finishes before the uncertain client retries: the retry still
+    // returns the original Steer instead of deciding again.
+    await applySessionTurnSettlement(client.db, value.grant.workspaceId!, {
+      sessionId: value.session.id,
+      turnId: running.id,
+      triggerEventId: running.triggerEventId,
+      attemptId: running.activeAttemptId!,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    });
+    const retried = await submit(
+      value,
+      "steer_or_send",
+      "follow-up",
+      operationKey,
+      fingerprint("steer_or_send"),
+    );
+    expect(retried).toMatchObject({
+      routing: "accepted_for_steering",
+      replay: true,
+      turnId: steered.turnId,
+      acceptedEventId: steered.acceptedEventId,
+    });
+    await expect(
+      submit(value, "steer", "follow-up", operationKey, fingerprint("steer")),
+    ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
+    await expect(
+      submit(value, "send", "follow-up", operationKey, fingerprint("send")),
+    ).rejects.toBeInstanceOf(SessionCommandIdempotencyError);
   });
 });
 
@@ -1839,7 +2109,7 @@ describe("canonical queue commands", () => {
     }
   });
 
-  test("Send keeps custom file mounts distinct and rejects genuinely changed drafts", async () => {
+  test("Send keeps custom file mounts distinct and sends changed content as typed", async () => {
     const value = await fixture(1);
     const fileId = crypto.randomUUID();
     const customResource = {
@@ -1889,19 +2159,18 @@ describe("canonical queue commands", () => {
         ),
       );
 
+    // What is in the box is what is sent, even when it differs from the draft.
     for (const changed of [
       {
         resources: [{ kind: "file" as const, fileId, mountPath: `files/${fileId}` }],
       },
       { text: "inspect different content" },
     ]) {
-      try {
-        await submit(changed);
-        throw new Error("changed draft unexpectedly admitted");
-      } catch (error) {
-        expect(error).toBeInstanceOf(QueueCommandConflictError);
-        expect((error as QueueCommandConflictError).code).toBe("DRAFT_CHANGED");
-      }
+      const sent = await submit(changed);
+      expect(sent.replay).toBe(false);
+      const turn = await getSessionTurn(client.db, value.grant.workspaceId!, sent.turnId);
+      expect(turn?.prompt).toBe("text" in changed ? changed.text : draft.text);
+      if ("resources" in changed) expect(turn?.resources).toEqual(changed.resources);
     }
   });
 

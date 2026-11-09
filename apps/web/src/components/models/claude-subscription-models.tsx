@@ -1,4 +1,5 @@
 import type { ClaudeSubscriptionAccount } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useState, type ReactNode } from "react";
 import {
@@ -47,6 +48,7 @@ export function claudeUsageCell(account: ClaudeSubscriptionAccount): React.React
   if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
   return (
     <ClaudeUsageReadout
+      plan={account.plan}
       state={{
         value: account.usage ?? null,
         loading: false,
@@ -76,7 +78,7 @@ export function ClaudeAccountUsageReadout({
   account,
   canManage,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   scope: "workspace" | "organization";
   scopeId: string;
   account: ClaudeSubscriptionAccount;
@@ -96,7 +98,7 @@ export function ClaudeAccountUsageReadout({
   });
   if (account.status !== "active") return null;
   if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
-  return <ClaudeUsageReadout state={usage} />;
+  return <ClaudeUsageReadout state={usage} plan={account.plan} />;
 }
 export function ClaudeRow({
   claude,
@@ -219,7 +221,7 @@ function AccountUsage({
     onCredentialChanged: () => refreshClaudeAccountMetadata(claude.client),
     accountPool: true,
   });
-  return <ClaudeUsage state={usage} onReconnect={onReconnect} />;
+  return <ClaudeUsage state={usage} plan={account.plan} onReconnect={onReconnect} />;
 }
 export function ClaudeAccountPage({
   claude,

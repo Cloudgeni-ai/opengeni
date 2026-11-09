@@ -34,6 +34,7 @@ test("stream component retains the completed compaction checkpoint before refusi
   const recoveryNotice = spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null);
   // The completed checkpoint contains no stored programmatic operations.
   const operations = spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]);
+  const gatewayRequests = spyOn(db, "listTurnGitHubGatewayApprovals").mockResolvedValue([]);
   const allowance = spyOn(db, "checkWorkspaceAllowance").mockImplementation(async (_db, input) => {
     order.push("admission");
     expect(input.subjectId).toBe("user:frozen-initiator");
@@ -119,6 +120,7 @@ test("stream component retains the completed compaction checkpoint before refusi
     position.mockRestore();
     recoveryNotice.mockRestore();
     operations.mockRestore();
+    gatewayRequests.mockRestore();
     allowance.mockRestore();
   }
 });

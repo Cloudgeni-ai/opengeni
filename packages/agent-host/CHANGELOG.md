@@ -1,5 +1,60 @@
 # @opengeni/agent-host
 
+## 6.12.0
+
+### Patch Changes
+
+- Updated dependencies [64fd53f]
+- Updated dependencies [2e7c01e]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [98938f0]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [65e1fb9]
+- Updated dependencies [c0b9f88]
+  - @opengeni/sdk@6.12.0
+
+## 6.11.0
+
+### Patch Changes
+
+- cd52481: A command's `kill -1` no longer takes a Linux Connected Machine agent offline. `kill -1` signals every process of the user, so the agent stopped, and a foreground agent's keeper stopped it for good. The agent now keeps running when one of its own commands sends it `SIGTERM` or `SIGINT`, including from a short-lived sender that already exited while a command was running or had just ended. The keeper ignores stop signals from the agent's commands, lets the agent decide about senders that already exited, and starts again an agent such a signal ended (`SIGHUP`, `SIGQUIT`, `SIGUSR2`). Nothing is blocked: the command still receives every signal, and the service manager, the desktop app, Ctrl-C, `opengeni-agent stop` or a `kill` from a shell outside the agent's commands still stop it. On Windows each command now runs on a hidden console of its own, so a Ctrl-C event a command sends to its whole console no longer stops the agent. `kill 0` and `kill -<group>` already reached only the command's own process group; a new test keeps it that way.
+- d677983: A workspace root or home folder that the machine agent (0.1.155) creates again is now complete before any command can start in it. Before, the folder appeared first and got its owner and mode afterwards, so a command racing to start there could begin in a folder still owned by the agent with the agent's umask mode. If the agent couldn't give a run-as user's home to that user, it left that half-made folder behind, and the command ran in it. On Linux and macOS the agent now makes the folder under a private name, sets its owner and mode, and moves it into place without replacing anything. If the owner can't be set, the agent removes it and that one command fails as not found. When the agent can't make a missing folder again, that not-found error now also says why, for example "(it was missing and creating it again failed: Permission denied (os error 13))". On macOS, the developer-tools check behind the Git identity probe now also uses the agent's retained `/dev/null`, so it keeps working when `/dev/null` was removed.
+- 42cd370: When the separately installed Opengeni Agent runs this computer, the desktop app now reports which machine it is in the workspace. Its status left the enrollment out in that case, so Settings › Computer use could not find the computer in the machine list and showed screen control and Chrome as Off while agents were using both, and the Runs on menu did not mark the computer as "This computer". The app-run case already reported it.
+- Updated dependencies [9bb1b56]
+- Updated dependencies [7e92bda]
+- Updated dependencies [71395d6]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [a505ce8]
+- Updated dependencies [840a780]
+- Updated dependencies [9d52126]
+- Updated dependencies [2a02889]
+- Updated dependencies [888aaf5]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [486e0bf]
+- Updated dependencies [cd349e6]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [6d81049]
+- Updated dependencies [57748cf]
+- Updated dependencies [3b81d9b]
+- Updated dependencies [d355388]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [b9523c1]
+- Updated dependencies [cf9358a]
+  - @opengeni/sdk@6.11.0
+
 ## 6.10.0
 
 ### Patch Changes

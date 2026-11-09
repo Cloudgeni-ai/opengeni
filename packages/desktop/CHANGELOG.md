@@ -1,5 +1,65 @@
 # @opengeni/desktop
 
+## 6.12.0
+
+### Patch Changes
+
+- Updated dependencies [64fd53f]
+- Updated dependencies [2e7c01e]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [98938f0]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [65e1fb9]
+- Updated dependencies [c0b9f88]
+  - @opengeni/sdk@6.12.0
+  - @opengeni/agent-host@6.12.0
+
+## 6.11.0
+
+### Patch Changes
+
+- 635cc6b: A "connect this computer" link to a server the app has not used before now asks the person to approve that server, named in the dialog and defaulting to Cancel, before any sign-in starts. Links to the app's own or installed-from server, or to a server that already has an account in the app, work as before.
+- 83399c2: The macOS install script no longer refuses to update when an iOS simulator is running an app with the same name: it only waits for the desktop app itself to close.
+- 840a780: The desktop app now opens a link to any page of the web app, not only workspaces and sessions. Before, a connector sign-in started in the desktop app finished in the browser, and the browser's "Back to Opengeni" page handed the app the page it started on (for example a workspace's plugins page with the connection result in its address), but the app only read workspace and session links, so it just came forward on whatever page it was showing and never showed the result. Now the app opens that page, with its query kept, on the account for that server and workspace; a page on a server without an account here opens in the browser. `parseAppLink` takes a new `anyPage` option for apps that show the whole web app, and `AppWebPaths` gets an optional `workspaceOf` that reads the workspace any page belongs to (`OPENGENI_WEB_PATHS` reads `/workspaces/:id/…`). Without `anyPage` nothing changes, so phone apps still open those pages in the browser.
+- Updated dependencies [9bb1b56]
+- Updated dependencies [cd52481]
+- Updated dependencies [7e92bda]
+- Updated dependencies [71395d6]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [a505ce8]
+- Updated dependencies [840a780]
+- Updated dependencies [9d52126]
+- Updated dependencies [2a02889]
+- Updated dependencies [888aaf5]
+- Updated dependencies [d677983]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [486e0bf]
+- Updated dependencies [cd349e6]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [6d81049]
+- Updated dependencies [57748cf]
+- Updated dependencies [3b81d9b]
+- Updated dependencies [d355388]
+- Updated dependencies [42cd370]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [b9523c1]
+- Updated dependencies [cf9358a]
+  - @opengeni/sdk@6.11.0
+  - @opengeni/agent-host@6.11.0
+
 ## 6.10.0
 
 ### Patch Changes

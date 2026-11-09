@@ -215,6 +215,54 @@ describe("worker concurrency contract", () => {
     expect(supplier.tryReserveSlot({} as never)).not.toBeNull();
   });
 
+  test("idle poll reservations are the polls that take turns, not lost capacity", () => {
+    const memory = mutableMemory(300 * MIB, 3_000 * MIB);
+    const supplier = new MemoryAwareTurnSlotSupplier({
+      maximumTurns: 16,
+      hardBytesPerTurn: 100 * MIB,
+      nativeHeadroomBytes: 500 * MIB,
+      memorySnapshot: memory.read,
+    });
+    // Temporal's poll loop reserves a slot before it waits for a poller, so an
+    // idle worker with ten activity pollers holds eleven permits and no turns.
+    const polling: SlotPermit[] = [];
+    const poll = () => {
+      const permit = supplier.tryReserveSlot({} as never);
+      if (permit) polling.push(permit);
+    };
+    for (let index = 0; index < 11; index++) poll();
+    expect(supplier.snapshot()).toMatchObject({
+      reservedSlots: 11,
+      usedSlots: 0,
+      availableSlots: 5,
+      memoryBoundCapacity: 16,
+    });
+
+    // Each delivered turn uses the permit its poll already holds, and the loop
+    // reserves the next poll while capacity remains. A burst reaches the full
+    // ceiling even though "available" reads 0 from the fifth turn on.
+    for (let turn = 1; turn <= 16; turn++) {
+      const permit = polling.shift();
+      expect(permit).toBeDefined();
+      supplier.markSlotUsed(used(permit!));
+      poll();
+      if (turn === 5) {
+        expect(supplier.snapshot()).toMatchObject({
+          reservedSlots: 16,
+          usedSlots: 5,
+          availableSlots: 0,
+        });
+      }
+    }
+    expect(polling).toHaveLength(0);
+    expect(supplier.snapshot()).toMatchObject({
+      reservedSlots: 16,
+      usedSlots: 16,
+      availableSlots: 0,
+      memoryBoundCapacity: 16,
+    });
+  });
+
   test("contracts advertised availability when retained memory grows", () => {
     const memory = mutableMemory(300 * MIB, 2_100 * MIB);
     const supplier = new MemoryAwareTurnSlotSupplier({

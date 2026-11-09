@@ -50,11 +50,11 @@ export type OtherWorkspaceContentFlow = "from_there" | "both_ways";
 
 export const REGION_RESTRICTED_TOOL_MESSAGE = `${WORKSPACE_CONTENT_FLOW_REFUSED_MESSAGE} Nothing was run. Tell the person plainly; it can't be worked around from here.`;
 const UNCHECKED =
-  "Nothing was run: Opengeni couldn't confirm that content may move between these workspaces. Retry.";
+  "Nothing was run: it couldn't be confirmed that content may move between these workspaces. Retry.";
 /** After the call ran: its answer is withheld instead. */
 const REGION_RESTRICTED_AFTER = `${WORKSPACE_CONTENT_FLOW_REFUSED_MESSAGE} The answer isn't shown. Tell the person plainly; it can't be worked around from here.`;
 const UNCHECKED_AFTER =
-  "The answer isn't shown: Opengeni couldn't confirm that content may move between these workspaces. Retry.";
+  "The answer isn't shown: it couldn't be confirmed that content may move between these workspaces. Retry.";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function refusal(message: string): CallToolResult {
@@ -126,9 +126,9 @@ export async function withOtherWorkspaceContentFlow(
 const ORGANIZATION_MCP_ENDPOINT = /^\/v1\/mcp\/?$/;
 const WORKSPACE_MCP_ENDPOINT = /^\/v1\/workspaces\/([^/]+)\/mcp(?:\/|$)/;
 const UNCHECKED_ENDPOINT =
-  "Nothing was shown: Opengeni couldn't confirm that content may go to the calling workspace. Retry.";
+  "Nothing was shown: it couldn't be confirmed that content may go to the calling workspace. Retry.";
 const UNCHECKED_CALL =
-  "Nothing was run: Opengeni couldn't confirm that content may move between these workspaces. Retry.";
+  "Nothing was run: it couldn't be confirmed that content may move between these workspaces. Retry.";
 /** MCP methods that only set up the connection or list what it offers. */
 const HANDSHAKE_METHODS = new Set([
   "initialize",
@@ -168,7 +168,7 @@ export async function callingWorkspaceOf(
   const calling = secret ? await verifyCallingWorkspaceProof(secret, header) : null;
   if (!calling)
     throw new HTTPException(403, {
-      message: "Nothing was run: Opengeni couldn't confirm which workspace is calling.",
+      message: "Nothing was run: the calling workspace couldn't be confirmed.",
     });
   return calling;
 }

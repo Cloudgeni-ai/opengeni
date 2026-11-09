@@ -110,6 +110,12 @@ import { errorMessage } from "@opengeni/contracts/values";
 
 const UPLOAD_URL_SECONDS = 15 * 60;
 const PLAYBACK_URL_SECONDS = 60 * 60;
+/** The longest a transcript list waits for a version to finish, under proxy timeouts. */
+const TRANSCRIPT_WAIT_MAX_SECONDS = 25;
+/** How often a waiting list looks at the version again: often at first, when a dictation finishes. */
+const TRANSCRIPT_WAIT_FAST_CHECK_MILLISECONDS = 100;
+const TRANSCRIPT_WAIT_FAST_SECONDS = 5;
+const TRANSCRIPT_WAIT_SLOW_CHECK_MILLISECONDS = 1_000;
 
 /** The type the worker stored a prepared track with, read from its key's extension. */
 function preparedTrackContentType(objectKey: string): string {
@@ -748,6 +754,29 @@ export function registerRecordingRoutes(
     });
   }
 
+  /** Never fails the upload: without it the speakers are only found after the end. */
+  async function startSpeakerScan(
+    actor: { workspaceId: string; subjectId: string; accountId: string },
+    recordingId: string,
+  ): Promise<void> {
+    try {
+      const recording = await getRecording(db, { ...actor, recordingId });
+      if (recording.purpose !== "meeting" || recording.state !== "capturing") return;
+      await deps.workflowClient.startRecordingSpeakerScan?.({
+        accountId: actor.accountId,
+        workspaceId: recording.workspaceId,
+        recordingId,
+        ownerSubjectId: recording.ownerSubjectId,
+      });
+    } catch (error) {
+      observability?.warn("couldn't start telling a meeting's speakers apart while it records", {
+        workspaceId: actor.workspaceId,
+        recordingId,
+        error: error instanceof Error ? error.message.slice(0, 500) : String(error),
+      });
+    }
+  }
+
   /** The live model a request names, else the provider's first, else the deployment's. */
   function liveModelChoice(requested: {
     providerId?: string | undefined;
@@ -1180,6 +1209,11 @@ export function registerRecordingRoutes(
         chunkNumbers: present,
       }),
     );
+    // About every half minute of a meeting's audio, make sure its speakers
+    // are being told apart while it records (starting it again is a no-op).
+    if (deps.workflowClient.startRecordingSpeakerScan && present.some((n) => n % 30 === 0)) {
+      await startSpeakerScan(actor, recordingId);
+    }
     if (newlyStoredBytes > 0) {
       count(
         "opengeni_recording_stored_bytes_total",
@@ -1248,9 +1282,32 @@ export function registerRecordingRoutes(
   app.get(`${base}/:recordingId/transcripts`, async (c) => {
     const actor = await actorFor(c, "sessions:read");
     const recordingId = recordingIdParam(c);
-    return c.json({
-      versions: await guard(() => listRecordingTranscriptVersions(db, { ...actor, recordingId })),
-    });
+    const waitFor = versionIdQuery(c, "waitFor");
+    const waitSeconds = c.req.query("waitSeconds");
+    const wait = waitSeconds === undefined ? 0 : Number(waitSeconds);
+    if (!(Number.isFinite(wait) && wait >= 0 && wait <= TRANSCRIPT_WAIT_MAX_SECONDS)) {
+      throw invalid(`waitSeconds must be between 0 and ${TRANSCRIPT_WAIT_MAX_SECONDS}`);
+    }
+    const list = () => guard(() => listRecordingTranscriptVersions(db, { ...actor, recordingId }));
+    let versions = await list();
+    // Answer the moment the awaited version (or the newest) is heard or fails,
+    // so a client learns its text is ready without checking every second.
+    const started = Date.now();
+    const deadline = started + wait * 1_000;
+    const signal = c.req.raw.signal;
+    while (Date.now() < deadline && !signal.aborted) {
+      const awaited = waitFor
+        ? versions.find((version) => version.id === waitFor)
+        : [...versions].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+      if (!awaited || awaited.state === "complete" || awaited.state === "failed") break;
+      const check =
+        Date.now() - started < TRANSCRIPT_WAIT_FAST_SECONDS * 1_000
+          ? TRANSCRIPT_WAIT_FAST_CHECK_MILLISECONDS
+          : TRANSCRIPT_WAIT_SLOW_CHECK_MILLISECONDS;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(check, deadline - Date.now())));
+      versions = await list();
+    }
+    return c.json({ versions });
   });
 
   app.post(`${base}/:recordingId/transcripts`, async (c) => {

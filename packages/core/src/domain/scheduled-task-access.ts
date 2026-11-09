@@ -27,7 +27,6 @@ import {
   ToolAuthNeededReason,
   mergeToolRefs,
   resolveWorkspaceSessionToolDefaults,
-  scheduledTaskKnowledgeSource,
   type AccessGrant,
   type ConnectionMetadata,
   type FirstPartyMcpToolName,
@@ -420,8 +419,8 @@ function scheduledTaskToolsFollowTask(task: Pick<ScheduledTask, "runMode" | "reu
   );
 }
 
-function hasAgentAccess(task: Pick<ScheduledTask, "action" | "agentConfig">): boolean {
-  return task.action.kind === "agent_turn" && scheduledTaskKnowledgeSource(task) === null;
+function hasAgentAccess(task: Pick<ScheduledTask, "action">): boolean {
+  return task.action.kind === "agent_turn";
 }
 
 export type ScheduledTaskAccessPlan = {

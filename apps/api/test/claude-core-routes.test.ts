@@ -269,9 +269,6 @@ describe.skipIf(!realDb)("Claude routes on the shared core (M4 C2b)", () => {
   });
 
   test("with the switch row the same routes answer from core connections", async () => {
-    await shared!.admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, 'claude', true) on conflict (account_id, provider) do update set enabled = true`;
     expect(await listed()).toEqual(legacyEmpty as never);
 
     const connected = await connectSetupToken();

@@ -11,16 +11,26 @@ export const englishMessages = {
   "approvalSurface.allow": "Allow",
   "approvalSurface.approvalNeeded": "Approval needed",
   "approvalSurface.approveAction": "Approve action",
+  /** Approves every waiting action the person may approve, one decision each. */
+  "approvalSurface.approveAll": "Approve all {length}",
   "approvalSurface.approving": "Approving…",
+  /** Shown in place of the bulk buttons while their decisions are sent. */
+  "approvalSurface.approvingIndexOfLength": "Approving {index} of {length}…",
   "approvalSurface.backToReview": "Back to review",
   /** Declines an app action's question without running it. */
   "approvalSurface.cancel": "Cancel",
   /** The empty choice of an MCP server's drop-down question. */
   "approvalSurface.choose": "Choose…",
+  /** One action Approve all could not approve; it stays waiting. Selecting it shows its card. */
+  "approvalSurface.couldnTApproveTitle": "Couldn't approve {title}: {error}",
+  "approvalSurface.couldnTDeclineTitle": "Couldn't decline {title}: {error}",
   "approvalSurface.couldnTLoadThisAction":
     "Couldn't load this action, so it can't be approved yet. You can still decline it.",
   "approvalSurface.decline": "Decline",
+  /** Declines every waiting action, one decision each. */
+  "approvalSurface.declineAll": "Decline all",
   "approvalSurface.declining": "Declining…",
+  "approvalSurface.decliningIndexOfLength": "Declining {index} of {length}…",
   "approvalSurface.lengthActionsAreWaitingFor": "{length} actions are waiting for you",
   "approvalSurface.loadingActionDetails": "Loading action details…",
   "approvalSurface.nextAction": "Next action",
@@ -935,6 +945,8 @@ export const englishMessages = {
   "browserViewer.thisBrowserProfileIsNo":
     "This browser profile is no longer available. Refresh and choose another.",
   "browserViewer.thisChatMovedToAnother": "This chat moved to another computer.",
+  "browserViewer.chatIsOnAnotherComputer":
+    "This chat is working on another computer right now. The browser keeps running on its own computer and is available again when the chat moves back.",
   "browserViewer.thisChromeProfileIsLive":
     "This Chrome profile is live again, but the previous browser cannot move to the new connection. Use Browser → New browser → Connected Chrome.",
   "browserViewer.thisMachineOnly": "This machine only",
@@ -1145,6 +1157,7 @@ export const englishMessages = {
   "commands.registry.thisViewCanTBe":
     "This view can't be cleared here (no local timeline to reset).",
   "composer.appShotSummary": "{app} · App-shot",
+  "composer.imageTag": "Image {number}",
   "composer.appShotTextIncluded":
     "The agent also gets the text this window shows, including parts scrolled out of view. Remove the app-shot to send nothing from this window.",
   "composer.appShotNoText": "Only the screenshot: this window shared no text.",
@@ -1255,6 +1268,8 @@ export const englishMessages = {
   "composerTranscriptionControl.savedTranscriptionFailedRetryWhen":
     "Saved. Transcription failed, retry when ready.",
   "composerTranscriptionControl.savingAudioLocally": "Saving audio…",
+  "composerTranscriptionControl.speechServiceOutOfCredit":
+    "The speech-to-text service is out of credit. Recording saved; retry once it's topped up.",
   "composerTranscriptionControl.startVoiceInput": "Start voice input",
   "composerTranscriptionControl.stopAndTranscribe": "Stop and transcribe",
   "composerTranscriptionControl.stopsAndTranscribesInSeconds":
@@ -1846,8 +1861,6 @@ export const englishMessages = {
   "hooks.useComposer.seeAttachedContext": "(see attached context)",
   "hooks.useComposer.theDurableComposerDraftIs":
     "The durable composer draft is not ready for delivery.",
-  "hooks.useComposer.theMessageDraftCouldNot":
-    "The message draft could not be saved before delivery.",
   "hooks.useComposer.theRequestCouldNotBe":
     "The request could not be confirmed. Check its status before retrying.",
   "hooks.useComputerFrameStream.desktopViewLostConnection": "Desktop view lost connection.",
@@ -2112,6 +2125,12 @@ export const englishMessages = {
     "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key. Your message is saved.",
   "lib.format.modelPolicyRefused":
     "This workspace's model policy doesn't allow this model. Choose another model. Your message is saved.",
+  "lib.format.repositoryUnavailable":
+    "{repository} is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry. Your message is saved.",
+  "lib.format.repositoriesUnavailable":
+    "These repositories are no longer available to this workspace: {repositories}. Remove them from this chat, or restore their GitHub access, then retry. Your message is saved.",
+  "lib.format.someRepositoryUnavailable":
+    "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry. Your message is saved.",
   "lib.format.now": "now",
   "lib.format.speedUnavailable":
     "This model can't run at the selected speed. Choose another speed. Your message is saved.",
@@ -2242,6 +2261,15 @@ export const englishMessages = {
   "machineInputDisplay.agentWaitingForCapacity": "Agent waiting for capacity",
   "machineInputDisplay.automationRun": "Automation run",
   "machineInputDisplay.automationRunsCount_other": "{count} automation runs",
+  /**
+   * The one line a chat shows when an automation acted in it: the automation's
+   * name, then what the event that started it says, e.g. "New task assigned:
+   * Replace the gutter".
+   */
+  "machineInputDisplay.automationRunWhat": "{name}: {what}",
+  /** As above when several events started the run; count is the others. */
+  "machineInputDisplay.automationRunWhatAndMore_one": "{name}: {what} and {count} more",
+  "machineInputDisplay.automationRunWhatAndMore_other": "{name}: {what} and {count} more",
   "machineInputDisplay.commandResultReceived": "Command result received",
   "machineInputDisplay.commandResultsReceivedCount_other": "{count} command results received",
   "machineInputDisplay.countTimesLabel": "{count}× {label}",
@@ -2952,6 +2980,8 @@ export const englishMessages = {
     "This organization's policy doesn't allow this model. Try another model.",
   "meetings.recordings.errorTimedOut":
     "Transcribing took too long and was stopped. Try again, or try another model.",
+  "meetings.recordings.errorWorkerStopped":
+    "The server kept stopping while it transcribed this meeting, most likely for lack of memory. Try again later, or ask whoever runs this server.",
   "meetings.recordings.errorUnknown":
     "Something went wrong while transcribing. Try again, or pick another model.",
   /** A speaker nobody has named yet. */
@@ -3386,6 +3416,7 @@ export const englishMessages = {
     "All observed subscriptions were capped",
   "native.presentation.approvalRequired": "Approval required",
   "native.presentation.approve": "Approve",
+  "native.presentation.archived": "Archived",
   "native.presentation.archivedMemory": "Archived memory",
   "native.presentation.askTheAgentToHelp": "Ask the agent to help with work in this session.",
   "native.presentation.assistant": "Assistant",
@@ -3592,6 +3623,10 @@ export const englishMessages = {
   "native.realtime.callView.speaker": "Speaker",
   "native.realtime.callView.unmute": "Unmute",
   "native.realtime.nativeCall.couldNotStartTheCall": "Could not start the call.",
+  "native.realtime.nativeCall.noInputAudio":
+    "Your microphone isn't picking up any sound. Check that no other app is using it.",
+  "native.realtime.nativeCall.replyNotPlayed":
+    "A reply arrived but couldn't be played. Check your volume.",
   "native.realtime.nativeCall.voiceDisconnected": "Voice disconnected.",
   "native.realtime.nativeCall.voiceIsNotReadyYet": "Voice is not ready yet.",
   "native.realtime.wakePhrase.copied": "Copied",
@@ -3633,6 +3668,8 @@ export const englishMessages = {
   "native.timeline.decisions.positionOfCurrent": "{position} of {current}",
   "native.timeline.decisions.reject": "Reject",
   "native.timeline.decisions.rejected": "Rejected",
+  /** A summary of a waiting action failed to load; the standard card and a Try again button follow. */
+  "native.timeline.decisions.summaryUnavailable": "Couldn't load the summary of this action.",
   "native.timeline.feedback.commentOptional": "Comment (optional)",
   "native.timeline.feedback.couldnTSendFeedbackDetail": "Couldn't send feedback.{detail}",
   "native.timeline.feedback.tryAgain": "Try again.",
@@ -3766,6 +3803,9 @@ export const englishMessages = {
   "native.timeline.messages.sending": "Sending…",
   "native.timeline.messages.showLess": "Show less",
   "native.timeline.messages.showMore": "Show more",
+  "native.timeline.messages.plainTextPage": "Plain text · {page}/{count}",
+  "native.timeline.messages.previousPage": "Previous",
+  "native.timeline.messages.nextPage": "Next",
   "native.timeline.messages.skipped": "Skipped",
   "native.timeline.messages.startACall": "Start a call",
   "native.timeline.messages.steer": "Steer",
@@ -4152,6 +4192,9 @@ export const englishMessages = {
   "realtime.realtimeControl.modeVersion": "mode version",
   "realtime.realtimeControl.muteMicrophone": "Mute microphone",
   "realtime.realtimeControl.muteVoiceAudio": "Mute voice audio",
+  "realtime.realtimeControl.noMicrophoneSound": "No sound from your microphone",
+  "realtime.realtimeControl.noMicrophoneSoundDetail":
+    "The voice can't hear you. Check that no other app is using your microphone.",
   "realtime.realtimeControl.opengeni": "{product}",
   "realtime.realtimeControl.pendingBytes": "pending bytes",
   "realtime.realtimeControl.pendingDurableEvents": "pending durable events",
@@ -4164,9 +4207,12 @@ export const englishMessages = {
   "realtime.realtimeControl.recommendedDescription": "Recommended · {description}",
   "realtime.realtimeControl.reconnectAttempt": "reconnect attempt",
   "realtime.realtimeControl.reconnecting": "Reconnecting…",
+  "realtime.realtimeControl.replyNotPlayed": "Reply not played",
+  "realtime.realtimeControl.replyNotPlayedDetail":
+    "A reply arrived but couldn't be played. Check your volume and audio output.",
   "realtime.realtimeControl.resumeAudio": "Resume audio",
   "realtime.realtimeControl.resumeAudioToHearThe":
-    "Resume audio to hear the existing voice connection.",
+    "Your browser didn't let the replies play. Tap to hear them.",
   "realtime.realtimeControl.resumeVoiceAudio": "Resume voice audio",
   "realtime.realtimeControl.retryConnection": "Retry connection",
   "realtime.realtimeControl.retryVoiceConnection": "Retry voice connection",
@@ -4178,6 +4224,7 @@ export const englishMessages = {
   "realtime.realtimeControl.startVoice": "Start voice",
   "realtime.realtimeControl.supergrokXaiPlan": "SuperGrok / xAI plan",
   "realtime.realtimeControl.talkLiveWithTheAgent": "Talk live with the agent.",
+  "realtime.realtimeControl.tapToHearReplies": "Tap to hear replies",
   "realtime.realtimeControl.theConnectionCouldNotBe": "The connection could not be started.",
   "realtime.realtimeControl.theVoiceSessionCouldNot": "The voice session could not be created.",
   "realtime.realtimeControl.tryVoiceAgain": "Try voice again",
@@ -4501,6 +4548,10 @@ export const englishMessages = {
   "sessionAgentsModel.needsYou": "Needs you",
   "sessionAgentsModel.needsYouFor": "Needs you · {duration}",
   "sessionAgentsModel.paused": "Paused",
+  /** The agents chip's detail: how many helper agents are paused. */
+  "sessionAgentsModel.pausedCount_other": "{count} paused",
+  /** The agents chip's detail: how many helper agents are running. */
+  "sessionAgentsModel.runningCount_other": "{count} running",
   "sessionAgentsModel.stuck": "Stuck",
   "sessionAgentsModel.waitingForYourInputSince": "Waiting for your input since {time}",
   "sessionAuthRecommendation.reconnectThisIntegrationToUse":
@@ -4606,6 +4657,26 @@ export const englishMessages = {
     "Paused by the agent: it is waiting on a human decision before continuing.",
   "sessionChrome.pausedManuallyByAPerson":
     "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
+  // The goal pill's short pause reasons, shown after "Paused · ". Keep each to a word or two:
+  // the goal panel carries the full explanation.
+  /** The agent paused its own goal to wait for a person's decision. */
+  "sessionChrome.pausedReasonAgent": "agent",
+  /** The deployment's usage allowance ran out. */
+  "sessionChrome.pausedReasonAllowance": "allowance",
+  /** The monthly model spending limit was reached. */
+  "sessionChrome.pausedReasonBudget": "budget",
+  /** The goal reached its cap of automatic continuations; new input resumes it. */
+  "sessionChrome.pausedReasonCap": "cap",
+  /** The workspace ran out of credits. */
+  "sessionChrome.pausedReasonCredits": "credits",
+  /** An admission limit or the application's usage policy paused the goal. */
+  "sessionChrome.pausedReasonLimits": "limits",
+  /** A person (or an API call) paused the goal. */
+  "sessionChrome.pausedReasonManually": "manually",
+  /** The selected model is unavailable. */
+  "sessionChrome.pausedReasonModel": "model",
+  /** A model policy blocks the selected model. */
+  "sessionChrome.pausedReasonPolicy": "policy",
   "sessionChrome.pausedSuffix": "Paused · {suffix}",
   "sessionChrome.placingInQueue": "Placing in queue",
   "sessionChrome.previousWorkStopping": "Previous work stopping",
@@ -4775,9 +4846,17 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.connectsYourOwnAccountOnly":
     "Connects your own account. Only work you start can use it.",
   "sessionMcpCapabilityCard.continueToName": "Continue to {name}",
+  "sessionMcpCapabilityCard.reconnectName": "Reconnect {name}",
+  "sessionMcpCapabilityCard.reconnectsTheSameAccount":
+    "Signs in again to the same account. Its settings stay as they were.",
   "sessionMcpCapabilityCard.couldNotDetermineHowTo":
     "Could not determine how to sign in. Try again.",
   "sessionMcpCapabilityCard.couldnTLoadConnectionDetails": "Couldn't load connection details.",
+  "sessionMcpCapabilityCard.details": "Details",
+  "sessionMcpCapabilityCard.detailsAbout": "About",
+  "sessionMcpCapabilityCard.detailsAccess": "Access",
+  "sessionMcpCapabilityCard.detailsAddress": "Address",
+  "sessionMcpCapabilityCard.detailsType": "Type",
   "sessionMcpCapabilityCard.done": "Done",
   "sessionMcpCapabilityCard.everyoneInThisWorkspace": "Everyone in this workspace",
   "sessionMcpCapabilityCard.finishingYourConnection": "Finishing your connection…",
@@ -4787,6 +4866,7 @@ export const englishMessages = {
   "sessionMcpCapabilityCard.mcpServer": "MCP server",
   "sessionMcpCapabilityCard.moreThanOnePersonalAccount":
     "More than one personal account matches. Choose the account in connection settings before reconnecting.",
+  "sessionMcpCapabilityCard.onceConnectedTheAgentCan": "Once connected, the agent can:",
   "sessionMcpCapabilityCard.onlyAnAdminCanTurnOn":
     "Only an admin can turn on {name}. Ask an admin to turn it on, then connect your account.",
   "sessionMcpCapabilityCard.onlyMe": "Only me",
@@ -4839,6 +4919,7 @@ export const englishMessages = {
   "sessionProxyScope.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "sessionProxyScope.thisServerDoesNotReport":
     "This server does not report its workspace. Update @opengeni/sdk on the server, or pass workspaceId.",
+  "sessionStatusModel.archived": "Archived",
   "sessionStatusModel.cancelled": "Cancelled",
   "sessionStatusModel.failed": "Failed",
   "sessionStatusModel.idle": "Idle",
@@ -5207,6 +5288,7 @@ export const englishMessages = {
   "timeline.commandStep.write.running": "Writing {name}",
   "timeline.commandStep.writeFile.done": "Wrote a file",
   "timeline.commandStep.writeFile.running": "Writing a file",
+  "timeline.compactionCopy.chatHistoryIsUnchanged": "Chat history is unchanged.",
   "timeline.compactionCopy.chatHistoryIsUnchangedIf":
     "Chat history is unchanged. If your next message fails too, start a new session.",
   "timeline.compactionCopy.checkpointExceedsThisModelS":
@@ -5226,11 +5308,15 @@ export const englishMessages = {
   "timeline.compactionCopy.noActiveHistoryToCompact": "No active history to compact",
   "timeline.compactionCopy.noSubscriptionCapacityRightNow":
     "No subscription capacity right now. It runs with your next message if still needed.",
+  "timeline.compactionCopy.olderMessagesTrimmed": "Older messages trimmed",
   "timeline.compactionCopy.parameter": "Parameter",
+  "timeline.compactionCopy.providerMessage": "Provider message",
   "timeline.compactionCopy.requestId": "Request ID",
   "timeline.compactionCopy.requestItAgainToRetry":
     "Request it again to retry. Chat history is unchanged.",
   "timeline.compactionCopy.response": "Response",
+  "timeline.compactionCopy.theModelCouldnTSummarizeThem":
+    "The model couldn’t summarize them. Chat history above is unchanged.",
   "timeline.compactionCopy.theProviderRejectsThisRequest":
     "The provider rejects this request the same way until the conversation changes.",
   "timeline.fleetDecisionRow.admission": "Admission",
@@ -5512,6 +5598,7 @@ export const englishMessages = {
   "timeline.platformActivityPresentation.sandboxReattached": "Sandbox reattached",
   "timeline.platformActivityPresentation.sandboxRestored": "Sandbox restored",
   "timeline.platformActivityPresentation.sandboxStartupInterrupted": "Sandbox startup interrupted",
+  "timeline.platformActivityPresentation.settingUpNamedSandboxEnvironment": "Setting up {name}",
   "timeline.platformActivityPresentation.settingUpSandboxEnvironment":
     "Setting up sandbox environment",
   "timeline.platformActivityPresentation.spawnedName": "Spawned {name}",
@@ -5550,11 +5637,17 @@ export const englishMessages = {
   "timeline.projection.approvalNeededTheTurnIs":
     "Approval needed — the turn is paused until someone decides.",
   "timeline.projection.details": "Details",
+  "timeline.projection.filesChangedAfterCouldNotBeSaved":
+    "Files changed after {time} couldn't be saved before this chat's workspace machine shut down.",
+  "timeline.projection.filesCouldNotBeSaved":
+    "This chat's files couldn't be saved before its workspace machine shut down.",
   "timeline.projection.interrupted": "Interrupted.",
   "timeline.projection.needsYou": "Needs you",
   "timeline.projection.restoredFromOlderSave":
     "This chat's workspace machine was lost, so its files were restored from a save made at {time}. Changes made after that may be missing.",
   "timeline.projection.returnedToYourPreferredModel": "Returned to your preferred model.",
+  "timeline.projection.savedWithoutRebuildableFolders":
+    "This chat's files were saved without folders that can be rebuilt: {folders}.",
   "timeline.projection.switchedToAFallbackModel": "Switched to a fallback model.",
   "timeline.projection.switchedToAnotherSubscriptionAccount":
     "Switched to another subscription account.",
@@ -5893,6 +5986,8 @@ export const englishMessages = {
   "timeline.toolStep.askForHelp.running": "Asking you for help",
   "timeline.toolStep.askYou.done": "Asked you",
   "timeline.toolStep.askYou.running": "Asking you",
+  "timeline.toolStep.attachRepository.done": "Attached a code repository",
+  "timeline.toolStep.attachRepository.running": "Attaching a code repository",
   "timeline.toolStep.changeEventSource.done": "Changed an event source",
   "timeline.toolStep.changeEventSource.running": "Changing an event source",
   "timeline.toolStep.changeModel.done": "Changed the model",
@@ -6031,8 +6126,8 @@ export const englishMessages = {
   "timeline.toolStep.runCommand.running": "Running a command",
   "timeline.toolStep.runSchedule.done": "Ran an automation",
   "timeline.toolStep.runSchedule.running": "Running an automation",
-  "timeline.toolStep.saveBotTemplate.done": "Saved a bot template",
-  "timeline.toolStep.saveBotTemplate.running": "Saving a bot template",
+  "timeline.toolStep.saveBotTemplate.done": "Made an agent",
+  "timeline.toolStep.saveBotTemplate.running": "Making an agent",
   "timeline.toolStep.saveGuide.done": "Saved a skill",
   "timeline.toolStep.saveGuide.running": "Saving a skill",
   "timeline.toolStep.saveMeetingNotes.done": "Saved meeting notes",

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 /* ----------------------------------------------------------------------------
    Workbench dock refinements.
 
@@ -50,7 +51,7 @@ const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
  *  must run under a provider (unlike the leaf hooks). This renders it there and
  *  exposes the latest return value. */
 async function renderTabsHook(
-  client: SessionClientLike,
+  client: SessionClientLike<ChatClient>,
   options: Omit<UseSandboxWorkspaceTabsOptions, "client" | "workspaceId">,
 ): Promise<{ result: { current: UseSandboxWorkspaceTabsResult }; unmount: () => Promise<void> }> {
   const result = { current: undefined as unknown as UseSandboxWorkspaceTabsResult };
@@ -62,7 +63,7 @@ async function renderTabsHook(
   return { result, unmount: rendered.unmount };
 }
 
-function withProvider(client: SessionClientLike, children: ReactNode): ReactElement {
+function withProvider(client: SessionClientLike<ChatClient>, children: ReactNode): ReactElement {
   return (
     <OpenGeniProvider client={client} workspaceId={WORKSPACE_ID}>
       {children}
@@ -206,7 +207,7 @@ function coldClient(
     // `listMachines` is served by the machines poll at runtime (the proxy needs
     // it present) but isn't a member of the narrow SessionClientLike — assert past
     // the excess-property check on this test mock.
-  } as Partial<SessionClientLike>);
+  } as Partial<SessionClientLike<ChatClient>>);
   return { client, spy };
 }
 
@@ -228,7 +229,7 @@ describe("workbench surface allowlist", () => {
         calls.machines += 1;
         return EMPTY_MACHINES;
       },
-    } as Partial<SessionClientLike>);
+    } as Partial<SessionClientLike<ChatClient>>);
     const hook = await renderTabsHook(client, {
       sessionId: SESSION_ID,
       events: [],
@@ -254,7 +255,7 @@ describe("workbench surface allowlist", () => {
         calls.machines += 1;
         return EMPTY_MACHINES;
       },
-    } as Partial<SessionClientLike>);
+    } as Partial<SessionClientLike<ChatClient>>);
     const hook = await renderTabsHook(client, {
       sessionId: SESSION_ID,
       events: [],
@@ -304,7 +305,7 @@ describe("workbench surface allowlist", () => {
         calls.machines += 1;
         return EMPTY_MACHINES;
       },
-    } as Partial<SessionClientLike>);
+    } as Partial<SessionClientLike<ChatClient>>);
     const hook = await renderTabsHook(client, {
       sessionId: SESSION_ID,
       events: [],
@@ -407,7 +408,7 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     const result = { current: undefined as unknown as UseSandboxWorkspaceTabsResult };
 
     function Harness({ revision }: { revision: number | null }) {
-      const context = useMemo<OpenGeniContextValue>(
+      const context = useMemo<OpenGeniContextValue<ChatClient>>(
         () => ({
           client,
           workspaceId: WORKSPACE_ID,

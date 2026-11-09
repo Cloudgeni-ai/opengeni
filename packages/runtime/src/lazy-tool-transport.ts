@@ -29,6 +29,7 @@ import {
   shortNameAlternatives,
   toolsWithExactName,
   unresolvedToolNames,
+  MAX_SEARCH_LIMIT,
 } from "./codex-tool-search";
 import { hasSearchTerms, isOperationWord, ToolSearchIndex } from "./tool-discovery-ranking";
 import {
@@ -459,7 +460,9 @@ export function connectableIntegrationsFromCatalogResult(
       const setup = isRecord(match.setup) ? match.setup : null;
       const next = setup && isRecord(setup.nextAction) ? setup.nextAction : null;
       if (next?.toolName !== "capability_authorization_request") continue;
-      if (setup!.action === "enable") continue;
+      // A setup the catalog reports unavailable (this deployment cannot
+      // connect it) has no card the person could finish.
+      if (setup!.action === "enable" || setup!.status === "unavailable") continue;
       if (typeof match.capabilityId !== "string" || typeof match.name !== "string") continue;
       found.push({
         capabilityId: match.capabilityId,
@@ -1704,7 +1707,7 @@ export class LazyToolRuntime {
         new Set(judgments.map((judgment) => judgment.name)).size !== judgments.length
       )
         throw new Error("Invalid decision model selection");
-      const selection = selectFromJudgments(judgments, limit);
+      const selection = selectFromJudgments(judgments);
       // Named tools are loaded whatever the judgments say; the selector
       // covers the query's other needs.
       chosen = [...new Set([...named, ...selection.load])];
@@ -1740,7 +1743,15 @@ export class LazyToolRuntime {
       };
     }
     signal?.throwIfAborted();
-    return this.selectedSearch(chosen, rawArguments, alternatives, await setupFor(chosen));
+    // Everything the selector judged needed loads: `limit` bounds keyword
+    // results and suggestions, not the tools a search asked for.
+    return this.selectedSearch(
+      chosen,
+      rawArguments,
+      alternatives,
+      await setupFor(chosen),
+      MAX_SEARCH_LIMIT,
+    );
   }
 
   private selectedSearch(
@@ -1749,6 +1760,8 @@ export class LazyToolRuntime {
     /** true: the keyword matches; a list: exactly these; false: none. */
     alternatives: boolean | readonly string[],
     companions: readonly string[] = [],
+    /** The most chosen tools that load; the search's own limit unless a selector chose them. */
+    loadLimit?: number,
   ): GenericSearchMarker {
     const { limit } = parseSearchArgs(rawArguments);
     // Resolve again after inference: revoked identities cannot be disclosed.
@@ -1760,7 +1773,7 @@ export class LazyToolRuntime {
       isFunctionTool,
     );
     const selected = [
-      ...resolved.filter((t) => chosen.includes(t.name)).slice(0, limit),
+      ...resolved.filter((t) => chosen.includes(t.name)).slice(0, loadLimit ?? limit),
       ...resolved.filter((t) => companions.includes(t.name) && !chosen.includes(t.name)),
     ];
     const isSelected = (tool: Tool) =>

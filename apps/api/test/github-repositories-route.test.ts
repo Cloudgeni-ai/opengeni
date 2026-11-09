@@ -1,9 +1,10 @@
 // The web app reads the workspace's GitHub repositories on every load and
 // window focus. A brief GitHub failure must not turn those passive reads into
 // errors once a list is known, while an explicit sync still asks GitHub and
-// reports its failure. The workspace allowlist always applies live.
+// reports its failure. The workspace allowlist always applies live, and it
+// follows the repositories GitHub lists for the installation.
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 
 import type { Settings } from "@opengeni/config";
 import {
@@ -13,6 +14,8 @@ import {
   type GitHubRepository,
 } from "@opengeni/contracts";
 import {
+  applyGitHubInstallationRepositoryObservation,
+  areGitHubRepositoriesAllowedForWorkspace,
   bindAuthorizedGitHubInstallationRepositories,
   createDb,
   deleteWorkspace,
@@ -24,6 +27,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import { GitHubAppApiError } from "@opengeni/github";
 
 import { createApp } from "../src/app";
+import { settleGitHubInstallationRepositorySyncs } from "../src/github-installation-sync";
 
 const DELEGATION_SECRET = "github-repositories-delegation";
 const EDGE_ACCESS_KEY = "github-repositories-edge";
@@ -116,15 +120,17 @@ function repository(id: number, installationId: number): GitHubRepository {
 }
 
 /** A host GitHub App whose repository listing can be made to fail. */
-function testApp(installationId: number, repositoryIds: number[]) {
+function testApp(installationId: number, repositoryIds: number[], appSettings = settings) {
   const github = {
     failing: false,
     failure: null as Error | null,
     listCalls: 0,
     repositoryIds,
+    /** While set, GitHub answers only once it resolves. */
+    gate: null as Promise<void> | null,
   };
   const app = createApp({
-    settings,
+    settings: appSettings,
     db: client.db,
     bus: {} as never,
     workflowClient: {} as never,
@@ -139,9 +145,11 @@ function testApp(installationId: number, repositoryIds: number[]) {
       }),
       listRepositories: async () => {
         github.listCalls += 1;
+        const listed = [...github.repositoryIds];
+        if (github.gate) await github.gate;
         if (github.failure) throw github.failure;
         if (github.failing) throw new Error("GitHub answered 502 Bad Gateway");
-        return github.repositoryIds.map((id) => repository(id, installationId));
+        return listed.map((id) => repository(id, installationId));
       },
     },
   } as never);
@@ -178,12 +186,12 @@ describe("workspace GitHub repositories", () => {
 
     const first = await app.request(list, { headers: await headers(workspace) });
     expect(first.status).toBe(200);
-    expect(await listedIds(first)).toEqual([1, 2]);
+    expect(await listedIds(first)).toEqual([1, 2, 3]);
 
     github.failing = true;
     const passive = await app.request(list, { headers: await headers(workspace) });
     expect(passive.status).toBe(200);
-    expect(await listedIds(passive)).toEqual([1, 2]);
+    expect(await listedIds(passive)).toEqual([1, 2, 3]);
 
     const callsBeforeSync = github.listCalls;
     const sync = await app.request(`${list}/sync`, {
@@ -194,20 +202,67 @@ describe("workspace GitHub repositories", () => {
     expect(github.listCalls).toBe(callsBeforeSync + 1);
   }, 60_000);
 
-  test("an allowlist change applies to a cached list immediately", async () => {
+  test("a removal applies at once, even to a cached or fallback list", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    await bindRepositories(workspace, { installationId: 502, repositoryIds: [11] });
-    const { app } = testApp(502, [11, 12]);
+    await bindRepositories(workspace, { installationId: 502, repositoryIds: [11, 12] });
+    const { app, github } = testApp(502, [11, 12]);
     const list = `/v1/workspaces/${workspace.workspaceId}/github/repositories`;
 
     expect(await listedIds(await app.request(list, { headers: await headers(workspace) }))).toEqual(
+      [11, 12],
+    );
+    // GitHub reports repository 12 removed from the installation (handled on
+    // any API replica) and then has an outage: the last good list still
+    // names 12, but the workspace no longer offers it.
+    await applyGitHubInstallationRepositoryObservation(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      installationId: 502,
+      observation: { kind: "remove", repositoryIds: [12], observedAt: new Date() },
+    });
+    github.failing = true;
+    expect(await listedIds(await app.request(list, { headers: await headers(workspace) }))).toEqual(
       [11],
     );
-    await bindRepositories(workspace, { installationId: 502, repositoryIds: [12] });
+    expect(
+      await areGitHubRepositoriesAllowedForWorkspace(client.db, workspace.workspaceId, 502, [12]),
+    ).toBe(false);
+  }, 60_000);
+
+  test("a repository GitHub adds to the installation appears without reconnecting", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    await bindRepositories(workspace, { installationId: 503, repositoryIds: [21] });
+    const list = `/v1/workspaces/${workspace.workspaceId}/github/repositories`;
+    const before = testApp(503, [21]);
+    expect(
+      await listedIds(await before.app.request(list, { headers: await headers(workspace) })),
+    ).toEqual([21]);
+
+    // Repository 22 is created in an "All repositories" installation and its
+    // webhook never arrives. The next listing GitHub answers adds it.
+    const { app, github } = testApp(503, [21, 22]);
     expect(await listedIds(await app.request(list, { headers: await headers(workspace) }))).toEqual(
-      [12],
+      [21, 22],
     );
+    expect(
+      await areGitHubRepositoriesAllowedForWorkspace(client.db, workspace.workspaceId, 503, [22]),
+    ).toBe(true);
+    // Applying the list does not make the next read ask GitHub again.
+    expect(await listedIds(await app.request(list, { headers: await headers(workspace) }))).toEqual(
+      [21, 22],
+    );
+    expect(github.listCalls).toBe(1);
+
+    // GitHub stops sharing 21: the next GitHub answer drops it.
+    const { app: later } = testApp(503, [22]);
+    expect(
+      await listedIds(await later.request(list, { headers: await headers(workspace) })),
+    ).toEqual([22]);
+    expect(
+      await areGitHubRepositoriesAllowedForWorkspace(client.db, workspace.workspaceId, 503, [21]),
+    ).toBe(false);
   }, 60_000);
 
   test("a reconnect shows a repository just shared on GitHub, even from a cached process", async () => {
@@ -232,6 +287,91 @@ describe("workspace GitHub repositories", () => {
     // Later passive reads use the new list.
     await app.request(list, { headers: await headers(workspace) });
     expect(github.listCalls).toBe(2);
+  }, 60_000);
+
+  test("a slow GitHub is answered from the last good list, and its answer applies later", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    await bindRepositories(workspace, { installationId: 506, repositoryIds: [51] });
+    const { app, github } = testApp(506, [51]);
+    const list = `/v1/workspaces/${workspace.workspaceId}/github/repositories`;
+    expect(await listedIds(await app.request(list, { headers: await headers(workspace) }))).toEqual(
+      [51],
+    );
+    // The cached list is no longer fresh, and GitHub is slow to answer.
+    setSystemTime(new Date(Date.now() + 2 * 60_000));
+    try {
+      let open = () => {};
+      github.gate = new Promise<void>((resolve) => (open = resolve));
+      github.repositoryIds = [51, 52];
+      const startedAt = performance.now();
+      expect(
+        await listedIds(await app.request(list, { headers: await headers(workspace) })),
+      ).toEqual([51]);
+      expect(performance.now() - startedAt).toBeGreaterThanOrEqual(2_900);
+      github.gate = null;
+      open();
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (
+          await areGitHubRepositoriesAllowedForWorkspace(
+            client.db,
+            workspace.workspaceId,
+            506,
+            [52],
+          )
+        )
+          break;
+        await Bun.sleep(20);
+      }
+      expect(
+        await areGitHubRepositoriesAllowedForWorkspace(client.db, workspace.workspaceId, 506, [52]),
+      ).toBe(true);
+      const calls = github.listCalls;
+      expect(
+        await listedIds(await app.request(list, { headers: await headers(workspace) })),
+      ).toEqual([51, 52]);
+      expect(github.listCalls).toBe(calls);
+    } finally {
+      setSystemTime();
+    }
+  }, 60_000);
+
+  test("a binding GitHub left empty recovers when the workspace's GitHub status is read", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    await bindRepositories(workspace, { installationId: 507, repositoryIds: [61] });
+    await applyGitHubInstallationRepositoryObservation(client.db, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      installationId: 507,
+      observation: { kind: "mirror", repositoryIds: [], observedAt: new Date(Date.now() + 1) },
+    });
+    expect(
+      await areGitHubRepositoriesAllowedForWorkspace(client.db, workspace.workspaceId, 507, [61]),
+    ).toBe(false);
+    // GitHub shares repositories again, and its webhook was missed.
+    const { app, github } = testApp(507, [61, 62], {
+      ...settings,
+      githubAppId: "12345",
+      githubClientId: "client",
+      githubClientSecret: "secret",
+      githubAppSlug: "opengeni",
+      githubAppPrivateKey: "test-private-key",
+    });
+    const status = await app.request(`/v1/workspaces/${workspace.workspaceId}/github/app`, {
+      headers: await headers(workspace),
+    });
+    expect(status.status).toBe(200);
+    await settleGitHubInstallationRepositorySyncs();
+    expect(github.listCalls).toBe(1);
+    expect(
+      await areGitHubRepositoriesAllowedForWorkspace(
+        client.db,
+        workspace.workspaceId,
+        507,
+        [61, 62],
+      ),
+    ).toBe(true);
   }, 60_000);
 
   test("GitHub refusing the installation is a 409 to reconnect, not a retryable 502", async () => {

@@ -26,14 +26,18 @@ import {
   FileResourceRef,
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
+  agentInstructionsContextItem,
   collapseRepeatedSessionGoalContexts,
   expandUnchangedSessionGoalContexts,
   formatModelContextTimestamp,
   isTransientSessionSystemUpdateBatch,
+  latestAgentInstructionsContext,
   latestSkillCatalogContext,
   latestWorkspaceGovernanceContext,
+  readAgentInstructionsContext,
   readSkillCatalogContext,
   readWorkspaceGovernanceContext,
   resourceMountPath,
@@ -1331,6 +1335,10 @@ export class EmptyCompactionSummaryError extends Error {
  * than a successful response with an empty assistant message. Diagnostics are
  * deliberately bounded and content-free so this error can be persisted on a
  * turn without copying provider messages or conversation input into events.
+ * The provider's own error message is kept apart in {@link providerMessage}:
+ * it can quote conversation input, so it is recorded only on the session's
+ * own events (which the conversation's readers can already see), never in
+ * diagnostics, logs or metrics.
  */
 export class CompactionProviderResponseError extends Error {
   readonly diagnostics: Record<string, unknown>;
@@ -1339,9 +1347,19 @@ export class CompactionProviderResponseError extends Error {
   readonly type?: string;
   /** Provider-named request field that was rejected (`error.param`), bounded. */
   readonly param?: string;
+  /**
+   * The provider's error message, bounded and single-line; null when it sent
+   * none. Not enumerable, like `cause`, so serializers that dump error fields
+   * never carry it.
+   */
+  declare readonly providerMessage: string | null;
   override readonly cause?: unknown;
 
-  constructor(diagnostics: Record<string, unknown> = {}, cause?: unknown) {
+  /**
+   * `messageSource` is where the provider's message is read from when it is
+   * not the cause, such as a failed response object.
+   */
+  constructor(diagnostics: Record<string, unknown> = {}, cause?: unknown, messageSource?: unknown) {
     const compact = JSON.stringify(diagnostics).slice(0, 2_000);
     const rejection = compactionProviderRejectionFromDiagnostics(diagnostics);
     super(
@@ -1357,10 +1375,58 @@ export class CompactionProviderResponseError extends Error {
     if (typeof diagnostics.code === "string") this.code = diagnostics.code;
     if (typeof diagnostics.type === "string") this.type = diagnostics.type;
     if (typeof diagnostics.param === "string") this.param = diagnostics.param;
+    Object.defineProperty(this, "providerMessage", {
+      value: compactionProviderMessage(messageSource ?? cause),
+      enumerable: false,
+    });
     if (cause !== undefined) {
       Object.defineProperty(this, "cause", { value: cause, enumerable: false });
     }
   }
+}
+
+/** Longest provider error message recorded for a failed compaction request. */
+export const COMPACTION_PROVIDER_MESSAGE_MAX_CHARS = 500;
+
+/**
+ * The provider's own error message for a failed compaction request: the error
+ * body's `error.message` (or a bare string `error`) anywhere in the cause
+ * chain, or the message an earlier {@link CompactionProviderResponseError}
+ * already captured. SDK, transport and runtime error text is never taken.
+ * Control characters and runs of whitespace become single spaces, and the
+ * result is cut to {@link COMPACTION_PROVIDER_MESSAGE_MAX_CHARS} characters.
+ */
+export function compactionProviderMessage(source: unknown): string | null {
+  let current = source;
+  const seen = new Set<object>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    if (current instanceof CompactionProviderResponseError && current.providerMessage) {
+      return current.providerMessage;
+    }
+    const record = current as Record<string, unknown>;
+    const nested = record.error;
+    const bodyMessage =
+      typeof nested === "string"
+        ? nested
+        : nested && typeof nested === "object"
+          ? (nested as Record<string, unknown>).message
+          : undefined;
+    const fromBody = typeof bodyMessage === "string" ? boundProviderMessage(bodyMessage) : null;
+    if (fromBody) return fromBody;
+    current = record.cause;
+  }
+  return null;
+}
+
+function boundProviderMessage(message: string): string | null {
+  // eslint-disable-next-line no-control-regex
+  const flat = message.replace(/[\u0000-\u001f\u007f\s]+/g, " ").trim();
+  if (!flat) return null;
+  return flat.length > COMPACTION_PROVIDER_MESSAGE_MAX_CHARS
+    ? `${flat.slice(0, COMPACTION_PROVIDER_MESSAGE_MAX_CHARS - 1).trimEnd()}…`
+    : flat;
 }
 
 /**
@@ -1700,28 +1766,6 @@ function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
 export const PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION = "portable_model_switch" as const;
 
 /**
- * Where the part of a stored transcript a model switch summarizes begins: the
- * oldest user-message boundary after which the rest fits `budgetTokens`. When
- * not even the newest work unit fits, it still starts at that unit, and the
- * checkpoint request trims its tool output as usual.
- */
-export function portableSwitchTranscriptStart(
-  items: readonly CompactionItem[],
-  budgetTokens: number,
-): number {
-  const prefixTokens = new Array<number>(items.length + 1).fill(0);
-  for (let index = 0; index < items.length; index += 1) {
-    prefixTokens[index + 1] = prefixTokens[index]! + estimateItemTokens(items[index]!);
-  }
-  const total = prefixTokens[items.length]!;
-  if (total <= budgetTokens) return 0;
-  const cuts = oldestLogicalUnitCuts(items);
-  const cut = cuts.find((candidate) => total - prefixTokens[candidate]! <= budgetTokens);
-  if (cut !== undefined && cut < items.length) return cut;
-  return cuts.length >= 2 ? cuts[cuts.length - 2]! : 0;
-}
-
-/**
  * Preparation for the retention rebuild shared by both compaction modes.
  *
  * - `source` has every "unchanged goal" stand-in restored to its full goal
@@ -1803,6 +1847,15 @@ export type CompactionTurnContext = {
   itemTurnIds: readonly (string | null | undefined)[];
   /** The turn running this compaction. It may still be working, so its requests stay open. */
   activeTurnId?: string | null;
+  /**
+   * Agent chats only, when the turn running this compaction continues after
+   * it: the agent revision its system prompt carries, or null when its prompt
+   * has no agent layer. Compaction drops agent instruction items, because the
+   * newest revision is folded into the next turn's system prompt; this turn's
+   * prompt cannot change, so a newer edit is re-added for the rest of it.
+   * Omitted: never re-added.
+   */
+  agentPromptRevision?: number | null;
 };
 
 /** A rebuilt history plus the turn each item belongs to (null for compaction-made items). */
@@ -1913,7 +1966,31 @@ function retainedReply(
 }
 
 function isPortableRetentionCandidate(item: CompactionItem): boolean {
-  return isPortableInputMessage(item) && !isCompactionSummary(item) && !isAttachmentCatalog(item);
+  return (
+    isPortableInputMessage(item) &&
+    !isCompactionSummary(item) &&
+    !isAttachmentCatalog(item) &&
+    readAgentInstructionsContext(item) === null
+  );
+}
+
+/**
+ * The newest agent instruction edit, re-added only while the continuing turn's
+ * system prompt still shows something else (see
+ * {@link CompactionTurnContext.agentPromptRevision}).
+ */
+function carriedAgentInstructionsContext(
+  items: readonly CompactionItem[],
+  turns: CompactionTurnContext | undefined,
+): CompactionItem | undefined {
+  if (turns?.agentPromptRevision === undefined) return undefined;
+  const latest = latestAgentInstructionsContext(items);
+  if (!latest) return undefined;
+  const current =
+    latest.context.kind === "revision"
+      ? latest.context.revision !== turns.agentPromptRevision
+      : turns.agentPromptRevision !== null;
+  return current ? agentInstructionsContextItem(latest.text) : undefined;
 }
 
 function hasAttachmentRefs(item: CompactionItem): boolean {
@@ -1942,6 +2019,7 @@ function withOnlyNewestAttachmentsInline(items: readonly CompactionItem[]): Comp
     const stripped: CompactionItem = { ...item };
     delete stripped[MODEL_ATTACHMENT_REFS_FIELD];
     delete stripped[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD];
+    delete stripped[MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD];
     return stripped;
   });
 }
@@ -2004,6 +2082,160 @@ export function buildCompactionReplacement(
 }
 
 /**
+ * `session.context.compacted` implementation of a checkpoint installed without
+ * a summary, because the chat's model could not produce one.
+ */
+export const DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION = "deterministic_trim";
+
+/** First paragraph of a trimmed checkpoint (model-visible). */
+export const TRIMMED_CONTEXT_NOTICE =
+  "Earlier parts of this conversation were removed to free up context. A summary of them could not be produced, so this note stands in for one. The most recent requests are kept above, each followed by a shortened copy of its reply where there was one. Before relying on anything from the removed part, check the current state (files, repositories, tool results) or ask the user.";
+
+/** Heading of an earlier checkpoint's summary carried into a trimmed checkpoint. */
+export const TRIMMED_CONTEXT_EARLIER_SUMMARY_HEADING = "Summary from an earlier checkpoint:";
+
+/** Heading of the current turn's latest assistant text kept in a trimmed checkpoint. */
+export const TRIMMED_CONTEXT_LATEST_MESSAGE_HEADING =
+  "Your latest message in the current turn, before the removal:";
+
+/** Lead-in of the current turn's tool-call tally in a trimmed checkpoint. */
+export const TRIMMED_CONTEXT_TOOL_CALLS_LEAD = "Tool calls made earlier in the current turn:";
+
+/** Most tokens of an earlier summary a trimmed checkpoint carries forward. */
+export const TRIMMED_CONTEXT_EARLIER_SUMMARY_MAX_TOKENS = 8_000;
+/** Most tokens of the current turn's latest assistant text a trimmed checkpoint keeps. */
+export const TRIMMED_CONTEXT_LATEST_MESSAGE_MAX_TOKENS = 1_000;
+const TRIMMED_CONTEXT_MAX_TOOL_NAMES = 20;
+
+/**
+ * The same rebuild as {@link buildCompactionReplacement}, for when the chat's
+ * model could not summarize the history: the newest requests (with their
+ * shortened replies) and platform context are kept exactly as a summarized
+ * checkpoint keeps them, and a deterministic note takes the summary's place.
+ * No model is called. See {@link buildTrimmedContextCheckpointItem}.
+ */
+export function buildTrimmedCompactionReplacement(
+  items: readonly CompactionItem[],
+  retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
+  retainedMessageBudgetTokens = COMPACT_USER_MESSAGE_MAX_TOKENS,
+  attachmentUploadTimes: AttachmentUploadTimes = new Map(),
+  turns?: CompactionTurnContext,
+): CompactionReplacement {
+  return rebuildAroundCheckpoint(items, buildTrimmedContextCheckpointItem(items, turns), {
+    isCandidate: isPortableRetentionCandidate,
+    budgetTokens: Math.max(
+      0,
+      Math.min(COMPACT_USER_MESSAGE_MAX_TOKENS, retainedMessageBudgetTokens),
+    ),
+    retainedItemTokens,
+    attachmentUploadTimes,
+    turns,
+  });
+}
+
+/**
+ * The checkpoint item of a trimmed history: {@link TRIMMED_CONTEXT_NOTICE},
+ * then, when present, the newest earlier checkpoint's summary (bounded), the
+ * tools the current turn has called so far, and the current turn's latest
+ * assistant text (bounded). It is marked like a summary, so a later compaction
+ * reads it as one.
+ */
+export function buildTrimmedContextCheckpointItem(
+  items: readonly CompactionItem[],
+  turns?: CompactionTurnContext,
+): CompactionItem {
+  const sections = [TRIMMED_CONTEXT_NOTICE];
+  const earlier = latestEarlierSummaryBody(items);
+  if (earlier) {
+    sections.push(
+      `${TRIMMED_CONTEXT_EARLIER_SUMMARY_HEADING}\n${truncateMiddleByEstimatedTokens(
+        earlier,
+        TRIMMED_CONTEXT_EARLIER_SUMMARY_MAX_TOKENS,
+      )}`,
+    );
+  }
+  const activeTurnId = turns?.activeTurnId ?? null;
+  if (activeTurnId) {
+    const toolCalls = new Map<string, number>();
+    let latestMessage = "";
+    items.forEach((item, index) => {
+      if (turns?.itemTurnIds[index] !== activeTurnId) return;
+      const tool = toolCallName(item);
+      if (tool) toolCalls.set(tool, (toolCalls.get(tool) ?? 0) + 1);
+      if (itemType(item) === "message" && itemRole(item) === "assistant") {
+        const text = messageText(item).trim();
+        if (text) latestMessage = text;
+      }
+    });
+    if (toolCalls.size > 0) {
+      const names = [...toolCalls]
+        .slice(0, TRIMMED_CONTEXT_MAX_TOOL_NAMES)
+        .map(([name, count]) => (count > 1 ? `${name} (${count})` : name));
+      const more = toolCalls.size - names.length;
+      sections.push(
+        `${TRIMMED_CONTEXT_TOOL_CALLS_LEAD} ${names.join(", ")}${more > 0 ? `, and ${more} more` : ""}.`,
+      );
+    }
+    if (latestMessage) {
+      sections.push(
+        `${TRIMMED_CONTEXT_LATEST_MESSAGE_HEADING}\n${truncateMiddleByEstimatedTokens(
+          latestMessage,
+          TRIMMED_CONTEXT_LATEST_MESSAGE_MAX_TOKENS,
+        )}`,
+      );
+    }
+  }
+  return {
+    type: "message",
+    role: "user",
+    content: sections.join("\n\n"),
+    [COMPACTION_SUMMARY_MARKER]: true,
+  };
+}
+
+/**
+ * The summary text of the newest earlier checkpoint in the history: a model
+ * summary without its fixed prefix, or the summary an earlier trimmed
+ * checkpoint carried. Null when there is none.
+ */
+function latestEarlierSummaryBody(items: readonly CompactionItem[]): string | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (!isCompactionSummary(item)) continue;
+    const text = messageText(item);
+    if (text.startsWith(TRIMMED_CONTEXT_NOTICE)) {
+      const start = text.indexOf(`\n\n${TRIMMED_CONTEXT_EARLIER_SUMMARY_HEADING}\n`);
+      if (start < 0) return null;
+      const body = text.slice(start + TRIMMED_CONTEXT_EARLIER_SUMMARY_HEADING.length + 3);
+      // The carried summary ends where this checkpoint's own sections begin.
+      const end = [
+        `\n\n${TRIMMED_CONTEXT_TOOL_CALLS_LEAD} `,
+        `\n\n${TRIMMED_CONTEXT_LATEST_MESSAGE_HEADING}\n`,
+      ]
+        .map((marker) => body.lastIndexOf(marker))
+        .filter((position) => position >= 0);
+      return (end.length > 0 ? body.slice(0, Math.min(...end)) : body).trim() || null;
+    }
+    const body = text.startsWith(SUMMARY_PREFIX) ? text.slice(SUMMARY_PREFIX.length) : text;
+    return body.trim() || null;
+  }
+  return null;
+}
+
+/** The tool a model-generated call item invoked, for the trimmed checkpoint's tally. */
+function toolCallName(item: CompactionItem): string | null {
+  const type = itemType(item);
+  if (!type || !type.endsWith("_call") || type === "context_compaction") return null;
+  const name = (item as { name?: unknown }).name;
+  if (typeof name === "string" && name.trim()) return name.trim().slice(0, 80);
+  if (type === "hosted_tool_call") {
+    const providerType = (item as { providerData?: { type?: unknown } }).providerData?.type;
+    return typeof providerType === "string" ? providerType.replace(/_call$/, "") : "hosted_tool";
+  }
+  return type.slice(0, -"_call".length);
+}
+
+/**
  * The rebuild both compaction modes share: the current Skill index and
  * workspace governance, an attachment catalog for files no longer inline, the
  * newest retention candidates that fit the budget (each answered person's
@@ -2055,15 +2287,19 @@ function rebuildAroundCheckpoint(
   }
   const currentCatalog = latestSkillCatalogContext(items);
   const currentGovernance = latestWorkspaceGovernanceContext(items);
+  const carriedAgentInstructions = carriedAgentInstructionsContext(items, turns);
   const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
   const attachmentCatalog = buildAttachmentCatalogItem(
     items,
     retained,
     options.attachmentUploadTimes,
   );
-  const prefix = [currentCatalog, currentGovernance, attachmentCatalog].filter(
-    (item): item is CompactionItem => Boolean(item),
-  );
+  const prefix = [
+    currentCatalog,
+    currentGovernance,
+    carriedAgentInstructions,
+    attachmentCatalog,
+  ].filter((item): item is CompactionItem => Boolean(item));
   const history = [...prefix, ...retained];
   // Platform context items before the retained messages belong to no turn.
   const turnIds: (string | null)[] = [
@@ -2164,9 +2400,16 @@ function isTurnOperationalNotice(item: CompactionItem): boolean {
   );
 }
 
-/** Skill catalog and workspace governance snapshots are re-added as the latest copy only. */
+/**
+ * Skill catalog and workspace governance snapshots are re-added as the latest
+ * copy only; agent instruction edits are folded into the system prompt.
+ */
 function isSessionContextSnapshot(item: CompactionItem): boolean {
-  return readSkillCatalogContext(item) !== null || readWorkspaceGovernanceContext(item) !== null;
+  return (
+    readSkillCatalogContext(item) !== null ||
+    readWorkspaceGovernanceContext(item) !== null ||
+    readAgentInstructionsContext(item) !== null
+  );
 }
 
 function isAttachmentCatalog(item: unknown): boolean {
@@ -2374,6 +2617,14 @@ function isImageContentPart(part: unknown): boolean {
   if (!part || typeof part !== "object") return false;
   const type = (part as { type?: unknown }).type;
   return type === "input_image" || type === "image_url";
+}
+
+/**
+ * A summary held to an output cap after it was produced without one: kept
+ * whole when it fits, otherwise cut from the middle with the usual marker.
+ */
+export function truncateCompactionSummary(summary: string, maxTokens: number): string {
+  return truncateMiddleByEstimatedTokens(summary, maxTokens);
 }
 
 function truncateMiddleByEstimatedTokens(text: string, maxTokens: number): string {

@@ -56,6 +56,21 @@ import {
 import { errorMessage } from "@opengeni/contracts/values";
 
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
+/**
+ * Why a turn attempt ended recovering. A closed set chosen at each recovery
+ * site: `provider` (the model provider or its subscription lease), `sandbox`,
+ * `tool` (MCP and first-party tool setup), `worker` (shutdown or death),
+ * `database` (settlement could not be written), `control` (admission holds)
+ * and `other`.
+ */
+export type TurnRecoveryCause =
+  | "provider"
+  | "sandbox"
+  | "tool"
+  | "worker"
+  | "database"
+  | "control"
+  | "other";
 export type WorkerDeathRecoveryOutcome = "recovering" | "exhausted";
 export type CreditMicrosKind = "usage" | "grant" | "topup" | "refund";
 export type SandboxLeaseLiveness = "cold" | "warming" | "warm" | "draining";
@@ -112,6 +127,19 @@ const initializedContextCompactionMetrics = new WeakSet<Observability>();
 // process-local Prometheus registry and this guard together.
 const MAX_MODEL_CACHE_COUNTER_TOTAL = 1_000_000_000_000;
 const TURN_OUTCOMES: readonly TurnOutcome[] = ["completed", "failed", "cancelled", "recovering"];
+const TURN_RECOVERY_CAUSES: readonly TurnRecoveryCause[] = [
+  "provider",
+  "sandbox",
+  "tool",
+  "worker",
+  "database",
+  "control",
+  "other",
+];
+const TURN_RECOVERIES_METRIC = {
+  name: "opengeni_turn_recoveries_total",
+  help: 'Agent turn attempts that ended recovering, by bounded cause. Each also counts as opengeni_turns_total{outcome="recovering"}.',
+} as const;
 const WORKER_DEATH_RECOVERY_OUTCOMES: readonly WorkerDeathRecoveryOutcome[] = [
   "recovering",
   "exhausted",
@@ -499,6 +527,9 @@ export function initializeWorkerOutcomeMetrics(observability: Observability): vo
       amount: 0,
     });
   }
+  for (const cause of TURN_RECOVERY_CAUSES) {
+    observability.incrementCounter({ ...TURN_RECOVERIES_METRIC, labels: { cause }, amount: 0 });
+  }
   for (const outcome of WORKER_DEATH_RECOVERY_OUTCOMES) {
     for (const timeoutType of WORKER_DEATH_TIMEOUT_TYPES) {
       observability.incrementCounter({
@@ -558,6 +589,9 @@ export function recordWorkerDeathRecoveryMetrics(
     help: "Total agent turns by terminal outcome.",
     labels: { outcome: turnOutcome },
   });
+  if (turnOutcome === "recovering") {
+    observability.incrementCounter({ ...TURN_RECOVERIES_METRIC, labels: { cause: "worker" } });
+  }
 }
 
 export class TurnLifecycleMetrics {
@@ -589,6 +623,8 @@ export class TurnLifecycleMetrics {
     attemptId: string;
     outcome: TurnOutcome | null;
     durationSeconds?: number;
+    /** Required in spirit for `recovering`; an unset cause is counted as `other`. */
+    recoveryCause?: TurnRecoveryCause | null | undefined;
   }): void {
     const startedAt = this.attempts.get(input.attemptId)?.startedAt;
     if (startedAt !== undefined) {
@@ -603,6 +639,12 @@ export class TurnLifecycleMetrics {
         help: "Total agent turns by terminal outcome.",
         labels: { outcome: input.outcome },
       });
+      if (input.outcome === "recovering") {
+        this.observability.incrementCounter({
+          ...TURN_RECOVERIES_METRIC,
+          labels: { cause: input.recoveryCause ?? "other" },
+        });
+      }
       this.observability.observeHistogram({
         name: "opengeni_turn_duration_seconds",
         help: "Agent turn duration in seconds by terminal outcome.",
@@ -796,16 +838,15 @@ export function recordTurnsQueuedGauge(observability: Observability, value: numb
 
 /**
  * Split the durable queued-turn count by what holds each prompt. Only `ready`
- * prompts are waiting for dispatch; an old `ready` prompt is a stranded queue.
- * Every class is always published so an emptied class drops to 0.
+ * prompts are waiting for dispatch. A `ready` prompt older than a few seconds
+ * is waiting somewhere before it runs: in the session's control activities
+ * before any turn-queue task exists, or in the turn-queue backlog. Every class
+ * is always published so an emptied class drops to 0.
  */
 export function recordQueuedTurnHoldGauges(
   observability: Observability,
-  summary: Record<QueuedTurnHold, QueuedTurnHoldSummary> | null,
+  summary: Record<QueuedTurnHold, QueuedTurnHoldSummary>,
 ): void {
-  // Null until a later migration grants 0988's withheld runtime EXECUTE:
-  // publish nothing rather than a misleading all-zero split.
-  if (!summary) return;
   for (const hold of QUEUED_TURN_HOLDS) {
     const entry = summary[hold];
     observability.setGauge({
@@ -1115,13 +1156,16 @@ export function recordSessionRecoveryBacklogGauges(
   }
 }
 
+/** How often the control worker re-reads the durable recovery aggregate. */
+export const SESSION_RECOVERY_MONITOR_INTERVAL_MS = 60_000;
+
 export function startSessionRecoveryMonitor(input: {
   observability: Observability;
   read: () => Promise<SessionRecoveryBacklog>;
   intervalMs?: number;
   now?: () => number;
 }): { close: () => Promise<void> } {
-  const intervalMs = input.intervalMs ?? 60_000;
+  const intervalMs = input.intervalMs ?? SESSION_RECOVERY_MONITOR_INTERVAL_MS;
   const now = input.now ?? Date.now;
   const startedAt = now();
   let lastSuccessAt: number | null = null;
@@ -1914,6 +1958,27 @@ export function recordSandboxDrainCaptureFailure(
       buckets: SANDBOX_DRAIN_CAPTURE_CONSECUTIVE_FAILURE_BUCKETS,
       labels: { backend },
       value: Math.max(1, Math.floor(input.consecutiveFailures)),
+    }),
+  );
+}
+
+/** What a drain did once full snapshots of a lease epoch kept failing:
+ * `reduced_saved` published a save without rebuildable folders,
+ * `reduced_failed` tried one and it failed, `reduced_unavailable` could not
+ * try one (nothing to leave out, or what remains is too large), and
+ * `abandoned` stopped the box without a new save. */
+export function recordSandboxDrainCaptureFallback(
+  observability: Observability,
+  input: {
+    backend: string;
+    outcome: "reduced_saved" | "reduced_failed" | "reduced_unavailable" | "abandoned";
+  },
+): void {
+  bestEffortDrainMetric(() =>
+    observability.incrementCounter({
+      name: "opengeni_sandbox_drain_capture_fallback_total",
+      help: "Drain snapshot fallbacks after repeated failures: reduced saves and boxes stopped without a new save.",
+      labels: { backend: safeSandboxBackend(input.backend), outcome: input.outcome },
     }),
   );
 }
@@ -2895,19 +2960,45 @@ export function recordTurnStartupMilestone(
     backend: string;
     outcome: TurnStartupOutcome;
     durationSeconds: number;
+    /**
+     * Seconds from the start of the turn attempt that reached the milestone.
+     * Ignored for the queue milestone.
+     */
+    sinceAttemptStartSeconds?: number | null;
   },
 ): void {
+  const labels = {
+    milestone: input.milestone,
+    provider: input.provider,
+    backend: input.backend,
+    outcome: input.outcome,
+  };
   observability.observeHistogram({
     name: "opengeni_turn_startup_milestone_duration_seconds",
     help: "Cumulative seconds from durable turn queueing to a bounded startup milestone.",
     buckets: TURN_STARTUP_MILESTONE_BUCKETS,
-    labels: {
-      milestone: input.milestone,
-      provider: input.provider,
-      backend: input.backend,
-      outcome: input.outcome,
-    },
+    labels,
     value: Math.max(0, input.durationSeconds),
+  });
+  if (
+    input.milestone === "queue" ||
+    input.sinceAttemptStartSeconds === null ||
+    input.sinceAttemptStartSeconds === undefined ||
+    !Number.isFinite(input.sinceAttemptStartSeconds)
+  ) {
+    return;
+  }
+  // Same milestone measured from the start of the attempt that reached it
+  // rather than from acceptance. It excludes time a prompt spent queued behind
+  // an earlier turn in its session, a subscription capacity wait or a gap
+  // before a recovery attempt, so it reflects only this attempt's claim,
+  // preparation and provider latency.
+  observability.observeHistogram({
+    name: "opengeni_turn_startup_since_attempt_start_seconds",
+    help: "Seconds from the start of the turn attempt that reached a startup milestone; excludes time queued behind an earlier turn, capacity waits and recovery gaps.",
+    buckets: TURN_STARTUP_MILESTONE_BUCKETS,
+    labels,
+    value: Math.max(0, input.sinceAttemptStartSeconds),
   });
 }
 
@@ -2949,6 +3040,37 @@ const MODEL_REQUEST_PRE_DISPATCH_BUCKETS = [
   0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120,
 ];
 
+/**
+ * Exclusive, consecutive stages of one model request's pre-dispatch time. Each
+ * runs from the moment it is entered until the next stage is entered or the
+ * request is dispatched, so the stages of one request add up to its
+ * `opengeni_model_request_pre_dispatch_seconds` sample.
+ *
+ *   - `settlement_wait`: the previous response's durable settlement.
+ *   - `admission`: the per-call admission (durable history reconcile, run and
+ *     credit revalidation, Steer check).
+ *   - `request_build`: SDK request serialization and provider body policy,
+ *     up to the provider transport.
+ *   - `credential`: the provider credential for this request.
+ *   - `dispatch_checkpoint`: the durable history and route checkpoint.
+ *   - `request_audit`: the durable request audit event.
+ *   - `provider_admission`: provider-side admission, such as the durable
+ *     one-shot subscription reservation.
+ *   - `transport`: the remaining transport work: residency, wire capture and
+ *     the connection, up to the bytes leaving this process.
+ */
+export const MODEL_REQUEST_PRE_DISPATCH_STAGES = [
+  "settlement_wait",
+  "admission",
+  "request_build",
+  "credential",
+  "dispatch_checkpoint",
+  "request_audit",
+  "provider_admission",
+  "transport",
+] as const;
+export type ModelRequestPreDispatchStage = (typeof MODEL_REQUEST_PRE_DISPATCH_STAGES)[number];
+
 /** First streamed content of a provider response. `any` is the first reasoning
  *  or answer delta; `text` is the first answer-text delta. They overlap — never
  *  sum across `content`. */
@@ -2967,6 +3089,9 @@ export type ProviderFirstContent = "any" | "text";
  *     latency: SDK model entry (the first admission check) to the literal
  *     provider dispatch. Covers admission, the durable history checkpoint,
  *     credit revalidation, the durable request audit and request build.
+ *   - `opengeni_model_request_pre_dispatch_stage_seconds{provider,stage}` —
+ *     the same per-request latency split into exclusive consecutive stages
+ *     (`MODEL_REQUEST_PRE_DISPATCH_STAGES`) that add up to it.
  *   - `opengeni_model_provider_ttft_seconds{provider,content}` — the PROVIDER's
  *     latency: literal dispatch to the first streamed `any` (reasoning or text)
  *     delta and to the first answer `text` delta. Includes network, provider
@@ -2995,6 +3120,9 @@ export class StreamTimingMetrics {
   private ttftArmed = true;
   private readonly lastDeltaAt = new Map<StreamDeltaClass, number>();
   private modelEntryAt: number | null = null;
+  /** The pre-dispatch stage now running, and since when. */
+  private stage: { name: ModelRequestPreDispatchStage; since: number } | null = null;
+  private readonly stageMs = new Map<ModelRequestPreDispatchStage, number>();
   private dispatchedAt: number | null = null;
   private readonly providerFirstRecorded = new Set<ProviderFirstContent>();
   /** The model call awaiting its terminal response, if one was dispatched. */
@@ -3018,7 +3146,30 @@ export class StreamTimingMetrics {
    *  providers can run those after dispatch, while the response is in flight. */
   onModelRequestEntry(point: "model_entry" | "transport" = "model_entry"): void {
     if (point !== "model_entry") return;
-    if (this.modelEntryAt === null) this.modelEntryAt = this.now();
+    if (this.modelEntryAt !== null) return;
+    this.modelEntryAt = this.now();
+    this.stageMs.clear();
+    this.stage = { name: "settlement_wait", since: this.modelEntryAt };
+  }
+
+  /**
+   * Producer side: the model request now in preparation entered `stage`. The
+   * stage before it ends here. Ignored between a dispatch and the next model
+   * entry, so post-dispatch work (a continuation's re-admission, a transport
+   * recheck) never lands in a later request's stages.
+   */
+  enterPreDispatchStage(stage: ModelRequestPreDispatchStage): void {
+    if (this.modelEntryAt === null || this.stage === null) return;
+    if (this.stage.name === stage) return;
+    const at = this.now();
+    this.closeStage(at);
+    this.stage = { name: stage, since: at };
+  }
+
+  private closeStage(at: number): void {
+    if (!this.stage) return;
+    const elapsed = Math.max(0, at - this.stage.since);
+    this.stageMs.set(this.stage.name, (this.stageMs.get(this.stage.name) ?? 0) + elapsed);
   }
 
   /** Producer side: request bytes are about to leave this process. */
@@ -3034,6 +3185,18 @@ export class StreamTimingMetrics {
         labels: { provider: this.options.provider },
         value: preDispatchMs / 1000,
       });
+      this.closeStage(at);
+      for (const [stage, ms] of this.stageMs) {
+        this.observability.observeHistogram({
+          name: "opengeni_model_request_pre_dispatch_stage_seconds",
+          help: "Seconds of one model request's pre-dispatch time spent in each exclusive stage; a request's stages add up to its pre-dispatch time.",
+          buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
+          labels: { provider: this.options.provider, stage },
+          value: ms / 1000,
+        });
+      }
+      this.stageMs.clear();
+      this.stage = null;
       this.modelEntryAt = null;
     }
     // A transport retry re-dispatches the same request; the first delta then
@@ -3357,7 +3520,11 @@ const MODEL_CACHE_HIT_RATIO_BUCKETS = [
  *     A reported cached-token zero records a real 0%; absent/null telemetry remains
  *     unknown and must not fabricate a low-cache signal.
  *   - `opengeni_model_cache_read_telemetry_total{provider,status}` — one bounded
- *     availability observation per authoritative call (`reported` or `missing`).
+ *     availability observation per authoritative call: `reported`, `missing` (the
+ *     call reported token usage but left out the cached-token field) or
+ *     `no_usage` (the call reported no token usage at all, for example a
+ *     terminal response without a usage object, which the SDK turns into zeros).
+ *     A call without any usage says nothing about the provider's cache fields.
  * Invalid, fractional, unsafe, or over-contract token telemetry is rejected. A call
  * with no prompt tokens has no ratio (skipped).
  */
@@ -3368,16 +3535,25 @@ export function recordModelCacheTokens(
     cachedTokens: number | null | undefined;
     cacheWriteTokens?: number | null | undefined;
     promptTokens: number | null | undefined;
+    /**
+     * False when the call reported no token usage at all (no counts, nothing
+     * rejected). Counted as `no_usage`, never as a missing cache field.
+     */
+    usageReported?: boolean;
   },
 ): void {
   const cached = modelUsageTokenCountOrNull(input.cachedTokens);
   const cacheWrite = modelUsageTokenCountOrNull(input.cacheWriteTokens);
   const prompt = modelUsageTokenCountOrNull(input.promptTokens);
+  const noUsage = cached === null && input.usageReported === false;
   incrementBoundedModelCacheCounter(observability, {
     name: "opengeni_model_cache_read_telemetry_total",
-    help: "Authoritative model calls with reported or missing cache-read telemetry, by provider.",
+    help: "Authoritative model calls with reported, missing or no-usage cache-read telemetry, by provider.",
     provider,
-    labels: { provider, status: cached === null ? "missing" : "reported" },
+    labels: {
+      provider,
+      status: noUsage ? "no_usage" : cached === null ? "missing" : "reported",
+    },
     amount: 1,
   });
   if (cached !== null && cached > 0) {

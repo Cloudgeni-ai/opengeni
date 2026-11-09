@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { ConnectAccount, ConnectController } from "@opengeni/connect";
 import { useConnect } from "./hooks/use-connect";
 import { ConnectAccountIdentity } from "./connect-account-identity";
@@ -12,7 +13,7 @@ export type ConnectAccountsProps = {
   /** Enables explicit account-bound reconnect. Host supplies the exact destination. */
   returnUrl?: string;
   /** Uses authenticated catalogue assets and exact connection references for service identity. */
-  client?: OpenGeniClient | undefined;
+  client?: ChatClient<OpenGeniClient> | undefined;
   /** Reconcile surrounding service state after a confirmed account disconnect. */
   onDisconnected?: (() => void) | undefined;
 };
@@ -44,7 +45,7 @@ function ScopedAccounts({
   const [error, setError] = useState(false);
   const [reload, setReload] = useState(0);
   const [catalog, setCatalog] = useState<{
-    client: OpenGeniClient;
+    client: ChatClient<OpenGeniClient>;
     items: CapabilityCatalogItem[];
   } | null>(null);
   const mutation = useRef<AbortController | null>(null);

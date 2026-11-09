@@ -672,7 +672,7 @@ describe("decision selection", () => {
       load: ["t0"],
       clear: false,
     });
-    // Several needs load every tool judged requested, bounded only by the page size.
+    // Several needs load every tool judged needed; the search's limit is not a cap.
     expect(selectFromJudgments(j(0.9, 0.8, 0.7, 0.6, 0.55, 0.3)).load).toEqual([
       "t0",
       "t1",
@@ -680,7 +680,6 @@ describe("decision selection", () => {
       "t3",
       "t4",
     ]);
-    expect(selectFromJudgments(j(0.9, 0.8), 1).load).toEqual(["t0"]);
     // Ties keep candidate (ranking) order.
     expect(selectFromJudgments(j(0.1, 0.1)).load).toEqual(["t0"]);
   });
@@ -1368,6 +1367,15 @@ describe("searches that name an integration the person can connect", () => {
           name: "Gmall",
           approximate: true,
           setup: { nextAction: { toolName: "capability_authorization_request" } },
+        },
+        // A setup the catalog reports unavailable never yields a card.
+        {
+          capabilityId: "registry:calendar",
+          name: "Google Calendar",
+          setup: {
+            status: "unavailable",
+            nextAction: { toolName: "capability_authorization_request" },
+          },
         },
       ],
     });

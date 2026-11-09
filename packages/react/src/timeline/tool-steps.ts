@@ -17,6 +17,7 @@ export const TOOL_STEP_IDS = [
   "archiveNote",
   "askForHelp",
   "askYou",
+  "attachRepository",
   "changeEventSource",
   "changeModel",
   "checkAccounts",
@@ -149,8 +150,6 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   knowledge_search: "checkNotes",
   knowledge_get: "checkNotes",
   knowledge_browse: "checkNotes",
-  knowledge_source_fetch: "checkNotes",
-  knowledge_source_read: "checkNotes",
   memory_search: "checkNotes",
   preference_registry_summary: "checkNotes",
   preference_registry_get: "checkNotes",
@@ -304,6 +303,7 @@ const BUILT_IN_TOOL_STEPS: Readonly<Record<string, ToolStepId>> = {
   custom_mcp_setup_request: "requestAccess",
   github_connect_link: "requestAccess",
   github_repositories_list: "listRepositories",
+  github_repository_attach: "attachRepository",
 
   // Web, images and video
   web_search_call: "searchWeb",

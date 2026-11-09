@@ -1,7 +1,8 @@
 {{- if and ((.Values.observability).prometheusRule).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 {{- $environment := default "production" (index .Values.config "OPENGENI_ENVIRONMENT") }}
 {{- $inventoryFreshnessSeconds := int (default 300 ((.Values.observability).prometheusRule).inventoryFreshnessSeconds) }}
-{{- $turnStartupQueueP95Seconds := int (default 5 ((.Values.observability).prometheusRule).turnStartupQueueP95Seconds) }}
+{{- $turnReadyPromptAgeSeconds := int (default 60 ((.Values.observability).prometheusRule).turnReadyPromptAgeSeconds) }}
+{{- $turnReadyPromptAgeCriticalSeconds := int (default 300 ((.Values.observability).prometheusRule).turnReadyPromptAgeCriticalSeconds) }}
 {{- $turnStartupProviderDispatchP95Seconds := int (default 20 ((.Values.observability).prometheusRule).turnStartupProviderDispatchP95Seconds) }}
 {{- $turnStartupFirstByteP95Seconds := int (default 120 ((.Values.observability).prometheusRule).turnStartupFirstByteP95Seconds) }}
 {{- $turnStartupFirstByteAvailabilityRatio := float64 ((.Values.observability).prometheusRule).turnStartupFirstByteAvailabilityRatio }}
@@ -13,6 +14,7 @@
 {{- $providerTtftRegressionFloorSeconds := float64 (default 5 ((.Values.observability).prometheusRule).providerTtftRegressionFloorSeconds) }}
 {{- $providerTtftRecentMinSamples := int (default 30 ((.Values.observability).prometheusRule).providerTtftRecentMinSamples) }}
 {{- $providerTtftBaselineMinSamples := int (default 200 ((.Values.observability).prometheusRule).providerTtftBaselineMinSamples) }}
+{{- $sessionEventMinSamples := int (default 100 ((.Values.observability).prometheusRule).sessionEventMinSamples) }}
 {{- $reaperPeriodMs := int (default "30000" (index .Values.config "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS")) }}
 {{- $fullName := include "opengeni.fullname" . }}
 {{- $opensandboxEnabled := eq (default "none" (index .Values.config "OPENGENI_SANDBOX_BACKEND")) "opensandbox" }}
@@ -20,11 +22,14 @@
 {{- if le $inventoryFreshnessSeconds 0 }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must be positive" }}
 {{- end }}
-{{- if or (le $turnStartupQueueP95Seconds 0) (le $turnStartupProviderDispatchP95Seconds 0) (le $turnStartupFirstByteP95Seconds 0) (le $turnStartupFirstByteAvailabilityRatio 0.0) (gt $turnStartupFirstByteAvailabilityRatio 1.0) (le $turnStartupMinSamples 0) }}
-{{- fail "observability.prometheusRule turn-startup latency thresholds/minimum samples must be positive and first-byte availability ratio must be in (0, 1]" }}
+{{- if or (le $turnReadyPromptAgeSeconds 0) (le $turnReadyPromptAgeCriticalSeconds $turnReadyPromptAgeSeconds) (le $turnStartupProviderDispatchP95Seconds 0) (le $turnStartupFirstByteP95Seconds 0) (le $turnStartupFirstByteAvailabilityRatio 0.0) (gt $turnStartupFirstByteAvailabilityRatio 1.0) (le $turnStartupMinSamples 0) }}
+{{- fail "observability.prometheusRule turn-startup latency thresholds/minimum samples must be positive, the critical ready-prompt age must exceed the warning age, and first-byte availability ratio must be in (0, 1]" }}
 {{- end }}
 {{- if or (le $turnStartupProviderDispatchCriticalP95Seconds $turnStartupProviderDispatchP95Seconds) (le $modelRequestPreDispatchP95Seconds 0.0) (le $modelRequestMinSamples 0) (le $providerTtftRegressionRatio 1.0) (le $providerTtftRegressionFloorSeconds 0.0) (le $providerTtftRecentMinSamples 0) (le $providerTtftBaselineMinSamples 0) }}
 {{- fail "observability.prometheusRule latency alerts: the critical provider-dispatch p95 must exceed the warning p95, the pre-dispatch threshold, floor and minimum samples must be positive, and the provider TTFT regression ratio must exceed 1" }}
+{{- end }}
+{{- if le $sessionEventMinSamples 0 }}
+{{- fail "observability.prometheusRule.sessionEventMinSamples must be positive" }}
 {{- end }}
 {{- if lt (mul $inventoryFreshnessSeconds 1000) (mul $reaperPeriodMs 3) }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must cover at least three sandbox reaper periods" }}
@@ -238,6 +243,9 @@ spec:
           # its recovery request recorded is scheduled, not overdue, so
           # sustained 429s that keep some session in backoff stay silent.
           # Overdue > 5m held for 5m means a single session is >= 10m past due.
+          # The workflow-wake reaper re-wakes a stranded recovery about four
+          # minutes after its close; apps/worker's session-recovery-repair-alert
+          # test keeps this window clearly longer, so a self-repair never pages.
           expr: |
             max by (state) (
               opengeni_session_recovery_oldest_overdue_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}
@@ -272,79 +280,98 @@ spec:
             headline: 'Session-recovery monitor not reporting'
             user_impact: 'No user-visible impact by itself; we just cannot see stuck sessions until it recovers.'
             next_step: 'Check that the worker-control pods are running and being scraped; restore the monitor before trusting session-recovery alerts.'
-        - alert: OpenGeniTurnStartupQueueP95High
+        # Runnable prompts, not prompts held behind a running turn, a Pause,
+        # a capacity wait or a required human action. Time queued behind an
+        # active turn in the same chat is normal serialization and never pages.
+        - alert: OpenGeniTurnReadyPromptWaiting
           expr: |
-            histogram_quantile(
-              0.95,
-              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="queue",outcome="completed"}[15m]))
-            ) > {{ $turnStartupQueueP95Seconds }}
-            and on()
-            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="queue",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
-          for: 15m
+            max(opengeni_turns_queued_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},hold="ready"}) > {{ $turnReadyPromptAgeSeconds }}
+            unless on()
+            max(opengeni_turns_queued_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},hold="ready"}) > {{ $turnReadyPromptAgeCriticalSeconds }}
+          for: 5m
           labels:
             severity: warning
+            notification_policy: investigate
           annotations:
-            summary: 'New agent turns wait more than {{ $turnStartupQueueP95Seconds }} seconds (p95) before a worker picks them up.'
-            headline: 'Agent turns waiting too long to start'
-            value: 'p95 wait {{ "{{ $value | humanizeDuration }}" }}'
-            user_impact: 'Users wait longer than usual after sending a message before the agent starts working.'
-            next_step: 'Check worker capacity and the eligible backlog in Grafana Launch; it usually clears once autoscaling adds workers.'
-            description: Durable turns are waiting too long before a worker starts them. Inspect Temporal eligible backlog, worker capacity, and admission saturation before attributing this to sandbox or model latency.
+            summary: 'A prompt that is ready to run has waited more than {{ $turnReadyPromptAgeSeconds }} seconds to start.'
+            headline: 'Ready prompts not starting'
+            value: 'oldest ready prompt {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Messages that nothing else is holding back wait before the agent starts on them.'
+            next_step: 'Compare opengeni_turn_eligible_backlog with turn-worker slots: a backlog means worker capacity or admission; no backlog means the prompt is stuck before turn dispatch in session control.'
+            description: The oldest durable queued turn that is not held behind an active turn, a Pause, a failed turn, a capacity wait or a required human action. Prompts held behind an active turn in their own chat are excluded by design.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
-        # OUR controllable latency, accepted turn -> first provider dispatch.
-        # Provider think time is excluded by construction; the warning yields
-        # to the critical tier so one incident never notifies twice.
+        - alert: OpenGeniTurnReadyPromptWaitingCritical
+          expr: |
+            max(opengeni_turns_queued_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},hold="ready"}) > {{ $turnReadyPromptAgeCriticalSeconds }}
+          for: 5m
+          labels:
+            severity: critical
+            notification_policy: page
+          annotations:
+            summary: 'A prompt that is ready to run has waited more than {{ $turnReadyPromptAgeCriticalSeconds }} seconds to start.'
+            headline: 'Ready prompts stuck'
+            value: 'oldest ready prompt {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Agents are not starting on new messages; users see no reply.'
+            next_step: 'Check turn-worker pods and opengeni_turn_eligible_backlog. With a backlog, workers are down or saturated; without one, session control is not dispatching ready prompts.'
+            description: The oldest runnable queued turn has waited longer than {{ $turnReadyPromptAgeCriticalSeconds }} seconds. Holds behind an active turn, Pause, capacity waits and required human actions are excluded.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
+        # Attempt start -> first provider dispatch: claim, policy, credentials,
+        # sandbox, tools and history preparation of the attempt that dispatched.
+        # Time behind an earlier turn, capacity waits and recovery gaps are
+        # excluded. The warning yields to the critical tier to avoid duplicates.
         - alert: OpenGeniTurnStartupProviderDispatchP95High
           expr: |
             histogram_quantile(
               0.95,
-              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
+              sum by (le) (rate(opengeni_turn_startup_since_attempt_start_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
             ) > {{ $turnStartupProviderDispatchP95Seconds }}
             and on()
-            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
+            sum(increase(opengeni_turn_startup_since_attempt_start_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
             unless on()
             histogram_quantile(
               0.95,
-              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
+              sum by (le) (rate(opengeni_turn_startup_since_attempt_start_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
             ) > {{ $turnStartupProviderDispatchCriticalP95Seconds }}
           for: 15m
           labels:
             severity: warning
             notification_policy: investigate
           annotations:
-            summary: 'Prompts take more than {{ $turnStartupProviderDispatchP95Seconds }} seconds (p95) to reach the model after a user sends them.'
+            summary: 'Started turns take more than {{ $turnStartupProviderDispatchP95Seconds }} seconds (p95) of preparation before their first model request.'
             headline: 'Agent turns slow to reach the model'
-            value: 'p95 {{ "{{ $value | humanizeDuration }}" }} to reach the model'
-            user_impact: 'Users wait longer before the agent starts responding; the delay is on our side, not the model provider''s.'
-            next_step: 'Open the Turn Startup breakdown to find the slow phase (queue, database or sandbox); this is our latency, not the provider''s.'
-            description: The cumulative platform path from accepted turn to the first provider request is slow. This is Opengeni latency (queue, claim, sandbox, tools, history, request preparation), never provider think time. The critical tier above {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds replaces this warning.
-            action: Open the Turn Startup phase breakdown; compare queue, claim_and_policy, worker preparation and sandbox_establish, then check Postgres append latency and worker admission before blaming a model provider.
+            value: 'p95 {{ "{{ $value | humanizeDuration }}" }} of preparation'
+            user_impact: 'After an agent starts on a message, it takes longer than usual to begin thinking.'
+            next_step: 'Find the slow phase in opengeni_turn_startup_phase_duration_seconds (claim_and_policy, credential, sandbox_establish, tool and history preparation) and opengeni_model_request_pre_dispatch_stage_seconds.'
+            description: Measured from the start of the turn attempt that dispatched to its first provider request. It excludes time behind an earlier turn, subscription capacity waits and recovery gaps, so it is Opengeni preparation time. The critical tier above {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds replaces this warning.
+            action: Split by phase with opengeni_turn_startup_phase_duration_seconds and per request with opengeni_model_request_pre_dispatch_stage_seconds. Do not subtract histogram quantiles to estimate preparation time.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnStartupProviderDispatchP95Critical
           expr: |
             histogram_quantile(
               0.95,
-              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
+              sum by (le) (rate(opengeni_turn_startup_since_attempt_start_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
             ) > {{ $turnStartupProviderDispatchCriticalP95Seconds }}
             and on()
-            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
+            sum(increase(opengeni_turn_startup_since_attempt_start_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
           for: 15m
           labels:
             severity: critical
             notification_policy: page
           annotations:
-            summary: 'Prompts take more than {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds (p95) to reach the model after a user sends them.'
+            summary: 'Started turns take more than {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds (p95) of preparation before their first model request.'
             headline: 'Agent turns very slow to reach the model'
-            value: 'p95 {{ "{{ $value | humanizeDuration }}" }} to reach the model'
-            user_impact: 'Users wait over {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds before the agent even starts thinking; many will assume it is broken.'
-            next_step: 'Open Turn Startup and Launch capacity in Grafana now and find the dominant slow phase (database, queue or sandbox start); this rarely clears on its own under load.'
-            description: Users wait over {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds at p95 before any model provider sees their prompt. This is Opengeni-owned latency (queue, claim, sandbox, tools, history, request preparation), not provider latency.
-            action: Open the Turn Startup phase breakdown and Launch capacity drilldowns; identify the dominant phase (claim/DB contention, queue age, sandbox establish) and follow the capacity owner's recovery path.
+            value: 'p95 {{ "{{ $value | humanizeDuration }}" }} of preparation'
+            user_impact: 'After an agent starts on a message, it takes over {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds at p95 before it begins thinking.'
+            next_step: 'Find the slow phase in opengeni_turn_startup_phase_duration_seconds; sandbox_establish and tool connects are the usual suspects. Check Postgres and turn-worker CPU when claim phases are slow.'
+            description: Measured from the start of the turn attempt that dispatched to its first provider request, excluding time behind an earlier turn, capacity waits and recovery gaps. This is Opengeni preparation time, not provider think time.
+            action: Split by phase with opengeni_turn_startup_phase_duration_seconds and per request with opengeni_model_request_pre_dispatch_stage_seconds. Do not subtract histogram quantiles to estimate preparation time.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # Per model request (every tool-loop step, not only the first): SDK
         # model entry -> literal provider dispatch. Admission, the durable
         # history checkpoint, credit revalidation and the request audit are
-        # Opengeni work and should stay well under a second.
+        # Opengeni work and should stay well under a second. The exclusive
+        # stages of opengeni_model_request_pre_dispatch_stage_seconds add up
+        # to it and name the slow one.
         - alert: OpenGeniModelRequestPreDispatchP95High
           expr: |
             histogram_quantile(
@@ -362,28 +389,28 @@ spec:
             headline: 'Our overhead slowing every model request'
             value: 'p95 {{ "{{ $value | humanizeDuration }}" }} per request'
             user_impact: 'Every agent step feels slower: replies and tool steps start later than they should.'
-            next_step: 'Check Postgres CPU, event-append latency and turn-worker CPU; this points at database or worker saturation, not a provider problem.'
-            description: Between tool-loop steps Opengeni itself is delaying every model request before it reaches the provider. This latency is entirely ours - admission, durable history/audit checkpoints, credit revalidation and request build - and adds directly to every user-visible time-to-first-token.
-            action: Compare session-event append latency, Postgres CPU/active sessions and turn-worker CPU; this is a database or worker saturation signal, not a provider regression.
+            next_step: 'Find the slow stage in opengeni_model_request_pre_dispatch_stage_seconds (by stage), then follow the runbook row for that stage; this is our own database or worker time, not a provider problem.'
+            description: Between tool-loop steps Opengeni itself is delaying every model request before it reaches the provider. This latency is entirely ours - settlement of the previous response, admission, request build, credentials, durable history/audit checkpoints, provider admission and transport preparation - and adds directly to every user-visible time-to-first-token.
+            action: Split p95 and mean by stage with opengeni_model_request_pre_dispatch_stage_seconds. Stages that wait on the database (settlement_wait, admission, credential, dispatch_checkpoint, request_audit, provider_admission) rising together mean Postgres is saturated or row locks are contended - check Postgres CPU and lock waits; request_build or transport alone point at turn-worker CPU or event-loop stalls.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnStartupFirstByteP95High
           expr: |
             histogram_quantile(
               0.95,
-              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m]))
+              sum by (le) (rate(opengeni_turn_startup_since_attempt_start_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m]))
             ) > {{ $turnStartupFirstByteP95Seconds }}
             and on()
-            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
+            sum(increase(opengeni_turn_startup_since_attempt_start_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
           for: 15m
           labels:
             severity: warning
           annotations:
-            summary: 'The first part of an agent reply takes more than {{ $turnStartupFirstByteP95Seconds }} seconds (p95) to appear.'
+            summary: 'The first part of an agent reply takes more than {{ $turnStartupFirstByteP95Seconds }} seconds (p95) to appear after the agent starts.'
             headline: 'Agents slow to start replying'
             value: 'p95 {{ "{{ $value | humanizeDuration }}" }} to first reply'
             user_impact: 'Users wait longer than usual to see the first words of a reply.'
-            next_step: 'Compare provider-dispatch latency with provider time-to-first-token in Grafana to see whether we or the provider are slow; provider slowness usually recovers on its own.'
-            description: End-to-end first response latency is above target. Compare the cumulative provider-dispatch milestone with provider first-byte duration to separate platform delay from provider think time.
+            next_step: 'Compare the provider-dispatch preparation p95 with provider time-to-first-token in Grafana to see whether we or the provider are slow; provider slowness usually recovers on its own.'
+            description: Measured from the start of the turn attempt that produced the first byte, excluding time behind an earlier turn, capacity waits and recovery gaps. It covers Opengeni preparation plus provider time to first token.
         - alert: OpenGeniTurnStartupFirstByteAvailabilityLow
           expr: |
             (
@@ -446,7 +473,7 @@ spec:
         - alert: OpenGeniTurnRecoveryRatioHigh
           expr: |
             (
-              sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="recovering"}[10m]))
+              sum(increase(opengeni_turn_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},cause!="provider"}[10m]))
               /
               clamp_min(sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.2
@@ -456,12 +483,12 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: 'More than 20% of agent turns needed an automatic retry over the last 10 minutes.'
+            summary: 'More than 20% of agent turns needed an automatic retry for a reason other than the model provider over the last 10 minutes.'
             headline: 'Many agent turns needing automatic retries'
             value: '{{ "{{ $value | humanizePercentage }}" }} of turns retried (10 min)'
             user_impact: 'Replies are slower and may pause briefly while turns retry automatically; no work is lost.'
-            next_step: 'Usually self-heals once the underlying provider, tool or worker issue clears; if it lasts over 30 min, find the dominant retry cause in Runtime Failures.'
-            description: Recovery is preserving logical turns but consuming capacity and adding latency. Inspect typed MCP transport, sandbox, provider, and worker-shutdown evidence for the dominant retryable boundary.
+            next_step: 'Split opengeni_turn_recoveries_total by cause (sandbox, tool, worker, database, control, other) and follow the matching sandbox, MCP, worker or Postgres evidence.'
+            description: Recovery is preserving logical turns but consuming capacity and adding latency. Provider-caused retries (outages, rate limits, subscription capacity and lease changes) are excluded; OpenGeniModelCallFailureRatioHigh covers the provider per model route. Inspect the dominant non-provider cause.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerRestarted
           expr: |
@@ -629,35 +656,6 @@ spec:
             next_step: 'Do not retry it automatically; confirm through the target system or the tool''s receipt whether the action happened.'
             description: Do not replay the operation automatically. Reconcile through the tool's durable provider receipt or idempotency boundary before retrying.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/mcp-operation-recovery.md
-        - alert: OpenGeniMcpToolLatencyHigh
-          # `tool` is bounded: a first-party Opengeni tool name, or `external` for
-          # every connector, API-integration, and custom MCP tool.
-          # Command polling permits up to 50 seconds of requested waiting. Its
-          # total-duration budget includes that wait plus 15 seconds overhead.
-          expr: |
-            (
-              histogram_quantile(
-                0.95,
-                sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},tool!~"command_read|command_wait"}[10m]))
-              ) > 15
-              or
-              histogram_quantile(
-                0.95,
-                sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},tool=~"command_read|command_wait"}[10m]))
-              ) > 65
-            )
-            and on(tool)
-            sum by (tool) (increase(opengeni_mcp_tool_call_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
-          for: 10m
-          labels:
-            severity: warning
-          annotations:
-            summary: 'Calls to the {{ "{{ $labels.tool }}" }} tool exceed their p95 latency budget: 65 seconds for command polling, 15 seconds for other tools. "external" means a connector or custom tool rather than an Opengeni tool.'
-            headline: 'Slow tool calls: {{ "{{ $labels.tool }}" }}'
-            value: 'p95 {{ "{{ $value | humanizeDuration }}" }}'
-            user_impact: 'Agent tasks take noticeably longer while waiting on this tool.'
-            next_step: 'For an Opengeni tool, check the Opengeni API and database for that tool. For "external", find the slow connector in Grafana; it is usually the outside service.'
-            description: Tool duration exceeds its budget. command_read and command_wait permit up to 50 seconds of requested waiting, so their total-duration budget is 65 seconds; it does not measure actual service overhead. Other tools retain a 15-second budget. The tool label names the first-party Opengeni tool, or "external" for every connector and custom tool. Split by structural outcome and compare MCP connect time before attributing this to model inference.
         - alert: OpenGeniHttp5xxRatioHigh
           expr: |
             (
@@ -698,34 +696,38 @@ spec:
             description: Workspace or session reads are slow enough to degrade the interactive control plane. Inspect database CPU, active queries, event append latency, and request volume before scaling API pods.
         # Product-level failure safety net: a route whose refusals (401/403/409/422)
         # jump against its own one-day baseline, or that refuses most of its
-        # traffic. Unauthenticated organization MCP discovery (GET 401 on the
+        # traffic. Use the classified rejection counter so an ended attempt's
+        # correctly refused bearer is not a product failure. Other refusals,
+        # including unknown, malformed, revoked and missing-permission callers,
+        # remain actionable on the same routes. Keep raw HTTP totals unchanged.
+        # Unauthenticated organization MCP discovery (GET 401 on the
         # organization MCP endpoint) is benign; its route is matched as a
         # character class so the unscoped-route source guard does not read it
         # as a client default.
         - alert: OpenGeniApiRouteRejectionsAbnormal
           expr: |
             (
-              (sum by (method, route, status) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[30m])) >= 20)
+              (sum by (method, route, status) (increase(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422",reason!="agent_attempt_caller_stale"}[30m])) >= 20)
               and on (method, route, status)
               (
-                sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[30m]))
-                > 3 * sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[1d] offset 30m))
+                sum by (method, route, status) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422",reason!="agent_attempt_caller_stale"}[30m]))
+                > 3 * sum by (method, route, status) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422",reason!="agent_attempt_caller_stale"}[1d] offset 30m))
                 or on (method, route, status)
                 (
-                  sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[30m]))
+                  sum by (method, route, status) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422",reason!="agent_attempt_caller_stale"}[30m]))
                   unless on (method, route, status)
-                  (sum by (method, route, status) (rate(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422"}[1d] offset 30m)) > 0)
+                  (sum by (method, route, status) (rate(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"401|403|409|422",reason!="agent_attempt_caller_stale"}[1d] offset 30m)) > 0)
                 )
               )
               or on (method, route, status)
               (
                 (
-                  sum by (method, route, status) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"403|409|422"}[1h]))
+                  sum by (method, route, status) (increase(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"403|409|422",reason!="agent_attempt_caller_stale"}[1h]))
                   / on (method, route) group_left
                   clamp_min(sum by (method, route) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api"}[1h])), 1)
                 ) > 0.5
                 and on (method, route, status)
-                sum by (method, route, status) (increase(opengeni_http_requests_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"403|409|422"}[1h])) >= 10
+                sum by (method, route, status) (increase(opengeni_http_request_rejections_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="api",status=~"403|409|422",reason!="agent_attempt_caller_stale"}[1h])) >= 10
               )
             )
             unless on (method, route)
@@ -739,7 +741,7 @@ spec:
             headline: 'An API route is suddenly refusing users'
             user_impact: 'People using this part of the product are being told they cannot do it (permission, conflict or validation refusal), usually with an unhelpful error or a silent failure.'
             next_step: 'Open "Capabilities, browser & handoffs" in Grafana for the route, then read the API logs for that route: rejectionReason names the missing permission or domain code and rejectionFingerprint groups identical refusals.'
-            description: 'Fires when a route''s 401/403/409/422 rate over 30 minutes is at least 20 requests and more than 3x its own previous-day rate (or the route never refused before), or when 403/409/422 are over half of the route''s traffic for an hour with at least 10 refusals. Excludes unauthenticated organization MCP endpoint discovery. Resolve a rejectionFingerprint to its source text with scripts/resolve-rejection-fingerprint.ts.'
+            description: 'Fires when a route''s actionable 401/403/409/422 rate over 30 minutes is at least 20 requests and more than 3x its own previous-day rate (or the route never refused before), or when actionable 403/409/422 are over half of the route''s traffic for an hour with at least 10 refusals. Excludes typed agent_attempt_caller_stale denials after an attempt ends and unauthenticated organization MCP endpoint discovery; all other reasons, including unclassified, remain actionable. Raw request and rejection counters still include every refusal. Resolve a rejectionFingerprint to its source text with scripts/resolve-rejection-fingerprint.ts.'
             action: 'Decide whether the refusal is a product bug (missing grant, UI offering an action the user cannot take, client retry loop) or abuse; fix the grant or the client rather than muting the alert.'
         # Browser/Computer sign-in handoff: the human could not join the live
         # session the agent handed them. This is the 2026-10-05 Personal
@@ -1309,18 +1311,6 @@ spec:
             user_impact: 'No user impact; they keep sandboxes alive and cost money.'
             next_step: 'Inspect provider-binding and settlement outcomes; never assume a process exited just because it is old.'
             description: A completed/failed/cancelled owner (or a background command already asked to stop) still has a physical sandbox process after 15m. Running session background commands are session-owned and excluded. Inspect provider-binding, probe, and settlement outcomes; age alone is never exit proof.
-        - alert: OpenGeniSandboxesHeldByIdleInteractions
-          expr: sum(opengeni:sandbox_leases_interaction_only:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},idle_bucket=~"2h_6h|gte_6h"}) > 5
-          for: 30m
-          labels:
-            severity: warning
-          annotations:
-            summary: 'Several sandboxes are kept running only by Browser/Computer sessions idle for 2+ hours.'
-            headline: 'Idle browser sessions keeping sandboxes running'
-            value: '{{ "{{ printf `%.0f` $value }}" }} sandboxes idle 2h+'
-            user_impact: 'No user impact; idle Browser/Computer sessions keep paid sandboxes warm.'
-            next_step: 'Check whether users are leaving Browser/Computer sessions open; end abandoned ones if cost matters.'
-            description: Interaction holders never expire by timestamp, so a box whose only holders are Browser/Computer sessions stays warm (and billed by the provider) until the session is ended or the provider deadline rotates it. Check opengeni:sandbox_leases_interaction_only:fresh_max by idle_bucket and whether sessions are being left open.
         - alert: OpenGeniSandboxDrainExpired
           expr: sum(opengeni:sandbox_leases_expired_draining:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},age_bucket=~"5m_1h|1h_1d|gte_1d"}) > 0
           for: 10m
@@ -1664,10 +1654,14 @@ spec:
             and
             opengeni:model_provider_ttft_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} >= {{ $providerTtftBaselineMinSamples }}
             unless on()
-            histogram_quantile(
-              0.95,
-              sum by (le) (rate(opengeni_model_request_pre_dispatch_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m]))
-            ) > {{ $modelRequestPreDispatchP95Seconds }}
+            (
+              histogram_quantile(
+                0.95,
+                sum by (le) (rate(opengeni_model_request_pre_dispatch_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m]))
+              ) > {{ $modelRequestPreDispatchP95Seconds }}
+              and on()
+              sum(increase(opengeni_model_request_pre_dispatch_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m])) >= {{ $modelRequestMinSamples }}
+            )
           for: 15m
           labels:
             severity: warning
@@ -1678,11 +1672,19 @@ spec:
             value: 'p90 first token {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Users on this model wait noticeably longer before replies start.'
             next_step: 'Check the provider''s status; usually recovers on its own; if it persists, steer users to another model.'
-            description: Measured from the literal provider dispatch, so Opengeni pre-dispatch work is excluded; a regression here is the provider (network, queueing, prefill or reasoning before the first streamed token). Suppressed while Opengeni's own pre-dispatch latency alert condition holds, so platform saturation is attributed to us first. A provider without a {{ $providerTtftBaselineMinSamples }}-request baseline does not alert.
+            description: Measured from the literal provider dispatch, so Opengeni pre-dispatch work is excluded; a regression here is the provider (network, queueing, prefill or reasoning before the first streamed token). Suppressed while Opengeni's own pre-dispatch latency alert condition holds (including its {{ $modelRequestMinSamples }}-request minimum), so platform saturation is attributed to us first. A provider without a {{ $providerTtftBaselineMinSamples }}-request baseline does not alert.
             action: Compare the provider's p90 against its baseline on Streaming Health, check provider status and the request phase (headers/first byte) panels, and consider steering traffic to another route if the regression persists.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
+        # A p99 means something only with at least 100 observations: below
+        # that, the 99th-percentile rank lies above every observation but the
+        # slowest, so one slow write decides the whole p99. Each streaming p99
+        # alert therefore needs sessionEventMinSamples observations in its own
+        # window, like the other latency alerts' volume guards.
         - alert: OpenGeniEventAppendLatencyHigh
-          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 1
+          expr: |
+            histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 1
+            and on()
+            sum(increase(opengeni_session_event_append_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= {{ $sessionEventMinSamples }}
           for: 10m
           labels:
             severity: warning
@@ -1692,9 +1694,12 @@ spec:
             value: 'p99 {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Agent output appears in the app with a delay and everything feels sluggish.'
             next_step: 'Check Postgres CPU, connections and slow queries.'
-            description: appendSessionEvents p99 is above 1s for 10m — Postgres is the streaming bottleneck, not the model or NATS.
+            description: appendSessionEvents p99 is above 1s for 10m, with at least {{ $sessionEventMinSamples }} appends in the window — Postgres is the streaming bottleneck, not the model or NATS.
         - alert: OpenGeniEventAppendLatencyCritical
-          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[5m]))) > 2
+          expr: |
+            histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[5m]))) > 2
+            and on()
+            sum(increase(opengeni_session_event_append_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[5m])) >= {{ $sessionEventMinSamples }}
           for: 5m
           labels:
             severity: critical
@@ -1704,10 +1709,13 @@ spec:
             value: 'p99 {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Agent replies stream slowly or stall, and the app may time out.'
             next_step: 'Check Postgres CPU, active sessions and hot queries now; adding API or worker pods will not help.'
-            description: The durable Postgres write path is critically saturated. Inspect database CPU, active sessions, hot statements, and application request pressure before scaling stateless pods.
+            description: The durable Postgres write path is critically saturated (p99 above 2s with at least {{ $sessionEventMinSamples }} appends in 5m). Inspect database CPU, active sessions, hot statements, and application request pressure before scaling stateless pods.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniEventPublishLatencyHigh
-          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_publish_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 0.5
+          expr: |
+            histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_publish_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))) > 0.5
+            and on()
+            sum(increase(opengeni_session_event_publish_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= {{ $sessionEventMinSamples }}
           for: 10m
           labels:
             severity: warning
@@ -1717,7 +1725,7 @@ spec:
             value: 'p99 {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Streaming output appears late or in bursts; nothing is lost and it catches up.'
             next_step: 'Check NATS health and load; usually clears on its own.'
-            description: The best-effort NATS live fan-out p99 is above 500ms for 10m — live delivery is degraded (events stay durable and reconcile on stream replay).
+            description: The best-effort NATS live fan-out p99 is above 500ms for 10m, with at least {{ $sessionEventMinSamples }} publishes in the window — live delivery is degraded (events stay durable and reconcile on stream replay).
         - alert: OpenGeniNatsSubscriptionTerminated
           expr: |
             sum by (kind, recovery) (increase(opengeni_nats_subscription_terminations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) > 0
@@ -1781,17 +1789,28 @@ spec:
         - alert: OpenGeniCodexPromptCacheTelemetryMissing
           # A missing cached-token field is unknown, not a truthful 0% hit. Keep
           # that semantics and detect active calls with no usage observations.
+          # A call that reported no usage at all (status="no_usage", for example a
+          # terminal response without a usage object) is not a missing cache field.
+          # One call must not page: missing fields need at least 3 calls and over 5%
+          # of the calls that reported usage in 30m.
           # HTTP success is recorded at response headers, before streamed usage
           # is committed; counter skew does not prove a missing cached-token field.
-          # Absent usage needs at least 20 completed calls in 30m: after a worker restart the first
-          # increment of a new counter is invisible to rate(), so a handful of calls looks missing.
+          # Absent usage (no call reported usage) needs at least 20 completed calls in 30m: after a
+          # worker restart the first increment of a new counter is invisible to rate(), so a handful
+          # of calls looks missing.
           expr: |
-            (sum(rate(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0
+            (
+              sum(increase(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",status="missing"}[30m])) >= 3
+              and on()
+              sum(increase(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",status="missing"}[30m]))
+              /
+              clamp_min(sum(increase(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",status=~"reported|missing"}[30m])), 1) > 0.05
+            )
             or
             (
               sum(increase(opengeni_model_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",outcome="completed"}[30m])) >= 20
               and on()
-              (sum(rate(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription"}[30m])) or vector(0)) == 0
+              (sum(rate(opengeni_model_cache_read_telemetry_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},provider="codex-subscription",status=~"reported|missing"}[30m])) or vector(0)) == 0
             )
           for: 15m
           labels:
@@ -1801,7 +1820,7 @@ spec:
             headline: 'Codex cache metrics missing'
             user_impact: 'No user impact; we cannot measure Codex cache efficiency.'
             next_step: 'Not urgent: an engineer should check whether the Codex usage format changed.'
-            description: For 15m, Codex-subscription usage has explicitly omitted cached-token fields, or active HTTP-success traffic has produced no cache-usage observations. Cache-hit ratio remains unknown rather than being fabricated as zero; inspect provider usage payload compatibility, stream failures and worker usage persistence.
+            description: For 15m, at least 3 Codex-subscription calls and over 5% of those reporting usage in 30m have omitted cached-token fields, or active HTTP-success traffic has produced no call that reported usage. Calls without any usage count as status="no_usage", not missing. Cache-hit ratio remains unknown rather than being fabricated as zero; inspect provider usage payload compatibility, stream failures and worker usage persistence.
         # ── Connected Machines (op-outcome plane) ────────────────────────────
         - alert: OpenGeniMachineOpInfraFailuresHigh
           expr: |

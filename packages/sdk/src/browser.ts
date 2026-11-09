@@ -25,6 +25,7 @@ export type {
   FetchResponse,
   GetSessionOptions,
   OpenGeniClientOptions,
+  ChatClient,
   OpenGeniRequestOptions,
   SendMessageInput,
   SteerMessageResult,
@@ -55,7 +56,11 @@ export { resolveWorkspaceVoiceInputEnabled } from "./transcription";
 export {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_BROWSER_REQUEST_HEADERS,
+  OPENGENI_BROWSER_RESPONSE_HEADERS,
   OPENGENI_CORRELATION_HEADER,
+  OPENGENI_SDK_VERSION_HEADER,
+  OPENGENI_SESSION_CHAT_ACCEPT,
 } from "./types";
 
 export type {

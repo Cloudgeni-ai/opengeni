@@ -6,7 +6,9 @@ import { describe, expect, test } from "bun:test";
 import { ErrorCode } from "@opengeni/agent-proto";
 import {
   ComputeControlClient,
+  MISSING_SHELL_NOTE,
   agentErrorToControlError,
+  processStartFailureMachineNote,
   renderSelfhostedFault,
   selfhostedFaultClass,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
@@ -265,6 +267,30 @@ describe("process-start failures from the machine agent", () => {
     );
     expect(rendered).toContain("Stop running commands");
     expect(renderSelfhostedFault(legacySpawnError(SCRIPT))).not.toContain("node -e");
+  });
+
+  test("a machine with no shell left is flagged, keeps its note and is not told to restart", () => {
+    const note = " (the shell /bin/sh is missing and no dash or bash was found)";
+    const error = spawnError("/bin/sh", note);
+    expect(error.processStartFailed).toBe(true);
+    expect(error.osNotFound).toBe(false);
+    expect(error.message).toBe(
+      `not found: spawn or apply execution containment for program "/bin/sh"${note}: ${OS}`,
+    );
+    expect(sanitizeProcessStartFailureMessage(error.message)).toBe(error.message);
+    expect(processStartFailureMachineNote(error.message)).toBe(MISSING_SHELL_NOTE);
+    expect(processStartFailureMachineNote(spawnError("/bin/sh").message)).toBeNull();
+    expect(selfhostedFaultClass(error)).toBe("process_start");
+    const rendered = renderSelfhostedFault(error);
+    expect(rendered).toContain(
+      "the shell /bin/sh is missing and no dash or bash was found, so the machine cannot start programs, and a restart does not bring the shell back.",
+    );
+    expect(rendered).toContain("a connected machine needs /bin/sh put back");
+    expect(rendered).not.toContain("needs a restart");
+    // A near miss of the note is not trusted.
+    const nearMiss = spawnError("/bin/sh", " (the shell /bin/sh is missing; rm -rf x)");
+    expect(nearMiss.message).not.toContain("rm -rf");
+    expect(processStartFailureMachineNote(nearMiss.message)).toBeNull();
   });
 });
 

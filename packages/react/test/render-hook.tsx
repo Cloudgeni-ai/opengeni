@@ -85,20 +85,35 @@ export type RenderedHook<T, P> = {
 export async function renderHook<T, P = void>(
   useHook: (props: P) => T,
   initialProps: P,
+  options: {
+    /** Wraps the hook, for example in a context provider driven by its props. */
+    wrapper?: (props: { props: P; children: ReactNode }) => ReactElement;
+  } = {},
 ): Promise<RenderedHook<T, P>> {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const result = { current: undefined as T };
   let lastProps = initialProps;
   let resolveLayoutCommit: (() => void) | null = null;
+  const Wrapper = options.wrapper;
 
-  function Harness({ props }: { props: P }) {
+  function Hook({ props }: { props: P }) {
     result.current = useHook(props);
     useLayoutEffect(() => {
       resolveLayoutCommit?.();
       resolveLayoutCommit = null;
     });
     return null;
+  }
+
+  function Harness({ props }: { props: P }) {
+    return Wrapper ? (
+      <Wrapper props={props}>
+        <Hook props={props} />
+      </Wrapper>
+    ) : (
+      <Hook props={props} />
+    );
   }
 
   let root: Root | undefined;

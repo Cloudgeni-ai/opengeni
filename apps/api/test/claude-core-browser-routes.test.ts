@@ -266,9 +266,6 @@ describe.skipIf(!realDb)("Claude routes on the shared core, as a managed browser
   });
 
   test("an OAuth attempt started on the legacy path never completes on the core", async () => {
-    await shared!.admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${organizationId}::uuid, 'claude', true) on conflict (account_id, provider) do update set enabled = true`;
     const completed = await browser(
       `${oauth(workspace(sharedWorkspaceId, ""))}/complete`,
       "POST",

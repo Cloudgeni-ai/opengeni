@@ -24,7 +24,8 @@ describe("compact conversation card states", () => {
     expect(html).toContain("og-session-capability-shell");
     expect(html).toContain("Guidance only · no account access");
     expect(html).toContain("Review skill");
-    expect(html).toContain('aria-hidden="true">WR</span>');
+    // "Writing style" reads as its word initials, not its first two letters.
+    expect(html).toContain('data-mark="initials" aria-hidden="true">WS</span>');
     expect(html).not.toContain("sparkles");
   });
 

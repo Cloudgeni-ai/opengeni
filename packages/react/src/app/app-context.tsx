@@ -3,9 +3,11 @@
 import type {
   CreateSessionRequest,
   McpConnectionAccountSelection,
+  PersonalGitHubRepositoryAccess,
   PersonalGitHubRepositorySelectionInput,
   SessionEvent,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { SessionEventsConnectionState } from "../hooks/use-session-events";
 import {
@@ -62,7 +64,7 @@ export type GitHubRefreshOptions = {
 };
 
 export type AppContextValue = {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   clientConfig: ClientConfig;
   authSession: AuthSession | null;
   accessContext: AccessContext;
@@ -223,10 +225,14 @@ export type AppContextValue = {
   connectPersonalGitHub: (workspaceId: string) => Promise<void>;
   reconnectPersonalGitHub: (workspaceId: string) => Promise<void>;
   disconnectPersonalGitHub: (workspaceId: string) => Promise<boolean>;
+  /** `allRepositoriesAccess` turns All my repositories on or off (null); omitted keeps it. */
   savePersonalGitHubRepositories: (
     workspaceId: string,
     repositories: PersonalGitHubRepositorySelectionInput[],
+    allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null,
   ) => Promise<boolean>;
+  /** Find more of the person's repositories on GitHub and add them to the catalog. */
+  searchPersonalGitHubRepositories: (workspaceId: string, query: string) => Promise<void>;
   ensurePersonalGitHubAuthority: (
     workspaceId: string,
   ) => Promise<McpConnectionAccountSelection | null>;
@@ -246,8 +252,8 @@ export type AppContextValue = {
       instructions?: string | undefined;
       /** Installed session-selected Skills to freeze onto this exact session. */
       installedSkillIds?: string[] | undefined;
-      /** Start the chat as a bot: its name, description and avatar, kept live. */
-      bot?: import("./lib/session-create").NewSessionBotProfile | undefined;
+      /** Start the chat with an agent: it follows the agent's Instructions and shows its icon. */
+      agent?: import("./lib/session-create").NewSessionAgent | undefined;
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[] | undefined;
       newSessionDraftToolPolicy?:

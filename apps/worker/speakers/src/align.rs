@@ -18,7 +18,7 @@
 //! hears each sound among its neighbours. The frames taken out read as
 //! silence.
 
-use crate::models::{Result, session};
+use crate::models::{Result, lean_session};
 use ort::environment::Environment;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -26,6 +26,7 @@ use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::Path;
+use std::sync::Mutex;
 use unicode_normalization::UnicodeNormalization;
 
 /// Samples per output frame: 20 ms at 16 kHz.
@@ -69,7 +70,8 @@ fn err(context: &str) -> impl Fn(ort::Error) -> String + '_ {
 }
 
 pub struct Aligner {
-    session: Session,
+    /// Held for each window the model runs, which needs the session to itself.
+    session: Mutex<Session>,
     vocab: HashMap<char, u32>,
     blank: u32,
     space: Option<u32>,
@@ -320,7 +322,7 @@ fn expand(sound: Emissions, origin: &[usize], samples: usize) -> Emissions {
 
 impl Aligner {
     pub fn load(env: &Environment, model: &Path, tokens: &Path, threads: usize) -> Result<Self> {
-        let session = session(env, model, threads)?;
+        let session = Mutex::new(lean_session(env, model, threads)?);
         let text = std::fs::read_to_string(tokens)
             .map_err(|error| format!("reading {}: {error}", tokens.display()))?;
         let mut vocab = HashMap::new();
@@ -371,7 +373,7 @@ impl Aligner {
         (key, ids)
     }
 
-    fn emissions(&mut self, audio: impl Read, wanted: &[u32]) -> Result<Emissions> {
+    fn emissions(&self, audio: impl Read, wanted: &[u32]) -> Result<Emissions> {
         let mut column = HashMap::new();
         for &token in std::iter::once(&self.blank).chain(wanted) {
             let next = column.len();
@@ -408,8 +410,11 @@ impl Aligner {
             }
             let length = input.len();
             let tensor = Tensor::from_array(([1, length], input)).map_err(err("input"))?;
-            let outputs = self
+            let mut session = self
                 .session
+                .lock()
+                .map_err(|_| "the alignment model stopped".to_string())?;
+            let outputs = session
                 .run(ort::inputs![tensor])
                 .map_err(err("alignment model"))?;
             let (shape, logits) = outputs[0]
@@ -452,6 +457,8 @@ impl Aligner {
                 let space = space_column.map_or(NEG, |col| emissions.scores[offset + col]);
                 emissions.gaps[frame] = space.max(speech - total - GAP_PENALTY);
             }
+            drop(outputs);
+            drop(session);
             core_start = core_end;
             // Keep only what the next window's context reaches back to.
             let keep = core_start.saturating_sub(context);
@@ -511,7 +518,7 @@ impl Aligner {
         words
     }
 
-    pub fn align(&mut self, audio: impl Read, words: &[String]) -> Result<Alignment> {
+    pub fn align(&self, audio: impl Read, words: &[String]) -> Result<Alignment> {
         let tokenized: Vec<(String, Vec<u32>)> = words.iter().map(|w| self.tokens(w)).collect();
         let mut wanted: Vec<u32> = tokenized.iter().flat_map(|(_, ids)| ids.clone()).collect();
         wanted.extend(self.space);

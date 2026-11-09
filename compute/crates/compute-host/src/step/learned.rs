@@ -74,7 +74,7 @@ fn discard(learned: &Path) {
 /// Reads the regular file at `path`, if it has no other name and holds at
 /// most [`MOST`] bytes, without following a link there or waiting on
 /// anything that is not a file.
-fn read_untrusted(path: &Path) -> io::Result<Vec<u8>> {
+pub(super) fn read_untrusted(path: &Path) -> io::Result<Vec<u8>> {
     use rustix::fs::{Mode, OFlags};
 
     let fd = rustix::fs::open(

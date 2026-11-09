@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -94,6 +95,62 @@ test("an account row shows every reported window with its reset", async () => {
   expect(windows[0]).toMatch(/^5h: Limit reached, until .*2099/);
   expect(windows[1]).toMatch(/^Week: 50% left, resets .*Oct 2099/);
 });
+test("an account row shows the week alone while the 5h has room, and never a Fable week", async () => {
+  const value = usage();
+  value.windows = [
+    { ...value.windows[0]!, usedPercent: 0, status: "allowed" },
+    value.windows[1]!,
+    {
+      id: "seven_day_fable",
+      usedPercent: 0,
+      resetsAt: "2099-10-03T22:00:00Z",
+      status: "allowed",
+      observedAt: "2026-09-30T14:00:00Z",
+    },
+  ];
+  const state: ClaudeUsageState = {
+    value,
+    loading: false,
+    refreshing: false,
+    error: false,
+    canRefresh: false,
+    refresh: async () => {},
+  };
+  const labels = () =>
+    [...container.querySelectorAll('[data-slot="subscription-usage-window"]')].map(
+      (window) => window.getAttribute("aria-label")?.split(":")[0],
+    );
+  for (const plan of ["claude_max_20x", "claude_max", "claude_max_5x"]) {
+    await act(async () => root.render(<ClaudeUsageReadout state={state} plan={plan} />));
+    expect(labels()).toEqual(["Week"]);
+  }
+  // A 5h that holds the account back is listed, on Ultra too.
+  value.windows[0] = { ...value.windows[0]!, usedPercent: 100, status: "rejected" };
+  await act(async () =>
+    root.render(<ClaudeUsageReadout state={{ ...state, value }} plan="claude_max_20x" />),
+  );
+  expect(labels()).toEqual(["5h", "Week"]);
+  value.windows[0] = { ...value.windows[0]!, usedPercent: 0, status: "allowed" };
+  // The account page keeps every window; Ultra's 5h only while it holds it back.
+  const now = Date.parse("2026-09-30T14:00:00Z");
+  expect(claudeUsageReadings(value, now, "claude_max_20x").map((item) => item.label)).toEqual([
+    "Week",
+    "Fable week",
+  ]);
+  expect(claudeUsageReadings(value, now, "claude_max_5x").map((item) => item.label)).toEqual([
+    "5h",
+    "Week",
+    "Fable week",
+  ]);
+  // A reading with only windows kept off the list is not "No usage yet".
+  value.windows = [value.windows[0]!, value.windows[2]!];
+  value.refreshStatus = "available";
+  await act(async () =>
+    root.render(<ClaudeUsageReadout state={{ ...state, value }} plan="claude_max_5x" />),
+  );
+  expect(labels()).toEqual([]);
+  expect(container.textContent).not.toContain("No usage yet");
+});
 test("near-full allowed quotas stay available and explicit rejection needs no invented percentage", async () => {
   const value = usage();
   value.windows = [{ ...value.windows[0]!, usedPercent: 99.6, status: "allowed" }];
@@ -144,7 +201,7 @@ test("an external credential rotation reloads metadata and resumes usage reads",
   const client = {
     getOrganizationClaudeSubscriptionUsage: async () => usage(serverVersion),
     refreshOrganizationClaudeSubscriptionUsage: async () => usage(serverVersion),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   let state!: ClaudeUsageState;
   function Harness() {
     const [version, setVersion] = useState(1);
@@ -203,7 +260,7 @@ test("usage requests stay disabled with the provider flag and stale scope/versio
       scopes.push(scope);
       return scope === "one" ? pending : usage(2);
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   let state!: ClaudeUsageState;
   function Harness({
     scope,
@@ -244,7 +301,7 @@ test("credentials replaced mid-refresh cannot revive an old reading", async () =
   const client = {
     refreshOrganizationClaudeSubscriptionUsage: async () =>
       ++checks === 2 ? pending : usage(version),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   let state!: ClaudeUsageState;
   function Harness({ credentialVersion }: { credentialVersion: number }) {
     state = useClaudeUsage({
@@ -281,7 +338,7 @@ test("refresh failure preserves the last reported quota", async () => {
       if (++checks === 1) return usage();
       throw new Error("Usage service unavailable");
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   let state!: ClaudeUsageState;
   function Harness() {
     state = useClaudeUsage({
@@ -314,7 +371,7 @@ test("recreated connections discard in-flight results even when their versions m
   const fresh = { ...usage(), windows: [] };
   const client = {
     refreshWorkspaceClaudeSubscriptionUsage: async () => (++calls === 1 ? pending : fresh),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   let state!: ClaudeUsageState;
   function Harness({ id }: { id: string }) {
     state = useClaudeUsage({
@@ -344,7 +401,7 @@ test("a revisit shows the last reading at once and never another credential's", 
       if (reads === 1) return usage(1);
       return await new Promise<ClaudeSubscriptionUsage>((resolve) => (release = resolve));
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   // The console keeps reads across navigation for its live client.
   const retained = retainSharedQueries(client);
   const firstFrames: (ClaudeUsageState | null)[] = [];
@@ -385,7 +442,7 @@ test("a revisit shows the last reading at once and never another credential's", 
 });
 
 function revisitHarness(input: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   credentialId?: string;
   accountPool?: boolean;
   frames: ClaudeUsageState[];
@@ -410,7 +467,7 @@ function revisitHarness(input: {
 test("a reading whose credential is unknown (people who can't manage it) is never retained", async () => {
   const client = {
     getWorkspaceClaudeSubscriptionUsage: async () => usage(1),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const retained = retainSharedQueries(client);
   const frames: ClaudeUsageState[] = [];
   const Harness = revisitHarness({ client, frames });
@@ -432,7 +489,7 @@ test("an access refusal drops the retained reading", async () => {
       if (refuse) throw Object.assign(new Error("Forbidden"), { status: 403 });
       return usage(1);
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const retained = retainSharedQueries(client);
   const frames: ClaudeUsageState[] = [];
   const Harness = revisitHarness({ client, credentialId: "claude-connection", frames });
@@ -480,7 +537,7 @@ test("readers share a single request, retain it for five minutes, and share expl
       checks++;
       return { ...usage(), windows: [] };
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const retained = retainSharedQueries(client);
   const frames: ClaudeUsageState[] = [];
   const Harness = revisitHarness({ client, credentialId: "account", accountPool: true, frames });
@@ -527,16 +584,16 @@ test("readers share a single request, retain it for five minutes, and share expl
 test("switching clients never renders the previous client's usage", async () => {
   const first = {
     refreshWorkspaceClaudeSubscriptionUsage: async () => usage(),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   let finish!: (value: ClaudeSubscriptionUsage) => void;
   const second = {
     refreshWorkspaceClaudeSubscriptionUsage: () =>
       new Promise<ClaudeSubscriptionUsage>((resolve) => {
         finish = resolve;
       }),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   let state!: ClaudeUsageState;
-  function Harness({ client }: { client: OpenGeniBrowserClient }) {
+  function Harness({ client }: { client: ChatClient<OpenGeniBrowserClient> }) {
     state = useClaudeUsage({
       client,
       scope: "workspace",
@@ -569,7 +626,7 @@ test("a clear during a live check discards the late response", async () => {
             finish = resolve;
           })
         : current,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const frames: ClaudeUsageState[] = [];
   const Harness = revisitHarness({ client, credentialId: "account", frames });
   await act(async () => root.render(<Harness />));
@@ -594,7 +651,7 @@ test("a shared revalidation reporting reconnect reloads metadata only once", asy
       ...usage(),
       refreshStatus: reconnect ? "reconnect" : "not_checked",
     }),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   let state!: ClaudeUsageState;
   function Harness() {
     state = useClaudeUsage({
@@ -625,7 +682,7 @@ test("a pool account's reading and the connection's reading never share an entry
   const client = {
     refreshWorkspaceClaudeSubscriptionUsage: async () => usage(1),
     refreshClaudeSubscriptionAccountUsage: async () => usage(1),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const retained = retainSharedQueries(client);
   const frames: ClaudeUsageState[] = [];
   const Connection = revisitHarness({ client, credentialId: "shared-id", frames });
@@ -663,7 +720,7 @@ for (const scope of ["workspace", "organization"] as const) {
       refreshOrganizationClaudeSubscriptionAccountUsage: live,
       getClaudeSubscriptionAccountUsage: stored,
       getOrganizationClaudeSubscriptionAccountUsage: stored,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const retain = retainSharedQueries(client);
     const account = {
       id: "account",
@@ -737,7 +794,7 @@ test("read-only usage never attempts the live mutation, including global Refresh
       liveChecks++;
       return usage();
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   function Harness() {
     useClaudeUsage({
       client,
@@ -770,7 +827,7 @@ for (const cold of [true, false]) {
           windows: [{ ...usage().windows[1]!, usedPercent: 25 }],
         };
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const account = {
       id: "account",
       version: 1,

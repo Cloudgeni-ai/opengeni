@@ -147,7 +147,7 @@ describe("request_human_input secret approval questions", () => {
       ask("secret-approval:0f8fad5b-d9cb-469f-a165-70867728950e"),
     );
     expect(reason).toBe(
-      "Nothing was asked. Opengeni already asked the person, in this chat and by notification, to allow that use of the secret, and their answer reaches you as an update in this chat. Do not ask them again; if they allow it, retry the same call.",
+      "Nothing was asked. The person was already asked, in this chat and by notification, to allow that use of the secret, and their answer reaches you as an update in this chat. Do not ask them again; if they allow it, retry the same call.",
     );
   });
 

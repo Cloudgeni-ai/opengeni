@@ -95,10 +95,12 @@ every durable queued prompt, including prompts held behind a running turn, a
 Pause, a failed turn or a required human action. Use
 `opengeni_turns_queued_by_hold{hold="ready"}` (and its
 `opengeni_turns_queued_oldest_age_seconds`) for prompts that are only waiting
-for dispatch; an old `ready` prompt is a stranded queue, not missing capacity.
-The split appears only after the follow-up migration grants the runtime EXECUTE
-that 0988 defers; until then only the total is published. Prompts from a
-non-owner waiting for a personal machine's owner still count as `ready`.
+for dispatch. A `ready` prompt waits first for its session workflow's control
+activities on the base task queue and only then on the turn queue, so an old
+`ready` prompt with no eligible turn backlog is waiting before dispatch, not
+for capacity. Migration 1274 grants the runtime EXECUTE that 0988 deferred.
+Prompts from a non-owner waiting for a personal machine's owner still count as
+`ready`.
 The producer contract assumes one turn SDK poller for each registry/queue/pod
 UID, as in the normal chart Deployment. Embedded hosts running multiple
 same-identity workers must aggregate their SDK occupancy first; scrape

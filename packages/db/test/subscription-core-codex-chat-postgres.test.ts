@@ -517,11 +517,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
       source: "allocator",
       previousCredentialId: null,
     });
-    // The legacy session pointer never receives a core connection id.
-    const [sessionRow] = await shared!.admin<{ codex_last_credential_id: string | null }[]>`
-      select codex_last_credential_id::text as codex_last_credential_id from sessions
-      where id = ${turn.identity.sessionId}::uuid`;
-    expect(sessionRow!.codex_last_credential_id).toBeNull();
 
     const loaded = await loadSubscriptionCoreCodexCredential(
       client!.db,
@@ -1716,9 +1711,6 @@ describe.skipIf(!realDb)("Codex chat turns on the shared subscription core", () 
           where provider = ${provider}`;
         await owner`update subscription_connections set provider = ${provider}
           where id = ${personal}::uuid`;
-        await owner`insert into subscription_provider_cutovers (account_id, provider, enabled)
-          values (${org.accountId}::uuid, ${provider}, true)
-          on conflict (account_id, provider) do update set enabled = true`;
         await owner`update session_turns set subscription_authority = ${owner.json({
           version: 2,
           personal: [

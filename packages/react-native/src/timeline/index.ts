@@ -57,6 +57,7 @@ export type { ModelPickerSheetProps } from "./model-picker";
 export type { ComposerCall, SessionComposerProps } from "./composer";
 export { ApprovalStrip, defaultApprovalStripMessages, HumanInputCard } from "./decisions";
 export type { ApprovalStripMessages, ApprovalStripProps, HumanInputCardProps } from "./decisions";
+export type { ApprovalReviewLoader } from "./approval-reviews";
 export { Button, IconButton } from "./controls";
 export {
   NativeAuthNeededRow,
@@ -96,4 +97,12 @@ export {
   StatusDot,
 } from "./session-list";
 export type { SessionRowProps } from "./session-list";
+export { SessionAvatar, useNativeSessionIdentity } from "./session-avatar";
+export type {
+  NativeSessionIdentity,
+  SessionAvatarClient,
+  SessionAvatarProps,
+  SessionAvatarSize,
+  SessionIdentityClient,
+} from "./session-avatar";
 export { webColorsDark, webColorsLight } from "../ui/web-tokens.gen";

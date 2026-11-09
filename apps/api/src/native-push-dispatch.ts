@@ -182,7 +182,12 @@ export function nativePushData(payload: ClaimedNativePushDelivery["payload"]) {
 
 /** Whether a delivery rings a call (rather than showing a notification). */
 export function nativePushRingsCall(payload: ClaimedNativePushDelivery["payload"]): boolean {
-  return payload.rule === "call" && typeof payload.callId === "string";
+  return payload.rule === "call" && typeof payload.callId === "string" && !payload.callEnded;
+}
+
+/** Whether a delivery stops a ring that was settled elsewhere (Android only). */
+export function nativePushEndsCall(payload: ClaimedNativePushDelivery["payload"]): boolean {
+  return payload.rule === "call" && typeof payload.callId === "string" && !!payload.callEnded;
 }
 
 /**
@@ -193,14 +198,80 @@ export function nativePushRingsCall(payload: ClaimedNativePushDelivery["payload"
 export function nativeCallPushBody(payload: ClaimedNativePushDelivery["payload"]) {
   return {
     aps: {},
-    call: {
-      callId: payload.callId,
-      sessionId: payload.sessionId,
-      workspaceId: payload.workspaceId,
-      subjectId: payload.subjectId,
-      title: payload.title ?? null,
-      reason: payload.body ?? null,
-      ringUntil: payload.ringUntil ?? null,
+    call: nativeCallRing(payload),
+  };
+}
+
+function nativeCallRing(payload: ClaimedNativePushDelivery["payload"]) {
+  return {
+    callId: payload.callId,
+    sessionId: payload.sessionId,
+    workspaceId: payload.workspaceId,
+    subjectId: payload.subjectId,
+    title: payload.title ?? null,
+    reason: payload.body ?? null,
+    ringUntil: payload.ringUntil ?? null,
+  };
+}
+
+/**
+ * The FCM message of a push. Android notifications are data messages that
+ * expo-notifications shows. A call ring also carries `opengeniCall`, which an
+ * app with Android system calls turns into the incoming-call notification and
+ * ring screen; an app without them shows the ordinary "is calling"
+ * notification from the same message. A ring that can no longer arrive while
+ * the call rings is dropped by FCM. The end of a ring settled elsewhere is a
+ * data-only message with nothing to show: it replaces the ring when that has
+ * not arrived yet (same collapse key), and expo-notifications presents no
+ * notification for it.
+ */
+export type NativeFcmMessage = {
+  token: string;
+  android: { priority: "HIGH"; collapse_key?: string | undefined; ttl?: string };
+  data: { title?: string; message?: string; body?: string; opengeniCall?: string };
+};
+
+export function nativeFcmMessage(
+  delivery: Pick<ClaimedNativePushDelivery, "token" | "payload">,
+  now = Date.now(),
+): NativeFcmMessage {
+  const ringSeconds =
+    delivery.payload.rule === "call"
+      ? Math.max(0, Math.floor((Date.parse(delivery.payload.ringUntil ?? "") - now) / 1000))
+      : NaN;
+  if (nativePushEndsCall(delivery.payload)) {
+    return {
+      token: delivery.token,
+      android: {
+        priority: "HIGH",
+        collapse_key: delivery.payload.callId,
+        ...(Number.isFinite(ringSeconds) ? { ttl: `${ringSeconds}s` } : {}),
+      },
+      data: {
+        opengeniCall: JSON.stringify({
+          type: "ended",
+          callId: delivery.payload.callId,
+          reason: delivery.payload.callEnded,
+        }),
+      },
+    };
+  }
+  const alert = nativePushAlert(delivery.payload);
+  const ring = nativePushRingsCall(delivery.payload);
+  return {
+    token: delivery.token,
+    android: {
+      priority: "HIGH",
+      collapse_key: ring ? delivery.payload.callId : delivery.payload.sessionId,
+      ...(Number.isFinite(ringSeconds) ? { ttl: `${ringSeconds}s` } : {}),
+    },
+    data: {
+      title: alert.title,
+      message: [alert.subtitle, alert.body].filter(Boolean).join("\n") || alert.title,
+      body: JSON.stringify(nativePushData(delivery.payload)),
+      ...(ring
+        ? { opengeniCall: JSON.stringify({ type: "ring", ...nativeCallRing(delivery.payload) }) }
+        : {}),
     },
   };
 }
@@ -283,6 +354,10 @@ export function createApnsSender(input: {
   return async (delivery) => {
     const host =
       delivery.environment === "development" ? "api.sandbox.push.apple.com" : "api.push.apple.com";
+    if (nativePushEndsCall(delivery.payload)) {
+      // CallKit hears a call's outcome from the app; only Android gets these.
+      return { outcome: "failed", error: "Ended-call pushes are Android only" };
+    }
     const ring = nativePushRingsCall(delivery.payload);
     if (ring && !delivery.voipToken) {
       return { outcome: "failed", error: "No PushKit token for this phone" };
@@ -409,7 +484,6 @@ export function createFcmSender(input: {
   };
   return async (delivery) => {
     try {
-      const alert = nativePushAlert(delivery.payload);
       const response = await http(
         `https://fcm.googleapis.com/v1/projects/${account.project_id}/messages:send`,
         {
@@ -418,17 +492,7 @@ export function createFcmSender(input: {
             authorization: `Bearer ${await accessToken()}`,
             "content-type": "application/json",
           },
-          body: JSON.stringify({
-            message: {
-              token: delivery.token,
-              android: { priority: "HIGH", collapse_key: delivery.payload.sessionId },
-              data: {
-                title: alert.title,
-                message: [alert.subtitle, alert.body].filter(Boolean).join("\n") || alert.title,
-                body: JSON.stringify(nativePushData(delivery.payload)),
-              },
-            },
-          }),
+          body: JSON.stringify({ message: nativeFcmMessage(delivery) }),
           signal: AbortSignal.timeout(10_000),
         },
       );

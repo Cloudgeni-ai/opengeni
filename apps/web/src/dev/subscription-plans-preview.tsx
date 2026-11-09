@@ -1,4 +1,5 @@
 import { useLayoutEffect, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { BillingPlanBalance, BillingSubscriptionCatalog } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { AppContext } from "@opengeni/react/app/app-context";
@@ -12,6 +13,7 @@ import { Section, SectionStack, SectionVariantProvider } from "@opengeni/react/u
 import { SettingRowGroup } from "@opengeni/react/ui/setting-row";
 import type { BillingSummary } from "@opengeni/react/app/types";
 import { seatUpgradeFor } from "@opengeni/react/app/lib/subscription-plans";
+import { CreditProtectionPreview } from "./credit-protection-preview";
 
 /** DEV only. The production components with deterministic API fixtures, no payments. */
 export const previewPlans: BillingSubscriptionCatalog["plans"] = [
@@ -131,7 +133,7 @@ export function SubscriptionPlansPreview() {
     async createSubscriptionPortalSession() {
       throw new Error("Preview only. Manage billing opens Stripe.");
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const billing: BillingSummary = {
     mode: "stripe",
     balance: {
@@ -244,21 +246,23 @@ export function SubscriptionPlansPreview() {
               </>
             ) : (
               <>
-                <SubscriptionPlans
-                  client={client}
-                  accountId={billing.balance.accountId}
-                  returnUrl={window.location.href}
-                  catalog={{
-                    accountId: billing.balance.accountId,
-                    revision: 1,
-                    plans: previewPlans,
-                    plan,
-                  }}
-                  plan={plan}
-                  canManage
-                  supportEmail="support@opengeni.ai"
-                  onChanged={() => undefined}
-                />
+                {view !== "protection" ? (
+                  <SubscriptionPlans
+                    client={client}
+                    accountId={billing.balance.accountId}
+                    returnUrl={window.location.href}
+                    catalog={{
+                      accountId: billing.balance.accountId,
+                      revision: 1,
+                      plans: previewPlans,
+                      plan,
+                    }}
+                    plan={plan}
+                    canManage
+                    supportEmail="support@opengeni.ai"
+                    onChanged={() => undefined}
+                  />
+                ) : null}
                 <Section title="Credit balance and top-ups">
                   <div className="space-y-4">
                     <OrganizationCreditBalance
@@ -285,6 +289,7 @@ export function SubscriptionPlansPreview() {
                     ) : null}
                   </div>
                 </Section>
+                {view === "protection" ? <CreditProtectionPreview /> : null}
               </>
             )}
           </SectionStack>

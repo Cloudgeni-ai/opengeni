@@ -441,7 +441,7 @@ export async function runOrganizationAction(
     ) {
       return {
         refused: failure(
-          `Nothing was run: this person uses Opengeni through another product, so app actions reach only this chat's workspace (workspaceId ${externalWorkspace ?? "unavailable"}). Organization-wide settings, billing and other workspaces aren't available here. Tell them plainly, without pointing them to a page.`,
+          `Nothing was run: this person uses this chat through another product, so app actions reach only this chat's workspace (workspaceId ${externalWorkspace ?? "unavailable"}). Organization-wide settings, billing and other workspaces aren't available here. Tell them plainly, without pointing them to a page.`,
         ),
       };
     }
@@ -567,7 +567,7 @@ async function toolResult(
     (status === 401 || status === 403) &&
     /human|browser|cookie|same-origin/i.test(JSON.stringify(result.body ?? ""))
   ) {
-    result.hint = "This action has to be done by the person in the Opengeni app in a browser.";
+    result.hint = "This action has to be done by the person in the web app in a browser.";
   }
   if (options.note && status < 400) result.note = options.note;
   return {
@@ -701,7 +701,7 @@ function json(value: unknown): CallToolResult {
 /** A browser-only action: say why, and that the person has to do it. */
 function browserOnly(entry: ActionCatalogEntry): CallToolResult {
   return failure(
-    `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. The person has to do it in the Opengeni app in a browser.`,
+    `${entry.id} isn't available to connected agents or API keys: ${entry.browserOnly}. The person has to do it in the web app in a browser.`,
   );
 }
 

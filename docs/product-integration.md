@@ -8,6 +8,52 @@ product owns its users, tenant admission, business data, navigation, and Skill
 catalog. Opengeni owns durable agent sessions, turns, events, approvals, files,
 tools, and execution.
 
+The console, mobile and packaged chat UI explicitly select `client.withSessionResponse("chat")`.
+These SDK clients send `Accept: application/json; opengeni-session=chat` on JSON requests. Session
+responses for chat reads, lists and mutations then omit `instructions`, `skills`
+and `effectiveTools`. Console/mobile chat views and embedded conversations use this
+small response. The console's Agent tool details and “create agent from chat” read
+`client.getSessionConfiguration(workspaceId, sessionId)` explicitly. The SDK's
+default remains the full response with required `Session` fields, so upgrading a
+server or SDK alone does not break existing field readers. Compact clients return
+`ChatSession`; callers needing configuration use the explicit method, or
+`GET /v1/workspaces/{workspaceId}/sessions/{sessionId}/configuration`, with
+`sessions:control` and access to the session. The packaged relay refuses that read
+and `model-context` when `createSession` makes setup server-owned. This does not
+change stored configuration, worker input or agent-facing MCP reads. Older APIs
+retain their old response until upgraded. Requests without this Accept preference retain the
+historical full response for previously shipped clients. Custom browser relays
+must add this Accept preference themselves, not let a browser choose the legacy response.
+The packaged relay does this automatically. This is an additive rollout; a future
+default change requires a separate compatibility decision after old clients migrate.
+Using the existing `Accept` header adds no CORS preflight requirement on older APIs.
+
+```ts
+const client = new OpenGeniClient({ baseUrl }); // existing full SDK contract
+const chatClient = client.withSessionResponse("chat"); // separate client; leaves client unchanged
+const chat = await chatClient.getSession(workspaceId, sessionId); // ChatSession
+const configuration = await chatClient.getSessionConfiguration(workspaceId, sessionId); // Session
+```
+
+Public React hooks, `OpenGeniProvider` and `createEmbeddedSessionClient` honor the
+client supplied by the application; they do not switch an existing full client
+to compact responses. For a custom chat, pass `chatClient` to the provider or
+hook. Passing the compact client directly to a hook also selects its compact
+return type; existing default/full hook callers retain the full `Session` type.
+The packaged chat's own clients explicitly opt in.
+Exported structural clients and annotated hook options also default to full
+responses. Custom compact wrappers can write `SessionClientLike<ChatClient>` or
+`UseSessionOptions<ChatClient>` (with `ChatClient` imported from the SDK). The
+embedded adapter preserves the input client's full or compact return contract.
+
+For cross-origin relays, use the SDK's `OPENGENI_BROWSER_REQUEST_HEADERS` for CORS
+allowed request headers and `OPENGENI_BROWSER_RESPONSE_HEADERS` for exposed response
+headers. The API and packaged relay share the response list; server-route adapters
+inherit it. Preserve those headers at every hop, including same-origin relays.
+Missing history metadata produces one SDK console warning per client, naming the
+unreadable headers and the exposure configuration to fix. See
+[the proxy guide](../docs-site/integrate/proxy-from-any-backend.mdx#headers).
+
 API and SDK/embedded requests use credits, not monthly app-plan credit.
 Connected AI subscriptions are for paid-plan app work and cannot serve API
 requests; an explicit selection returns `subscription_api_unavailable` (403),
@@ -16,6 +62,13 @@ supported. Their platform fee is configuration-driven; at
 `OPENGENI_BYOK_PLATFORM_FEE_BPS=0` there is no fee or paid-credit admission
 requirement for it. See [billing-origin.md](billing-origin.md) for funding and
 the existing internal-account legacy terms.
+
+A self-hosted operator that owns the subscriptions it connects can let its own
+product's API requests use them by setting
+`OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED=true` on the deployment (default
+`false`); the operator is responsible for its provider's terms. See
+[deployment.md](deployment.md) and
+[billing-origin.md](billing-origin.md#connected-subscriptions-and-api-work).
 
 The canonical server-side integration uses:
 
@@ -292,7 +345,10 @@ only narrow their parent (`agent_config_widening`), and a goal needs `goals`.
 Every built-in tool and prompt section follows what the session can use, so
 `"none"` pays only for what is relevant on each call: a neutral identity
 without a shared workspace; `request_human_input` with the secret kind only
-under `secrets` and Skill reviews only under `skills: "manage"`;
+under `secrets` and Skill reviews only under `skills: "manage"`, and not at all
+when nobody can answer (a session created with `unattended: true`, or
+`humanInput: false`; an API-started session keeps it because the backend can
+answer, and a child session because its parent agent can);
 `wait_for_input` only with a sandbox, `subagents`, `goals`, `schedules`,
 `browser`, `media` or `workspaceAdmin` (an answer to a question resumes the turn
 on its own), and the Codemode guidance only with a sandbox or `run_on`; tool
@@ -595,6 +651,13 @@ beyond the creating session. Omitting `firstPartyMcpTools` inherits the
 deployment's non-connector default catalog, and omitting `tools` inherits
 workspace MCP defaults; explicit empty arrays suppress those respective
 selections.
+
+A scheduled task the app creates takes the same two fields in its
+`agentConfig` for the chats it starts; without them its runs get the
+deployment defaults, not the selection of the app's other chats. They are set
+once at creation, so give an older task the app's selection by creating it
+again. Create a user's schedules as that user (`asUser`): an ownerless task has
+nobody to notify, and its runs are not offered `notify_user` or `call_user`.
 
 Creating a workspace does not create a dedicated cluster or permanently
 running sandbox. It adds control-plane state and may require per-workspace

@@ -182,11 +182,13 @@ export function runtimeStrategy(
     return {
       name: label,
       description,
-      async search({ query }) {
+      async search({ query, limit }) {
         costed?.drain();
         const spend = { usd: 0 };
         const started = performance.now();
-        const marker = await meaningSpend.run(spend, () => runtime.prepareSearch({ query }));
+        const marker = await meaningSpend.run(spend, () =>
+          runtime.prepareSearch(limit === undefined ? { query } : { query, limit }),
+        );
         const latencyMs = performance.now() - started;
         const drained = costed?.drain() ?? { costUsd: 0, decisions: [], errors: [] };
         const { decisions, errors } = drained;

@@ -53,6 +53,19 @@ const KNOWN_PROVIDER_NAMES: Record<string, string> = {
 };
 
 /**
+ * The connection an agent's capability card asks to reconnect: one of the
+ * person's accounts that stopped working (its provider rejected the saved
+ * sign-in). Undefined for a first connection.
+ */
+export function capabilityReconnectConnectionId(item: AuthNeededItem): string | undefined {
+  return item.capability &&
+    item.connectionId &&
+    (item.reason === "expired" || item.reason === "refresh_failed")
+    ? item.connectionId
+    : undefined;
+}
+
+/**
  * Present one auth notice. `setupUnavailable`: this person cannot set an
  * agent's request up from here, so say so instead of offering a review.
  */
@@ -71,8 +84,10 @@ export function authNeededPresentation(
   const unavailable = UNAVAILABLE_REASONS.has(item.reason);
   const missing = item.reason === "missing_connection";
   // An agent's request to set something up is a first connection: never
-  // "reconnect", which only fits an account that was connected before.
-  const request = recommendation ?? item.setupRequest ?? null;
+  // "reconnect", which only fits an account that was connected before; unless
+  // the agent asked to reconnect one exact account that stopped working.
+  const reconnect = capabilityReconnectConnectionId(item) !== undefined;
+  const request = reconnect ? null : (recommendation ?? item.setupRequest ?? null);
   // A connected account that needs more access is asked to allow it, not to
   // "reconnect": nothing lapsed.
   const moreAccess = !request && item.reason === "insufficient_scope" && !!item.connectionId;
@@ -81,30 +96,34 @@ export function authNeededPresentation(
     : [];
   // A plugin is installed for the workspace, not connected to an account.
   const plugin = recommendation?.kind === "plugin";
-  const actionLabel = recommendation
-    ? recommendation.action === "connect"
-      ? t("messageTimeline.connect")
-      : t("messageTimeline.review")
-    : missing || request
-      ? t("messageTimeline.connect")
-      : moreAccess
-        ? t("messageTimeline.allowAccess")
-        : t("messageTimeline.reconnect");
-  const title = recommendation
-    ? plugin
-      ? t("messageTimeline.installProvider", { provider })
-      : recommendation.action === "connect"
-        ? t("messageTimeline.connectProvider", { provider })
-        : recommendation.action === "add_credentials"
-          ? t("messageTimeline.setUpProvider", { provider })
-          : t("messageTimeline.enableProvider", { provider })
-    : item.setupRequest
-      ? t("messageTimeline.setUpProvider", { provider })
-      : unavailable
-        ? t("messageTimeline.providerToolsUnavailable", { provider })
+  const actionLabel = reconnect
+    ? t("messageTimeline.reconnect")
+    : recommendation
+      ? recommendation.action === "connect"
+        ? t("messageTimeline.connect")
+        : t("messageTimeline.review")
+      : missing || request
+        ? t("messageTimeline.connect")
         : moreAccess
-          ? t("messageTimeline.giveProviderMoreAccess", { provider })
-          : `${actionLabel} ${provider}`;
+          ? t("messageTimeline.allowAccess")
+          : t("messageTimeline.reconnect");
+  const title = reconnect
+    ? `${actionLabel} ${provider}`
+    : recommendation
+      ? plugin
+        ? t("messageTimeline.installProvider", { provider })
+        : recommendation.action === "connect"
+          ? t("messageTimeline.connectProvider", { provider })
+          : recommendation.action === "add_credentials"
+            ? t("messageTimeline.setUpProvider", { provider })
+            : t("messageTimeline.enableProvider", { provider })
+      : item.setupRequest
+        ? t("messageTimeline.setUpProvider", { provider })
+        : unavailable
+          ? t("messageTimeline.providerToolsUnavailable", { provider })
+          : moreAccess
+            ? t("messageTimeline.giveProviderMoreAccess", { provider })
+            : `${actionLabel} ${provider}`;
   const reasonLine =
     recommendation?.rationale ??
     item.setupRequest?.rationale ??

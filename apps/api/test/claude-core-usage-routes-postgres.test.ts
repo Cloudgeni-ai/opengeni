@@ -103,10 +103,6 @@ async function organization(): Promise<Org> {
     insert into workspace_memberships (account_id, workspace_id, subject_id, role)
     values (${grant.accountId}::uuid, ${grant.workspaceId}::uuid, ${memberSubjectId}, 'member')
     on conflict do nothing`;
-  await shared.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${grant.accountId}::uuid, 'claude', true)
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
   return {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
@@ -495,10 +491,6 @@ describe("the owner's personal connection on the core route", () => {
       from organization_memberships
       where account_id = ${accountId}::uuid and subject_id = ${subjectId}`;
     expect(access.workspaceGrants.map((grant) => grant.workspaceId)).toContain(sharedWorkspace.id);
-    await shared.admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, 'claude', true)
-      on conflict (account_id, provider) do update set enabled = excluded.enabled`;
     const org: Org = {
       accountId,
       workspaceId: sharedWorkspace.id,

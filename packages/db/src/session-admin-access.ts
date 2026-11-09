@@ -14,7 +14,10 @@ import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
  * every action it runs is checked against the person's live access. Every use
  * goes through {@link resolveSessionAdminAuthority}, which re-checks the
  * allowance, the grant, its time limit and that the person still belongs to
- * the session's workspace.
+ * the session's workspace. What a turn may do with it goes through
+ * {@link resolveSessionAppActionAuthority}: only turns the person who gave it
+ * caused run as them, so another member's message in the same shared chat
+ * never does.
  */
 export type OrganizationAgentAdminAccess = {
   sessionAdminAccessAllowed: boolean;
@@ -325,6 +328,9 @@ export async function revokeSessionAdminAccess(
  * call: the organization must still allow it, the grant must still exist and
  * be within its time limit, and the person who gave it must still belong to
  * the session's workspace (or be an active owner or admin).
+ *
+ * This describes the session (its grant state and tool listing), not a turn:
+ * anything acting for a turn uses {@link resolveSessionAppActionAuthority}.
  */
 export async function resolveSessionAdminAuthority(
   db: Database,
@@ -434,6 +440,81 @@ export async function getSessionAdminAccessView(
     ),
   ]);
   return { ...details, active: authority !== null };
+}
+
+type TurnCause = {
+  createdByKind: string;
+  parentSessionId: string | null;
+  source: string;
+  initiatorKind: string;
+  initiatorSubjectId: string;
+  initiatingHumanSubjectId: string | null;
+  frozen: {
+    subjectId: string;
+    changes: string;
+    permissions: string[];
+  } | null;
+};
+
+/** A turn of this session with who caused it and its frozen app-action grant, or null. */
+async function readTurnCause(
+  scopedDb: Database,
+  input: { workspaceId: string; sessionId: string; turnId: string },
+): Promise<TurnCause | null> {
+  const [row] = await scopedDb
+    .select({
+      createdByKind: schema.sessions.createdByKind,
+      parentSessionId: schema.sessions.parentSessionId,
+      source: schema.sessionTurns.source,
+      initiatorKind: schema.sessionTurns.initiatorKind,
+      initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+      initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+    })
+    .from(schema.sessionTurns)
+    .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionTurns.sessionId))
+    .where(
+      and(
+        eq(schema.sessionTurns.id, input.turnId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        eq(schema.sessions.workspaceId, input.workspaceId),
+      ),
+    )
+    .limit(1);
+  if (!row) return null;
+  const [frozen] = await scopedDb
+    .select({
+      subjectId: schema.sessionTurnAppActionGrants.subjectId,
+      changes: schema.sessionTurnAppActionGrants.changes,
+      permissions: schema.sessionTurnAppActionGrants.permissions,
+    })
+    .from(schema.sessionTurnAppActionGrants)
+    .where(
+      and(
+        eq(schema.sessionTurnAppActionGrants.turnId, input.turnId),
+        eq(schema.sessionTurnAppActionGrants.workspaceId, input.workspaceId),
+      ),
+    )
+    .limit(1);
+  return { ...row, frozen: frozen ?? null };
+}
+
+/** A message a person sent themselves (not a schedule, goal, inbox or other continuation). */
+function sentByPerson(turn: TurnCause): boolean {
+  return turn.initiatorKind === "subject" && (turn.source === "user" || turn.source === "api");
+}
+
+/**
+ * The person who caused this turn, as far as full access is concerned: for a
+ * person's message, its sender, when the grant frozen with it is theirs; for
+ * any other turn (a schedule, a goal, an inbox delivery, another agent's
+ * message), the causal person recorded when it was accepted. Null when nobody
+ * is recorded (a workspace key, a service, pure service work).
+ */
+function turnCausalPerson(turn: TurnCause): string | null {
+  if (sentByPerson(turn)) {
+    return turn.frozen?.subjectId === turn.initiatorSubjectId ? turn.initiatorSubjectId : null;
+  }
+  return turn.initiatingHumanSubjectId?.trim() || null;
 }
 
 /**
@@ -563,8 +644,11 @@ export async function readTurnSenderAccess(
 /**
  * As whom an app action in this turn runs, checked live on every call:
  *
- * - `full_access`: the session has full access; the person who gave it, with
- *   everything they can do, no confirmation (unchanged).
+ * - `full_access`: the session has full access and this turn is one the
+ *   person who gave it caused: their own message (with the grant frozen with
+ *   it theirs), or a continuation whose recorded causal person is them. That
+ *   person, with everything they can do, no confirmation. A turn someone else
+ *   caused continues below exactly as without full access.
  * - `confirm`: the person who sent this turn's message, in a session a person
  *   started, in an organization that allows in-chat actions, from where they
  *   can confirm (see {@link TurnAppActionGrant}). Reads run; each change runs
@@ -587,72 +671,44 @@ export async function resolveSessionAppActionAuthority(
   | { kind: "unavailable"; reason: SessionAppActionUnavailableReason }
 > {
   const full = await resolveSessionAdminAuthority(db, input);
-  if (full) return { kind: "full_access", subjectId: full.subjectId };
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      const turn = await readTurnCause(scopedDb, input);
+      if (full && turn && turnCausalPerson(turn) === full.subjectId) {
+        return { kind: "full_access", subjectId: full.subjectId } as const;
+      }
       const allowance = await readAllowance(scopedDb, input.accountId);
       if (!allowance.chatActionsAllowed) {
         return { kind: "unavailable", reason: "organization_off" } as const;
       }
-      const [row] = await scopedDb
-        .select({
-          createdByKind: schema.sessions.createdByKind,
-          parentSessionId: schema.sessions.parentSessionId,
-          source: schema.sessionTurns.source,
-          initiatorKind: schema.sessionTurns.initiatorKind,
-          initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-        })
-        .from(schema.sessionTurns)
-        .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionTurns.sessionId))
-        .where(
-          and(
-            eq(schema.sessionTurns.id, input.turnId),
-            eq(schema.sessionTurns.sessionId, input.sessionId),
-            eq(schema.sessions.workspaceId, input.workspaceId),
-          ),
-        )
-        .limit(1);
-      if (!row || row.createdByKind !== "subject" || row.parentSessionId !== null) {
+      if (!turn || turn.createdByKind !== "subject" || turn.parentSessionId !== null) {
         return { kind: "unavailable", reason: "not_person_session" } as const;
       }
       // Only a message a person sent; schedules, goals, inbox and other
       // continuations run with nobody there to confirm anything.
-      if (row.initiatorKind !== "subject" || (row.source !== "user" && row.source !== "api")) {
+      if (!sentByPerson(turn)) {
         return { kind: "unavailable", reason: "no_person_present" } as const;
       }
-      const [frozen] = await scopedDb
-        .select({
-          subjectId: schema.sessionTurnAppActionGrants.subjectId,
-          changes: schema.sessionTurnAppActionGrants.changes,
-          permissions: schema.sessionTurnAppActionGrants.permissions,
-        })
-        .from(schema.sessionTurnAppActionGrants)
-        .where(
-          and(
-            eq(schema.sessionTurnAppActionGrants.turnId, input.turnId),
-            eq(schema.sessionTurnAppActionGrants.workspaceId, input.workspaceId),
-          ),
-        )
-        .limit(1);
+      const { frozen } = turn;
       // No frozen grant: an API key, a service, or a message accepted before
       // this existed. Nobody signed in to act for.
-      if (!frozen || frozen.subjectId !== row.initiatorSubjectId) {
+      if (!frozen || frozen.subjectId !== turn.initiatorSubjectId) {
         return { kind: "unavailable", reason: "not_signed_in_person" } as const;
       }
       if (
         !(await canActInWorkspace(scopedDb, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          subjectId: row.initiatorSubjectId,
+          subjectId: turn.initiatorSubjectId,
         }))
       ) {
         return { kind: "unavailable", reason: "not_member" } as const;
       }
       return {
         kind: frozen.changes === "confirm" ? "confirm" : "read_only",
-        subjectId: row.initiatorSubjectId,
+        subjectId: turn.initiatorSubjectId,
         permissions: frozen.permissions.flatMap((value) => {
           const parsed = Permission.safeParse(value);
           return parsed.success ? [parsed.data] : [];

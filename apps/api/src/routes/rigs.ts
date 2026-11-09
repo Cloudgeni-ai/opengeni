@@ -42,7 +42,6 @@ import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
 import { parseRequestJson } from "../http/request-body";
 import {
-  organizationComputeHere,
   organizationComputeReachResponse,
   requireComputeReachCaller,
   requireOrganizationCompute,
@@ -197,21 +196,14 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   // Every organization sandbox environment, wherever it works: names and
   // where each works, for the organization owners and admins who decide that
   // (Organization settings > Shared). The list above holds only the ones that
-  // work here. Until the list routine is granted (migration 1224), the
-  // organization ones that work in this workspace, with `complete: false`.
+  // work here.
   app.get("/v1/workspaces/:workspaceId/organization-rigs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId, "rigs:use");
     requireOrganizationComputeLister(authorization, "sandbox environment");
-    const grant = authorization.grant;
-    const everywhere = await listOrganizationCompute(db, grant, "rig");
-    if (everywhere) {
-      return c.json({ rigs: everywhere, complete: true } satisfies ListOrganizationRigsResponse);
-    }
-    const here = (await listRigs(db, grant)).filter((rig) => rig.status === "active");
     return c.json({
-      rigs: organizationComputeHere(here),
-      complete: false,
+      rigs: await listOrganizationCompute(db, authorization.grant, "rig"),
+      complete: true,
     } satisfies ListOrganizationRigsResponse);
   });
 

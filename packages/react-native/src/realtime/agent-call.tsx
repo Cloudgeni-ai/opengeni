@@ -1,4 +1,5 @@
 import { useSession, useSessionEvents, useTurnQueue } from "@opengeni/react/session";
+import type { ChatClient } from "@opengeni/sdk";
 import { useRealtimeModelSelection } from "@opengeni/react/session-realtime";
 import { OpenGeniApiError, type EffectiveSessionControl, type OpenGeniClient } from "@opengeni/sdk";
 import {
@@ -73,7 +74,7 @@ export type NativeAgentCallContextValue = {
 };
 
 export type NativeOutsideCallContext = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   /** The session the request named (Phone recents), or null (Siri, a control, a shortcut). */
   requested: string | null;
@@ -84,7 +85,7 @@ export type NativeOutsideCallContext = {
 };
 
 export type NativeAgentCallProviderProps = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   /** No calls start until the host has a workspace. */
   workspaceId: string | null;
   /** Whether the user's workspace can use Codex voice models. */
@@ -145,6 +146,9 @@ type CallTarget = {
   systemTarget: string | null;
   /** An agent's call the person answered: voice runs on that system call. */
   answeredCallId?: string | undefined;
+  /** Mounted silently; provider preconnection additionally requires the native audio gate. */
+  ringing?: boolean | undefined;
+  incomingDevice?: string | undefined;
 };
 
 /**
@@ -234,12 +238,29 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
   useIncomingAgentCalls({
     client,
     callAdapter,
-    onAnswered: (call) => {
+    onRinging: (call, device) => {
+      setTarget(
+        (current) =>
+          current ?? {
+            workspaceId: call.workspaceId,
+            sessionId: call.sessionId,
+            systemTarget: call.sessionId,
+            answeredCallId: call.callId,
+            ringing: true,
+            incomingDevice: device,
+          },
+      );
+    },
+    onEnded: (callId) => {
+      setTarget((current) => (current?.answeredCallId === callId ? null : current));
+    },
+    onAnswered: (call, device) => {
       setTarget({
         workspaceId: call.workspaceId,
         sessionId: call.sessionId,
         systemTarget: call.sessionId,
         answeredCallId: call.callId,
+        incomingDevice: device,
       });
       setExpanded(true);
     },
@@ -277,8 +298,13 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
     };
   }, []);
   const value = useMemo(
-    () => ({ sessionId: target?.sessionId ?? null, callSession, callFromOutside, hidePillFor }),
-    [callFromOutside, callSession, hidePillFor, target?.sessionId],
+    () => ({
+      sessionId: target?.ringing ? null : (target?.sessionId ?? null),
+      callSession,
+      callFromOutside,
+      hidePillFor,
+    }),
+    [callFromOutside, callSession, hidePillFor, target?.sessionId, target?.ringing],
   );
   const finish = useCallback(() => {
     setTarget(null);
@@ -288,15 +314,16 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
   return (
     <NativeAgentCallContext.Provider value={value}>
       {props.children}
-      {target ? (
-        <ActiveAgentCall
-          key={`${target.sessionId}:${target.answeredCallId ?? ""}`}
+      {target?.workspaceId || workspaceId ? (
+        <AgentCallHost
+          key={target?.workspaceId ?? workspaceId}
           {...props}
+          workspaceId={(target?.workspaceId ?? workspaceId)!}
           target={target}
           messages={messages}
           onError={onError}
           expanded={expanded}
-          pillHidden={pillHiddenFor.includes(target.sessionId)}
+          pillHidden={target ? pillHiddenFor.includes(target.sessionId) : false}
           onExpand={() => setExpanded(true)}
           onMinimize={() => setExpanded(false)}
           onFinished={finish}
@@ -306,16 +333,39 @@ export function NativeAgentCallProvider(props: NativeAgentCallProviderProps) {
   );
 }
 
+type AgentCallSurfaceProps = NativeAgentCallProviderProps & {
+  messages: NativeAgentCallMessages;
+  onError(title: string, message?: string): void;
+  expanded: boolean;
+  pillHidden: boolean;
+  onExpand(): void;
+  onMinimize(): void;
+  onFinished(): void;
+};
+
+/** Resolve the workspace's voice choice before a call, retaining the loaded catalog. */
+function AgentCallHost(
+  props: AgentCallSurfaceProps & { workspaceId: string; target: CallTarget | null },
+) {
+  const selection = useRealtimeModelSelection({
+    client: props.client,
+    workspaceId: props.workspaceId,
+    codexConnected: props.codexConnected,
+  });
+  return props.target ? (
+    <ActiveAgentCall
+      key={`${props.target.sessionId}:${props.target.answeredCallId ?? ""}`}
+      {...props}
+      target={props.target}
+      selection={selection}
+    />
+  ) : null;
+}
+
 function ActiveAgentCall(
-  props: NativeAgentCallProviderProps & {
+  props: AgentCallSurfaceProps & {
     target: CallTarget;
-    messages: NativeAgentCallMessages;
-    onError(title: string, message?: string): void;
-    expanded: boolean;
-    pillHidden: boolean;
-    onExpand(): void;
-    onMinimize(): void;
-    onFinished(): void;
+    selection: ReturnType<typeof useRealtimeModelSelection>;
   },
 ) {
   const { client, codexConnected, messages, onError, onFinished } = props;
@@ -334,7 +384,7 @@ function ActiveAgentCall(
     enabled: true,
     events: feed.events,
   });
-  const selection = useRealtimeModelSelection({ client, workspaceId, codexConnected });
+  const selection = props.selection;
   // Native voice streams over WebRTC; fall back from a browser-only voice model.
   const voice = nativeRealtimeModelSupported(selection.selectedModel.id)
     ? selection.selectedModel
@@ -348,7 +398,9 @@ function ActiveAgentCall(
     sessionStatus: session.session?.status ?? feed.sessionStatus ?? "idle",
     effectiveControl: queue.effectiveControl ?? LOADING_CONTROL,
     events: feed.events,
-    eventsReady: !feed.initialLoading,
+    // Observing lifecycle can recover a stored owner. Ring preparation must
+    // not recover/start another provider call before this phone wins Answer.
+    eventsReady: !props.target.ringing && !feed.initialLoading,
     codexConnected,
     model: voice.id,
     modelAvailable: voice.available,
@@ -369,7 +421,36 @@ function ActiveAgentCall(
   // be replaced right after the start, which aborts the connection.
   const startedRef = useRef(false);
   const { canStart, start } = call;
-  const ready = canStart && selection.catalogReady;
+  const ready = canStart && selection.catalogReady && !props.target.ringing;
+  const { prepare, prepareIncoming } = realtime;
+  const incomingPreparationAttempted = useRef(false);
+  useEffect(() => {
+    if (!canStart || !selection.catalogReady) return;
+    if (
+      props.callAdapter?.incoming?.connectsBeforeAnswer === true &&
+      voice.incomingPreparation &&
+      props.target.ringing &&
+      props.target.answeredCallId &&
+      props.target.incomingDevice
+    ) {
+      if (incomingPreparationAttempted.current) return;
+      incomingPreparationAttempted.current = true;
+      void prepareIncoming({
+        callId: props.target.answeredCallId,
+        device: props.target.incomingDevice,
+      }).catch(() => undefined);
+    } else void prepare().catch(() => undefined);
+  }, [
+    canStart,
+    prepare,
+    prepareIncoming,
+    selection.catalogReady,
+    props.target.ringing,
+    props.target.answeredCallId,
+    props.target.incomingDevice,
+    voice.incomingPreparation,
+    props.callAdapter?.incoming?.connectsBeforeAnswer,
+  ]);
   const onCallStartingRef = useRef(props.onCallStarting);
   onCallStartingRef.current = props.onCallStarting;
   useEffect(() => {
@@ -382,13 +463,22 @@ function ActiveAgentCall(
     });
   }, [messages.couldNotStart, onError, onFinished, ready, start]);
   // A call that ran and ended (here, on the lock screen or by the agent) closes.
+  const observedStartedCall = useRef(false);
   useEffect(() => {
-    if (startedRef.current && call.phase === "idle" && !call.error) onFinished();
+    if (call.phase !== "idle") observedStartedCall.current = true;
+    else if (startedRef.current && observedStartedCall.current && !call.error) onFinished();
   }, [call.error, call.phase, onFinished]);
   // Surface a blocker that will never clear (for example voice not connected).
   const blocker = realtime.admissionBlocker;
   useEffect(() => {
-    if (startedRef.current || !blocker || feed.initialLoading || !queue.effectiveControl) return;
+    if (
+      props.target.ringing ||
+      startedRef.current ||
+      !blocker ||
+      feed.initialLoading ||
+      !queue.effectiveControl
+    )
+      return;
     const timer = setTimeout(() => {
       if (startedRef.current) return;
       onError(messages.cannotCallSession, blocker);
@@ -402,9 +492,11 @@ function ActiveAgentCall(
     onError,
     onFinished,
     queue.effectiveControl,
+    props.target.ringing,
   ]);
 
   const surface = (node: ReactNode) => (props.renderSurface ? props.renderSurface(node) : node);
+  if (props.target.ringing) return null;
   return (
     <>
       <Modal

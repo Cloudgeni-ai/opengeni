@@ -1,16 +1,13 @@
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
-import gmailLogo from "./assets/gmail.ico";
+import { bundledServiceLogo } from "./connection-service-presentation";
 
 /** Passive catalogue identity, shared by embedded and console surfaces. */
 export function capabilityLogoFallback(
   item: Pick<CapabilityCatalogItem, "id"> &
     Partial<Pick<CapabilityCatalogItem, "metadata" | "mcpUrl">>,
 ): string | null {
-  if (
-    item.id.startsWith("mcp:integrations-sh:gmailmcp-googleapis-com-") ||
-    item.mcpUrl === "https://gmailmcp.googleapis.com/mcp/v1"
-  )
-    return gmailLogo;
+  const bundled = bundledServiceLogo(item);
+  if (bundled) return bundled;
   const original = item.metadata?.originalLogoUrl;
   if (typeof original !== "string") return null;
   try {

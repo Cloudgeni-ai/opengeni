@@ -18,7 +18,7 @@ const {
   reconcileSubscriptionCoreCapacityWait,
   withSessionRlsActorContext,
   withRlsContext,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
 } = await import("../src");
 import { rawRows } from "../src/database";
@@ -55,9 +55,6 @@ async function fixture(candidateProviders?: string[]) {
     (provider,migration,committed_at,seed_rotation)
     values ('claude','9999_waiter_fixture.sql',clock_timestamp(),'{}'::jsonb)
     on conflict do nothing`;
-  await shared.admin`insert into subscription_provider_cutovers(account_id,provider,enabled)
-    values (${accountId}::uuid,'codex',true),(${accountId}::uuid,'claude',true)
-    on conflict(account_id,provider) do update set enabled=true`;
   const session = await withSessionRlsActorContext({ subjectId }, () =>
     createSession(client.db, {
       accountId,
@@ -144,6 +141,18 @@ async function deliveries(f: Awaited<ReturnType<typeof fixture>>) {
   const [generic] = await shared.admin`select coalesce(max(wake_revision), 0)::integer as revision
     from session_workflow_wake_outbox where session_id=${f.sessionId}::uuid`;
   return { typed: typed!.count as number, generic: generic!.revision as number };
+}
+async function waiterCount(f: Awaited<ReturnType<typeof fixture>>) {
+  const [row] = await shared.admin`select count(*)::integer as count
+    from subscription_capacity_waiters where session_id=${f.sessionId}::uuid`;
+  return row!.count as number;
+}
+async function turnState(f: Awaited<ReturnType<typeof fixture>>) {
+  const [row] = await shared.admin`select session.status as session_status,
+    session.active_turn_id::text as active_turn_id, turn.status as turn_status
+    from sessions session join session_turns turn on turn.session_id = session.id
+    where turn.id = ${f.turnId}::uuid`;
+  return row!;
 }
 async function control(
   f: Awaited<ReturnType<typeof fixture>>,
@@ -313,97 +322,101 @@ describe.skipIf(!realDb)("SUB-WAIT-01/02 candidate-provider waiter persistence",
     expect(typed!.count).toBe(0);
   }, 180_000);
 
-  test("a paused waiter records capacity changes but is delivered only through Resume", async () => {
+  test("session Pause releases the waiting turn; capacity no longer wakes it and Resume runs it", async () => {
     const f = await fixture([]);
     await wake(f, "codex");
     const active = await deliveries(f);
     expect(active.typed).toBe(1);
 
     await control(f, "pause");
+    // Pause stopped the wait itself: no waiter is left, and the same turn
+    // parks recovering on an idle chat, as a paused running turn does.
+    expect(await waiterCount(f)).toBe(0);
+    expect(await turnState(f)).toEqual({
+      session_status: "idle",
+      active_turn_id: f.turnId,
+      turn_status: "recovering",
+    });
     // The dispatcher has delivered everything recorded so far.
     await shared.admin`update session_workflow_wake_outbox set delivered_revision = wake_revision
       where session_id=${f.sessionId}::uuid`;
     const pausedBaseline = await deliveries(f);
     await wake(f, "codex");
-    await wake(f, "codex");
-    // The capacity change is durable on the waiter, but no workflow run is
+    // Capacity changes have nothing left to wake, and no workflow run is
     // started merely to peek Pause and close.
-    expect((await state(f)).wake_revision).toBe(4);
     expect(await deliveries(f)).toEqual(pausedBaseline);
     expect((await peekSessionWork(client.db, f.workspaceId, f.sessionId)).kind).toBe("idle");
 
-    // Resume commits its own wake; the run it starts sees the unobserved
-    // revision as an already-due waiter.
+    // Resume commits its own wake, and the run it starts claims the same turn.
     await control(f, "resume");
     expect((await deliveries(f)).generic).toBeGreaterThan(pausedBaseline.generic);
-    const resumed = await peekSessionWork(client.db, f.workspaceId, f.sessionId);
-    expect(resumed).toMatchObject({
-      kind: "capacity-wait",
-      ref: { waiterId: f.armed.waiter.waiterId, wakeRevision: 4 },
+    expect((await peekSessionWork(client.db, f.workspaceId, f.sessionId)).kind).toBe("runnable");
+    const claimed = await claimSessionWorkForAttempt(client.db, f.workspaceId, {
+      sessionId: f.sessionId,
+      workflowId: `session-${f.sessionId}`,
+      workflowRunId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      trigger: { kind: "next" },
     });
-    expect(resumed.kind === "capacity-wait" && Date.parse(resumed.ref.nextCheckAt)).toBe(0);
-    const resumedBaseline = await deliveries(f);
-    await wake(f, "codex");
-    expect(await deliveries(f)).toEqual({
-      typed: resumedBaseline.typed + 1,
-      generic: resumedBaseline.generic + 1,
-    });
+    if (claimed.action !== "claimed") throw new Error(`claim failed: ${claimed.reason}`);
+    expect(claimed.turn.id).toBe(f.turnId);
   }, 180_000);
 
-  test("ancestor and workspace Pause defer delivery with the override algebra", async () => {
+  test("an ancestor Pause releases a descendant's wait; the child's own Resume runs it", async () => {
     const f = await fixture([]);
     const parent = await adoptParent(f);
     await control(f, "pause", parent.id);
-    let baseline = await deliveries(f);
+    expect(await waiterCount(f)).toBe(0);
+    expect(await turnState(f)).toMatchObject({ session_status: "idle", turn_status: "recovering" });
+    const baseline = await deliveries(f);
     await wake(f, "codex");
     expect(await deliveries(f)).toEqual(baseline);
+    expect((await peekSessionWork(client.db, f.workspaceId, f.sessionId)).kind).toBe("idle");
 
     // A newer selected Resume on the child defeats the older ancestor Pause.
     await control(f, "resume");
-    baseline = await deliveries(f);
-    await wake(f, "codex");
-    expect((await deliveries(f)).typed).toBe(baseline.typed + 1);
-
-    await withWorkspaceRls(client.db, f.workspaceId, (db) =>
-      db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
-          accountId: f.accountId,
-          workspaceId: f.workspaceId,
-          actor: { type: "human", subjectId: f.subjectId },
-          operationKey: crypto.randomUUID(),
-          action: "pause",
-        }),
-      ),
-    );
-    baseline = await deliveries(f);
-    const revision = (await state(f)).wake_revision;
-    await wake(f, "codex");
-    expect(await deliveries(f)).toEqual(baseline);
-    expect((await state(f)).wake_revision).toBe(revision + 1);
-
-    // Workspace Resume reconstructs the deferred wait like session Resume.
-    await shared.admin`update session_workflow_wake_outbox set delivered_revision = wake_revision
-      where session_id=${f.sessionId}::uuid`;
-    baseline = await deliveries(f);
-    await withWorkspaceRls(client.db, f.workspaceId, (db) =>
-      db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
-          accountId: f.accountId,
-          workspaceId: f.workspaceId,
-          actor: { type: "human", subjectId: f.subjectId },
-          operationKey: crypto.randomUUID(),
-          action: "resume",
-        }),
-      ),
-    );
-    expect((await deliveries(f)).generic).toBe(baseline.generic + 1);
-    expect(await peekSessionWork(client.db, f.workspaceId, f.sessionId)).toMatchObject({
-      kind: "capacity-wait",
-      ref: { waiterId: f.armed.waiter.waiterId, wakeRevision: revision + 1 },
-    });
+    expect((await deliveries(f)).generic).toBeGreaterThan(baseline.generic);
+    expect((await peekSessionWork(client.db, f.workspaceId, f.sessionId)).kind).toBe("runnable");
   }, 180_000);
 
-  test("a Steer that auto-resumes a paused branch wakes its waiting descendants", async () => {
+  test("workspace Pause releases the waiting turn; capacity no longer wakes it and workspace Resume runs it", async () => {
+    const f = await fixture([]);
+    const workspaceControl = async (action: "pause" | "resume") =>
+      await withWorkspaceSessionActivityRls(client.db, f.workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
+            accountId: f.accountId,
+            workspaceId: f.workspaceId,
+            actor: { type: "human", subjectId: f.subjectId },
+            operationKey: crypto.randomUUID(),
+            action,
+          }),
+        ),
+      );
+    await workspaceControl("pause");
+    // Exactly like a session Pause: no waiter is left, and the same turn parks
+    // recovering on an idle chat.
+    expect(await waiterCount(f)).toBe(0);
+    expect(await turnState(f)).toEqual({
+      session_status: "idle",
+      active_turn_id: f.turnId,
+      turn_status: "recovering",
+    });
+    await shared.admin`update session_workflow_wake_outbox set delivered_revision = wake_revision
+      where session_id=${f.sessionId}::uuid`;
+    const baseline = await deliveries(f);
+    await wake(f, "codex");
+    expect(await deliveries(f)).toEqual(baseline);
+    expect((await peekSessionWork(client.db, f.workspaceId, f.sessionId)).kind).toBe("idle");
+
+    // Workspace Resume commits its own wake, and the run it starts claims the same turn.
+    await workspaceControl("resume");
+    expect((await deliveries(f)).generic).toBe(baseline.generic + 1);
+    expect((await peekSessionWork(client.db, f.workspaceId, f.sessionId)).kind).toBe("runnable");
+  }, 180_000);
+
+  test("a Steer that auto-resumes a paused branch wakes the descendants its Pause released", async () => {
     const f = await fixture([]);
     const parent = await adoptParent(f);
     await control(f, "pause", parent.id);
@@ -435,10 +448,8 @@ describe.skipIf(!realDb)("SUB-WAIT-01/02 candidate-provider waiter persistence",
       from session_workflow_wake_outbox where session_id = ${f.sessionId}::uuid`;
     expect(wakeRow).toMatchObject({ reason: "session_auto_resume", due: true });
     expect((await deliveries(f)).generic).toBe(baseline.generic + 1);
-    expect(await peekSessionWork(client.db, f.workspaceId, f.sessionId)).toMatchObject({
-      kind: "capacity-wait",
-      ref: { waiterId: f.armed.waiter.waiterId },
-    });
+    // Pause released the child's wait, so the resumed child runs its turn now.
+    expect((await peekSessionWork(client.db, f.workspaceId, f.sessionId)).kind).toBe("runnable");
   }, 180_000);
 
   test("candidate containment uses the GIN index and migration bounds malformed arrays", async () => {

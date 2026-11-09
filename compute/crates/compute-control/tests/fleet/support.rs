@@ -248,6 +248,26 @@ pub async fn given_up(fleet: &Fleet, host: &FakeHost) -> Instant {
     Instant::now()
 }
 
+/// Has the operator declare `host`, given up on, gone, once the replica
+/// sees it given up on, and answers the declaration.
+pub async fn declare_gone(fleet: &Fleet, host: &FakeHost) -> Value {
+    let path = format!("/v1/hosts/{}/gone", host.name());
+    let mut answer = Value::Null;
+    until(
+        Duration::from_secs(5),
+        "the host is declared gone",
+        async || {
+            let (status, body) = fleet
+                .call(reqwest::Method::POST, &path, Some(OPERATOR_KEY), None)
+                .await;
+            answer = body;
+            status == 200
+        },
+    )
+    .await;
+    answer
+}
+
 /// A control service and what it runs on.
 pub struct Fleet {
     pub pki: Pki,
@@ -575,12 +595,14 @@ pub fn roomy() -> Capacity {
         cpu_millis: 64_000,
         cpu_free_millis: 64_000,
         disk_free_mib: 1 << 20,
+        disk_available_mib: None,
         disk_reclaimable_mib: 0,
         ready: Vec::new(),
         awake: 0,
         sandboxes: 0,
         pointers_in_service: true,
         reads_packs: true,
+        sets_aside: true,
         info: None,
     }
 }
@@ -639,6 +661,8 @@ struct HostInner {
     seq: AtomicU64,
     /// Sandboxes it holds, by owner epoch.
     held: Mutex<HashMap<Id, u64>>,
+    /// Sandboxes whose copies it set aside as it registered, oldest first.
+    set_aside: Mutex<Vec<Id>>,
     /// How many times each OCI image was asked to be built.
     prepares: Mutex<HashMap<String, u32>>,
     /// The sandboxes it holds saved, which it may capture.
@@ -824,6 +848,7 @@ impl FakeHost {
             epoch,
             seq: AtomicU64::new(0),
             held: Mutex::new(HashMap::new()),
+            set_aside: Mutex::new(Vec::new()),
             prepares: Mutex::new(HashMap::new()),
             saved: Mutex::new(HashSet::new()),
             captures: Mutex::new(HashMap::new()),
@@ -858,6 +883,10 @@ impl FakeHost {
     }
 
     #[must_use]
+    pub fn name(&self) -> &str {
+        &self.inner.name
+    }
+
     pub fn id(&self) -> u64 {
         self.inner.id.load(Ordering::SeqCst)
     }
@@ -1021,6 +1050,11 @@ impl FakeHost {
     }
 
     /// Holds sandbox `id` under `owner_epoch` from now on.
+    /// The sandboxes whose copies it set aside as it registered.
+    pub fn set_aside(&self) -> Vec<Id> {
+        self.inner.set_aside.lock().unwrap().clone()
+    }
+
     pub fn hold(&self, id: Id, owner_epoch: u64) {
         self.inner.held.lock().unwrap().insert(id, owner_epoch);
     }
@@ -1072,6 +1106,7 @@ pub fn op_name(request: &Request) -> &'static str {
         Request::Adopt { .. } => "adopt",
         Request::Sleep { .. } => "sleep",
         Request::Capture { .. } => "capture",
+        Request::Restart { .. } => "restart",
         _ => "other",
     }
 }
@@ -1147,6 +1182,10 @@ async fn send_register(inner: &HostInner, attempt: u64) -> Registered {
                 }
                 Verdict::Refetch { .. } | Verdict::Drop => {
                     held.remove(&ruling.id);
+                }
+                Verdict::SetAside => {
+                    held.remove(&ruling.id);
+                    inner.set_aside.lock().unwrap().push(ruling.id);
                 }
             }
         }
@@ -1393,6 +1432,12 @@ async fn ordinary(inner: &HostInner, envelope: &Envelope) -> Reply {
             Reply::Done
         }
         Request::Capture { id, key, .. } if holds(id) => capture(inner, *id, key).await,
+        // Its VM ends unsaved and its memory image goes.
+        Request::Restart { id } if holds(id) => {
+            inner.saved.lock().unwrap().remove(id);
+            Reply::Done
+        }
+        Request::Restart { .. } => error(ErrorCode::NotFound, "no such sandbox"),
         Request::Status => status(inner),
         // The first ask starts the build; later ones find it stored.
         Request::Prepare { image } => {

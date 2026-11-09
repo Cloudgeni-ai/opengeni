@@ -37,7 +37,7 @@ export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = 
   { id: "shared", label: "Shared", icon: LayersIcon },
   { id: "models", label: "Models", icon: SparklesIcon },
   { id: "integrations", label: "Integrations", icon: BlocksIcon },
-  { id: "agents", label: "Connected agents", icon: BotIcon },
+  { id: "agents", label: "Connected apps", icon: BotIcon },
   { id: "insights", label: "Insights", icon: ChartColumnIcon },
   { id: "billing", label: "Billing", icon: CreditCardIcon },
   { id: "developer", label: "Developer", icon: CodeIcon },

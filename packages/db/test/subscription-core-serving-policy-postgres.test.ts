@@ -321,7 +321,7 @@ describe.skipIf(!realDb)("serving revisions on real PostgreSQL as the non-owner 
     expect(await record(client.db, input)).toMatchObject({ accepted: true, modelChangeCount: 1 });
   }, 180_000);
 
-  test("D-39 prospective budget includes refusals of a held provider and refuses an over-budget commit", async () => {
+  test("D-39 prospective budget includes recorded provider refusals and refuses an over-budget commit", async () => {
     let input = await fixture();
     await record(client.db, input);
     const policy = { ...input.policy, productModelId: "target/next" };
@@ -331,7 +331,6 @@ describe.skipIf(!realDb)("serving revisions on real PostgreSQL as the non-owner 
       values (${connectionId}::uuid, ${input.accountId}::uuid, 'codex', 'synthetic-not-used', 'shared', 'organization', ${connectionId})`;
     await shared.admin`insert into subscription_turn_failures (account_id, workspace_id, session_id, turn_id, connection_id, provider, failure_kind, recovery_evidence)
       values (${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.sessionId}::uuid, ${input.turnId}::uuid, ${connectionId}::uuid, 'codex', 'capacity', '{"refusals":4}'::jsonb)`;
-    await shared.admin`update subscription_provider_cutovers set enabled = false where account_id = ${input.accountId}::uuid and provider = 'codex'`;
     input = { ...(await recover(input)), policy };
     expect(await record(client.db, input)).toEqual({
       accepted: false,

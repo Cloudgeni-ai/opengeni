@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { authNeededPresentation, providerLabel } from "../src/auth-needed-presentation";
+import {
+  authNeededPresentation,
+  capabilityReconnectConnectionId,
+  providerLabel,
+} from "../src/auth-needed-presentation";
 import {
   approvalAnswerLabels,
   APP_ACTION_TOOL_NAME,
@@ -64,6 +68,35 @@ describe("authNeededPresentation", () => {
     expect(view.actionLabel).toBe("Connect");
     expect(view.reasonLine).toBe("To read your calendar for this week.");
     expect(`${view.title} ${view.footnote} ${view.startFailed}`).not.toMatch(/reconnect/i);
+  });
+
+  test("an agent's card for an account that stopped working reconnects that account", () => {
+    const capability = {
+      id: "mcp:gmail",
+      name: "Gmail",
+      action: "connect",
+      rationale: "Your Gmail stopped working on 2026-10-29.",
+      requiredVariables: [],
+    } as unknown as NonNullable<AuthNeededItem["capability"]>;
+    const lapsed = item({
+      source: "capability",
+      providerDomain: "gmailmcp.googleapis.com",
+      reason: "refresh_failed",
+      connectionId: "conn-1",
+      capability,
+    });
+    expect(capabilityReconnectConnectionId(lapsed)).toBe("conn-1");
+    const view = authNeededPresentation(t, lapsed);
+    expect(view.title).toBe("Reconnect Gmail");
+    expect(view.actionLabel).toBe("Reconnect");
+    expect(view.missing).toBe(false);
+    expect(view.reasonLine).toBe("Your Gmail stopped working on 2026-10-29.");
+    // The same card without a lapsed connection is still a first connection.
+    const first = item({ source: "capability", reason: "missing_connection", capability });
+    expect(capabilityReconnectConnectionId(first)).toBeUndefined();
+    expect(authNeededPresentation(t, first).actionLabel).toBe("Connect");
+    // A failed tool call's own reconnect row is not an agent's card.
+    expect(capabilityReconnectConnectionId(item({ connectionId: "conn-1" }))).toBeUndefined();
   });
 
   test("tools that cannot run here offer no action", () => {

@@ -1,8 +1,10 @@
 import {
   authorizeAutomaticSandboxCheckpointRecovery,
+  computeHostHandingOff,
   getEnrollment,
   getSandboxForAttempt,
   readActiveSandbox,
+  readLease,
   getLiveEnrollmentConnection,
   countSessionTurnSandboxProcessStartRestarts,
   SANDBOX_PROCESS_START_RESTART_OPERATION,
@@ -27,9 +29,14 @@ import {
   type SelfhostedSession,
   type ComputeTurnDeps,
   resolveConnectedMachineWorkspaceRoot,
+  type SoftSetupFailure,
 } from "@opengeni/runtime";
 import { type Settings } from "@opengeni/config";
 import { managedCodemodeClientDownload } from "./codemode-client-download";
+import {
+  isPersonalMachineAccessRefusal,
+  PersonalMachineAccessRequiredError,
+} from "./machine-access";
 import {
   backgroundCommandWakeSender,
   managedSessionGroupBackend,
@@ -39,6 +46,7 @@ import { mergeResourceRefs } from "../common";
 import {
   mintSandboxCodemodeToken,
   type MintedRunGitCredentials,
+  type MintedSandboxCodemodeToken,
   type SandboxCodemodeAuthority,
 } from "../environment";
 import { rigProviderImageSourceImage } from "@opengeni/core";
@@ -95,7 +103,9 @@ import type { AttemptIdentityState, EventingState, SandboxRuntimeState } from ".
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 import {
   createSandboxSetupReplayGuard,
+  modalSandboxBoxReplacer,
   recoverSandboxSetupFailure,
+  recoverUnresponsiveComputeAgent,
 } from "./sandbox-setup-agent-failure";
 import { sandboxStartupPhaseObserver } from "./sandbox-startup-phase";
 import { errorMessage } from "@opengeni/contracts/values";
@@ -165,11 +175,12 @@ export type EstablishTurnSandboxDeps = SandboxRouteOk & {
 
 export type BindLazySandboxProvisionerDeps = EstablishTurnSandboxDeps & {
   agent: ReturnType<ActivityServices["runtime"]["buildAgent"]>;
+  /** Resolves to the soft failure when the box's own disk refused the files. */
   attachRunCredentialRenewal: (
     credentialSession: RunCredentialCommandSession,
     initialMaterial: NormalizedRunCredentialMaterial | null,
     initialSandbox?: ResumedTurnSandbox,
-  ) => Promise<void>;
+  ) => Promise<SoftSetupFailure | null | void>;
   attachGitCredentialRenewal: (
     tokenSession: GitCredentialTokenWriterSession,
     initial: MintedRunGitCredentials | undefined,
@@ -177,7 +188,7 @@ export type BindLazySandboxProvisionerDeps = EstablishTurnSandboxDeps & {
   ) => Promise<void>;
   attachCodemodeTokenRenewal: (
     tokenSession?: CodemodeTokenWriterSession,
-    initialExpiresAt?: Date,
+    seeded?: MintedSandboxCodemodeToken,
     initialSandbox?: ResumedTurnSandbox,
   ) => Promise<void>;
   throwIfWorkerShuttingDown: () => void;
@@ -354,11 +365,23 @@ export async function resolveMachineEnrollmentForTurn(
   authority: Omit<Parameters<typeof resolvePersonalMachineRouteForAttempt>[1], "enrollmentId">,
 ) {
   if (sandbox.scope === "user") {
-    const route = await resolvePersonalMachineRouteForAttempt(db, {
-      ...authority,
-      enrollmentId: sandbox.enrollmentId!,
-    });
-    if (!route) throw new Error("personal Connected Machine use was not admitted for this turn");
+    let route: Awaited<ReturnType<typeof resolvePersonalMachineRouteForAttempt>>;
+    try {
+      route = await resolvePersonalMachineRouteForAttempt(db, {
+        ...authority,
+        enrollmentId: sandbox.enrollmentId!,
+      });
+    } catch (error) {
+      // A missing, used, revoked or expired approval is the person's to give
+      // again, not a database fault.
+      if (isPersonalMachineAccessRefusal(error))
+        throw new PersonalMachineAccessRequiredError(sandbox.name, { cause: error });
+      throw error;
+    }
+    // No admitted route: the attempt holds no approval for this machine (or
+    // the machine was removed, where the web app offers no Allow because the
+    // chat no longer lists it as its machine).
+    if (!route) throw new PersonalMachineAccessRequiredError(sandbox.name);
     return route;
   }
   const liveConnection = await getLiveEnrollmentConnection(
@@ -470,6 +493,29 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 attemptId: input.attemptId,
               },
             }),
+            // A command whose agent stopped answering restarts the box, at
+            // most once per turn, before the command fails.
+            recoverUnresponsiveAgent: async (machine) =>
+              await recoverUnresponsiveComputeAgent(machine, {
+                restartsThisTurn: async () =>
+                  await countSessionTurnSandboxProcessStartRestarts(db, input.workspaceId, {
+                    sessionId: input.sessionId,
+                    turnId: turn.id,
+                  }),
+                publish: async (events) => {
+                  // The restart guard counts these events: an unrecorded
+                  // restart could repeat, so no publisher means no restart.
+                  if (!eventing.publish) throw new Error("no event publisher for this turn");
+                  await eventing.publish(events, true);
+                },
+                operationName: SANDBOX_PROCESS_START_RESTART_OPERATION,
+                hostBusy: async () =>
+                  computeHostHandingOff(
+                    session.sandboxGroupId
+                      ? await readLease(db, input.workspaceId, session.sandboxGroupId)
+                      : null,
+                  ),
+              }),
           }
         : undefined;
     // A committed system recovery decision is rematerialized in this turn even
@@ -704,9 +750,10 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
         // proxy's first default-pointer op. A chat-only turn never calls it, so
         // no lease row, no provider box, no warm-meter interval.
         //
-        // A repository still forces that first default-pointer op before HTTP
-        // (workspace-skill catalog in Agent.instructions). Start create now and
-        // join it at get(); do not await here or we serialize Modal before tools.
+        // A repository turn's box is likely to be used by a tool. Start create
+        // now and join it at get(); do not await here or we serialize the
+        // provider create before tools. The repository skill index no longer
+        // reaches the box before the model (shouldDeferRepositorySkillIndex).
         if (sandboxState.sandboxHolderId && sandboxState.sandboxGroupId) {
           const lazyHolderId = sandboxState.sandboxHolderId;
           const lazyGroupId = sandboxState.sandboxGroupId;
@@ -1218,6 +1265,9 @@ export async function bindLazySandboxProvisioner(
                     environment: sandboxEnvironment,
                     recordLazyManifest: true,
                     measureSetup: measure,
+                    ...(materialization.value
+                      ? { priorSoftSetupFailures: [materialization.value] }
+                      : {}),
                     onRuntimeEvent: async (event) => {
                       await eventing.publish?.(
                         [{ type: event.type, payload: event.payload }],
@@ -1276,7 +1326,7 @@ export async function bindLazySandboxProvisioner(
             );
             await attachCodemodeTokenRenewal(
               provisioned.established.session as CodemodeTokenWriterSession,
-              lazyCodemodeToken?.expiresAt,
+              lazyCodemodeToken,
               provisioned,
             );
             await attachGitCredentialRenewal(
@@ -1305,6 +1355,14 @@ export async function bindLazySandboxProvisioner(
             throw await recoverSandboxSetupFailure(setupReplayGuard, error, {
               session: provisioned.established.session,
               backend: activeSandboxBackend ?? groupBoxBackend,
+              boxReplacement: modalSandboxBoxReplacer(db, {
+                backend: activeSandboxBackend ?? groupBoxBackend,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: sandboxState.sandboxGroupId,
+                box: provisioned,
+                session: provisioned.established.session,
+              }),
               restartsThisTurn: async () =>
                 await countSessionTurnSandboxProcessStartRestarts(db, input.workspaceId, {
                   sessionId: input.sessionId,

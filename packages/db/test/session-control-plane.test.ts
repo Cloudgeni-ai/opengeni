@@ -12,7 +12,7 @@ import {
 import {
   addSessionSystemUpdate,
   acceptSessionApprovalDecision,
-  applyCreditDebitUpToBalance,
+  applyCreditDebitAfterUse,
   applyCreditLedgerEntry,
   applyContextCompaction,
   applySessionTurnSettlement,
@@ -95,6 +95,7 @@ import {
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 import * as schema from "../src/schema";
+import * as dbQueries from "../src/index";
 import { and, eq, sql } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { boundModelToolOutputItem, canonicalizePersistedHistoryItem } from "@opengeni/codex";
@@ -283,6 +284,57 @@ async function claimTestSessionWork(
     trigger: options.trigger ?? { kind: "next" },
   });
   return result.action === "claimed" ? result.turn : null;
+}
+
+/** Claims the session's next turn and parks it waiting on its box's rotation,
+ * as a turn does that asked to replace a box that cannot start programs. */
+async function waitOnBoxRotation(
+  grant: { accountId: string; workspaceId: string | null },
+  session: { id: string; sandboxGroupId: string },
+  leaseEpoch: number,
+) {
+  const workspaceId = grant.workspaceId!;
+  const attemptId = crypto.randomUUID();
+  const workflowId = `session-${session.id}`;
+  const workflowRunId = crypto.randomUUID();
+  const dispatchId = `dispatch-${crypto.randomUUID()}`;
+  const turn = await claimTestSessionWork(client.db, workspaceId, session.id, workflowId, {
+    attemptId,
+    workflowRunId,
+    dispatchId,
+  });
+  if (!turn) throw new Error(`No turn to claim in session ${session.id}`);
+  const wait = {
+    version: 1 as const,
+    sandboxGroupId: session.sandboxGroupId,
+    leaseEpoch,
+    reason: "rotation_in_progress" as const,
+  };
+  expect(
+    await requestSessionTurnRecovery(client.db, workspaceId, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId,
+      reason: "sandbox_lifecycle_transition",
+      detail: { sandboxGroupId: session.sandboxGroupId, leaseEpoch },
+      sandboxLifecycleWait: wait,
+    }),
+  ).toMatchObject({ action: "recovering" });
+  await markSessionAttemptQuiesced(client.db, {
+    accountId: grant.accountId,
+    workspaceId,
+    sessionId: session.id,
+    attemptId,
+    temporalWorkflowId: workflowId,
+    temporalWorkflowRunId: workflowRunId,
+    temporalActivityId: dispatchId,
+  });
+  expect(await peekSessionWork(client.db, workspaceId, session.id)).toEqual({
+    kind: "sandbox-lifecycle-wait",
+    ref: wait,
+  });
+  return turn;
 }
 
 describe("clean session control plane", () => {
@@ -1223,6 +1275,437 @@ describe("clean session control plane", () => {
       expect(resumed?.metadata).not.toHaveProperty("sandboxLifecycleWait");
     },
   );
+
+  test.each(["replaced", "another turn replaced it", "no replacement"] as const)(
+    "a drain that cannot save a box that cannot start programs releases the turns waiting on it (%s)",
+    async (variant) => {
+      // A Modal box lost /bin/sh, so a turn asked to replace it, and this
+      // turn waits on the rotation. The drain's save keeps failing (the box
+      // stays draining, possibly for hours): no turn may wait on it. An
+      // ordinary rotation (no turn asked for a process-start replacement)
+      // keeps its waiters.
+      const queries = dbQueries as Partial<typeof dbQueries>;
+      const readReplacement = queries.readSessionTurnSandboxBoxNotSaved;
+      const releaseWaiters = queries.releaseSandboxProcessStartReplacementWaiters;
+      expect(typeof readReplacement).toBe("function");
+      expect(typeof releaseWaiters).toBe("function");
+      if (!readReplacement || !releaseWaiters) return;
+      const { grant, session } = await fixture();
+      const workspaceId = grant.workspaceId!;
+      await send(grant, session.id, "my box lost its shell");
+      const attemptId = crypto.randomUUID();
+      const workflowId = `session-${session.id}`;
+      const workflowRunId = crypto.randomUUID();
+      const dispatchId = `dispatch-${crypto.randomUUID()}`;
+      const turn = await claimTestSessionWork(client.db, workspaceId, session.id, workflowId, {
+        attemptId,
+        workflowRunId,
+        dispatchId,
+      });
+      expect(turn).not.toBeNull();
+      const leaseEpoch = 7;
+      await shared.admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        instance_id, backend, lease_epoch, resume_backend_id, resume_state,
+        rotation_requested_at, rotation_reason, expires_at
+      ) values (
+        ${grant.accountId}, ${workspaceId}, ${session.sandboxGroupId},
+        'draining', 0, 'sb-no-shell', 'modal', ${leaseEpoch}, 'modal',
+        jsonb_build_object(
+          'backendId', 'modal',
+          'sessionState', jsonb_build_object(
+            'providerState', jsonb_build_object('sandboxId', 'sb-no-shell')
+          )
+        ),
+        now(), 'operator', now() - interval '1 second'
+      )`;
+      if (variant === "replaced") {
+        const appended = await appendSessionEventsForTurnAttempt(
+          client.db,
+          workspaceId,
+          session.id,
+          turn!.id,
+          turn!.executionGeneration,
+          attemptId,
+          [
+            {
+              type: "sandbox.operation.started",
+              payload: {
+                name: dbQueries.SANDBOX_PROCESS_START_RESTART_OPERATION,
+                reason: "process_start_failed",
+                sandboxGroupId: session.sandboxGroupId,
+                leaseEpoch,
+              },
+            },
+          ],
+        );
+        expect(appended.accepted).toBe(true);
+      }
+      if (variant === "another turn replaced it") {
+        await appendSessionEvents(client.db, workspaceId, session.id, [
+          {
+            type: "sandbox.operation.started",
+            payload: {
+              name: dbQueries.SANDBOX_PROCESS_START_RESTART_OPERATION,
+              reason: "process_start_failed",
+              sandboxGroupId: session.sandboxGroupId,
+              leaseEpoch,
+            },
+          },
+        ]);
+      }
+      const notSaved = async () =>
+        await readReplacement(client.db, workspaceId, { sessionId: session.id, turnId: turn!.id });
+      // Nothing failed to save yet: every turn waits for the replacement.
+      expect(await notSaved()).toBeNull();
+      const wait = {
+        version: 1 as const,
+        sandboxGroupId: session.sandboxGroupId,
+        leaseEpoch,
+        reason: "rotation_in_progress" as const,
+      };
+      expect(
+        await requestSessionTurnRecovery(client.db, workspaceId, {
+          sessionId: session.id,
+          turnId: turn!.id,
+          triggerEventId: turn!.triggerEventId,
+          attemptId,
+          reason: "sandbox_lifecycle_transition",
+          detail: { sandboxGroupId: session.sandboxGroupId, leaseEpoch },
+          sandboxLifecycleWait: wait,
+        }),
+      ).toMatchObject({ action: "recovering" });
+      await markSessionAttemptQuiesced(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId: session.id,
+        attemptId,
+        temporalWorkflowId: workflowId,
+        temporalWorkflowRunId: workflowRunId,
+        temporalActivityId: dispatchId,
+      });
+      const waiting = { kind: "sandbox-lifecycle-wait" as const, ref: wait };
+      expect(await peekSessionWork(client.db, workspaceId, session.id)).toEqual(waiting);
+      const wake = async () =>
+        await withWorkspaceRls(client.db, workspaceId, async (db) => {
+          const [row] = await db
+            .select()
+            .from(schema.sessionWorkflowWakeOutbox)
+            .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id))
+            .limit(1);
+          return row!;
+        });
+      const before = await wake();
+
+      // Another box (an older epoch) is not this one.
+      expect(
+        await releaseWaiters(client.db, {
+          workspaceId,
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch: leaseEpoch - 1,
+        }),
+      ).toBe(0);
+      expect(await peekSessionWork(client.db, workspaceId, session.id)).toEqual(waiting);
+
+      const released = await releaseWaiters(client.db, {
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        leaseEpoch,
+      });
+      // The box itself stays fenced and draining either way.
+      const lease = await dbQueries.readLease(client.db, workspaceId, session.sandboxGroupId);
+      expect(lease).toMatchObject({ liveness: "draining", leaseEpoch, instanceId: "sb-no-shell" });
+      expect(lease?.rotationRequestedAt).not.toBeNull();
+      if (variant === "no replacement") {
+        expect(released).toBe(0);
+        expect(await notSaved()).toBeNull();
+        expect(await peekSessionWork(client.db, workspaceId, session.id)).toEqual(waiting);
+        expect((await wake()).wakeRevision).toBe(before.wakeRevision);
+        return;
+      }
+      expect(released).toBe(1);
+      const after = await wake();
+      expect(after.reason).toBe("sandbox_lifecycle_advanced");
+      expect(after.wakeRevision).toBeGreaterThan(before.wakeRevision);
+      expect(await peekSessionWork(client.db, workspaceId, session.id)).toEqual({
+        kind: "runnable",
+      });
+      // The next failed save finds no one left to release: the released turn
+      // is not woken again.
+      expect(
+        await releaseWaiters(client.db, {
+          workspaceId,
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch,
+        }),
+      ).toBe(0);
+      expect((await wake()).wakeRevision).toBe(after.wakeRevision);
+      const next = await claimTestSessionWork(client.db, workspaceId, session.id, workflowId);
+      expect(next).toMatchObject({ id: turn!.id, status: "running" });
+      expect(next?.metadata).not.toHaveProperty("sandboxLifecycleWait");
+      // The released attempt, and a person's later retry of this turn, read
+      // the unsaved box and stop with clear copy instead of parking again.
+      expect(await notSaved()).toEqual({ sandboxGroupId: session.sandboxGroupId, leaseEpoch });
+
+      // Another session on the same box starts waiting after the first
+      // release; the next failed save releases it.
+      const sibling = await createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        initialMessage: "sibling",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
+        sandboxBackend: "none",
+        sandboxGroupId: session.sandboxGroupId,
+      });
+      await send(grant, sibling.id, "the sibling runs something");
+      const siblingTurn = await waitOnBoxRotation(grant, sibling, leaseEpoch);
+      expect(
+        await releaseWaiters(client.db, {
+          workspaceId,
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch,
+        }),
+      ).toBe(1);
+      expect(await peekSessionWork(client.db, workspaceId, sibling.id)).toEqual({
+        kind: "runnable",
+      });
+      expect(
+        await readReplacement(client.db, workspaceId, {
+          sessionId: sibling.id,
+          turnId: siblingTurn.id,
+        }),
+      ).toEqual({ sandboxGroupId: session.sandboxGroupId, leaseEpoch });
+      // The first session's turn is not released again.
+      expect((await wake()).wakeRevision).toBe(after.wakeRevision);
+    },
+  );
+
+  test("a release takes the session lock before the turn lock", async () => {
+    // Every writer locks a session before its turns. Clearing a turn's wait
+    // also locks its session (the turn's archive guard), so a release that
+    // locked the turn first deadlocked with a writer that holds the session
+    // and then asks for the turn, as turn recovery does.
+    const leaseEpoch = 5;
+    const { grant, session } = await fixture();
+    const workspaceId = grant.workspaceId!;
+    await send(grant, session.id, "my box lost its shell");
+    await shared.admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        instance_id, backend, lease_epoch, resume_backend_id, resume_state,
+        rotation_requested_at, rotation_reason, expires_at
+      ) values (
+        ${grant.accountId}, ${workspaceId}, ${session.sandboxGroupId},
+        'draining', 0, 'sb-lock-order', 'modal', ${leaseEpoch}, 'modal',
+        jsonb_build_object(
+          'backendId', 'modal',
+          'sessionState', jsonb_build_object(
+            'providerState', jsonb_build_object('sandboxId', 'sb-lock-order')
+          )
+        ),
+        now(), 'operator', now() - interval '1 second'
+      )`;
+    const turn = await waitOnBoxRotation(grant, session, leaseEpoch);
+    await appendSessionEvents(client.db, workspaceId, session.id, [
+      {
+        type: "sandbox.operation.started",
+        payload: {
+          name: dbQueries.SANDBOX_PROCESS_START_RESTART_OPERATION,
+          reason: "process_start_failed",
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch,
+        },
+      },
+    ]);
+
+    const writer = await shared.admin.reserve();
+    let open = false;
+    try {
+      await writer`begin`;
+      open = true;
+      await writer`select id from sessions where id = ${session.id} for no key update`;
+      const [{ pid: writerPid } = { pid: 0 }] = await writer<{ pid: number }[]>`
+        select pg_backend_pid() as pid`;
+      const release = dbQueries.releaseSandboxProcessStartReplacementWaiters(client.db, {
+        workspaceId,
+        sandboxGroupId: session.sandboxGroupId,
+        leaseEpoch,
+      });
+      let blocked = false;
+      for (let polls = 0; polls < 200 && !blocked; polls += 1) {
+        const [row] = await shared.admin<{ waiting: number }[]>`
+          select count(*)::int as waiting from pg_stat_activity
+          where ${writerPid}::int = any(pg_blocking_pids(pid))`;
+        blocked = (row?.waiting ?? 0) > 0;
+        if (!blocked) await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(blocked).toBe(true);
+      // The writer now asks for the turn. The release must not be holding it.
+      const writerGotTurn = await writer`
+        select id from session_turns where id = ${turn.id} for update`.then(
+        () => true,
+        (error: { code?: string }) => {
+          if (error?.code === "40P01") return false;
+          throw error;
+        },
+      );
+      if (writerGotTurn) await writer`commit`;
+      else await writer`rollback`;
+      open = false;
+      const released = await release.then(
+        (count) => count,
+        (error: { code?: string; cause?: { code?: string } }) => {
+          if (error?.code === "40P01" || error?.cause?.code === "40P01") return "deadlock";
+          throw error;
+        },
+      );
+      expect({ writerGotTurn, released }).toEqual({ writerGotTurn: true, released: 1 });
+    } finally {
+      if (open) await writer`rollback`.catch(() => {});
+      writer.release();
+    }
+  }, 60_000);
+
+  test("a release locks the turns it wakes in turn-id order", async () => {
+    // Two sessions share a box that cannot start programs, and both wait on
+    // its replacement. Every multi-turn writer locks turns in id order; a
+    // release that locked them in scan order could deadlock with another
+    // release for the same box or with any such writer. While the
+    // lower-id turn is locked elsewhere, the release must hold no lock on the
+    // higher-id one.
+    const leaseEpoch = 3;
+    // Only a scan that meets the higher id first can tell the orders apart,
+    // so set up until the waiting turns' natural scan order puts it first.
+    // Some plans (a merge join) already scan in id order; after a few tries
+    // the last setup is used as is, and the fixed release still passes.
+    let setup:
+      | {
+          workspaceId: string;
+          sandboxGroupId: string;
+          lower: string;
+          higher: string;
+        }
+      | undefined;
+    for (let tries = 0; tries < 8; tries += 1) {
+      const { grant, session: first } = await fixture();
+      const workspaceId = grant.workspaceId!;
+      const second = await createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        initialMessage: "second",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium" as const,
+        latencyMode: "standard" as const,
+        sandboxBackend: "none",
+        sandboxGroupId: first.sandboxGroupId,
+      });
+      await send(grant, first.id, "first waits");
+      await send(grant, second.id, "second waits");
+      await shared.admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        instance_id, backend, lease_epoch, resume_backend_id, resume_state,
+        rotation_requested_at, rotation_reason, expires_at
+      ) values (
+        ${grant.accountId}, ${workspaceId}, ${first.sandboxGroupId},
+        'draining', 0, 'sb-shared-no-shell', 'modal', ${leaseEpoch}, 'modal',
+        jsonb_build_object(
+          'backendId', 'modal',
+          'sessionState', jsonb_build_object(
+            'providerState', jsonb_build_object('sandboxId', 'sb-shared-no-shell')
+          )
+        ),
+        now(), 'operator', now() - interval '1 second'
+      )`;
+      await waitOnBoxRotation(grant, first, leaseEpoch);
+      await waitOnBoxRotation(grant, second, leaseEpoch);
+      const scanned = await withWorkspaceSessionActivityRls(client.db, workspaceId, async (db) =>
+        (
+          await db.execute(sql`select turn.id::text as id
+            from sessions session
+            join session_turns turn
+              on turn.workspace_id = session.workspace_id
+              and turn.session_id = session.id
+              and turn.id = session.active_turn_id
+            where session.workspace_id = ${workspaceId}
+              and session.sandbox_group_id = ${first.sandboxGroupId}
+              and session.status = 'recovering'
+              and turn.status = 'recovering'
+              and turn.metadata ? 'sandboxLifecycleWait'`)
+        ).map((row: unknown) => String((row as { id: string }).id)),
+      );
+      expect(scanned).toHaveLength(2);
+      const [lower, higher] = [...scanned].sort();
+      await appendSessionEvents(client.db, workspaceId, first.id, [
+        {
+          type: "sandbox.operation.started",
+          payload: {
+            name: dbQueries.SANDBOX_PROCESS_START_RESTART_OPERATION,
+            reason: "process_start_failed",
+            sandboxGroupId: first.sandboxGroupId,
+            leaseEpoch,
+          },
+        },
+      ]);
+      setup = {
+        workspaceId,
+        sandboxGroupId: first.sandboxGroupId,
+        lower: lower!,
+        higher: higher!,
+      };
+      if (scanned[0] === higher) break;
+    }
+    if (!setup) throw new Error("No waiting turns were set up");
+    const { workspaceId, sandboxGroupId, lower, higher } = setup;
+
+    const holder = await shared.admin.reserve();
+    let open = false;
+    try {
+      await holder`begin`;
+      open = true;
+      await holder`select id from session_turns where id = ${lower} for update`;
+      const [{ pid: holderPid } = { pid: 0 }] = await holder<{ pid: number }[]>`
+        select pg_backend_pid() as pid`;
+      const release = dbQueries.releaseSandboxProcessStartReplacementWaiters(client.db, {
+        workspaceId,
+        sandboxGroupId,
+        leaseEpoch,
+      });
+      // Wait until the release is blocked behind the lower-id turn's lock.
+      let blocked = false;
+      for (let polls = 0; polls < 200 && !blocked; polls += 1) {
+        const [row] = await shared.admin<{ waiting: number }[]>`
+          select count(*)::int as waiting from pg_stat_activity
+          where ${holderPid}::int = any(pg_blocking_pids(pid))`;
+        blocked = (row?.waiting ?? 0) > 0;
+        if (!blocked) await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      expect(blocked).toBe(true);
+      // The higher-id turn is still free: the release locks in id order.
+      const free = await shared.admin`
+        select id from session_turns where id = ${higher} for update nowait`.then(
+        () => true,
+        (error: { code?: string }) => {
+          if (error?.code === "55P03") return false;
+          throw error;
+        },
+      );
+      await holder`commit`;
+      open = false;
+      expect(await release).toBe(2);
+      expect(free).toBe(true);
+    } finally {
+      if (open) await holder`rollback`.catch(() => {});
+      holder.release();
+    }
+  }, 180_000);
 
   test("an accepted Steer outranks retryable recovery for the exact live attempt", async () => {
     const { grant, session } = await fixture();
@@ -7956,14 +8439,14 @@ describe("clean session control plane", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       type: "model_usage_debit",
-      requestedAmountMicros: 400,
+      amountMicros: 400,
       sourceType: "model_response",
       sourceId: crypto.randomUUID(),
       idempotencyKey,
     };
 
-    const first = await applyCreditDebitUpToBalance(client.db, input);
-    const duplicate = await applyCreditDebitUpToBalance(client.db, input);
+    const first = await applyCreditDebitAfterUse(client.db, input);
+    const duplicate = await applyCreditDebitAfterUse(client.db, input);
     expect(first.debitedMicros).toBe(400);
     expect(duplicate.debitedMicros).toBe(0);
     expect(duplicate.balance.balanceMicros).toBe(before.balanceMicros + 600);

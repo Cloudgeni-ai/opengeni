@@ -98,6 +98,32 @@ async fn an_archive_packs_its_chunks_and_comes_back_byte_for_byte() {
     assert_eq!(listed(&backend, "t/packs").await.len(), 1);
 }
 
+/// A sweep that takes stock while an archive uploads stops that try from
+/// publishing. The archive tries again with the same files at once, finds
+/// the pack the stopped try stored and publishes: it neither fails nor
+/// uploads the sandbox twice.
+#[tokio::test]
+async fn an_archive_a_sweep_takes_stock_of_in_flight_still_publishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let saved = files(dir.path(), false);
+    disk_of(&saved, *b"abcdefgh");
+    let backend = Arc::new(Counted::default());
+    let store = packed(&backend);
+    let sandbox = id("000000000000000000000000000000a7");
+    let sweep = store.chunks.clone();
+    let name = sandbox.to_string();
+    backend.before_pack(async move {
+        sweep.fence(&name).await.unwrap();
+    });
+    let cancel = CancellationToken::new();
+    let archived = store.archive(sandbox, at(2, 4), &saved, &cancel).await;
+    assert!(matches!(archived, Ok(Archive::Stored(_))), "{archived:?}");
+    assert_eq!(backend.take().1, 1, "the pack is uploaded once");
+    assert_eq!(listed(&backend, "t/packs").await.len(), 1);
+    let disk = fs::read(saved.disk.path()).unwrap();
+    assert_eq!(fetched_disk(&store, sandbox).await.unwrap(), disk);
+}
+
 /// A copy an earlier release stored as one object per chunk keeps those
 /// objects: each is a pack of one chunk, named whole, so the next archive
 /// reuses it as it is, storing and copying nothing. Only chunks that
@@ -219,4 +245,149 @@ async fn a_fetch_reads_the_chunks_of_a_pack_with_one_request() {
         assert_eq!(fetched_disk(&store, sandbox).await.unwrap(), disk);
         assert_eq!(backend.take().0, reads);
     }
+}
+
+/// Incompressible bytes, the same for the same `seed`.
+fn noise(seed: u64, length: u64) -> Vec<u8> {
+    let mut bytes = vec![0; usize::try_from(length).unwrap()];
+    blake3::Hasher::new()
+        .update(&seed.to_le_bytes())
+        .finalize_xof()
+        .fill(&mut bytes);
+    bytes
+}
+
+/// The bytes of the packs stored since `before` was listed.
+async fn stored_since(backend: &Counted, before: &[(ObjectPath, u64)]) -> u64 {
+    listed(backend, "t/packs")
+        .await
+        .into_iter()
+        .filter(|pack| !before.contains(pack))
+        .map(|(_, size)| size)
+        .sum()
+}
+
+/// An idle guest's checkpoints store about what it wrote since the one
+/// before, and nothing once it writes nothing, because memory it gave back
+/// reads as zeros in its image.
+///
+/// The guest used all of its memory once, then gave back all but its first
+/// chunks. Idle from then on, it writes a page here and there between
+/// checkpoints, in memory it takes and gives back again, as a kernel's own
+/// bookkeeping does. Its diffs hold only those pages, so an image that kept
+/// what freed memory held before would change whole chunks of stale bytes
+/// around each page, and store them all again: sixteen chunks for sixteen
+/// pages here. The copy still comes back byte for byte.
+#[tokio::test]
+async fn an_idle_guests_checkpoints_store_only_what_it_wrote() {
+    const CHUNKS: u64 = 64;
+    const USED: u64 = 4;
+    const PAGES_PER_CHUNK: u64 = CHUNK_BYTES / PAGE;
+    let len = CHUNKS * CHUNK_BYTES;
+    let dir = tempfile::tempdir().unwrap();
+    let images = crate::image::Images::new(dir.path().join("images"));
+    let backend = Arc::new(Counted::default());
+    let store = packed(&backend);
+    let sandbox = id("000000000000000000000000000000a9");
+    let disk = dir.path().join("disk");
+    sparse(&disk, CHUNK_BYTES, &[(0, b"disk")]);
+    let (state, diff) = (dir.path().join("state"), dir.path().join("diff"));
+    let saved = |image: &crate::image::Verified| SavedFiles {
+        disk: crate::store::JailedFile::new(&disk),
+        memory: Some(crate::store::SavedImage {
+            state: images.state(image.generation()),
+            memory: images.memory(image.generation()),
+            chunks: Some(Arc::new(images.chunk_map(image).unwrap().0)),
+            runtime: Some(RUNTIME.to_owned()),
+            vcpus: Some(VCPUS),
+        }),
+        profile: None,
+        image: None,
+    };
+    // A checkpoint: the guest wrote `written` (page, seed) and gave back
+    // `freed` since the last one. Returns the bytes it stored.
+    let checkpoint = async |image: &mut crate::image::Verified,
+                            written: &[(u64, u64)],
+                            freed: &[std::ops::Range<u64>]| {
+        let writes: Vec<(u64, Vec<u8>)> = written
+            .iter()
+            .map(|(page, seed)| (page * PAGE, noise(*seed, PAGE)))
+            .collect();
+        let writes: Vec<(u64, &[u8])> = writes.iter().map(|(at, b)| (*at, b.as_slice())).collect();
+        sparse(&diff, len, &writes);
+        fs::write(&state, b"state").unwrap();
+        let next = images
+            .publish(crate::image::Parts::Diff {
+                base: image.generation(),
+                state: &state,
+                diff: &diff,
+                freed,
+            })
+            .unwrap();
+        images.retire(&next, &[]).unwrap();
+        *image = next;
+        let before = listed(&backend, "t/packs").await;
+        archived(&store, sandbox, &saved(image)).await;
+        stored_since(&backend, &before).await
+    };
+
+    fs::write(&diff, noise(0, len)).unwrap();
+    fs::write(&state, b"state").unwrap();
+    let mut image = images
+        .publish(crate::image::Parts::Whole {
+            state: &state,
+            memory: &diff,
+            len,
+        })
+        .unwrap();
+    archived(&store, sandbox, &saved(&image)).await;
+
+    // The guest gives back all but its first chunks: those are all it
+    // stores, packed anew rather than kept alive in packs mostly freed.
+    let unused = USED * CHUNK_BYTES..len;
+    let stored = checkpoint(&mut image, &[], std::slice::from_ref(&unused)).await;
+    assert!(
+        stored <= (USED + 1) * CHUNK_BYTES,
+        "{stored} bytes stored for {USED} chunks in use"
+    );
+
+    let mut last: Vec<u64> = Vec::new();
+    for round in 1..=4_u64 {
+        // A page in each of sixteen chunks it does not use, a different one
+        // each time; the pages of the round before are given back.
+        let pages: Vec<u64> = (0..16)
+            .map(|k| (USED + k * 3 + round) * PAGES_PER_CHUNK + round * 5)
+            .collect();
+        let written: Vec<(u64, u64)> = pages
+            .iter()
+            .map(|page| (*page, round * 1000 + page))
+            .collect();
+        let freed: Vec<std::ops::Range<u64>> = last
+            .iter()
+            .map(|page| page * PAGE..(page + 1) * PAGE)
+            .collect();
+        let stored = checkpoint(&mut image, &written, &freed).await;
+        let wrote = written.len() as u64 * PAGE;
+        assert!(
+            stored <= 2 * wrote,
+            "round {round}: {stored} bytes stored for {wrote} written"
+        );
+        last = pages;
+    }
+
+    // Nothing written, nothing given back: nothing stored.
+    assert_eq!(checkpoint(&mut image, &[], &[]).await, 0);
+
+    let restored = tempfile::tempdir().unwrap();
+    let FetchedMemory::Remote { manifest, .. } = store
+        .fetch(sandbox, &into(restored.path(), true))
+        .await
+        .unwrap()
+    else {
+        panic!("memory should stay in the store");
+    };
+    assert_eq!(
+        page_in(&store, &manifest).await,
+        fs::read(images.memory(image.generation())).unwrap()
+    );
 }

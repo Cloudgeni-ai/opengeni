@@ -54,14 +54,14 @@ integration's tools; the agent saves lasting findings with `knowledge_save`
 under the usual learning policy. No separate ingestion workflow or integration
 scheduler decides what the company should remember.
 
-Integration Knowledge sync (Google Drive, OneDrive, Jira/Confluence) is retired.
-Saved source tasks, whether a frozen `knowledge_source_sync` action or an agent
-task carrying `agentConfig.knowledgeSource`, read as **Sync retired**: new
-fires, manual runs and resume are refused, and queued runs settle failed with
-the retirement reason before any session or model is created. The reasons and
-copy live in `packages/contracts/src/knowledge-source-sync-retirement.ts`.
-Imported Documents, Knowledge entries, source provenance and run history remain
-readable, and old tasks can still be deleted. See [Atlassian](atlassian.md) and
+Integration Knowledge sync (Google Drive, OneDrive, Jira/Confluence) was
+removed. Migration 1275 deleted the leftover source sync tasks with their runs,
+sync state and wakes, and the stored `knowledge_source` facets. Requests that
+still carry `agentConfig.knowledgeSource`, or call the remaining source routes
+of the public SDK, answer 410 with the message in
+`packages/contracts/src/knowledge-source-sync-retirement.ts` until the next SDK
+major. Imported Documents, Knowledge entries and source provenance remain
+readable. See [Atlassian](atlassian.md) and
 [Google Drive](google-drive.md) for their MCP connections.
 
 A failed vector-index batch keeps its last completed projection and the durable
@@ -391,7 +391,7 @@ All finding types share retrieval, review, permissions and revision history.
 ## Agent learning settings
 
 **Settings → Agent learning** (`/settings?section=learning`) groups three
-destinations together. Knowledge's ⋯ menu, an empty Review and the chat Agent tab
+destinations together. Knowledge's ⋯ menu, an empty Review and the chat Settings tab
 link to it, and old `/state?page=learning` links redirect there. The page also
 links to Knowledge → Review, where Review first changes wait:
 

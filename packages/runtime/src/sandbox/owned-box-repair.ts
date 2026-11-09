@@ -1,5 +1,5 @@
 /**
- * Self-repair of a chat's own cloud computer (a compute box) at turn setup.
+ * Self-repair of a chat's own workspace machine (a compute box) at turn setup.
  *
  * An agent can set the box's clock or overwrite /etc/resolv.conf with a few
  * shell commands. Both then persist across turns: the compute guest writes
@@ -258,29 +258,26 @@ export function ownedBoxRepairNote(report: OwnedBoxRepairReport): string | null 
   const lines: string[] = [];
   if (report.clock?.set) {
     lines.push(
-      `- Its clock said ${utc(report.clock.fromEpochSeconds)}, so Opengeni set it to ${utc(report.clock.toEpochSeconds)}.`,
+      `- Its clock said ${utc(report.clock.fromEpochSeconds)}, so it was set to ${utc(report.clock.toEpochSeconds)}.`,
     );
   } else if (report.clock) {
     lines.push(
-      `- Its clock says ${utc(report.clock.fromEpochSeconds)}, but the time is ${utc(report.clock.toEpochSeconds)}, and Opengeni could not set it; TLS and git may fail until it is fixed.`,
+      `- Its clock says ${utc(report.clock.fromEpochSeconds)}, but the time is ${utc(report.clock.toEpochSeconds)}, and it could not be set; TLS and git may fail until it is fixed.`,
     );
   }
   if (report.dns?.outcome === "restored" || report.dns?.outcome === "restored-still-failing") {
     const servers = report.dns.servers?.join(", ") || "the platform name servers";
     lines.push(
-      `- It could not look up ${report.dns.host ?? "Opengeni"}, so Opengeni restored /etc/resolv.conf to the platform name servers (${servers}); the previous file is /etc/resolv.conf${OWNED_BOX_REPLACED_RESOLV_CONF_SUFFIX}.${
+      `- It could not look up ${report.dns.host ?? "its control server"}, so /etc/resolv.conf was restored to the platform name servers (${servers}); the previous file is /etc/resolv.conf${OWNED_BOX_REPLACED_RESOLV_CONF_SUFFIX}.${
         report.dns.outcome === "restored-still-failing" ? " Lookups still fail." : ""
       }`,
     );
   } else if (report.dns) {
     const reason = UNREPAIRED_DNS_REASONS[report.dns.reason ?? ""];
     lines.push(
-      `- It cannot look up ${report.dns.host ?? "Opengeni"}, and Opengeni left /etc/resolv.conf unchanged${reason ? ` because ${reason}` : ""}.`,
+      `- It cannot look up ${report.dns.host ?? "its control server"}, and /etc/resolv.conf was left unchanged${reason ? ` because ${reason}` : ""}.`,
     );
   }
   if (lines.length === 0) return null;
-  return [
-    "[Opengeni checked the cloud computer this chat runs on before this turn]",
-    ...lines,
-  ].join("\n");
+  return ["[This chat's workspace machine was checked before this turn]", ...lines].join("\n");
 }

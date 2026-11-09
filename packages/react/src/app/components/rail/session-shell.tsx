@@ -5,7 +5,7 @@ import { requestSessionArchive } from "../../lib/archive-session";
 // sections (workspace switcher, navigation extras, footer, banners) come in as
 // slots, so the web app and embeds share one shell and differ only in what they
 // put in it.
-import type { SessionSummary } from "@opengeni/sdk";
+import type { ChatSession as SessionSummary } from "@opengeni/sdk";
 import { MenuIcon, MessagesSquareIcon, Settings2Icon } from "lucide-react";
 import {
   useCallback,
@@ -632,14 +632,18 @@ function SessionRouteHeader({
         context.updateSessionPin(target.workspaceId, target.id, pinned, target.pinVersion ?? 0)
       }
       onUpdateProfile={context.updateSessionProfile}
-      onSaveBotTemplate={(request) =>
-        context.client.createBotTemplate(session.workspaceId, request)
+      onMakeAgent={() =>
+        void navigate({
+          to: "/workspaces/$workspaceId/agents/new",
+          params: { workspaceId: session.workspaceId },
+          search: { sourceSessionId: session.id },
+        })
       }
       onArchive={onArchive}
       repliesMute={repliesMute}
       adminAccess={adminAccess}
       onOpenUsageLimit={
-        // The editor lives in the session panel's Agent tab.
+        // The editor lives in the session panel's Settings tab.
         sessionUsageLimitCapability(context.clientConfig) === "absent" || !dock
           ? null
           : () => requestSessionUsageLimitEditor(uiEvents)

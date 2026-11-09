@@ -1,6 +1,5 @@
 import {
   BellRingIcon,
-  BookOpenIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
   CirclePauseIcon,
@@ -11,6 +10,7 @@ import {
   SlidersHorizontalIcon,
   Trash2Icon,
 } from "lucide-react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useEffect, useMemo, useRef, useState, type ComponentType, type FormEvent } from "react";
 import { toast } from "sonner";
@@ -50,6 +50,8 @@ import type {
 } from "@opengeni/react/app/types";
 
 type FacetEntry = IntegrationInstanceFacetsResponse["facets"][number];
+/** The SDK still lists the removed `knowledge_source` kind; this panel never shows it. */
+type ShownFacetKind = Exclude<IntegrationFacetDefinitionSummary["kind"], "knowledge_source">;
 type FormValue = string | boolean;
 type FacetFormState = Record<string, FormValue>;
 type FacetMutationToken = {
@@ -59,21 +61,13 @@ type FacetMutationToken = {
 };
 
 const KIND_DETAILS: Record<
-  IntegrationFacetDefinitionSummary["kind"],
+  ShownFacetKind,
   {
     label: string;
     description: string;
     icon: ComponentType<{ className?: string }>;
   }
 > = {
-  // Retired: only facets saved before the retirement still appear, so they
-  // can be removed. Imported documents stay in Knowledge.
-  knowledge_source: {
-    label: "Knowledge source",
-    description:
-      "Knowledge sync is retired. Use this account's tools in an agent schedule instead; imported documents remain.",
-    icon: BookOpenIcon,
-  },
   inbound_trigger: {
     label: "Inbound trigger",
     description: "Choose what Opengeni watches for new work from this account.",
@@ -99,7 +93,7 @@ export function IntegrationFacetsPanel({
   canManage,
   refreshRevision,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
   facetCount: number;
@@ -229,7 +223,6 @@ export function IntegrationFacetsPanel({
   }
 
   function edit(entry: FacetEntry): void {
-    if (isRetiredFacet(entry)) return;
     setEditor(entry);
     setForm(facetFormState(entry.definition, entry.binding));
   }
@@ -389,9 +382,7 @@ export function IntegrationFacetsPanel({
   }
 
   const visibleFacets = data ? visibleIntegrationFacets(data.facets) : [];
-  const activeCount = visibleFacets.filter(
-    (entry) => !isRetiredFacet(entry) && entry.binding?.status === "active",
-  ).length;
+  const activeCount = visibleFacets.filter((entry) => entry.binding?.status === "active").length;
 
   return (
     <>
@@ -525,16 +516,15 @@ function FacetRow({
   onResume: () => void;
   onRemove: () => void;
 }) {
-  const detail = KIND_DETAILS[entry.definition.kind];
+  const detail = KIND_DETAILS[entry.definition.kind as ShownFacetKind];
   const Icon = detail.icon;
   const binding = entry.binding;
   const configured = binding !== null && binding.status !== "disabled";
   const directlyOwned = binding?.directlyOwned === true;
   const otherOwners = otherFacetOwners(binding);
   const externallyManaged = configured && !directlyOwned;
-  const retired = isRetiredFacet(entry);
-  const independentlyMutable = !retired && directlyOwned && otherOwners.length === 0;
-  const canConfigure = !retired && !configured && otherOwners.length === 0;
+  const independentlyMutable = directlyOwned && otherOwners.length === 0;
+  const canConfigure = !configured && otherOwners.length === 0;
   return (
     <article
       className="rounded-lg border border-border bg-bg p-3"
@@ -547,7 +537,7 @@ function FacetRow({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
             <p className="text-xs font-semibold text-fg">{facetTitle(entry.definition)}</p>
-            <FacetStatusBadge binding={binding} retired={retired} />
+            <FacetStatusBadge binding={binding} />
             {otherOwners.length > 0 || externallyManaged ? (
               <Badge variant="outline" className="text-2xs text-fg-subtle">
                 {otherOwners.length > 0 ? "Shared" : "Managed"}
@@ -570,21 +560,15 @@ function FacetRow({
         {busy ? <Loader2Icon className="size-3.5 animate-spin text-brand" /> : null}
       </div>
       <div className="mt-2 flex flex-wrap gap-1">
-        {retired ? null : (
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            disabled={!canManage || busy || (!canConfigure && !independentlyMutable)}
-            onClick={onEdit}
-          >
-            {configured
-              ? "Edit"
-              : entry.definition.kind === "identity_link"
-                ? "Enable"
-                : "Configure"}
-          </Button>
-        )}
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          disabled={!canManage || busy || (!canConfigure && !independentlyMutable)}
+          onClick={onEdit}
+        >
+          {configured ? "Edit" : entry.definition.kind === "identity_link" ? "Enable" : "Configure"}
+        </Button>
         {binding?.status === "active" && independentlyMutable ? (
           <Button
             type="button"
@@ -627,24 +611,16 @@ function FacetRow({
   );
 }
 
-function FacetStatusBadge({
-  binding,
-  retired,
-}: {
-  binding: IntegrationFacetBindingSummary | null;
-  retired: boolean;
-}) {
-  const status = retired ? "retired" : (binding?.status ?? "not_configured");
+function FacetStatusBadge({ binding }: { binding: IntegrationFacetBindingSummary | null }) {
+  const status = binding?.status ?? "not_configured";
   const label =
-    status === "retired"
-      ? "Retired"
-      : status === "active"
-        ? "Active"
-        : status === "paused"
-          ? "Paused"
-          : status === "needs_attention"
-            ? "Needs attention"
-            : "Not configured";
+    status === "active"
+      ? "Active"
+      : status === "paused"
+        ? "Paused"
+        : status === "needs_attention"
+          ? "Needs attention"
+          : "Not configured";
   return (
     <Badge
       variant="outline"
@@ -714,7 +690,9 @@ function FacetEditorDialog({
         <DialogHeader>
           <DialogTitle>{entry ? facetTitle(entry.definition) : "Configure facet"}</DialogTitle>
           <DialogDescription>
-            {entry ? KIND_DETAILS[entry.definition.kind].description : "Configure this facet."}
+            {entry
+              ? KIND_DETAILS[entry.definition.kind as ShownFacetKind].description
+              : "Configure this facet."}
           </DialogDescription>
         </DialogHeader>
         {entry ? (
@@ -927,7 +905,7 @@ function requiredFieldsComplete(
 
 function facetTitle(definition: IntegrationFacetDefinitionSummary): string {
   const specific = humanize(definition.facetKey);
-  const generic = KIND_DETAILS[definition.kind].label;
+  const generic = KIND_DETAILS[definition.kind as ShownFacetKind].label;
   return specific.toLowerCase() === generic.toLowerCase() ? generic : specific;
 }
 
@@ -945,15 +923,8 @@ function objectValue(value: unknown): Record<string, unknown> {
     : {};
 }
 
-/** Knowledge-source facets are retired; a saved one stays visible only so it can be removed. */
-function isRetiredFacet(entry: FacetEntry): boolean {
-  return entry.definition.kind === "knowledge_source";
-}
-
 export function visibleIntegrationFacets(
   facets: IntegrationInstanceFacetsResponse["facets"],
 ): IntegrationInstanceFacetsResponse["facets"] {
-  return facets.filter(
-    (entry) => !isRetiredFacet(entry) || (entry.binding && entry.binding.status !== "disabled"),
-  );
+  return facets.filter((entry) => entry.definition.kind !== "knowledge_source");
 }

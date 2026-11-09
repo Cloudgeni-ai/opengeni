@@ -93,6 +93,9 @@ config:
   MIMALLOC_PURGE_DECOMMITS: "1"
   OPENGENI_SERVICE_NAME: opengeni
   OPENGENI_ENVIRONMENT: production
+  # Comma-separated exact hosts, optionally host:port, allowed to resolve privately.
+  # Example: "admin-api.example.com:443,auth.example.com:8443". No wildcards or URLs.
+  OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS: ""
   OPENGENI_DEPLOYMENT_REVISION: dev
   OPENGENI_API_HOST: 0.0.0.0
   OPENGENI_API_PORT: "8000"
@@ -133,6 +136,11 @@ config:
   # cost credit on turns whose model Opengeni pays for. Set "false" to restore
   # free hosted search and images, for example without the Gateway image
   # credential. See docs/web-search.md.
+  # OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED (default "false", unset here):
+  # set "true" to let API-origin work (organization access keys, embedded
+  # products) use the organization's own connected subscriptions. Only for an
+  # operator who owns the subscriptions it connects and accepts its provider's
+  # terms. See docs/deployment.md.
   # The offer and both new resource charges require separate operator activation.
   OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED: "false"
   OPENGENI_SANDBOX_WARM_BILLING_MODE: usage_only
@@ -202,11 +210,9 @@ secret:
   # OpenRouter catalog. It belongs here, never in config or catalog JSON.
   # OPENGENI_OPPER_API_KEY likewise enables the reviewed Opper catalog
   # (default: Claude Opus 5.5 EU).
-  # When the Google Drive connection is enabled, this Secret must provide
-  # OPENGENI_INTEGRATIONS_STATE_SECRET,
-  # OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY, OPENGENI_GOOGLE_DRIVE_CLIENT_ID, and
-  # OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET. Never pass those values through Helm
-  # values or command-line --set arguments.
+  # When integrations are enabled, this Secret must provide
+  # OPENGENI_INTEGRATIONS_STATE_SECRET and OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY.
+  # Never pass those values through Helm values or command-line --set arguments.
   # For Temporal Cloud, configure OPENGENI_TEMPORAL_HOST and
   # OPENGENI_TEMPORAL_NAMESPACE, then place OPENGENI_TEMPORAL_API_KEY in this
   # secret; the API key automatically enables TLS.
@@ -1761,11 +1767,15 @@ observability:
     # Must cover at least three configured sandbox reaper periods; Helm rejects
     # an incompatible pairing before generating a rule that would age out live data.
     inventoryFreshnessSeconds: 300
-    # Cumulative p95 startup SLOs, measured from the durable turn queue time.
-    # Keep these aligned with the canonical Turn Startup dashboard annotations.
-    turnStartupQueueP95Seconds: 5
-    # Accepted turn -> first provider dispatch is Opengeni-owned latency, so it
-    # gets tight tiers: a warning (investigate) and a paging critical tier that
+    # Age of the oldest runnable prompt (not held behind an active turn, a
+    # Pause, a capacity wait or a required human action). Prompts queued behind
+    # a running turn in their own chat are normal and never alert.
+    turnReadyPromptAgeSeconds: 60
+    turnReadyPromptAgeCriticalSeconds: 300
+    # Startup p95s measured from the start of the turn attempt, so they exclude
+    # time behind an earlier turn, capacity waits and recovery gaps. Attempt
+    # start -> first provider dispatch is Opengeni-owned preparation, so it gets
+    # tight tiers: a warning (investigate) and a paging critical tier that
     # replaces it. Normal p95 is a few seconds.
     turnStartupProviderDispatchP95Seconds: 20
     turnStartupProviderDispatchCriticalP95Seconds: 60
@@ -1789,6 +1799,11 @@ observability:
     providerTtftRegressionFloorSeconds: 5
     providerTtftRecentMinSamples: 30
     providerTtftBaselineMinSamples: 200
+    # Streaming p99 alerts (session event append and live publish) need at
+    # least this many observations in their window. Below 100 the p99 is just
+    # the slowest single observation, so one slow write on a quiet deployment
+    # would page.
+    sessionEventMinSamples: 100
     labels: {}
     annotations: {}
     rules: []

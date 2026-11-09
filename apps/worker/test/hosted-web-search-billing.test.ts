@@ -30,17 +30,12 @@ function spyWrites() {
     spyOn(opengeniDb, "recordModelCallFact").mockResolvedValue({
       promptCacheDiagnostics: null,
     } as never),
-    spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
-      async (_db, input) =>
-        ({
-          balance: {},
-          debitedMicros: input.requestedAmountMicros,
-          grantDebitedMicros: 0,
-        }) as never,
-    ),
     spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async (_db, input) => {
-      afterUse.push(input as unknown as Record<string, unknown>);
-      return { balance: {}, debitedMicros: input.amountMicros } as never;
+      // Model responses settle through the same helper; collect only the search debits.
+      if (input.type !== "model_usage_debit") {
+        afterUse.push(input as unknown as Record<string, unknown>);
+      }
+      return { balance: {}, debitedMicros: input.amountMicros, grantDebitedMicros: 0 } as never;
     }),
     spyOn(opengeniDb, "creditDebitAttributionForTurn").mockImplementation(
       async (_db, input) =>

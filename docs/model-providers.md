@@ -248,11 +248,21 @@ singleton owns membership.
 ### Customer OpenAI and Azure OpenAI keys
 
 The web console offers **OpenAI** and **Azure OpenAI** in the model step after
-organization setup and in **Workspace settings → Models → OpenAI, Azure OpenAI and compatible endpoints**. OpenAI
-asks for an API key, with the model preselected and an optional Change model
-control. Azure asks for an API key, resource endpoint
-(`https://RESOURCE.openai.azure.com` or its `/openai/v1` URL), and deployment
-name. Both use Responses and ordinary function tools; arbitrary proxy endpoints
+organization setup and in **Models → Connect provider**. Connect provider lists
+the same providers, in the same order and with the same connect steps, on the
+organization's Models page and on a workspace's: what differs is only where
+the connection lives. Organization owners and admins connect an organization
+account and choose its **Available in** (starting from the workspace whose
+page they opened it from); a shared workspace's admins connect a key that
+belongs to that workspace; anyone else sees the API-key providers listed but
+disabled, with who can add them. OpenAI asks for an API key and a model
+(prefilled). Azure asks for the resource endpoint, the deployment name and an
+API key; pasting any address Azure shows for the resource (its
+`https://RESOURCE.openai.azure.com` endpoint, its Cognitive Services or Foundry
+endpoint, or a deployment's Target URI) is read as
+`https://RESOURCE.openai.azure.com`, and a Target URI also fills in the
+deployment name. A workspace's own keys are listed with its other accounts,
+where they can be disconnected. Both use Responses and ordinary function tools; arbitrary proxy endpoints
 are refused. Azure endpoint/deployment/API-version configuration remains available
 separately for deployment operators.
 
@@ -285,18 +295,23 @@ are not enabled implicitly for an arbitrary Azure deployment name.
 
 #### A workspace's own OpenAI-compatible endpoint
 
-**Workspace settings → Models** also offers **Connect an OpenAI-compatible
-endpoint**, for any provider or self-run server whose API follows OpenAI's Chat
-Completions or Responses format. It asks for an optional name, the API's HTTPS
+A shared workspace's admins connect one from **Connect provider → Custom
+endpoint** on the workspace's Models page, with the same step organization
+owners and admins use for an
+[organization endpoint](#organization-openai-compatible-endpoints). It is
+listed with the workspace's other accounts, where it can be disconnected.
+Such a connection is for any provider or
+self-run server whose API follows OpenAI's Chat Completions or Responses
+format. It has an optional name, the API's HTTPS
 base URL (such as `https://api.example.com/v1`; a pasted `/chat/completions`
 or `/responses` path is trimmed), an API key, the model ID exactly as the
 provider lists it under `/models` (IDs such as `org/model:tag` are accepted),
-and the API format (Chat Completions by default, or Responses). Connect each
-model you want to use as its own connection.
+and the API format (Chat Completions by default, or Responses). Each model is
+its own connection.
 
 It is the same workspace-owned rail as OpenAI and Azure OpenAI above, with
 `credentialRole: "direct_openai_compatible"` and
-`directModelProvider: { provider: "openai_compatible", baseUrl, model, api?, label? }`.
+`directModelProvider: { provider: "openai_compatible", baseUrl, model, api?, label?, reasoning? }`.
 `providerDomain` must be the base URL's host. Over the API:
 
 ```json
@@ -335,10 +350,32 @@ Model IDs are `workspace-compatible-<connection id>/<version>/<model>`. The key
 is sent only to that base URL and only for that workspace's turns. Usage is
 billed by the provider and uses no Opengeni credits. The route gets the
 conservative text, function-calling and SSE capabilities every compatible API
-shares; no hosted tools, reasoning controls or images are assumed, the model
+shares; no hosted tools or images are assumed, the model
 SDK does not retry a failed request on its own, and no price is inferred from
 the model ID. Its residency is recorded as unknown, so deployments that
 require EU-only inference refuse these routes.
+
+##### Reasoning levels
+
+A compatible model offers reasoning only at the levels it declares:
+`reasoning: { efforts, defaultEffort }`, where `efforts` is a non-empty subset
+of `none`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max` (stored lowest
+first) and contains `defaultEffort`. When a connection doesn't set it, the
+setup check reads it from the endpoint's own listing: `GET {baseUrl}/models/{model}`,
+then the `GET {baseUrl}/models` entry with that `id`, taking
+`supported_reasoning_efforts` (or `reasoning_efforts`) and the default from
+`default_reasoning_effort` (or `reasoning_effort`); levels with no Opengeni
+name are skipped. Reading is best effort: an endpoint that lists none, or
+can't be read, gets no reasoning levels.
+
+With levels, the model picker offers exactly those, starting at the default,
+and each request sends the chosen level as `reasoning_effort` (Chat
+Completions) or `reasoning.effort` (Responses). A level the model doesn't
+declare is sent as the nearest declared level below it (or the default).
+Without levels, no reasoning parameter is sent at all. Reasoning text the
+endpoint returns (`reasoning_content` or `reasoning`) and cached input tokens
+(`usage.prompt_tokens_details.cached_tokens`) are read back like on every Chat
+Completions route.
 
 #### Organization OpenAI and Azure OpenAI
 
@@ -347,7 +384,13 @@ the whole organization** in **Organization settings → Models**
 (`OrganizationModelProviderKind` `openai` and `azure_openai`).
 
 **OpenAI** stores only the encrypted API key and uses the official
-`https://api.openai.com/v1` Responses API with a bearer key. Admins add exact
+`https://api.openai.com/v1` Responses API with a bearer key. Connecting can
+name the first models in the same request (`models` on
+`PUT /v1/organizations/:id/model-providers/:kind`, OpenAI and Azure OpenAI
+only, up to 16): each is checked with the new key (or Entra sign-in) before
+anything is saved, a failure saves nothing, and they are saved with the key in
+one transaction, keeping any the organization already offers. The console
+always sends the first model, so a connected key is ready to use. Admins add exact
 OpenAI model IDs as the organization's models; each is checked with the
 organization's key before it is saved (422 on failure, 409 when OpenAI is not
 connected). Products are `organization-openai/<model>` (provider
@@ -422,11 +465,55 @@ signs in once first and returns a safe 422 if Entra refuses it; the identity
 needs the `Cognitive Services OpenAI User` role on the resource. Ownership,
 reach and administration are the same as for a key connection.
 
+#### Organization OpenAI-compatible endpoints
+
+Organization owners/admins connect their own OpenAI-compatible endpoints from
+**Organization settings → Models → Connect provider → Custom endpoint**,
+the same list as the organization's other accounts, with the same
+**Available in** step (`OrganizationModelProviderKind` `openai_compatible`).
+Unlike the other organization providers, an organization can connect several
+endpoints, for example two model hosts; each is its own connection, addressed
+by its connection id:
+
+```text
+GET    /v1/organizations/:id/model-providers/openai_compatible/endpoints
+POST   /v1/organizations/:id/model-providers/openai_compatible/endpoints
+PUT    …/endpoints/:connectionId/key
+DELETE …/endpoints/:connectionId
+POST   …/endpoints/:connectionId/models
+PUT    …/endpoints/:connectionId/models/:customModelId/reasoning
+DELETE …/endpoints/:connectionId/models/:customModelId
+```
+
+Connecting takes the same fields as a workspace endpoint above (HTTPS base URL,
+key, first model ID, API format, optional name, optional `reasoning`); more
+models can be added later, each with optional `reasoning`. Every model's
+[reasoning levels](#reasoning-levels) are read from the endpoint when not given
+(`null` saves none). `PUT …/reasoning` with `{ expectedVersion, reasoning }`
+changes them, and without `reasoning` reads them again from the endpoint (422
+when it lists none); the endpoint's page offers both under each model's
+**Reasoning levels** button. Every key and model is checked with the same short setup request before
+it is saved, and that request and every model request are DNS-pinned to public
+addresses without redirects, exactly as for workspace endpoints. The key is
+stored encrypted and never returned. Products are
+`organization-compatible-<connection id>/<model>` (provider
+`organization-compatible-<connection id>`, kind
+`direct-compatible-organization`) with the conservative capabilities of a
+workspace endpoint, organization billing with no Opengeni credits, unknown
+residency, the same reach into workspaces as the other organization API-key
+rails, and narrowing by
+`/v1/organizations/:id/model-connections/openai_compatible/:connectionId/access`.
+A disconnected endpoint fails closed and never falls back to another
+credential.
+
 Canonical: `packages/contracts/src/direct-model-provider.ts`,
 `packages/core/src/domain/direct-model-provider.ts` for the setup check,
 `withDirectModelProviders` in `packages/config/src/index.ts`,
 `loadDirectModelProviderConnection` in `packages/db/src/index.ts`, and the direct
-provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
+provider form in `apps/web/src/components/direct-model-provider-connection.tsx`
+(onboarding); on the Models page, `ConnectPickerPage` in
+`apps/web/src/components/models/workspace-models-page.tsx` and a workspace's
+own keys in `apps/web/src/components/models/workspace-model-keys.tsx`.
 Organization OpenAI and Azure: `withOrganizationDirectCatalogProvider` /
 `withOrganizationDirectCredential` in `packages/config/src/index.ts`,
 `packages/db/src/organization-model-providers.ts` (endpoint, digest binding,
@@ -435,6 +522,11 @@ Organization OpenAI and Azure: `withOrganizationDirectCatalogProvider` /
 `packages/core/src/model-provider-credentials.ts`,
 `apps/api/src/routes/organization-model-providers.ts`, and the organization
 provider hook `apps/web/src/components/organization-model-provider-connection.tsx`.
+Organization OpenAI-compatible endpoints: `withOrganizationCompatibleProviders`
+in `packages/config/src/index.ts`,
+`packages/db/src/organization-compatible-model-endpoints.ts`,
+`apps/api/src/routes/organization-compatible-model-endpoints.ts`, and
+`apps/web/src/components/models/organization-compatible-endpoints.tsx`.
 
 ### Reviewed overlays — not generic JSON
 
@@ -449,9 +541,8 @@ provider hook `apps/web/src/components/organization-model-provider-connection.ts
 | Codex ChatGPT subscription   | `OPENGENI_CODEX_SUBSCRIPTION_ENABLED`         | Responses        | `codex/…` after the workspace connection is ready                 |
 | SuperGrok / xAI subscription | `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED`     | Responses        | `supergrok/…` after the workspace connection is ready             |
 
-A workspace connects its own OpenAI-compatible server through the encrypted
-workspace connection described in
-[A workspace's own OpenAI-compatible endpoint](#a-workspaces-own-openai-compatible-endpoint),
+An organization connects its own OpenAI-compatible servers as described in
+[Organization OpenAI-compatible endpoints](#organization-openai-compatible-endpoints),
 not through this registry. Voice input, image, and video use separate provider
 settings.
 
@@ -815,6 +906,7 @@ derives both from the provider kind:
 | Organization Opper                  | organization connection       | organization           | external         |
 | Organization OpenAI                 | organization connection       | organization           | external         |
 | Organization Azure OpenAI           | organization connection       | organization           | external         |
+| Organization OpenAI-compatible      | organization connection       | organization           | external         |
 
 `workspace_connection` is a reserved normalized contract. Generic JSON does
 not enable workspace BYOK; that requires a separately reviewed encrypted
@@ -937,6 +1029,14 @@ from the ambiguous response, and routes the same accepted turn through the
 existing fenced recovery path from durable history. This is intentionally
 narrower than blindly replaying every interrupted stream; ordinary partial or
 outcome-unknown provider operations retain their existing safety classification.
+
+The Chat streaming adapter also requires a nonempty finish reason on choice 0
+before accepting the SDK's `response_done`. Clean EOF or `[DONE]` alone cannot
+complete partial text or release assembled tool calls. A missing finish reason
+fails with `provider_incomplete_response` without automatic replay; a provider's
+explicit streamed error keeps its original evidence. Usage-only trailing chunks
+do not erase an observed finish reason, and a terminal reason does not require a
+redundant `[DONE]` marker.
 
 Other Zen models use the same generic registry, but authentication and billing
 ownership must stay explicit:
@@ -1529,7 +1629,7 @@ The catalog describes:
 - hosted web search, X search, code execution, and image generation;
 - input and output modalities;
 - SSE, Responses WebSocket, and realtime-audio transports; and
-- standard, priority, and fast latency modes.
+- standard, priority, fast, and ultrafast latency modes.
 
 GPT-6 Astra, Sol, and Luna (including their Codex subscription variants)
 advertise runnable **Fast** mode. Fast requests set the provider service tier,
@@ -1537,6 +1637,12 @@ use a 2× billing multiplier, and fail the turn if the provider response omits
 or downgrades that tier; Opengeni never silently falls back to Standard. The
 GPT-6 family uses the 1.05M context window. A configured GPT-5.6 id still pins
 Codex's 272,000 / 258,400 / 244,800 raw / effective / auto-compact catalog.
+
+GPT-6 Astra and GPT-6.1 Sol also advertise **Ultrafast** (service tier
+`ultrafast`, 6× billing multiplier) where OpenAI serves it: the built-in
+provider only on the direct OpenAI API (`api.openai.com`, never Azure OpenAI or
+another base URL), and Codex subscription models only when a connected account's
+live model list advertises the tier for that model.
 
 Upstream documentation alone never makes a capability runnable. For example,
 provider support for X search or Responses WebSocket remains `runnable: false`
@@ -2273,6 +2379,9 @@ New bare rates require a configured model on the official OpenAI API route;
 custom proxies and Azure do not inherit them by matching a model name.
 Registry prices and explicit
 product-ID overrides still win. External metering never becomes a credit debit.
+When a model has no debit price, its usage record's equivalent credit cost is the
+reviewed list rate's equivalent-credit comparison, so list-priced subscription
+calls still report what they would have cost.
 
 Forward fact writers may use `calculateModelListUsageCostSnapshot` with
 `priceContextKnown: true` only after establishing the request's price provenance
@@ -2521,6 +2630,12 @@ the deployment default is off. Anthropic API-key connections are independent of
 this flag. When off, subscription setup endpoints and catalog/credential resolution
 are disabled, and subscription setup is hidden from model settings. Stored credentials
 are retained. Anthropic API keys, Codex, SuperGrok, OpenRouter and Vercel are unchanged.
+
+`OPENGENI_CLAUDE_CODE_API_KEY_ENABLED=true` adds a "Claude Code (API key)" row to Connect
+provider (default off). It opens the same Anthropic API-key connection as the Anthropic row,
+with a short explanation that some Claude plans include monthly API credits and how to claim
+them and create the key. It is display only: it adds no provider, credential kind or
+billing path, and it is independent of `OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED`.
 
 Workspace Claude custom models use `/v1/workspaces/:workspaceId/model-providers/
 :providerKind/custom-models` (`anthropic` or `claude_subscription`) and the shared subscription account APIs for Claude. Anthropic API keys keep the

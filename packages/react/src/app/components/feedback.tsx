@@ -1,4 +1,5 @@
 import { t } from "../lib/console-text";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   useCallback,
   useEffect,
@@ -44,7 +45,7 @@ import {
   type FeedbackImage,
 } from "../lib/feedback-capture";
 
-type FeedbackClient = Pick<OpenGeniClient, "createFeedback" | "listOwnFeedback">;
+type FeedbackClient = Pick<ChatClient<OpenGeniClient>, "createFeedback" | "listOwnFeedback">;
 
 /** Screenshots in a report: taking, adding, pasting and removing them. */
 function useFeedbackImages() {

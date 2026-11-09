@@ -845,7 +845,7 @@ export const SECTIONS: readonly SectionMeta[] = [
     group: "Forms",
     title: "Cadence picker",
     purpose: "Say when something runs, as a sentence, with a preview.",
-    usedOn: "Schedules, knowledge source sync",
+    usedOn: "Schedules",
     recommended: "a",
     whyRecommended:
       "The rule reads the way people think about it, and the time zone is part of the sentence.",
@@ -1009,10 +1009,10 @@ export const SECTIONS: readonly SectionMeta[] = [
   {
     key: "page-connected-agents",
     group: "Pages",
-    title: "Connected agents",
+    title: "Connected apps",
     purpose:
       "How to add the Opengeni MCP server to a coding agent, then the outside agents working in the organization over MCP: whose they are, what they can do and where.",
-    usedOn: "Organization settings > Connected agents, agent sign-in",
+    usedOn: "Organization settings > Connected apps, agent sign-in",
     load: () => import("./page-connected-agents"),
   },
   {

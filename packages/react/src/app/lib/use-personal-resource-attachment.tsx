@@ -3,9 +3,10 @@ import {
   type PersonalResourceAttachmentIntent,
   type ResourceAuthorityScope,
   type SendMessageInput,
-  type Session,
+  type ChatSession as Session,
   type Workspace,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -71,7 +72,7 @@ export type PersonalResourceAttachmentController = Readonly<{
  * optional Personal catalog into submission UI.
  */
 export function useFixedRigScope(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string | null,
   rigId: string | null,
   enabled = true,
@@ -101,7 +102,7 @@ export function useFixedRigScope(
 }
 
 export function usePersonalResourceAttachment(input: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   authMode: string;
   authSession: AuthSession | null;
   accessSubjectId: string;

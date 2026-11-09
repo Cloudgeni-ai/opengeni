@@ -1,4 +1,5 @@
 import { possessive } from "./possessive";
+import type { ChatClient } from "@opengeni/sdk";
 import { AccountGroupRows, groupEntry, type GroupEntry } from "./account-fold";
 import { OrganizationElevenLabsVoiceConnection } from "./elevenlabs-voice-connection";
 import { OrganizationRealtimeVoiceSettingsRows } from "./realtime-voice-settings";
@@ -37,6 +38,10 @@ import {
   providerListed,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
+import {
+  CompatibleEndpointView,
+  type OrganizationCompatibleEndpoints,
+} from "@/components/models/organization-compatible-endpoints";
 import { codexAccountName, codexUsageWindows, planLabel } from "@/components/codex-connection";
 import { useConnectionAccess } from "@/components/connection-access-settings";
 import {
@@ -197,7 +202,7 @@ export interface WorkspaceModelsSnapshot {
 }
 
 async function readWorkspaceModels(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspace: ModelsWorkspace,
   claudeEnabled: boolean,
   /**
@@ -288,7 +293,7 @@ async function readWorkspaceModels(
 
 /** Reads each workspace once, through that workspace, and keeps the results by id. */
 function useWorkspaceSnapshots(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaces: readonly ModelsWorkspace[],
   claudeEnabled: boolean,
   /** Changes when the organization's defaults change, so what workspaces follow is re-read. */
@@ -352,12 +357,13 @@ export function OrganizationModelsList({
   orgGrok,
   orgClaude,
   orgGateways,
+  orgCompatible,
   liveCodexUsage,
   onOpenAccount,
   onOpenWorkspace,
   onConnect,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId?: string | undefined;
   /** The defaults every workspace follows; owners and admins only, otherwise null. */
   organizationDefaults: OrganizationModelDefaultsState | null;
@@ -385,6 +391,8 @@ export function OrganizationModelsList({
   orgGrok: SuperGrokSubscriptions;
   orgClaude: ClaudeSubscriptions;
   orgGateways: Record<GatewayId, ProviderConnection>;
+  /** The organization's OpenAI-compatible endpoints; owners and admins only. */
+  orgCompatible?: OrganizationCompatibleEndpoints | undefined;
   /** Weekly usage by account, as the settings workspace reads the accounts it uses. */
   liveCodexUsage: Readonly<Record<string, ReactNode>>;
   /** Opens an organization account (`org:...`). */
@@ -639,13 +647,15 @@ export function OrganizationModelsList({
   }
 
   const orgKeyIds = administrator ? GATEWAYS.filter((id) => providerListed(orgGateways[id])) : [];
+  const orgEndpoints = administrator && orgCompatible ? orgCompatible.endpoints : [];
   const loadingAccounts =
     loadingWorkspaces ||
     (administrator &&
       (orgCodex.loading ||
         (!orgGrok.unavailable && orgGrok.loading) ||
         (claudeEnabled && orgClaude.loading) ||
-        GATEWAYS.some((id) => !orgGateways[id].hidden && !orgGateways[id].settled)));
+        GATEWAYS.some((id) => !orgGateways[id].hidden && !orgGateways[id].settled) ||
+        Boolean(orgCompatible?.loading)));
   const visible: Record<AccountGroupId, boolean> = {
     codex:
       groups.codex.length > 0 ||
@@ -665,6 +675,7 @@ export function OrganizationModelsList({
     !visible.claude &&
     !visible.supergrok &&
     orgKeyIds.length === 0 &&
+    orgEndpoints.length === 0 &&
     keyRows.length === 0;
   const connect = (
     <RowButton variant="default" onClick={onConnect}>
@@ -799,7 +810,10 @@ export function OrganizationModelsList({
               administrator && !orgGrok.unavailable ? orgGrok.loadError : null,
               () => void orgGrok.refresh(),
             )}
-            {credits.visible || keyRows.length > 0 || orgKeyIds.length > 0 ? (
+            {credits.visible ||
+            keyRows.length > 0 ||
+            orgKeyIds.length > 0 ||
+            orgEndpoints.length > 0 ? (
               <AccountGroupHeading>Pay as you go</AccountGroupHeading>
             ) : null}
             <OpenGeniCreditsRow
@@ -816,6 +830,23 @@ export function OrganizationModelsList({
                 onOpen={() => onOpenAccount(accountKey("gateway", id, true))}
               />
             ))}
+            {orgCompatible
+              ? orgEndpoints.map((endpoint) => (
+                  <CompatibleEndpointView
+                    key={`org:compatible:${endpoint.id}`}
+                    endpoints={orgCompatible}
+                    connectionId={endpoint.id}
+                  >
+                    {(state) => (
+                      <OrganizationKeyRow
+                        state={state}
+                        labels={labels}
+                        onOpen={() => onOpenAccount(accountKey("compatible", endpoint.id, true))}
+                      />
+                    )}
+                  </CompatibleEndpointView>
+                ))
+              : null}
             {keyRows}
           </RowList>
         )}

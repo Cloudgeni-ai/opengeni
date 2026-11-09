@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   ComputerSession,
   ComputerSessionMutationResponse,
@@ -11,7 +12,7 @@ import {
 } from "../session-context";
 import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
-export type UseComputerSessionsOptions = EmbeddedComputerInteractionClientOverride & {
+export type UseComputerSessionsOptions = EmbeddedComputerInteractionClientOverride<ChatClient> & {
   /** Current agent/session relevance. Workspace peers remain in `sessions`. */
   sessionId?: string | undefined;
   enabled?: boolean | undefined;
@@ -255,4 +256,4 @@ function mergeSession(
 }
 
 /** Exported for narrow proxy implementations and tests. */
-export type ComputerSessionsClient = EmbeddedComputerInteractionClientLike;
+export type ComputerSessionsClient = EmbeddedComputerInteractionClientLike<ChatClient>;

@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { Loader2Icon, MailIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -48,7 +49,7 @@ export type OrganizationInvitationsController = {
 };
 
 export function useOrganizationInvitations(input: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   enabled: boolean;
   activeEmail?: string | null;
   onUseInvitedAccount?: (targetEmail: string) => void;

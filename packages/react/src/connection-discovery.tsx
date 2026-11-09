@@ -1,4 +1,6 @@
 import type { ConnectAccount, ConnectController, ConnectProvider } from "@opengeni/connect";
+import type { ChatClient } from "@opengeni/sdk";
+import { deploymentCannotConnect } from "@opengeni/contracts/personal-integration-setup";
 import { ConnectChooser } from "./connect-chooser";
 import {
   capabilityConnectProviderId,
@@ -17,7 +19,7 @@ import { useOpenGeniText } from "./messages/runtime";
 import { useNobodyToShareWith } from "./workspace-sharing";
 
 export type ConnectionDiscoveryProps = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   controller?: ConnectController | undefined;
   workspaceId: string;
   returnUrl: string;
@@ -97,9 +99,9 @@ function ScopedDiscovery({
                 item.kind === "mcp" &&
                 item.authKind === "oauth2" &&
                 Boolean(item.mcpUrl ?? item.endpointUrl) &&
-                // The provider refuses self-registration and this deployment
-                // has no operator client for it: Connect cannot succeed.
-                (item.enabled || item.runtime?.operatorOAuthClient?.configured !== false),
+                // This deployment cannot start the connection (no operator
+                // OAuth client, or setup switched off): Connect cannot succeed.
+                !deploymentCannotConnect(item),
             ),
           );
         }

@@ -1,4 +1,8 @@
-import type { Session, UpdateSessionPinRequest, UpdateSessionRequest } from "@opengeni/sdk";
+import type {
+  ChatSession as Session,
+  UpdateSessionPinRequest,
+  UpdateSessionRequest,
+} from "@opengeni/sdk";
 import {
   resolveRenameSubmission,
   SESSION_TITLE_MAX_LENGTH,

@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { OpenGeniApiError, type BillingPlanBalance } from "@opengeni/sdk";
@@ -237,7 +238,9 @@ function makeClient(overrides: Record<string, unknown> = {}) {
 }
 
 type Client = ReturnType<typeof makeClient>;
-type InvitationRequest = Parameters<OpenGeniBrowserClient["createOrganizationInvitation"]>[1] &
+type InvitationRequest = Parameters<
+  ChatClient<OpenGeniBrowserClient>["createOrganizationInvitation"]
+>[1] &
   Pick<OrganizationInvitation, "role" | "initialWorkspaceIds">;
 
 async function flush() {
@@ -276,7 +279,7 @@ function Provider({
 }) {
   return (
     <OrganizationDirectoryProvider
-      client={client as unknown as OpenGeniBrowserClient}
+      client={client as unknown as ChatClient<OpenGeniBrowserClient>}
       identity={identity}
       actorRole={actorRole}
       managedSession
@@ -1228,7 +1231,9 @@ describe("Workspace page", () => {
     await flush();
     expect(listOpenGeniSlackAgents).toHaveBeenCalledWith("workspace-a");
     const confirm = view.container.querySelector('[data-testid="confirm"]');
-    expect(confirm?.textContent).toContain("Its Slack agents are deleted too: Data team, Release.");
+    expect(confirm?.textContent).toContain(
+      "Its agents stop answering in Slack: Data team, Release.",
+    );
     expect(confirm?.textContent).not.toContain("Elsewhere");
     await view.unmount();
   });
@@ -1252,7 +1257,7 @@ describe("Workspace page", () => {
     await act(async () => remove.click());
     await flush();
     const confirm = view.container.querySelector('[data-testid="confirm"]');
-    expect(confirm?.textContent).toContain("Its chats, files, automations and knowledge");
+    expect(confirm?.textContent).toContain("Its chats, files, automations, agents and knowledge");
     expect(confirm?.textContent).not.toContain("Slack agents");
     await view.unmount();
   });

@@ -143,6 +143,15 @@ pub(crate) fn sandboxes_dir(root: &Path) -> PathBuf {
     chroot_base(root).join("firecracker")
 }
 
+/// The directory holding the copies of sandboxes set aside rather than
+/// deleted, one directory each, named after the sandbox and the owner
+/// epoch it held here. On the filesystem of [`sandboxes_dir`], so setting
+/// one aside is a rename. Nothing deletes them; an operator recovers what
+/// they need from one, then deletes it.
+pub(crate) fn aside_dir(root: &Path) -> PathBuf {
+    chroot_base(root).join("aside")
+}
+
 /// The directory holding the warm templates (see [`crate::pool`]).
 pub(crate) fn templates_dir(root: &Path) -> PathBuf {
     root.join("templates")

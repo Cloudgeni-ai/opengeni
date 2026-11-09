@@ -76,6 +76,59 @@ Keep all `@opengeni` packages on the same version.
 
 Chats are private to each user by default. That needs private chats enabled for your organization; if they are off, the proxy returns an error that says who can turn them on.
 
+### A backend on another origin
+
+A same-origin backend route needs no CORS configuration. If your browser calls a
+different origin, use both SDK header lists in that backend's CORS middleware:
+
+```ts
+import { OPENGENI_BROWSER_REQUEST_HEADERS, OPENGENI_BROWSER_RESPONSE_HEADERS } from "@opengeni/sdk";
+
+const corsOptions = {
+  origin: "https://your-product.example",
+  credentials: true,
+  allowHeaders: [...OPENGENI_BROWSER_REQUEST_HEADERS],
+  exposeHeaders: [...OPENGENI_BROWSER_RESPONSE_HEADERS],
+};
+```
+
+Use your framework's equivalent of `allowHeaders` and `exposeHeaders`. Add any
+headers your product sends itself. The packaged proxy and server-route adapters
+already preserve and expose Opengeni's response metadata; middleware outside them
+must not replace that exposure list. Allowing request headers does **not** expose
+response headers. Missing exposure breaks history paging and conversation filtering;
+the SDK warns once per client when the required metadata is unreadable.
+
+### Session data and operator configuration
+
+The packaged chat UI opts into `client.withSessionResponse("chat")`. Its SDK client sends
+`Accept: application/json; opengeni-session=chat`; session reads, lists and
+mutation responses then omit `instructions`, `skills` and `effectiveTools`. The
+chat does not need these to render. An authorized settings
+page or server-side SDK caller can explicitly use
+`client.getSessionConfiguration(workspaceId, sessionId)` (`GET .../sessions/{id}/configuration`),
+which returns the full session configuration and requires `sessions:control` plus
+access to that session. There is no automatic full-configuration fallback.
+
+The SDK default itself remains unchanged: `new OpenGeniClient({ baseUrl })` returns
+the full `Session` shape. For your own chat client, use
+`client.withSessionResponse("chat")` to create a separate compact client without
+changing existing readers. Its session methods return `ChatSession`, with optional
+configuration fields for compatibility with older APIs.
+
+With a server-owned `createSession` hook, the packaged relay also refuses browser
+reads of `configuration` and `model-context`. Read operator configuration on your
+backend instead. These are response projections only: the agent's stored instructions,
+skills and model input do not change. Upgrade the API as well as the SDK; older
+APIs still return their historical full session payloads.
+
+Previously shipped clients without this Accept preference keep the historical full response.
+The packaged browser relay always adds the compact preference itself, even for older
+browser clients. A custom relay must do the same; never pass a browser's choice
+through as a way to read the legacy configuration.
+The existing `Accept` header works with older APIs' CORS allowlists; they ignore
+the new preference and continue to return the full response.
+
 ## Choose what your agent can do
 
 Embedded agents can use Opengeni's built-in capabilities and your product's own tools. Configure them on your backend; the conversation component stays the same.

@@ -1,10 +1,12 @@
 import {
+  OpenGeniApiError,
   resolveWorkspaceVoiceInputEnabled,
   SESSION_SCOPE_HEADER,
   type ClientVoiceInputConfig,
   type OpenGeniClient,
   type SessionEvent,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   lazy,
   Suspense,
@@ -52,6 +54,7 @@ import type {
 import { SessionChrome, type SessionChromeProps } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { AuthNeededRow } from "./auth-needed-row";
+import { capabilityReconnectConnectionId } from "../auth-needed-presentation";
 import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
 import {
   inChatConnectDecision,
@@ -75,6 +78,11 @@ import {
 } from "./open-geni-links";
 import type { UserMessageDisclosureLabels } from "./user-message-body";
 import { cn } from "../lib/cn";
+import {
+  resolveAgentSignals,
+  type AgentSignals,
+  type ResolvedAgentSignals,
+} from "../session-agents-model";
 import { useComposerWithStreamState } from "../lib/use-calm-service-failure";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 import { useErrorMessage } from "../lib/error-message";
@@ -102,7 +110,7 @@ const DEFAULT_CONVERSATION_LABELS = (t: OpenGeniText): SessionConversationLabels
   sitePreviewUnavailable: t("sessionConversation.sitePreviewUnavailable"),
 });
 
-export type SessionConversationProps = ClientOverride &
+export type SessionConversationProps = ClientOverride<ChatClient> &
   SessionProxyBaseUrl & {
     /**
      * `null` while your server is still creating the session. Render the
@@ -215,6 +223,19 @@ export type SessionConversationProps = ClientOverride &
     modelPicker?: boolean | undefined;
     /** Model-picker appearance only; visibility, policy and delivery remain owned here. */
     modelPickerProps?: Pick<ModelPolicyPickerProps, "groupPresentation" | "messages"> | undefined;
+    /**
+     * Show how the agent works behind the scenes: above the composer, the
+     * goal pill and the agents and commands segments a host passes in
+     * `chromeProps`; on each turn row, the live step and step facets.
+     * Defaults to true. Set `false` for end users to whom a paused goal, a
+     * count of helper agents, a running command or a tool step means
+     * nothing: turn rows then read only "Working · 8s" / "Worked for 8s".
+     * Or hide only some of them, for example `{ goal: false }` to drop the
+     * goal pill and keep helper agents and turn-row detail (see
+     * `AgentSignalOptions`). Queued messages, the agent's wait, incoming
+     * updates, approvals and the agent's questions always show.
+     */
+    agentSignals?: AgentSignals | undefined;
     /** Localized actions for already-sent user-message disclosure. */
     userMessageDisclosureLabels?: UserMessageDisclosureLabels | undefined;
     loadSkillReview?: HumanInputSurfaceProps["loadSkillReview"];
@@ -401,6 +422,7 @@ function ConversationView({
   realtimeVoiceProps,
   genieLoading,
   modelPickerProps,
+  agentSignals,
   userMessageDisclosureLabels,
   loadSkillReview,
   className,
@@ -418,6 +440,8 @@ function ConversationView({
   onRetry,
 }: SessionConversationViewProps & { onRetry: () => void }) {
   const t = useOpenGeniText();
+  const signals = resolveAgentSignals(agentSignals);
+  const hostChrome = withoutHiddenSignals(chromeProps, signals);
   const {
     sessionId,
     config,
@@ -572,6 +596,7 @@ function ConversationView({
           capabilityId={decision.item.id}
           name={decision.item.name}
           personalOnly={decision.personalOnly}
+          reconnectConnectionId={capabilityReconnectConnectionId(item)}
           rationale={item.capability?.rationale ?? ""}
           // OAuth returns to this exact host page; the card follows the
           // attempt's durable state, so the page needs no return handler.
@@ -688,6 +713,12 @@ function ConversationView({
           >
             <MessageTimeline
               renderMessageText={renderMessageText}
+              artifactScope={{
+                client: context.client,
+                workspaceId: context.workspaceId,
+                sessionId: sessionId ?? undefined,
+                override: resolveLink,
+              }}
               resolveLink={links}
               renderInteractiveBlock={
                 renderInteractiveBlock === false
@@ -707,6 +738,7 @@ function ConversationView({
               events={feed.events}
               items={conversation.timeline}
               turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
+              agentSignals={signals.turnDetail}
               renderAuthNeeded={(item) =>
                 timelineProps?.renderAuthNeeded?.(item) ??
                 (item.capability?.id === "api:connected-machine" && computerConnection ? (
@@ -753,14 +785,21 @@ function ConversationView({
                   className="mx-auto max-w-3xl"
                   {...approvalProps}
                   approvals={approvals}
+                  // A refusal rejects, so the card (or Approve all) names it
+                  // and keeps the action waiting.
                   onApprove={async (approval, answer) => {
-                    await control.approve(approval.id, undefined, answer);
+                    await control.approve(approval.id, undefined, answer, { throwOnError: true });
                   }}
                   onReject={async (approval) => {
-                    await control.reject(approval.id);
+                    await control.reject(approval.id, undefined, { throwOnError: true });
                   }}
                   responding={control.responding}
-                  error={control.error}
+                  // A 409 means it was already decided: nothing to show.
+                  error={
+                    control.error instanceof OpenGeniApiError && control.error.status === 409
+                      ? null
+                      : control.error
+                  }
                 />
               ) : null}
               <ProviderRecoveryNotice
@@ -768,7 +807,15 @@ function ConversationView({
                 recovery={providerRecovery}
               />
               {/* Links in agent questions resolve like links in its replies. */}
-              <OpenGeniLinkProvider resolveLink={links}>
+              <OpenGeniLinkProvider
+                resolveLink={links}
+                artifactScope={{
+                  client: context.client,
+                  workspaceId: context.workspaceId,
+                  sessionId: sessionId ?? undefined,
+                  override: resolveLink,
+                }}
+              >
                 <HumanInputSurface
                   className="mx-auto max-w-3xl"
                   autoFocus={false}
@@ -792,17 +839,18 @@ function ConversationView({
                 client={context.client}
                 workspaceId={context.workspaceId}
                 events={feed.events}
+                goal={signals.goal}
                 chrome={
                   terminal
                     ? {
-                        ...chromeProps,
+                        ...hostChrome,
                         queue,
                         sessionStatus: status,
                         readOnly: true,
                         onOpenSession,
                       }
                     : {
-                        ...chromeProps,
+                        ...hostChrome,
                         queue,
                         composer,
                         queuedRecall,
@@ -903,13 +951,42 @@ type ConversationChromeProps = {
   client: unknown;
   workspaceId: string;
   events: UseGoalOptions["events"];
+  /** Show the goal pill (and read the goal) when the client can reach goals. */
+  goal: boolean;
   chrome: Omit<ComponentProps<typeof SessionChrome>, "goal">;
 };
+
+type ConversationChromeExtras = NonNullable<SessionConversationProps["chromeProps"]>;
+
+/**
+ * The host's chrome extras without the segments it hides, in the composer's
+ * readable column: the row lines up with the composer in a wide panel.
+ */
+function withoutHiddenSignals(
+  chrome: SessionConversationProps["chromeProps"],
+  signals: ResolvedAgentSignals,
+): ConversationChromeExtras {
+  const {
+    agentsPanel,
+    agentsSignal,
+    commandsPanel,
+    commandsCount,
+    className,
+    ...rest
+  }: ConversationChromeExtras = chrome ?? {};
+  return {
+    ...rest,
+    ...(signals.agents ? { agentsPanel, agentsSignal } : {}),
+    ...(signals.commands ? { commandsPanel, commandsCount } : {}),
+    className: cn("mx-auto max-w-3xl", className),
+  };
+}
 
 /** Session chrome with the goal pill and its Pause/Resume/Clear when the client can reach goals. */
 function ConversationChrome(props: ConversationChromeProps) {
   const goals = props.client as Partial<Record<"getGoal" | "updateGoal" | "deleteGoal", unknown>>;
   const canReachGoals =
+    props.goal &&
     typeof goals.getGoal === "function" &&
     typeof goals.updateGoal === "function" &&
     typeof goals.deleteGoal === "function";
@@ -1009,7 +1086,7 @@ function useDefaultInteractiveBlock(
 
 type RetainedLoaderClient = Partial<
   Pick<
-    OpenGeniClient,
+    ChatClient<OpenGeniClient>,
     | "createRetainedArtifactDownloadUrl"
     | "downloadRetainedArtifact"
     | "downloadRetainedScreenshot"
@@ -1087,7 +1164,9 @@ export function useComposerTranscription(
     key: string;
     enabled: boolean;
   } | null>(null);
-  const reader = client as Partial<Pick<OpenGeniClient, "getWorkspace" | "transcribeAudio">>;
+  const reader = client as Partial<
+    Pick<ChatClient<OpenGeniClient>, "getWorkspace" | "transcribeAudio">
+  >;
   const supported = capability !== null && typeof reader.transcribeAudio === "function";
   useEffect(() => {
     if (!supported) return;
@@ -1119,8 +1198,8 @@ export function useComposerTranscription(
     () =>
       supported
         ? {
-            client: reader as Pick<OpenGeniClient, "transcribeAudio"> &
-              Partial<Pick<OpenGeniClient, "requestJson">>,
+            client: reader as Pick<ChatClient<OpenGeniClient>, "transcribeAudio"> &
+              Partial<Pick<ChatClient<OpenGeniClient>, "requestJson">>,
             workspaceId,
             capability,
             workspaceEnabled:

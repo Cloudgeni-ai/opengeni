@@ -1,6 +1,12 @@
 import { AppWindowIcon, DownloadIcon, FileJsonIcon, ImageIcon } from "lucide-react";
 import { useLightboxOptional } from "../../../timeline";
 import { useEffect, useState } from "react";
+import {
+  isStoredImage,
+  readStoredFile,
+  useStoredFilePreview,
+  useStoredFiles,
+} from "../../../stored-file-preview";
 import { toast } from "../../lib/toast";
 import { useAppContext } from "../../app-context";
 import { usePage } from "../../lib/navigation";
@@ -26,10 +32,10 @@ export default function MessageResourceAttachments({
   const filesPending = fileResources.length > 0 && !ready;
   const imageResources = filesPending
     ? []
-    : fileResources.filter((resource) => isImageAsset(assets.get(resource.fileId)));
+    : fileResources.filter((resource) => isStoredImage(assets.get(resource.fileId)));
   const otherFileResources = filesPending
     ? []
-    : fileResources.filter((resource) => !isImageAsset(assets.get(resource.fileId)));
+    : fileResources.filter((resource) => !isStoredImage(assets.get(resource.fileId)));
   const hasChips =
     otherFileResources.length > 0 || resources.some((resource) => resource.kind === "repository");
   return (
@@ -77,47 +83,13 @@ function useFileAssets(
   workspaceId: string,
   resources: FileResource[],
   sessionId?: string,
-): { assets: Map<string, FileAsset | null>; ready: boolean } {
+): { assets: ReadonlyMap<string, FileAsset | null>; ready: boolean } {
   const { client } = useAppContext();
-  // The map remembers WHICH id-key it was fetched for: when the attachments
-  // change, the stale map must not masquerade as this message's metadata while
-  // the new fetch is in flight (previews briefly showed the previous message's
-  // files). `ready` is key-matched, never inferred from map size.
-  const [loaded, setLoaded] = useState<{ key: string; assets: Map<string, FileAsset | null> }>({
-    key: "",
-    assets: new Map(),
-  });
-  const fileIdsKey = resources.map((resource) => resource.fileId).join(",");
-  const key = `${sessionId ?? ""}:${fileIdsKey}`;
-  useEffect(() => {
-    let mounted = true;
-    const ids = fileIdsKey ? fileIdsKey.split(",") : [];
-    if (ids.length === 0) {
-      setLoaded({ key, assets: new Map() });
-      return;
-    }
-    void Promise.all(
-      ids.map(async (id): Promise<readonly [string, FileAsset | null]> => {
-        try {
-          return [id, await client.getFile(workspaceId, id, { sessionId })] as const;
-        } catch {
-          return [id, null] as const;
-        }
-      }),
-    ).then((entries) => {
-      if (mounted) {
-        setLoaded({ key, assets: new Map(entries) });
-      }
-    });
-    return () => {
-      mounted = false;
-    };
-  }, [client, workspaceId, sessionId, fileIdsKey, key]);
-  return { assets: loaded.key === key ? loaded.assets : new Map(), ready: loaded.key === key };
-}
-
-function isImageAsset(asset: FileAsset | null | undefined): boolean {
-  return Boolean(asset?.contentType.startsWith("image/"));
+  const { files, ready } = useStoredFiles(
+    { client, workspaceId, sessionId },
+    resources.map((resource) => resource.fileId),
+  );
+  return { assets: files, ready };
 }
 
 /** Signed image preview with lightbox and download; failures become file chips. */
@@ -137,33 +109,12 @@ function MessageImagePreview({
   const { client } = useAppContext();
   const page = usePage();
   const lightbox = useLightboxOptional();
-  const [url, setUrl] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [loaded, setLoaded] = useState(false);
-
-  useEffect(() => {
-    let mounted = true;
-    // Same mounted instance, new file (virtualized/reused rows): the previous
-    // attachment's url/failed/loaded must never bleed into this one.
-    setUrl(null);
-    setFailed(false);
-    setLoaded(false);
-    void client
-      .createFileDownloadUrl(workspaceId, resource.fileId, { sessionId })
-      .then((signed) => {
-        if (mounted) {
-          setUrl(signed.url);
-        }
-      })
-      .catch(() => {
-        if (mounted) {
-          setFailed(true);
-        }
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [client, workspaceId, sessionId, resource.fileId]);
+  // The stored copy, re-signed once if it stops loading before falling back to a chip.
+  const preview = useStoredFilePreview({ client, workspaceId, sessionId }, asset);
+  const url = preview.url ?? null;
+  const failed = preview.failed;
+  const [loadedUrl, setLoadedUrl] = useState<string | null>(null);
+  const loaded = url !== null && loadedUrl === url;
 
   // A dead/expired signed URL degrades to the plain file card — never a broken image.
   if (failed) {
@@ -220,8 +171,8 @@ function MessageImagePreview({
             src={url}
             alt={asset.filename}
             loading="lazy"
-            onLoad={() => setLoaded(true)}
-            onError={() => setFailed(true)}
+            onLoad={() => setLoadedUrl(url)}
+            onError={preview.onError}
             className={cn(
               "w-full transition-opacity duration-200",
               grid ? "h-36 object-cover" : "max-h-80 object-contain",
@@ -286,8 +237,7 @@ function MessageFileAttachment({
       return;
     }
     let mounted = true;
-    void client
-      .getFile(workspaceId, resource.fileId, { sessionId })
+    void readStoredFile({ client, workspaceId, sessionId }, resource.fileId)
       .then((asset) => {
         if (mounted) {
           setFile(asset);

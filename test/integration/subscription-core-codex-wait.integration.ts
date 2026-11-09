@@ -50,12 +50,6 @@ const realDb = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const testTimeoutMs = 120_000;
 const workflowDefinitionsPath = new URL("../../apps/worker/src/workflows.ts", import.meta.url)
   .pathname;
-// Recorded with the session workflow before session-capacity-wake-jitter-v1
-// (a legacy Codex capacity wait); the core path must not change its replay.
-const legacySessionCapacityWaitHistoryPath = new URL(
-  "../../apps/worker/test/fixtures/legacy-session-capacity-wait-history.json",
-  import.meta.url,
-).pathname;
 const MODEL = "codex/gpt-5.5";
 const key = Buffer.alloc(32, 53);
 const settings = { environmentsEncryptionKey: key.toString("base64") } as never;
@@ -126,10 +120,6 @@ describe.skipIf(!realDb)(
         ${accountId}::uuid, ${shared!.admin.json({ codex: { mode: "spread" } })}::jsonb,
         '{}'::jsonb, false, '{}'::jsonb, false, false
       )`;
-      await shared!.admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, 'codex', true)
-      on conflict (account_id, provider) do update set enabled = true`;
       const [connectionRow] = await shared!.admin<{ id: string }[]>`
       insert into subscription_connections (
         account_id, provider, kind, credential_encrypted, ownership, scope_kind,
@@ -275,9 +265,9 @@ describe.skipIf(!realDb)(
     }) {
       const { fixture: state } = input;
       let phase: "queued" | "waiting" | "recovering" | "done" = input.initialPhase ?? "queued";
-      // After Pause, Steer or Cancel the real database peek decides what the
-      // workflow sees next: a stale core waiter would make it sleep again.
-      let interrupted: "pause" | "steer" | "cancel" | null = null;
+      // After Pause, Resume, Steer or Cancel the real database peek decides
+      // what the workflow sees next: a stale core waiter would make it sleep again.
+      let interrupted: "pause" | "resume" | "steer" | "cancel" | null = null;
       const realPeeks: string[] = [];
       const attempts: string[] = [];
       const reconciliations: Array<{ cause: string; action: string }> = [];
@@ -377,7 +367,7 @@ describe.skipIf(!realDb)(
         attempts,
         reconciliations,
         realPeeks,
-        interrupt: (kind: "pause" | "steer" | "cancel" | null) => {
+        interrupt: (kind: "pause" | "resume" | "steer" | "cancel" | null) => {
           interrupted = kind;
         },
         phase: () => phase,
@@ -410,23 +400,6 @@ describe.skipIf(!realDb)(
         ],
       });
     }
-
-    test(
-      "SUB-WAIT-03: the pinned legacy capacity-wait history still replays",
-      async () => {
-        const history = (await Bun.file(legacySessionCapacityWaitHistoryPath).json()) as {
-          events: Array<{
-            workflowExecutionStartedEventAttributes?: { workflowId?: string };
-          }>;
-        };
-        await Worker.runReplayHistory(
-          { workflowsPath: workflowDefinitionsPath },
-          history,
-          history.events[0]?.workflowExecutionStartedEventAttributes?.workflowId ?? "legacy",
-        );
-      },
-      testTimeoutMs,
-    );
 
     test(
       "SUB-WAIT-02: signal before peek resumes a core wake committed while the turn is still parking",
@@ -695,7 +668,7 @@ describe.skipIf(!realDb)(
     }
 
     test(
-      "SUB-WAIT-04: Pause preserves the waiter and available capacity cannot bypass Resume",
+      "SUB-WAIT-04: Pause stops the wait, available capacity cannot bypass Resume, and Resume runs the same turn",
       async () => {
         const taskQueue = `core-wait-${crypto.randomUUID()}`;
         const state = await fixture();
@@ -721,9 +694,12 @@ describe.skipIf(!realDb)(
           await handle.signal("sessionControl");
           await handle.result();
           expect(worker.realPeeks).toContain("idle");
-          expect((await state.currentRef())?.waiterId).toBe(parked?.waiterId);
-          expect(await state.turnStatus()).toBe("waiting_capacity");
+          // Pause released the turn from its wait: no waiter is left, and the
+          // same turn parks recovering until Resume.
+          expect(await state.currentRef()).toBeNull();
+          expect(await state.turnStatus()).toBe("recovering");
           await state.setExhausted(null);
+          // A late signal for the released waiter changes nothing.
           const pausedResult = await createCodexCapacityActivities(
             async () =>
               ({
@@ -741,8 +717,13 @@ describe.skipIf(!realDb)(
             cause: "signal",
           });
           expect(pausedResult.action).not.toBe("resumed");
+          await wakeSubscriptionCoreCodexWaitersAndDeliver(
+            { db: client!.db, signalCodexCapacityWorkflow: signal },
+            { accountId: state.accountId, reason: "quota_observed_available" },
+          );
           expect(worker.attempts).toHaveLength(1);
-          expect((await state.currentRef())?.waiterId).toBe(parked?.waiterId);
+          expect(await state.currentRef()).toBeNull();
+          expect(await state.turnStatus()).toBe("recovering");
           await asOwner(state, (tx) =>
             mutateSessionControlInTransaction(tx, {
               accountId: state.accountId,
@@ -753,7 +734,7 @@ describe.skipIf(!realDb)(
               action: "resume",
             }),
           );
-          worker.interrupt(null);
+          worker.interrupt("resume");
           const resumed = await new Client({ connection }).workflow.signalWithStart(
             "sessionWorkflow",
             {
@@ -772,11 +753,9 @@ describe.skipIf(!realDb)(
               signalArgs: [],
             },
           );
-          await wakeSubscriptionCoreCodexWaitersAndDeliver(
-            { db: client!.db, signalCodexCapacityWorkflow: signal },
-            { accountId: state.accountId, reason: "quota_observed_available" },
-          );
           await resumed.result();
+          // The real peek handed the released turn back as runnable work.
+          expect(worker.realPeeks.at(-1)).toBe("runnable");
           expect(worker.attempts).toHaveLength(2);
           expect(await state.currentRef()).toBeNull();
           for (const history of [await handle.fetchHistory(), await resumed.fetchHistory()])

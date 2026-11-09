@@ -65,12 +65,7 @@ async function organization(): Promise<Org> {
     name: "Core Codex consumers fixture",
   });
   const accountId = access.workspaceGrants[0]!.accountId;
-  // The retired per-account row is not reset authority. Start without one so
-  // the live owner, membership, workspace and connection fences stand alone.
-  await shared!.admin`
-    delete from subscription_provider_cutovers
-    where account_id = ${accountId}::uuid and provider = 'codex'`;
-  // ...and its seeded organization settings row, which the fixture writes itself.
+  // The seeded organization settings row, which the fixture writes itself.
   await shared!.admin`
     delete from subscription_settings
     where account_id = ${accountId}::uuid and workspace_id is null`;
@@ -104,13 +99,6 @@ async function organization(): Promise<Org> {
     personalWorkspaceId: membership!.personal_workspace_id,
     sharedWorkspaceId: sharedWorkspace!.id,
   };
-}
-
-async function setCutover(accountId: string, enabled: boolean): Promise<void> {
-  await shared!.admin`
-    insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', ${enabled})
-    on conflict (account_id, provider) do update set enabled = excluded.enabled`;
 }
 
 async function sharedConnection(
@@ -238,13 +226,7 @@ describe.skipIf(!realDb)("Codex reset credits on the shared core (M3 PR 2c)", ()
     const manager = await workspaceAdmin(org, org.sharedWorkspaceId);
     const plain = await member(org, org.sharedWorkspaceId);
 
-    // Neither an absent nor a disabled obsolete switch changes current
-    // authority. Unauthorized callers remain denied by the actual fences.
-    expect(await authorityOf(org, org.ownerSubjectId, connectionId)).toEqual({
-      status: "active",
-      owned: true,
-    });
-    await setCutover(org.accountId, false);
+    // Unauthorized callers remain denied by the actual fences.
     expect(await authorityOf(org, org.ownerSubjectId, connectionId)).toEqual({
       status: "active",
       owned: true,
@@ -252,8 +234,6 @@ describe.skipIf(!realDb)("Codex reset credits on the shared core (M3 PR 2c)", ()
     expect(await claim(org, plain, connectionId, crypto.randomUUID())).toEqual({
       kind: "forbidden",
     });
-    await setCutover(org.accountId, true);
-    await setCutover(other.accountId, true);
 
     for (const requested of [connectionId, alias]) {
       const canonical = await resolveSubscriptionCoreCodexConnectionId(client!.db, {
@@ -319,7 +299,6 @@ describe.skipIf(!realDb)("Codex reset credits on the shared core (M3 PR 2c)", ()
 
   test("the ledger is single-use, recovers an ambiguous send with the same key, and clears quota under the generation fence", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await managedHere(org, "reset-ledger");
     const manager = await workspaceAdmin(org, org.sharedWorkspaceId);
     const exhaustedUntil = Date.now() + 3_600_000;
@@ -399,11 +378,10 @@ describe.skipIf(!realDb)("Codex reset credits on the shared core (M3 PR 2c)", ()
       accountId: org.accountId,
       reason: "codex_reset_credit_redeemed",
     });
-    const [quota] = await shared!.admin<{ until: string | null; legacy: number }[]>`
-      select quota->>'exhaustedUntil' as until,
-        (select count(*)::int from codex_subscription_credentials where id = ${connectionId}::uuid) as legacy
+    const [quota] = await shared!.admin<{ until: string | null }[]>`
+      select quota->>'exhaustedUntil' as until
       from subscription_connection_quota where connection_id = ${connectionId}::uuid`;
-    expect(quota).toEqual({ until: null, legacy: 0 });
+    expect(quota).toEqual({ until: null });
 
     // Single use: a replay is the durable completion; a new attempt on the credit conflicts.
     const replay = await claim(org, manager, connectionId, attemptId);
@@ -453,7 +431,6 @@ describe.skipIf(!realDb)("Codex reset credits on the shared core (M3 PR 2c)", ()
 
   test("an authorized ledger step share-locks the connection against disconnect", async () => {
     const org = await organization();
-    await setCutover(org.accountId, true);
     const connectionId = await managedHere(org, "reset-lock");
     let release!: () => void;
     const held = new Promise<void>((resolve) => {

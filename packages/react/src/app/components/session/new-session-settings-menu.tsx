@@ -491,6 +491,8 @@ export function VisibilityMenuBody(props: {
   presentation?: MenuBodyPresentation | undefined;
   value: "private" | "workspace";
   disabled: boolean;
+  /** Why the chat can't be shared (it starts with an Only me agent); null when it can. */
+  workspaceUnavailable?: string | null | undefined;
   onChange: (visibility: "private" | "workspace") => void;
 }) {
   const presentation = props.presentation ?? "menu";
@@ -503,10 +505,10 @@ export function VisibilityMenuBody(props: {
         <RadioGroup presentation={presentation} label="Who can see this chat" value={props.value}>
           <RadioRow
             value="workspace"
-            disabled={props.disabled}
+            disabled={props.disabled || Boolean(props.workspaceUnavailable)}
             icon={<UsersIcon />}
             label="Workspace"
-            meta="People in this workspace"
+            meta={props.workspaceUnavailable || "People in this workspace"}
             onSelect={() => props.onChange("workspace")}
           />
           <RadioRow

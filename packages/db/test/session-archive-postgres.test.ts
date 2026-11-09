@@ -507,6 +507,60 @@ describe("idle-session archive lifecycle", () => {
 });
 
 describe("idle-session archive export reads", () => {
+  test("every foreign key into a purged table is checked by an index seek", async () => {
+    // Each purged row fires its referencing tables' foreign-key checks (a
+    // deferred NO ACTION check, a cascade or a SET NULL). Each check filters by
+    // the key columns alone, so it seeks only an index that leads with them;
+    // otherwise every deleted row scans the referencing table's index or heap
+    // across all workspaces.
+    const references = await shared.admin<
+      { constraint: string; referencing: string; columns: string[]; seekable: boolean }[]
+    >`select c.conname::text as constraint, c.conrelid::regclass::text as referencing,
+        array(select a.attname::text from unnest(c.conkey) k(attnum)
+          join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum) as columns,
+        exists (
+          select 1 from pg_index i join pg_class ic on ic.oid = i.indexrelid
+          join pg_am am on am.oid = ic.relam
+          where i.indrelid = c.conrelid and i.indisvalid and am.amname = 'btree'
+            -- The leading key column is a key column of the reference and is
+            -- not only the tenant: the check binds it, so the index seeks.
+            and i.indkey[0] = any(c.conkey)
+            and (select a.attname from pg_attribute a
+              where a.attrelid = c.conrelid and a.attnum = i.indkey[0])
+              not in ('account_id', 'workspace_id')
+            -- A partial index serves the check only when it keeps every
+            -- non-null key, which the check's equality implies.
+            and (i.indpred is null or pg_get_expr(i.indpred, i.indrelid) = any(array(
+              select format('(%I IS NOT NULL)', a.attname) from unnest(c.conkey) k(attnum)
+              join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum)))
+        ) or exists (
+          -- Or a tenant-led index whose next key column is a key column too.
+          select 1 from pg_index i join pg_class ic on ic.oid = i.indexrelid
+          join pg_am am on am.oid = ic.relam
+          where i.indrelid = c.conrelid and i.indisvalid and am.amname = 'btree'
+            and i.indpred is null and i.indnkeyatts >= 2
+            and i.indkey[0] = any(c.conkey) and i.indkey[1] = any(c.conkey)
+        ) as seekable
+      from pg_constraint c
+      where c.contype = 'f'
+        and c.confrelid = any(${SESSION_ARCHIVE_PURGE_TABLES.map((table) => table as string)}::regclass[])
+      order by 1`;
+    expect(references.length).toBeGreaterThan(5);
+    expect(references.filter((reference) => !reference.seekable)).toEqual([]);
+
+    // The planner uses it: the deferred check of a purged history item binds
+    // only delivered_history_item_id.
+    const plan = await shared.admin.begin(async (tx) => {
+      await tx`set local enable_seqscan = off`;
+      return await tx<{ "QUERY PLAN": string }[]>`explain (costs off)
+        select 1 from only session_system_updates x
+        where ${crypto.randomUUID()}::uuid = delivered_history_item_id for key share of x`;
+    });
+    expect(plan.map((row) => row["QUERY PLAN"]).join("\n")).toContain(
+      "session_system_updates_delivered_history_item_idx",
+    );
+  });
+
   test("every export table pages by a unique id or seeks a single leakproof key", async () => {
     // Unique, non-partial btree indexes on a table, as ordered key column names.
     const uniqueIndexes = async (table: string) =>

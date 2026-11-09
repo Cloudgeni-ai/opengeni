@@ -31,6 +31,8 @@ const DEMO_API_PREFIX = "/demo-api";
 // so a local miss under one of them may be answered from a previous build.
 const HASHED_ASSET_DIRECTORIES = ["assets", "office/assets", "react-demo/assets"] as const;
 const PREVIOUS_ASSET_ROOTS_ENV = "OPENGENI_WEB_PREVIOUS_ASSET_ROOTS";
+const NOINDEX_ENV = "OPENGENI_WEB_NOINDEX";
+const NOINDEX_ROBOTS_TAG = "noindex, nofollow";
 // Baseline hardening for every response the shell itself serves. Framing and
 // CSP stay unset on purpose: the console supports embedding (docs/embedding.md).
 // A route-specific value, such as the setup page's no-referrer, wins.
@@ -77,6 +79,12 @@ export type WebHandlerOptions = {
    * never served from them. Missing roots are ignored.
    */
   previousAssetRoots?: readonly string[] | undefined;
+  /**
+   * Ask search engines not to index this deployment, for example a staging
+   * console: every response the handler serves carries
+   * `X-Robots-Tag: noindex, nofollow`. Off by default.
+   */
+  noindex?: boolean | undefined;
 };
 
 type RenderedShell = { html: Uint8Array<ArrayBuffer>; gzip: Uint8Array<ArrayBuffer> };
@@ -106,12 +114,18 @@ export function createWebHandler(
   let renderedShell: Promise<RenderedShell> | null = null;
 
   return async function webHandler(request: Request): Promise<Response> {
+    const response = await routeRequest(request);
+    if (options.noindex) response.headers.set("x-robots-tag", NOINDEX_ROBOTS_TAG);
+    return response;
+  };
+
+  async function routeRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === DEMO_API_PREFIX || url.pathname.startsWith(`${DEMO_API_PREFIX}/`)) {
       return proxyDemoApi(request, url, options.demoApiProxy);
     }
     return withShellSecurityHeaders(await serveShell(request, url));
-  };
+  }
 
   async function serveShell(request: Request, url: URL): Promise<Response> {
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -281,6 +295,18 @@ export function previousAssetRootsFromEnvironment(
     .split(",")
     .map((path) => path.trim())
     .filter(Boolean);
+}
+
+/**
+ * Whether `OPENGENI_WEB_NOINDEX` asks search engines not to index this
+ * deployment (`true` or `1`, case-insensitive). Anything else leaves indexing
+ * to the defaults.
+ */
+export function noindexFromEnvironment(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const value = env[NOINDEX_ENV]?.trim().toLowerCase();
+  return value === "true" || value === "1";
 }
 
 function withShellSecurityHeaders(response: Response): Response {
@@ -494,6 +520,7 @@ if (import.meta.main) {
       publicOrigin: publicWebOriginFromEnvironment(),
       officePublisher: officeManifestPublisherFromEnvironment(),
       previousAssetRoots: previousAssetRootsFromEnvironment(),
+      noindex: noindexFromEnvironment(),
     }),
   });
   // As a container's PID 1 the process gets no default SIGTERM action, so stop

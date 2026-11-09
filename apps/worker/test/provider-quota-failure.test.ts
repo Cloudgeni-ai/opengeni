@@ -13,6 +13,7 @@ import {
   providerRecoveryResult,
   shouldRecoverCompactionProviderFailure,
 } from "../src/activities/agent-turn";
+import { compactionTrimFallbackReason } from "../src/activities/agent-turn/compaction-trim-fallback";
 
 // Realistic provider refusals, replayed over real HTTP through the same OpenAI
 // SDK client the worker builds for the built-in provider (SDK retries enabled).
@@ -372,6 +373,8 @@ describe("provider quota exhaustion fails the turn promptly", () => {
       error,
     );
     expect(shouldRecoverCompactionProviderFailure(compactError)).toBe(false);
+    // Trimming history cannot help: the next ordinary request is refused too.
+    expect(compactionTrimFallbackReason(compactError)).toBeNull();
     expect(compactionFailureReasonFromError(compactError)).toBe(
       "compaction summarization failed: This model's daily limit at the model provider has been reached, so automatic retries stopped. Choose another model, or try again after the limit resets. Active history was preserved.",
     );

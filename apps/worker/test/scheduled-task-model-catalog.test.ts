@@ -326,10 +326,6 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
     });
     // The organization is on the shared subscription core with a serving
     // organization-wide Claude connection.
-    await shared!.admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${grant.accountId}::uuid, 'claude', true)
-      on conflict (account_id, provider) do update set enabled = excluded.enabled`;
     const label = `scheduled-claude-${suffix}`;
     await shared!.admin`
       insert into subscription_connections (

@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act } from "react";
@@ -42,7 +43,7 @@ const updatePrivacy = mock(
 const client = {
   getOrganizationPrivacySettings: async () => privacy,
   updateOrganizationPrivacySettings: updatePrivacy,
-} as unknown as OpenGeniBrowserClient;
+} as unknown as ChatClient<OpenGeniBrowserClient>;
 
 beforeEach(() => {
   document.body.replaceChildren();

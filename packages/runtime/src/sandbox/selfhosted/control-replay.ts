@@ -267,9 +267,10 @@ export class ControlReplyRecovery {
     const windowMs = lifetimeMs * 2;
     // Retrying this safe request can only allocate unused tokens, never execute
     // the operation. The local usable bound starts before network transmission.
+    const probeId = randomUUID();
     const probe = ControlRequest.encode(
       ControlRequest.fromPartial({
-        requestId: randomUUID(),
+        requestId: probeId,
         op: { $case: "ping", ping: { nonce: "0", controlReplayWindowMs: String(windowMs) } },
       }),
     ).finish();
@@ -283,19 +284,37 @@ export class ControlReplyRecovery {
       readySubject,
       connectionCurrent,
     );
+    let response: ControlResponse | undefined;
+    try {
+      response = ControlResponse.decode(negotiated.data);
+    } catch {
+      response = undefined;
+    }
+    // Only the answer to this probe negotiates anything: a reply naming
+    // another request is refused as malformed, issues no tokens and never
+    // downgrades the subject to legacy delivery.
+    if (response && response.requestId !== probeId) {
+      return {
+        data: ControlResponse.encode({
+          requestId: probeId,
+          result: undefined,
+          error: {
+            code: ErrorCode.ERROR_CODE_PROTOCOL,
+            message: "The machine returned a malformed control response.",
+            retryable: false,
+            detail: {},
+          },
+        }).finish(),
+      };
+    }
     if (negotiated.headers?.get(REPLAY_HEADER) !== "2") {
       pool.legacy = true;
       pool.expiresAt = startedAt + windowMs;
       return;
     }
-    let response: ControlResponse;
-    try {
-      response = ControlResponse.decode(negotiated.data);
-    } catch {
-      // Let the existing malformed-response boundary classify these bytes as a
-      // protocol error, not a transport outage. The mutation was never sent.
-      return negotiated;
-    }
+    // Let the existing malformed-response boundary classify these bytes as a
+    // protocol error, not a transport outage. The mutation was never sent.
+    if (!response) return negotiated;
     const tokens =
       response.result?.$case === "ping" ? response.result.ping.controlReplayTokens : [];
     if (

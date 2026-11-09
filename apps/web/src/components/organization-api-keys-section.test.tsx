@@ -255,8 +255,20 @@ describe("organization API keys section", () => {
     await act(async () => accessPicker.click());
     await flush();
     expect(options().some((each) => each.startsWith("Custom"))).toBe(true);
-    expect(options().some((each) => each.startsWith("Full access"))).toBe(false);
-    expect(options().some((each) => each.startsWith("Developer setup"))).toBe(false);
+    // They stay visible, off, naming who can create them.
+    for (const label of ["Full access", "Developer setup"]) {
+      const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+        (each) => each.textContent?.startsWith(label),
+      );
+      expect(option?.getAttribute("aria-disabled")).toBe("true");
+      expect(option?.textContent).toContain(
+        "Only the organization owner can create a key that manages people, keys or billing.",
+      );
+    }
+    const readOnly = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+      (each) => each.textContent?.startsWith("Read only"),
+    );
+    expect(readOnly?.getAttribute("aria-disabled")).not.toBe("true");
     const custom = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
       (each) => each.textContent?.startsWith("Custom"),
     );
@@ -270,6 +282,9 @@ describe("organization API keys section", () => {
     expect(field("api_keys:manage")?.hasAttribute("data-disabled")).toBe(true);
     expect(field("billing:manage")?.hasAttribute("data-disabled")).toBe(true);
     expect(field("sessions:read")?.hasAttribute("data-disabled")).toBe(false);
+    // An organization admin holds people administration; it's the owner's to give, not beyond them.
+    expect(field("members:manage")?.textContent).toContain("only the organization owner");
+    expect(container.textContent).not.toContain("beyond your own access");
     await act(async () => root.unmount());
     container.remove();
   });

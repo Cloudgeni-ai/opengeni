@@ -3,6 +3,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
+  AutoConnectSection,
+  AutoConnectSetupPage,
+  TrustedIssuerPage,
+  useTrustedIssuers,
+  type AutoConnectApi,
+} from "@/components/organization-access/auto-connect";
+import {
   OrganizationAccessFields,
   type AccessWorkspace,
 } from "@/components/organization-access/organization-access-fields";
@@ -59,11 +66,13 @@ import {
    client, then lists those connections; each row opens the agent's page, where
    its access can be narrowed or widened and the agent disconnected.
 
-     (none)                 setup and the list
+     (none)                 setup, auto-connect (admins) and the list
      agent=<id>             a connected agent's page
+     issuer=new             set up auto-connect (admins)
+     issuer=<id>            an auto-connect issuer's page (admins)
    -------------------------------------------------------------------------- */
 
-export type ConnectedAgentsLocation = { agent?: string };
+export type ConnectedAgentsLocation = { agent?: string; issuer?: string };
 
 export type ConnectedAgentsProps = {
   organizationName: string;
@@ -79,6 +88,8 @@ export type ConnectedAgentsProps = {
   onNavigate: (next: ConnectedAgentsLocation) => void;
   /** Opens Create API key, for agents that can't sign in through a browser. */
   onCreateApiKey?: () => void;
+  /** Auto-connect, shown to the people who manage every agent (owners and admins). */
+  autoConnect?: { organizationId: string; api: AutoConnectApi };
 };
 
 const COLUMNS: RowListColumn[] = [
@@ -128,6 +139,99 @@ function useConnections(api: McpConnectionsApi) {
 export function ConnectedAgents(props: ConnectedAgentsProps) {
   const { api, location, onNavigate } = props;
   const { connections, canManageAll, error, refresh, replace } = useConnections(api);
+  const autoConnect = canManageAll ? (props.autoConnect ?? null) : null;
+  const issuers = useTrustedIssuers(autoConnect?.api ?? null);
+  const setup = issuers.list
+    ? { mcpUrl: issuers.list.mcpUrl, audience: issuers.list.audience }
+    : null;
+
+  if (location.issuer && props.autoConnect) {
+    const { organizationId, api: issuerApi } = props.autoConnect;
+    // Only owners and admins manage auto-connect; anyone else gets the plain "not here".
+    const refused = connections !== null && !canManageAll;
+    const listFailed = issuers.error !== null && issuers.list === null;
+    if (refused || listFailed)
+      return (
+        <DetailPage
+          back={{ label: "Connected apps", onClick: () => onNavigate({}) }}
+          className={FLUSH_DETAIL_PAGE_CLASS}
+        >
+          {refused ? (
+            <EmptyState
+              variant="page"
+              icon={<BotIcon />}
+              title={
+                location.issuer === "new"
+                  ? "Only owners and admins set up auto-connect"
+                  : "Only owners and admins manage auto-connect"
+              }
+              description={
+                location.issuer === "new"
+                  ? "Ask one of them to turn it on for your organization."
+                  : "Ask one of them to change it."
+              }
+            />
+          ) : (
+            <ErrorMessage
+              variant="block"
+              title="Couldn't load auto-connect."
+              announce
+              action={<RowButton onClick={() => void issuers.refresh()}>Try again</RowButton>}
+              {...apiErrorDetails(issuers.error)}
+            >
+              {userErrorTextWithoutReference(issuers.error)}
+            </ErrorMessage>
+          )}
+        </DetailPage>
+      );
+    if (location.issuer === "new")
+      return (
+        <AutoConnectSetupPage
+          api={issuerApi}
+          organizationId={organizationId}
+          organizationName={props.organizationName}
+          setup={setup}
+          workspaces={props.workspaces}
+          workspacesError={props.workspacesError}
+          onRetryWorkspaces={props.onRetryWorkspaces}
+          onClose={() => onNavigate({})}
+          onCreated={(created) => {
+            issuers.accept(created);
+            toast.success("Auto-connect is on");
+            onNavigate({ issuer: created.id });
+          }}
+        />
+      );
+    const issuer = issuers.list?.trustedIssuers.find((each) => each.id === location.issuer) ?? null;
+    return (
+      <TrustedIssuerPage
+        api={issuerApi}
+        issuer={issuer}
+        loading={!refused && issuers.list === null && !issuers.error}
+        organizationId={organizationId}
+        organizationName={props.organizationName}
+        setup={setup}
+        workspaces={props.workspaces}
+        workspacesError={props.workspacesError}
+        onRetryWorkspaces={props.onRetryWorkspaces}
+        onClose={() => onNavigate({})}
+        onRefresh={() => {
+          void issuers.refresh();
+          void refresh();
+        }}
+        onSaved={(next) => {
+          issuers.accept(next);
+          // Access and on/off apply to every agent it connected.
+          void refresh();
+        }}
+        onRemoved={(id) => {
+          issuers.drop(id);
+          void refresh();
+          onNavigate({});
+        }}
+      />
+    );
+  }
 
   if (location.agent) {
     const connection = connections?.find((each) => each.id === location.agent) ?? null;
@@ -138,6 +242,9 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
         connection={connection}
         loading={connections === null && !error}
         onClose={() => onNavigate({})}
+        {...(autoConnect
+          ? { onOpenIssuer: (issuerId: string) => onNavigate({ issuer: issuerId }) }
+          : {})}
         onSaved={replace}
         onDisconnected={() => {
           void refresh();
@@ -164,7 +271,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
     );
   } else if (visible === null) {
     body = (
-      <RowList label="Connected agents" columns={COLUMNS} busy flush>
+      <RowList label="Connected apps" columns={COLUMNS} busy flush>
         <ListRowSkeleton count={2} />
       </RowList>
     );
@@ -178,7 +285,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
     );
   } else {
     body = (
-      <RowList label="Connected agents" columns={COLUMNS} nameLabel="Agent" flush>
+      <RowList label="Connected apps" columns={COLUMNS} nameLabel="App" flush>
         {visible.map((connection) => {
           const status = mcpConnectionStatus(connection);
           return (
@@ -203,6 +310,7 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
                 ...(connection.connectedBy.subjectId === props.currentSubjectId
                   ? []
                   : [connection.connectedBy.name]),
+                ...(connection.autoConnect ? ["Auto-connected"] : []),
                 policySummary(connection.policy),
                 scopeSummary(connection.policy.workspaceScope, props.workspaces),
               ].join(" · ")}
@@ -232,8 +340,16 @@ export function ConnectedAgents(props: ConnectedAgentsProps) {
           {...(props.onCreateApiKey ? { onCreateApiKey: props.onCreateApiKey } : {})}
         />
       </Section>
+      {autoConnect ? (
+        <AutoConnectSection
+          issuers={issuers}
+          workspaces={props.workspaces}
+          onSetUp={() => onNavigate({ issuer: "new" })}
+          onOpen={(issuerId) => onNavigate({ issuer: issuerId })}
+        />
+      ) : null}
       <Section
-        title={canManageAll ? "All agents" : "Your agents"}
+        title={canManageAll ? "All apps" : "Your apps"}
         description={
           canManageAll
             ? "Outside agents people connected to this organization."
@@ -357,6 +473,7 @@ export function ConnectedAgentPage({
   onClose,
   onSaved,
   onDisconnected,
+  onOpenIssuer,
 }: ConnectedAgentsProps & {
   canManageAll: boolean;
   connection: McpConnection | null;
@@ -364,6 +481,8 @@ export function ConnectedAgentPage({
   onClose: () => void;
   onSaved: (next: McpConnection) => void;
   onDisconnected: () => void;
+  /** Opens the auto-connect issuer that connected it (owners and admins). */
+  onOpenIssuer?: (issuerId: string) => void;
 }) {
   const [draft, setDraft] = useState<OrganizationAccessPolicy | null>(connection?.policy ?? null);
   const [saving, setSaving] = useState(false);
@@ -376,13 +495,13 @@ export function ConnectedAgentPage({
     () => Boolean(connection && draft && !samePolicy(connection.policy, draft)),
     [connection, draft],
   );
-  const back = { label: "Connected agents", onClick: onClose };
+  const back = { label: "Connected apps", onClick: onClose };
 
   if (!connection || !draft) {
     return (
       <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
         {loading ? (
-          <RowList label="Connected agent" busy flush>
+          <RowList label="Connected app" busy flush>
             <ListRowSkeleton count={1} />
           </RowList>
         ) : (
@@ -400,6 +519,9 @@ export function ConnectedAgentPage({
   const status = mcpConnectionStatus(connection);
   const blocked = policyBlockedReason(draft);
   const mine = connection.connectedBy.subjectId === currentSubjectId;
+  const automatic = connection.autoConnect ?? null;
+  // An auto-connected agent's access follows its issuer, for everyone at once.
+  const editable = mine && !automatic;
 
   return (
     <DetailPage back={back} className={FLUSH_DETAIL_PAGE_CLASS}>
@@ -417,7 +539,10 @@ export function ConnectedAgentPage({
             </StatusBadge>
           ) : undefined
         }
-        meta={[mine ? "Acts as you" : `Acts as ${connection.connectedBy.name}`]}
+        meta={[
+          mine ? "Acts as you" : `Acts as ${connection.connectedBy.name}`,
+          ...(automatic ? [`Auto-connected through ${automatic.issuerName}`] : []),
+        ]}
         actions={
           (connection.canDisconnect ?? (mine || canManageAll)) ? (
             <MoreMenu label={`More for ${connection.clientName}`}>
@@ -446,12 +571,19 @@ export function ConnectedAgentPage({
         <DetailSection
           title="What it can do"
           description={
-            mine
-              ? "Never more than you can do. Changes apply to its next request."
-              : `Never more than ${connection.connectedBy.name} can do. Only they can change it.`
+            automatic
+              ? `Set for everyone auto-connected through ${automatic.issuerName}. Never more than ${mine ? "you" : connection.connectedBy.name} can do.`
+              : mine
+                ? "Never more than you can do. Changes apply to its next request."
+                : `Never more than ${connection.connectedBy.name} can do. Only they can change it.`
+          }
+          action={
+            automatic && onOpenIssuer ? (
+              <RowButton onClick={() => onOpenIssuer(automatic.trustedIssuerId)}>Change</RowButton>
+            ) : undefined
           }
         >
-          {mine ? (
+          {editable ? (
             <div className="flex min-w-0 flex-col gap-6">
               <OrganizationAccessFields
                 organizationName={organizationName}
@@ -528,7 +660,9 @@ export function ConnectedAgentPage({
         title={`Disconnect ${connection.clientName}?`}
         consequences={[
           "Its next request is refused, including work it's doing now.",
-          "To use it again, connect it again and sign in.",
+          automatic
+            ? `It connects again the next time it's used, while auto-connect through ${automatic.issuerName} is on.`
+            : "To use it again, connect it again and sign in.",
         ]}
         confirmLabel="Disconnect"
         pendingLabel="Disconnecting…"

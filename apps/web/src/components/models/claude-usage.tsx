@@ -1,4 +1,5 @@
 import type { ClaudeSubscriptionUsage, ClaudeUsageWindow } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useId, useRef } from "react";
 import { Button } from "@opengeni/react/ui/button";
@@ -10,6 +11,8 @@ import {
   subscriptionUsageReadings,
 } from "@opengeni/react/app/components/models/subscription-usage";
 import {
+  subscriptionListWindows,
+  subscriptionPlanWindows,
   subscriptionWindows,
   type SubscriptionWindow,
   type SubscriptionWindowInput,
@@ -67,7 +70,7 @@ export function useClaudeUsage({
   onCredentialChanged,
   accountPool = false,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   scope: "workspace" | "organization";
   scopeId: string;
   enabled: boolean;
@@ -176,14 +179,32 @@ export function useClaudeUsage({
 
 /**
  * The windows Claude reported for this account, labelled the shared way.
- * Only reported windows: a verified Ultra plan has no 5-hour limit, so it
- * shows none.
+ * Only reported windows, and on Ultra (sold without a 5-hour limit) the 5h
+ * only while it holds the account back.
  */
 export function claudeUsageWindows(
   value: ClaudeSubscriptionUsage | null,
   now: number,
+  plan?: string | null,
 ): SubscriptionWindow[] {
-  return subscriptionWindows("claude", claudeWindowInputs(value?.windows ?? []), now);
+  return subscriptionPlanWindows(
+    "claude",
+    plan,
+    subscriptionWindows("claude", claudeWindowInputs(value?.windows ?? []), now),
+  );
+}
+
+/** An account row's windows: the week, and the 5h only while it holds the account back. */
+export function claudeUsageListWindows(
+  value: ClaudeSubscriptionUsage | null,
+  now: number,
+  plan?: string | null,
+): SubscriptionWindow[] {
+  return subscriptionListWindows(
+    "claude",
+    plan,
+    subscriptionWindows("claude", claudeWindowInputs(value?.windows ?? []), now),
+  );
 }
 
 /** Claude's per-window statuses in the shared shape. */
@@ -206,8 +227,9 @@ export function claudeWindowInputs(
 export function claudeUsageReadings(
   value: ClaudeSubscriptionUsage | null,
   now: number,
+  plan?: string | null,
 ): UsageWindowReading[] {
-  return subscriptionUsageReadings(claudeUsageWindows(value, now), now);
+  return subscriptionUsageReadings(claudeUsageWindows(value, now, plan), now);
 }
 
 /** Omitted windows retain their own observation time, not the latest response's. */
@@ -227,21 +249,33 @@ export function claudeUsageReportedAt(
   );
 }
 
-export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
+/** The usage cell of an account row: the week, and the 5h only while it holds the account back. */
+export function ClaudeUsageReadout({
+  state,
+  plan,
+}: {
+  state: ClaudeUsageState;
+  plan?: string | null | undefined;
+}) {
   const now = useMinuteNow();
   const unavailable =
     state.error ||
     state.value?.refreshStatus === "unavailable" ||
     state.value?.refreshStatus === "reconnect";
+  const windows = claudeUsageListWindows(unavailable ? null : state.value, now, plan);
+  // A reading whose windows are all kept off the list is not "no usage".
+  const reported = !unavailable && (state.value?.windows?.length ?? 0) > 0;
   // A failed live check is not evidence of no usage (or a fresh old reading).
   return (
     <SubscriptionUsageCell
-      windows={claudeUsageWindows(unavailable ? null : state.value, now)}
+      windows={windows}
       loading={state.loading}
       fallback={
         unavailable || state.value?.refreshStatus === "scope_required"
           ? "Usage unavailable"
-          : "No usage yet"
+          : reported
+            ? null
+            : "No usage yet"
       }
     />
   );
@@ -249,14 +283,17 @@ export function ClaudeUsageReadout({ state }: { state: ClaudeUsageState }) {
 
 export function ClaudeUsage({
   state,
+  plan,
   onReconnect,
 }: {
   state: ClaudeUsageState;
+  /** The account's plan: Ultra's 5h shows only while it holds the account back. */
+  plan?: string | null | undefined;
   onReconnect?: (() => void) | undefined;
 }) {
   const now = useMinuteNow();
   const value = state.value;
-  const readings = claudeUsageReadings(value, now);
+  const readings = claudeUsageReadings(value, now, plan);
   const reportedAt = claudeUsageReportedAt(value, now);
   const stale = Boolean(reportedAt && now - Date.parse(reportedAt) > 5 * 60_000);
   const disabled =

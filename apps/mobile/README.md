@@ -54,6 +54,21 @@ The new-chat and follow-up composers follow the web composer:
 The home header names the current workspace and organization; tapping it opens
 the workspace switcher.
 
+## Automations
+
+**Automations** in the side menu (below Meetings) lists the workspace's
+automations as the web list orders them, each with when it runs, what its
+last run did and a word for one that won't run (Paused, Finished) or keeps
+failing. Pull down to refresh; the list also re-reads while it is open.
+
+An automation's page has the everyday controls: switch it on or off, Run now,
+open the chat its runs continue, read its instructions, open a recent run's
+chat, and delete it. Only its owner (or, for a workspace automation, anyone
+who manages automations) can change or run it. **+** describes a new one to a
+chat that creates it, as the web's "Create with Opengeni" does; the full form
+and event triggers stay on the web ("Edit on the web"). Words and order come
+from `@opengeni/react/automation-model`, shared with the web pages.
+
 ## Calls and other sessions
 
 Generic Siri, Shortcuts and Phone calls start a fresh conversation by default.
@@ -92,6 +107,27 @@ Server configuration:
 | `OPENGENI_NATIVE_APP_IDS` | Bundle IDs / package names that may register for push (default `ai.opengeni.app`). |
 | `OPENGENI_APNS_KEY_ID`, `OPENGENI_APNS_TEAM_ID`, `OPENGENI_APNS_PRIVATE_KEY` | APNs token auth (.p8). The bundle ID must be an App ID with Push Notifications in that team. Development builds use the APNs sandbox. |
 | `OPENGENI_FCM_SERVICE_ACCOUNT_JSON` | Firebase service account with the Cloud Messaging role. Android builds also need that project's `google-services.json`: set `OPENGENI_GOOGLE_SERVICES_FILE` to its path when building. |
+
+## Message rendering limits
+
+The shared native timeline renders Markdown only up to 8,192 UTF-16 code units
+(roughly 1,300 words), including math delimiter normalization. Longer messages
+use selectable plain-text pages; Previous/Next expose the complete source without
+mounting it all or running Markdown, math or interactive-preview parsers over it.
+The original message and copy action are unchanged.
+
+This app has a separate lockfile: its overrides pin `markdown-it` 14.3.1,
+`linkify-it` 5.0.2 and `decode-uri-component` 0.5.1. The root install pins the
+same Markdown stack for the native package's tests. The one-line `query-string`
+patch unwraps the decoder's ESM default export for its CommonJS caller; keep it
+with the decoder override. Verify both installs when updating these dependencies:
+
+```sh
+for file in packages/react-native/test/markdown-*.test.*; do bun test "./$file" || break; done
+cd apps/mobile
+bun install --frozen-lockfile
+bun scripts/check-parser-dependencies.ts
+```
 
 ## Run it
 

@@ -50,6 +50,7 @@ import {
   chatComposerPlaceholder,
   failedSessionCopy,
   failureFallbackReason,
+  MACHINE_ACCESS_REQUIRED_CODE,
 } from "../lib/failed-session-copy";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import {
@@ -61,6 +62,8 @@ import { ChatPaymentPages } from "../components/chat-payment-pages";
 import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
 import { timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
+import { canArchiveChat, requestSessionArchive } from "../lib/archive-session";
+import { notifySessionListChanged } from "../lib/session-list-invalidation";
 import { waitingDescendants } from "../lib/descendant-requests";
 import {
   useDescendantRequestsRefresh,
@@ -129,7 +132,7 @@ import {
 } from "../lib/session-usage-limit";
 import { SessionUsageLimitNotice } from "../../usage";
 import { isSessionUsageLimitSubmissionError } from "../../lib/format";
-import { OpenGeniSessionUsageLimitReachedError } from "@opengeni/sdk/browser";
+import { OpenGeniApiError, OpenGeniSessionUsageLimitReachedError } from "@opengeni/sdk/browser";
 import { SESSION_USAGE_LIMIT_GOAL_PAUSED_REASON } from "@opengeni/sdk/session-usage-limits";
 import { expireArtifactCatalog } from "../lib/artifact-catalog-cache";
 import { useArtifactCatalogMutationInvalidation } from "../lib/use-artifact-catalog-mutation-invalidation";
@@ -157,12 +160,12 @@ import {
 import { sessionAgentsSignal } from "../../session-agents-model";
 import { useNavigate, usePage, useRouterState } from "../lib/navigation";
 import {
-  BotIcon,
   BugIcon,
   Loader2Icon,
   MenuIcon,
   MessagesSquareIcon,
   PanelsTopLeftIcon,
+  SettingsIcon,
 } from "lucide-react";
 import {
   createElement,
@@ -211,7 +214,7 @@ import {
   sessionReadOnlyArchive,
 } from "../components/session/session-retention";
 import { useRail } from "../components/rail/rail-context";
-import { sessionComputeLabel } from "../../sandbox-label-model";
+import { machineDisplayName, sessionComputeLabel } from "../../sandbox-label-model";
 import { useBackgroundAttentionTitle } from "../lib/background-attention-title";
 import { ChatViewportFileDropTarget } from "../components/session/chat-viewport-file-drop-target";
 import { sessionInputWait } from "../lib/session-rail";
@@ -337,12 +340,16 @@ import {
   usePersonalResourceAttachment,
 } from "../lib/use-personal-resource-attachment";
 import { personalMachineUseIntent } from "../lib/personal-resource-attachments";
-import { isPersonalMachine, moveChatToMachine } from "../lib/move-chat-to-machine";
+import {
+  isPersonalMachine,
+  machineUseMessage,
+  moveChatToMachine,
+} from "../lib/move-chat-to-machine";
 import type { MachineView } from "../../machines";
 import { useWorkspaceModelCatalog } from "../lib/use-workspace-model-catalog";
 import type {
   McpElicitationAnswer,
-  LineageNode,
+  ChatLineageNode as LineageNode,
   SessionRealtimeModel,
   UpdateSessionToolPolicyRequest,
 } from "@opengeni/sdk";
@@ -654,6 +661,34 @@ export function SessionRoute({
       clearTimeout(timer);
     };
   }, [waitingForDispatch, sessionId, refreshSession]);
+  // A restored chat's content comes back in the background: read it again
+  // until it is live (no event announces that).
+  const restoringArchive = session?.retention?.archive?.restoring === true;
+  useEffect(() => {
+    if (!restoringArchive) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void refreshSession();
+    }, 3_000);
+    return () => clearInterval(timer);
+  }, [restoringArchive, sessionId, refreshSession]);
+  const restoreArchived = useCallback(async () => {
+    if (!session) return false;
+    try {
+      const updated = await requestSessionArchive(
+        context,
+        session,
+        false,
+        sessionDisplayTitle(session),
+      );
+      if (!updated) return false;
+      notifySessionListChanged({ workspaceId, sessionId: session.id, archived: updated.archived });
+      await refreshSession();
+      return true;
+    } catch (error) {
+      toast.error("Couldn't restore the chat.", { description: userErrorText(error) });
+      return false;
+    }
+  }, [context, refreshSession, session, workspaceId]);
   // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
   // every event at or before the sequence seen when the operator ran it; the
   // server log is untouched and newer events (higher sequence) keep streaming
@@ -1359,7 +1394,7 @@ export function SessionRoute({
     setSandboxFileRequest(null);
   }, [sessionId]);
   const setInspectorOpen = context.setInspectorOpen;
-  // Composer + > Chat settings opens the dock's Agent tab at its Agent learning;
+  // Composer + > Chat settings opens the dock's Settings tab at its Agent learning;
   // the header menu and the usage limit notice open it at Usage limit.
   const agentSettingsRequestSeq = useRef(0);
   const [agentSettingsRequest, setAgentSettingsRequest] = useState<{
@@ -1553,6 +1588,11 @@ export function SessionRoute({
           search: { continueSessionId: sessionId },
         })
       }
+      onRestoreArchived={
+        session && session.parentSessionId === null && canArchiveChat(context, workspaceId)
+          ? restoreArchived
+          : undefined
+      }
       onApprove={(approvalId, answer) => approve(approvalId, "approve", answer)}
       onReject={(approvalId) => approve(approvalId, "reject")}
       onReconnect={onReconnect}
@@ -1561,7 +1601,7 @@ export function SessionRoute({
       onReloadSession={refreshSession}
       // A file link opens the session panel's Files tab; without the panel it is plain text.
       onOpenSandboxFile={dockEnabled ? openSandboxFile : undefined}
-      // Both open the session panel's Agent tab; without the panel, neither shows.
+      // Both open the session panel's Settings tab; without the panel, neither shows.
       onOpenAgentSettings={dockEnabled ? openAgentSettings : undefined}
       onOpenUsageLimit={dockEnabled ? openUsageLimit : undefined}
       connectionState={connectionState}
@@ -1658,9 +1698,11 @@ export function SessionRoute({
         ...answer,
       });
     } catch (error) {
-      toast.error("Couldn't submit the decision", {
-        description: userErrorText(error),
-      });
+      // Already decided (elsewhere, or by an earlier Approve all): no news.
+      if (!(error instanceof OpenGeniApiError && error.status === 409))
+        toast.error("Couldn't submit the decision", {
+          description: userErrorText(error),
+        });
       throw error instanceof Error ? error : new Error(String(error));
     }
   }
@@ -1714,7 +1756,7 @@ type SessionDockProps = {
       }
     | null
     | undefined;
-  /** Open the Agent tab at Agent learning or Usage limit. A new requestId reopens it. */
+  /** Open the Settings tab at Agent learning or Usage limit. A new requestId reopens it. */
   openAgentSettingsRequest?:
     | { requestId: number; target: "learning" | "usage-limit" }
     | null
@@ -1895,10 +1937,10 @@ function SessionDockPanel(props: SessionDockProps) {
   if (props.session) {
     trailingTabs.push({
       id: "agent",
-      label: "Agent",
-      icon: <BotIcon />,
+      label: "Settings",
+      icon: <SettingsIcon />,
       content: (
-        <LazyPart fallback={<LoadingPanel label="Opening agent settings" />}>
+        <LazyPart fallback={<LoadingPanel label="Opening settings" />}>
           <LazyAgentConfigurationPanel
             key={props.session.id}
             session={props.session}
@@ -2194,6 +2236,11 @@ function SessionChatPane(props: {
   onNewSession: () => void;
   /** Starts a new chat that continues this archived chat's work. */
   onContinueInNewSession: () => void;
+  /**
+   * Restores this archived chat so it can continue here; absent when this
+   * person can't, or for a sub-chat. Resolves whether a restore started.
+   */
+  onRestoreArchived?: (() => Promise<boolean>) | undefined;
   onApprove: (approvalId: string, answer?: McpElicitationAnswer) => Promise<void>;
   onReject: (approvalId: string) => Promise<void>;
   onReconnect: (item: AuthNeededItem) => void | Promise<void>;
@@ -2202,9 +2249,9 @@ function SessionChatPane(props: {
   resolveProviderLogo: (providerDomain: string) => string | null;
   onReloadSession: () => Promise<void>;
   onOpenSandboxFile: ((path: string, line?: number) => void) | undefined;
-  /** Composer + > Chat settings: open this chat's Agent tab. */
+  /** Composer + > Chat settings: open this chat's Settings tab. */
   onOpenAgentSettings: (() => void) | undefined;
-  /** The usage limit notice's Change limit: open the Agent tab at Usage limit. */
+  /** The usage limit notice's Change limit: open the Settings tab at Usage limit. */
   onOpenUsageLimit: (() => void) | undefined;
   connectionState: ReturnType<typeof useSessionEvents>["connectionState"];
 }) {
@@ -2331,9 +2378,11 @@ function SessionChatPane(props: {
     () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
   );
-  const cancelled = isTerminalSessionStatus(props.session.status);
   // Archived (moving to or in long-term storage): readable, not continuable.
   const readOnlyArchive = sessionReadOnlyArchive(props.session);
+  // Archiving a chat cancels its running work, so an archived chat often has
+  // the `cancelled` status too: it still reads as archived, never cancelled.
+  const cancelled = readOnlyArchive === null && isTerminalSessionStatus(props.session.status);
   const terminal = cancelled || readOnlyArchive !== null;
   const answerStore = useMemo(() => browserInteractiveAnswerStore(), []);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -3074,10 +3123,10 @@ function SessionChatPane(props: {
       : null;
   });
   chatSendContext.current = {
-    blocked: isTerminalSessionStatus(props.session.status)
-      ? "This chat has ended. Start a new chat to use a repository."
-      : sessionReadOnlyArchive(props.session)
-        ? "This chat is archived. Continue in a new chat to use a repository."
+    blocked: sessionReadOnlyArchive(props.session)
+      ? "This chat is archived. Continue in a new chat to use a repository."
+      : isTerminalSessionStatus(props.session.status)
+        ? "This chat has ended. Start a new chat to use a repository."
         : connectionAccounts.requiresAccountChoice
           ? "Choose an account for this chat's connected tools in the composer first."
           : personalAttachment.requiresDecision
@@ -3374,7 +3423,7 @@ function SessionChatPane(props: {
     });
   }, [failedOptimisticMessageCount, props.session.id, props.session.workspaceId]);
 
-  // The task's usage limit: one live read shared with the Agent tab, and the
+  // The task's usage limit: one live read shared with the Settings tab, and the
   // calm composer notice near and at the limit. Enforcement is server-side;
   // this only keeps the view fresh.
   const usageLimitCapability = sessionUsageLimitCapability(context.clientConfig);
@@ -3484,7 +3533,8 @@ function SessionChatPane(props: {
   });
   const timelineEmptyStateCopy = sessionTimelineEmptyStateCopy(
     sessionDisplayStatus(props.session),
-    (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
+    readOnlyArchive === null &&
+      (props.queue.effectiveControl ?? props.session.effectiveControl).state === "paused",
   );
 
   // Slash-command palette context: the operator controls (/goal, /clear,
@@ -3952,6 +4002,43 @@ function SessionChatPane(props: {
     props.session.workspaceId,
     "connections:write",
   );
+  // The turn was refused because this chat isn't allowed on its owner's
+  // machine. Only the owner, viewing a chat that runs on that machine, can
+  // allow it: Allow sends their consent for this chat with a message that
+  // picks the work up again, like an ordinary Send.
+  const allowFailedMachine =
+    props.failure?.failureCode === MACHINE_ACCESS_REQUIRED_CODE &&
+    runsOnCanMessage &&
+    runsOnActiveMachineConsent &&
+    runsOn.activeMachine
+      ? {
+          consent: runsOnActiveMachineConsent,
+          machineName: machineDisplayName(t, runsOn.activeMachine),
+        }
+      : null;
+  const allowMachine = allowFailedMachine
+    ? {
+        machineName: allowFailedMachine.machineName,
+        onAllow: async (): Promise<string | null> => {
+          const chat = readChatSendContext();
+          if (chat.blocked) return chat.blocked;
+          if (chat.awaitingHuman) return "Answer the question above first.";
+          try {
+            await context.client.sendMessage(props.session.workspaceId, props.session.id, {
+              text: `${machineUseMessage(allowFailedMachine.machineName)} Continue where you left off.`,
+              ...chat.extras,
+              personalResourceAttachment: allowFailedMachine.consent,
+              clientEventId: crypto.randomUUID(),
+            });
+            return null;
+          } catch (failure) {
+            return userErrorText(failure, "Try again.");
+          } finally {
+            await Promise.allSettled([props.onReloadSession(), props.queue.refresh()]);
+          }
+        },
+      }
+    : undefined;
   // An archived chat is read-only: there is nothing to retry or recover.
   const failureRecovery =
     !props.hasNewer &&
@@ -3974,6 +4061,7 @@ function SessionChatPane(props: {
             }
             canChooseModel={canChooseRecoveryModel}
             codexUsage={codexUsageChoice}
+            allowMachine={allowMachine}
             hasModelPicker={hasComposerPolicy}
             freeModel={isDeploymentFreeModel(modelCatalog.rows, props.session.model)}
             subscriptions={connectableSubscriptions(context.clientConfig.models)}
@@ -4152,6 +4240,7 @@ function SessionChatPane(props: {
               <ReadOnlySessionNotice
                 session={props.session}
                 onContinue={props.onContinueInNewSession}
+                onRestore={props.onRestoreArchived}
               />
             </div>
           ) : null}
@@ -4186,6 +4275,11 @@ function SessionChatPane(props: {
                       >
                         <MessageTimeline
                           resolveLink={resolveLink}
+                          artifactScope={{
+                            client: context.client,
+                            workspaceId: props.session.workspaceId,
+                            sessionId: props.session.id,
+                          }}
                           renderMessageSender={renderMessageSender}
                           allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
                           trailingState={
@@ -4426,7 +4520,14 @@ function SessionChatPane(props: {
               {waitingSubSessions.length > 0 ? (
                 <LazyPart fallback={null}>
                   {/* Links in sub-session questions resolve like links in the timeline. */}
-                  <OpenGeniLinkProvider resolveLink={resolveLink}>
+                  <OpenGeniLinkProvider
+                    resolveLink={resolveLink}
+                    artifactScope={{
+                      client: context.client,
+                      workspaceId: props.session.workspaceId,
+                      sessionId: props.session.id,
+                    }}
+                  >
                     <DescendantRequests
                       client={context.client}
                       workspaceId={props.session.workspaceId}
@@ -4702,7 +4803,8 @@ function SessionChatPane(props: {
                   ) : null
                 }
                 placeholder={chatComposerPlaceholder({
-                  cancelled: props.session.status === "cancelled",
+                  archived: readOnlyArchive !== null,
+                  cancelled,
                   creditStopped:
                     Boolean(props.creditExhausted) &&
                     (props.session.status === "failed" || props.session.status === "idle"),

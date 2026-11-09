@@ -3,21 +3,23 @@
 //! tickets and host tokens the service signs.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use compute_control::link::Links;
 use compute_guest::GATEWAY_PORT;
 use compute_protocol::fleet::{Registered, Verdict};
-use compute_protocol::host::Request;
+use compute_protocol::host::{ErrorCode, Reply, Request};
 use compute_protocol::link::AgentLink;
 use ring::rand::SystemRandom;
 use ring::signature::{ED25519, Ed25519KeyPair, UnparsedPublicKey};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
-use super::support::{FakeHost, Fleet, OTHER_KEY, TEAM, given_up, id};
+use super::support::{Act, FakeHost, Fleet, OTHER_KEY, TEAM, declare_gone, given_up, id};
 
 const GATEWAY: &str = "wss://og.example/agent-link";
 
@@ -234,6 +236,68 @@ async fn a_request_id_answers_its_sandbox_refuses_another_create_and_is_gone_aft
     assert_eq!(status, 404, "{other}");
 }
 
+/// A create its host failed leaves nothing anywhere. Retrying it asks the
+/// host to wake it once, finds it nowhere and creates it again, rather
+/// than asking again every moment until the wake gives up; a wake of it
+/// answers at once that there is no such sandbox.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_create_its_host_failed_is_created_again_on_retry_not_woken_until_the_wake_gives_up() {
+    let fleet = linked_fleet().await;
+    let a = fleet.host("host-a.example").await;
+    let _inits = take_inits(&a);
+    let failing = Arc::new(AtomicBool::new(true));
+    let fails = Arc::clone(&failing);
+    a.behave(move |envelope| match envelope.request {
+        Request::Create { .. } if fails.load(Ordering::SeqCst) => Act::Reply(Reply::Error {
+            message: "the image could not be fetched".into(),
+            code: ErrorCode::Internal,
+        }),
+        _ => Act::Ordinary,
+    });
+    let count = |op: &str| a.ops().iter().filter(|seen| **seen == op).count();
+
+    let (status, failed) = fleet.post("/v1/sandboxes", create_body("lease-1", 1)).await;
+    assert_eq!(
+        (status, failed["code"].as_str()),
+        (502, Some("host")),
+        "{failed}"
+    );
+    let (status, row) = fleet.get("/v1/requests/lease-1").await;
+    assert_eq!(status, 200, "{row}");
+    let sandbox = row["id"].as_str().unwrap().to_owned();
+
+    // The retry, as a client makes it, while the host still fails: one
+    // wake, one more create, and the host's failure at once.
+    let started = Instant::now();
+    let (status, again) = fleet.post("/v1/sandboxes", create_body("lease-1", 1)).await;
+    assert_eq!(
+        (status, again["code"].as_str()),
+        (502, Some("host")),
+        "{again}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "answered after {:?}",
+        started.elapsed()
+    );
+    assert_eq!((count("create"), count("wake")), (2, 1), "{:?}", a.ops());
+
+    // Woken by id, it is not found, after one ask.
+    let (status, missing) = fleet
+        .post(&format!("/v1/sandboxes/{sandbox}/wake"), json!({}))
+        .await;
+    assert_eq!((status, missing["code"].as_str()), (404, Some("not_found")));
+    assert_eq!(count("wake"), 2, "{:?}", a.ops());
+
+    // Once the host can create it, the retry makes it, under the same id.
+    failing.store(false, Ordering::SeqCst);
+    let (status, made) = fleet.post("/v1/sandboxes", create_body("lease-1", 1)).await;
+    assert_eq!(status, 201, "{made}");
+    assert_eq!(made["id"], sandbox.as_str());
+    assert_eq!(count("create"), 3, "{:?}", a.ops());
+    assert!(a.holds(id(&sandbox)).is_some());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_agent_sandbox_needs_its_team_to_have_a_link() {
     let fleet = linked_fleet().await;
@@ -279,8 +343,8 @@ async fn hosts_get_link_tokens_only_for_their_own_name_and_known_gateways() {
     assert_eq!(status, 403, "only gateways a team uses are signed for");
 }
 
-/// A host the service gave up on gets back, when it registers again, the
-/// agent sandbox nobody took meanwhile under a raised owner epoch, with the
+/// A host declared gone gets back, when it registers again, the agent
+/// sandbox nobody took meanwhile under a raised owner epoch, with the
 /// ticket for that epoch in the ruling; a sandbox with no agent gets none.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_host_registering_again_is_given_its_kept_sandboxes_tickets_for_their_new_epochs() {
@@ -294,8 +358,9 @@ async fn a_host_registering_again_is_given_its_kept_sandboxes_tickets_for_their_
 
     a.renewing(false);
     given_up(&fleet, &a).await;
+    declare_gone(&fleet, &a).await;
     let Registered::Registered { rulings, .. } = a.register().await else {
-        panic!("a host given up on registers afresh");
+        panic!("a host declared gone registers afresh");
     };
     let ruled = |sandbox: &str| {
         rulings

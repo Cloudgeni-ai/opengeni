@@ -98,19 +98,13 @@ describe("alert notification annotations", () => {
     }
   });
 
-  test("the tool-latency alert names the slow tool", async () => {
-    const rule = (await canonicalAlerts()).get("OpenGeniMcpToolLatencyHigh")!;
-    const annotations = rule.annotations!;
-    const firstParty = { value: 21, labels: { tool: "session_create" } };
-    expect(expandAlertTemplate(annotations.headline!, firstParty)).toBe(
-      "Slow tool calls: session_create",
-    );
-    expect(expandAlertTemplate(annotations.summary!, firstParty)).toStartWith(
-      "Calls to the session_create tool exceed their p95 latency budget:",
-    );
-    const external = { value: 21, labels: { tool: "external" } };
-    expect(expandAlertTemplate(annotations.headline!, external)).toBe("Slow tool calls: external");
-    expect(expandAlertTemplate(annotations.value!, external)).toBe("p95 21s");
+  test("diagnostic duration and retained-interaction inventory are not operator alerts", async () => {
+    const alerts = await canonicalAlerts();
+    expect(alerts.has("OpenGeniMcpToolLatencyHigh")).toBe(false);
+    expect(alerts.has("OpenGeniSandboxesHeldByIdleInteractions")).toBe(false);
+    expect(alerts.has("OpenGeniMcpToolFailureRatio")).toBe(true);
+    expect(alerts.has("OpenGeniMcpToolOutcomeUncertain")).toBe(true);
+    expect(alerts.has("OpenGeniSandboxDrainSnapshotFailing")).toBe(true);
   });
 
   test("critical alerts link a runbook", async () => {

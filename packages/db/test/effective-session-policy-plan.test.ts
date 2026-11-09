@@ -8,6 +8,7 @@ import {
   createDb,
   createSession,
   getSession,
+  getSessionForSubject,
   effectiveSessionPolicyQuery,
   listSessionEntriesForSubject,
   listSessionsForSubject,
@@ -65,6 +66,19 @@ test("a session detail read projects effective policy only once", async () => {
     const detail = await getSession(client.db, grant.workspaceId, session.id);
     expect(detail).toMatchObject({
       id: session.id,
+      model: "stored-model",
+      reasoningEffort: "high",
+      latencyMode: "standard",
+    });
+    expect(queries.filter((query) => query.includes('"latest_started_policy"'))).toHaveLength(1);
+    queries.length = 0;
+    const personal = await getSessionForSubject(
+      client.db,
+      grant.workspaceId,
+      session.id,
+      grant.subjectId,
+    );
+    expect(personal).toMatchObject({
       model: "stored-model",
       reasoningEffort: "high",
       latencyMode: "standard",

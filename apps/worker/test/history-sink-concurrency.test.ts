@@ -6,12 +6,28 @@ const realDb = await import("@opengeni/db");
 // process keep writing real history.
 const realDbFns = {
   appendSessionHistoryItems: realDb.appendSessionHistoryItems,
+  appendSessionHistoryItemsInTransaction: realDb.appendSessionHistoryItemsInTransaction,
   upsertSandboxSessionEnvelope: realDb.upsertSandboxSessionEnvelope,
 };
 const fakeDb = {};
+const fakeTx = { transaction: async (work: (tx: unknown) => Promise<unknown>) => work(fakeTx) };
+const appendInTransaction = mock(async (_input: { items: Array<{ position: number }> }) => ({
+  jsonBytes: 10,
+  rows: 1,
+  jsonNodes: 1,
+  jsonProperties: 1,
+}));
 const append = mock(async (_db: unknown, _input: { items: Array<{ position: number }> }) => true);
 mock.module("@opengeni/db", () => ({
   ...realDb,
+  appendSessionHistoryItemsInTransaction: (
+    tx: Parameters<typeof realDbFns.appendSessionHistoryItemsInTransaction>[0],
+    input: Parameters<typeof realDbFns.appendSessionHistoryItemsInTransaction>[1],
+    fence: Parameters<typeof realDbFns.appendSessionHistoryItemsInTransaction>[2],
+  ) =>
+    tx === fakeTx
+      ? appendInTransaction(input)
+      : realDbFns.appendSessionHistoryItemsInTransaction(tx, input, fence),
   appendSessionHistoryItems: (
     db: unknown,
     input: Parameters<typeof realDbFns.appendSessionHistoryItems>[1],
@@ -91,6 +107,79 @@ test("overlapping stream and provider checkpoints append each position once", as
   ]);
   expect(sink.persistedHistoryCount).toBe(2);
   expect(sink.nextHistoryPosition).toBe(2);
+});
+
+test("a combined checkpoint acknowledges history only after the outer commit succeeds", async () => {
+  appendInTransaction.mockClear();
+  const { sink } = fixture();
+  await expect(
+    sink.reconcileConversationTruth({
+      requireDurable: true,
+      persist: async (history) => {
+        await history(fakeTx as never, { allowed: true } as never);
+        throw new Error("commit acknowledgement failed");
+      },
+    }),
+  ).rejects.toThrow();
+  expect(sink.persistedHistoryCount).toBe(0);
+  expect(sink.nextHistoryPosition).toBe(0);
+  await sink.reconcileConversationTruth({
+    requireDurable: true,
+    persist: async (history) => {
+      await history(fakeTx as never, { allowed: true } as never);
+      return true;
+    },
+  });
+  expect(
+    appendInTransaction.mock.calls.map(([input]) => input.items.map((row) => row.position)),
+  ).toEqual([[0], [0]]);
+  expect(sink.persistedHistoryCount).toBe(1);
+});
+
+test("an audit-only duplicate cannot acknowledge an unapplied prepared history", async () => {
+  const { sink } = fixture();
+  await sink.reconcileConversationTruth({ requireDurable: true, persist: async () => false });
+  expect(sink.persistedHistoryCount).toBe(0);
+  expect(sink.nextHistoryPosition).toBe(0);
+});
+
+test("history SQL failure preserves the outer result commit but cannot advance the watermark", async () => {
+  appendInTransaction.mockImplementationOnce(async () => {
+    throw new Error("history SQL failure");
+  });
+  const { sink } = fixture();
+  let committed = false;
+  await expect(
+    sink.reconcileConversationTruth({
+      requireDurable: true,
+      persist: async (history) => {
+        await history(fakeTx as never, { allowed: true } as never);
+        committed = true;
+        return true;
+      },
+    }),
+  ).rejects.toThrow();
+  expect(committed).toBe(true);
+  expect(sink.persistedHistoryCount).toBe(0);
+});
+
+test("prefix failure still commits the result without acknowledging the changed history", async () => {
+  const { sink, state } = fixture();
+  sink.seedHistory(state.history, 1);
+  state.history = [{ type: "message", role: "user", content: "changed" }];
+  let committed = false;
+  await expect(
+    sink.reconcileConversationTruth({
+      requireDurable: true,
+      persist: async (history) => {
+        expect(await history(fakeTx as never, { allowed: true } as never)).toBe(true);
+        committed = true;
+        return true;
+      },
+    }),
+  ).rejects.toThrow();
+  expect(committed).toBe(true);
+  expect(sink.persistedHistoryCount).toBe(1);
 });
 
 test("a failed checkpoint does not poison a queued durable checkpoint", async () => {

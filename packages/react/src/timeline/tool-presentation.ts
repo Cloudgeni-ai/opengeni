@@ -268,6 +268,31 @@ function textPreview(text: string, running?: boolean): ToolPreview {
 /* ---- exec_command ---------------------------------------------------------- */
 
 /**
+ * The text of an `{ isError, content: [{ type: "text", text }] }` result. A
+ * command's own output is always a string; this envelope is the receipt the
+ * server writes when a call was interrupted or never started, so the row shows
+ * its sentence rather than JSON.
+ */
+function textContentOutput(out: unknown): string | null {
+  if (!out || typeof out !== "object" || Array.isArray(out)) return null;
+  const content = (out as { content?: unknown }).content;
+  if (!Array.isArray(content) || content.length === 0) return null;
+  const texts: string[] = [];
+  for (const part of content) {
+    if (
+      !part ||
+      typeof part !== "object" ||
+      (part as { type?: unknown }).type !== "text" ||
+      typeof (part as { text?: unknown }).text !== "string"
+    ) {
+      return null;
+    }
+    texts.push((part as { text: string }).text);
+  }
+  return texts.join("\n");
+}
+
+/**
  * A command row's title: what the command did in plain words ("Downloaded
  * report.json"), or "Ran a command" when it can't be placed. A call that ended
  * badly keeps the ongoing form so its chip finishes the sentence.
@@ -371,7 +396,7 @@ export function execPresentation(
     };
   }
 
-  const text = typeof out === "string" ? out : stringifyPayload(out);
+  const text = typeof out === "string" ? out : (textContentOutput(out) ?? stringifyPayload(out));
   const stripped = redactSignedUrls(stripExecBanner(text), undefined, "text");
   const bgSession = parseExecBannerSessionId(text);
   const exitCode = sandboxCommandExitCode(text);
@@ -990,6 +1015,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   useTool: "plug",
   requestAccess: "plug",
   listRepositories: "git",
+  attachRepository: "git",
   // Web, images and video
   searchWeb: "search",
   createImage: "image",

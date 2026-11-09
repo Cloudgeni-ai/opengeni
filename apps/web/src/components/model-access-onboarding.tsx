@@ -1,5 +1,7 @@
 import { modelDisplayName } from "@opengeni/sdk/model-display";
+import type { ChatClient } from "@opengeni/sdk";
 import { DirectModelProviderForm } from "@/components/direct-model-provider-connection";
+import { COMPATIBLE_ENDPOINT_CHOICE } from "@/components/models/organization-compatible-endpoints";
 import { pollDeviceAuthorization } from "@opengeni/connect";
 import type { BillingCheckoutStatus, CodexConnectPoll, CodexConnectStart } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -146,7 +148,7 @@ export function ModelAccessOnboardingPanel({
   footer,
   onComplete,
 }: {
-  client?: OpenGeniBrowserClient;
+  client?: ChatClient<OpenGeniBrowserClient>;
   organizationId: string;
   /** The new organization's name, for "Shared with everyone in Acme". */
   organizationName?: string | undefined;
@@ -523,19 +525,23 @@ export function ModelAccessOnboardingPanel({
         ]
       : []),
   ];
-  const providerAccountChoices: ProviderConnectChoice[] = (
-    [
-      ["openai", "OpenAI"],
-      ["azure_openai", "Azure OpenAI"],
-      ["openrouter", "OpenRouter"],
-      ["opper", "Opper"],
-      ["vercel", "Vercel AI Gateway"],
-    ] as const
-  ).map(([id, title]) => ({
-    id,
-    title,
-    summary: providerPaymentSummary(id, title),
-  }));
+  const providerAccountChoices: ProviderConnectChoice[] = [
+    ...(
+      [
+        ["openai", "OpenAI"],
+        ["azure_openai", "Azure OpenAI"],
+        ["openrouter", "OpenRouter"],
+        ["opper", "Opper"],
+        ["vercel", "Vercel AI Gateway"],
+      ] as const
+    ).map(([id, title]) => ({
+      id,
+      title,
+      summary: providerPaymentSummary(id, title),
+    })),
+    // Connected for the organization, so every workspace in it can use it.
+    { id: "openai_compatible", ...COMPATIBLE_ENDPOINT_CHOICE },
+  ];
   const openProviderAccount = providerAccountChoices.some((choice) => choice.id === open);
   const providerAccountsExpanded = providerAccountsOpen || openProviderAccount;
   /** Opens or closes the provider accounts group; closing it closes the provider open inside. */
@@ -623,12 +629,17 @@ export function ModelAccessOnboardingPanel({
 
   function providerPanel(choice: ProviderConnectChoice): ReactNode {
     if (choice.id === "codex" || choice.id === "supergrok") return devicePanel(choice.id);
-    if (choice.id === "openai" || choice.id === "azure_openai") {
+    if (
+      choice.id === "openai" ||
+      choice.id === "azure_openai" ||
+      choice.id === "openai_compatible"
+    ) {
       const provider = choice.id;
       return (
         <DirectModelProviderForm
           client={client}
           workspaceId={workspaceId}
+          organizationId={organizationId}
           provider={provider}
           onBusyChange={setBusy}
           onConnected={async (modelId) => {

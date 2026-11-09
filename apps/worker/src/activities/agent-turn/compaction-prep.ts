@@ -7,11 +7,13 @@ import {
   hasPendingSteerAfterContextCompaction,
   sessionCompactionRequestTrigger,
   sessionHasToolRouterHistory,
+  type SessionAgentPrompt,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   appendSessionInstructions,
   appendWorkspaceMemory,
+  agentInstructionsLayerContent,
   agentPromptResourcesFor,
   agentPromptExperimentsFor,
   composeAgentInstructions,
@@ -60,6 +62,7 @@ import { sessionStartedUnattended } from "./unattended";
 import { acceptsPromptCacheKeyForTurn } from "./codex";
 import {
   safeErrorDiagnostic,
+  compactionFailureProviderMessage,
   compactionFailureTurnEventPayload,
   isCompactionSummaryFailure,
   shouldRecoverCompactionProviderFailure,
@@ -145,6 +148,11 @@ export type CompactionPrepDeps = {
   modelUsageDispatchId: string;
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
+  /**
+   * The agent revision in this chat's system prompt, read once per attempt;
+   * null for chats not bound to an agent revision.
+   */
+  agentPrompt: SessionAgentPrompt | null;
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
   portableModelSwitchPending?: ClaimTurnOk["portableModelSwitchPending"];
   resolvedModel: GovernanceModelOk["resolvedModel"];
@@ -198,10 +206,12 @@ export type PostAgentCompactionOutcome =
 /**
  * System instructions for the standalone (chat-provider) compaction request.
  * A session with an agent configuration uses the same modular composer and
- * module selection as its turns; a legacy session keeps the historical
+ * capability-based module selection as its turns (without a tool surface, so
+ * the media guidance stays); a legacy session keeps the historical
  * persona + CORE + session + memory string byte-for-byte. Like a turn, it
  * carries no workspace governance: governance is a durable history item the
- * summarized history already contains.
+ * summarized history already contains. An agent chat adds the instructions of
+ * the agent revision in its system prompt, as its turns do.
  */
 export function standaloneCompactionInstructions(input: {
   settings: Settings;
@@ -216,6 +226,8 @@ export function standaloneCompactionInstructions(input: {
    * composer would assume no router and leave out Tool discovery. */
   lazyToolTransport?: GovernanceModelOk["lazyToolTransport"];
   toolRouterInHistory?: boolean;
+  /** The agent revision's instructions in the chat's system prompt, if any. */
+  agentInstructions?: string | null | undefined;
 }): string {
   // The instructions the chat started with, as the turn composes them.
   const unattended = sessionStartedUnattended({ metadata: input.session.metadata ?? {} });
@@ -227,6 +239,7 @@ export function standaloneCompactionInstructions(input: {
         : {}),
       ...(input.workspaceMemory ? { workspaceMemory: input.workspaceMemory } : {}),
       ...(input.session.instructions ? { sessionInstructions: input.session.instructions } : {}),
+      ...(input.agentInstructions ? { agentInstructions: input.agentInstructions } : {}),
       ...(input.rig ? { rig: input.rig } : {}),
       ...(input.lazyToolTransport ? { lazyToolTransport: input.lazyToolTransport } : {}),
       ...(input.toolRouterInHistory ? { toolRouterInHistory: true } : {}),
@@ -236,19 +249,27 @@ export function standaloneCompactionInstructions(input: {
       }),
     }).composed;
   }
+  const personaAndCore = composeAgentInstructions(
+    input.structuredWorkspacePolicyActive
+      ? input.settings.agentInstructionsTemplate
+      : (input.workspaceAgentInstructions ?? input.settings.agentInstructionsTemplate),
+    undefined,
+    input.rig,
+    agentPromptExperimentsFor(input.settings).experiments,
+    unattended ? { unattended: true } : undefined,
+  );
+  // As in the turn, the agent layer follows the persona as its own section,
+  // and the text after it starts a new paragraph.
+  const agentLayer = agentInstructionsLayerContent(input.agentInstructions ?? undefined);
+  if (agentLayer) {
+    const sessionText = input.session.instructions?.trim();
+    return appendWorkspaceMemory(
+      `${personaAndCore}\n\n${agentLayer}${sessionText ? `\n\n${sessionText}` : ""}`,
+      input.workspaceMemory ?? undefined,
+    );
+  }
   return appendWorkspaceMemory(
-    appendSessionInstructions(
-      composeAgentInstructions(
-        input.structuredWorkspacePolicyActive
-          ? input.settings.agentInstructionsTemplate
-          : (input.workspaceAgentInstructions ?? input.settings.agentInstructionsTemplate),
-        undefined,
-        input.rig,
-        agentPromptExperimentsFor(input.settings).experiments,
-        unattended ? { unattended: true } : undefined,
-      ),
-      input.session.instructions ?? undefined,
-    ),
+    appendSessionInstructions(personaAndCore, input.session.instructions ?? undefined),
     input.workspaceMemory ?? undefined,
   );
 }
@@ -274,6 +295,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     modelUsageDispatchId,
     turn,
     session,
+    agentPrompt,
     turnExecutionPolicy,
     resolvedModel,
     workspaceAgentInstructions,
@@ -497,19 +519,37 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
       events.filter((event) => event.type !== "session.context.compaction.started"),
     );
   };
-  const compactionModeOptions = {
-    codexCompactionMode: session.codexCompactionMode,
-    isCodexSubscriptionTurn: billingState.isCodexTurn,
-    onCompactionStarted: (trigger: "auto" | "operator" | "proactive" | "overflow") =>
-      recordContextCompactionStarted(observability, trigger),
-    publishLiveEvents: publishCompactionLiveEvents,
-    ...(remoteCompactionRequester ? { requestRemoteCompactionV2: remoteCompactionRequester } : {}),
-  } as const;
-
   // Responses and Claude compaction prepare the ordinary agent request first so
   // tool schemas, instructions and settings match the warm cache prefix. Chat
   // providers keep the standalone portable maintenance path.
   const compactionOnlyTurn = turn.source === "compaction";
+  const compactionModeOptions = {
+    codexCompactionMode: session.codexCompactionMode,
+    ...(agentPrompt
+      ? {
+          agentPrompt: {
+            revision: agentPrompt.revision,
+            // A compaction-only turn runs no model turn after it, so the
+            // folded revision needs no history item for the rest of it.
+            ...(compactionOnlyTurn
+              ? {}
+              : {
+                  inPrompt: agentPrompt.instructions === null ? null : agentPrompt.revision,
+                }),
+          },
+        }
+      : {}),
+    isCodexSubscriptionTurn: billingState.isCodexTurn,
+    onCompactionStarted: (trigger: "auto" | "operator" | "proactive" | "overflow") =>
+      recordContextCompactionStarted(observability, trigger),
+    // A summary that fails terminally falls back to trimming history, but
+    // never one cut short by this attempt's own cancellation.
+    ...(cancellationSignal ? { cancellationSignal } : {}),
+    observability,
+    publishLiveEvents: publishCompactionLiveEvents,
+    ...(remoteCompactionRequester ? { requestRemoteCompactionV2: remoteCompactionRequester } : {}),
+  } as const;
+
   const remoteV2CompactionNeedsAgentPrefix =
     Boolean(remoteCompactionRequester) && session.codexCompactionMode === "remote_v2";
   const settleDeferredSteerAfterCompaction = async (): Promise<RunAgentTurnResult | null> => {
@@ -564,6 +604,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
             sessionId: input.sessionId,
           })
         : false,
+      agentInstructions: agentPrompt?.instructions,
     });
     const requestTrigger = await sessionCompactionRequestTrigger(
       db,
@@ -641,6 +682,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
             clearRequestedCompaction: true,
             publishLiveEvents: publishCompactionLiveEvents,
             providerRejection: compactionProviderRejection(error),
+            providerMessage: compactionFailureProviderMessage(error),
           },
         );
         if (!isCompactionSummaryFailure(error)) throw error;
@@ -846,6 +888,7 @@ export async function runPostAgentCompaction(
             clearRequestedCompaction: true,
             publishLiveEvents: publishCompactionLiveEvents,
             providerRejection: compactionProviderRejection(error),
+            providerMessage: compactionFailureProviderMessage(error),
           },
         );
         if (!isCompactionSummaryFailure(error)) throw error;
@@ -1039,6 +1082,7 @@ export async function runPostAgentCompaction(
           clearRequestedCompaction: forcedTrigger !== null,
           publishLiveEvents: publishCompactionLiveEvents,
           providerRejection: compactionProviderRejection(compactError),
+          providerMessage: compactionFailureProviderMessage(compactError),
         },
       );
       if (!isCompactionSummaryFailure(compactError)) throw compactError;

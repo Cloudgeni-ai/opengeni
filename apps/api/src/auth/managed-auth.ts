@@ -53,6 +53,15 @@ import {
   createManagedAuthNewSignupsGate,
   type ManagedAuthNewSignupsGate,
 } from "./new-signups-gate";
+import {
+  currentManagedSignUpPasswordHash,
+  invalidManagedVerificationLink,
+  managedSignUpOfVerificationRequest,
+  managedSignUpRequestFields,
+  managedSignUpVerificationClaims,
+  replaceManagedSignUpPassword,
+  verifyManagedSignUpEmail,
+} from "./managed-sign-up-verification";
 import { createSignupFunnelMetrics } from "./signup-funnel-metrics";
 import {
   currentManagedAuthProviderId,
@@ -692,9 +701,27 @@ export function createManagedAuth(
       // Non-local deployments require verification unless explicitly overridden.
       requireEmailVerification,
       revokeSessionsOnPasswordReset: true,
-      onExistingUserSignUp: async ({ user }) => {
+      onExistingUserSignUp: async ({ user }, request) => {
         if (requireEmailVerification && !user.emailVerified) {
-          const url = await verificationUrl(settings, user.email);
+          // The newest sign-up for an unverified address replaces its
+          // password, and only its link verifies the address (see
+          // managed-sign-up-verification.ts).
+          const { password, callbackURL } = await managedSignUpRequestFields(request);
+          const context = await auth.$context;
+          const passwordHash =
+            password === null
+              ? await currentManagedSignUpPasswordHash(pool, user.id)
+              : await replaceManagedSignUpPassword(pool, {
+                  userId: user.id,
+                  passwordHash: await context.password.hash(password),
+                });
+          if (passwordHash === "verified") return;
+          const url = await verificationUrl(
+            settings,
+            user.email,
+            managedSignUpVerificationClaims(context.secret, user.id, passwordHash),
+            callbackURL ?? "/",
+          );
           await sendManagedAuthEmail(
             managedEmailTransport,
             emailVerificationMessage(user.email, url),
@@ -718,11 +745,40 @@ export function createManagedAuth(
       // bind sign-in to an isolated browser transaction, and the provider
       // session this would create is discarded there by design.
       autoSignInAfterVerification: settings.managedAuthSessionSetMode === "legacy",
-      sendVerificationEmail: async ({ user, url }) => {
+      // A link Better Auth builds (sign-up, resend) keeps its address and
+      // callback, with a token bound to the password the account holds now,
+      // like a repeated sign-up's.
+      sendVerificationEmail: async ({ user, url: providerUrl }) => {
+        const { secret } = await auth.$context;
+        const url = new URL(providerUrl);
+        url.searchParams.set(
+          "token",
+          await createEmailVerificationToken(
+            secret,
+            user.email,
+            undefined,
+            undefined,
+            managedSignUpVerificationClaims(
+              secret,
+              user.id,
+              await currentManagedSignUpPasswordHash(pool, user.id),
+            ),
+          ),
+        );
         await sendManagedAuthEmail(
           managedEmailTransport,
-          emailVerificationMessage(user.email, url),
+          emailVerificationMessage(user.email, url.toString()),
         );
+      },
+      // Only the newest sign-up's link verifies the address, keeping that
+      // sign-up's password; an earlier link is refused like an invalid one.
+      beforeEmailVerification: async (user, request) => {
+        const outcome = await verifyManagedSignUpEmail(pool, {
+          secret: (await auth.$context).secret,
+          userId: user.id,
+          signUp: managedSignUpOfVerificationRequest(request),
+        });
+        if (outcome === "superseded") throw invalidManagedVerificationLink(request);
       },
       afterEmailVerification: async (user) => {
         funnel?.recordEmailVerified();
@@ -1101,7 +1157,12 @@ function emailVerificationMessage(to: string, url: string): Omit<ManagedEmailMes
   };
 }
 
-async function verificationUrl(settings: Settings, email: string): Promise<string> {
+async function verificationUrl(
+  settings: Settings,
+  email: string,
+  claims: Record<string, string>,
+  callbackURL: string,
+): Promise<string> {
   if (!settings.betterAuthSecret) {
     throw new Error(
       "OPENGENI_BETTER_AUTH_SECRET is required to send managed auth verification email",
@@ -1110,10 +1171,16 @@ async function verificationUrl(settings: Settings, email: string): Promise<strin
   if (!settings.publicBaseUrl) {
     throw new Error("OPENGENI_PUBLIC_BASE_URL is required to send managed auth verification email");
   }
-  const token = await createEmailVerificationToken(settings.betterAuthSecret, email);
+  const token = await createEmailVerificationToken(
+    settings.betterAuthSecret,
+    email,
+    undefined,
+    undefined,
+    claims,
+  );
   const url = new URL("/v1/auth/verify-email", settings.publicBaseUrl);
   url.searchParams.set("token", token);
-  url.searchParams.set("callbackURL", "/");
+  url.searchParams.set("callbackURL", callbackURL);
   return url.toString();
 }
 

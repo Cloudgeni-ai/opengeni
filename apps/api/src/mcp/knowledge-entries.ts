@@ -13,6 +13,10 @@ import {
   withLearningRefusalMeta,
 } from "@opengeni/contracts/learning-refusal";
 import {
+  agentMemoryUnreadableMessage,
+  agentMemoryAccess,
+  type AgentMemoryAccess,
+  agentMemoryReadOnlyMessage,
   prepareKnowledgeFile,
   prepareKnowledgeSave,
   retainKnowledgeMessage,
@@ -27,6 +31,7 @@ import {
   confirmLegacyKnowledge,
   confirmLegacyInstruction,
   getKnowledgeEntry,
+  getSessionAgentMemoryState,
   listKnowledgeEntries,
   nestedAuthorityRefusalMessage,
   nestedPostgresSqlState,
@@ -93,6 +98,19 @@ function refusalAgentMessage(
   }
 }
 
+/**
+ * A write an agent's chat may not make into its agent's Memory, or a read of
+ * a Memory that is off (see agent-memory.ts).
+ */
+class AgentMemoryReadOnlyError extends Error {
+  constructor(
+    message: string,
+    readonly code: "agent_memory_read_only" | "agent_memory_off" = "agent_memory_read_only",
+  ) {
+    super(message);
+  }
+}
+
 /** One structured write and retrieval path, independent of the legacy Memory toggle. */
 export function registerKnowledgeEntryTools(
   server: McpServer,
@@ -130,9 +148,10 @@ export function registerKnowledgeEntryTools(
     } catch (error) {
       if (
         error instanceof KnowledgeEntryIdTakenError ||
-        error instanceof KnowledgeEntryIdRequiredError
+        error instanceof KnowledgeEntryIdRequiredError ||
+        error instanceof AgentMemoryReadOnlyError
       ) {
-        return {
+        const result = {
           isError: true,
           content: [
             {
@@ -141,6 +160,10 @@ export function registerKnowledgeEntryTools(
             },
           ],
         };
+        // A refused Memory write tells the timeline it was not saved.
+        return error instanceof AgentMemoryReadOnlyError && error.code === "agent_memory_read_only"
+          ? withLearningRefusalMeta(result, { destination: "knowledge", reason: "not_permitted" })
+          : result;
       }
       const state = nestedPostgresSqlState(error);
       const refusalMessage =
@@ -181,6 +204,98 @@ export function registerKnowledgeEntryTools(
       // refusal fact in `_meta`, which the model never sees, so the timeline
       // tells the person it was not saved.
       return refusal ? withLearningRefusalMeta(result, refusal) : result;
+    }
+  }
+  async function agentMemoryState(): Promise<AgentMemoryAccess | null> {
+    const state = await getSessionAgentMemoryState(deps.db, {
+      workspaceId: grant.workspaceId,
+      sessionId,
+    });
+    return state?.agentChat ? agentMemoryAccess(state.agent, state.chat) : null;
+  }
+  /** Groups of an entry, published and pending together; empty when unreadable. */
+  async function entryGroups(context: KnowledgeContext, entryId: string): Promise<string[]> {
+    const groups = new Set<string>();
+    for (const view of ["published", "needs_review"] as const) {
+      const existing = await getKnowledgeEntry(deps.db, context, entryId, { view }).catch(
+        () => null,
+      );
+      for (const id of existing?.revision.entry.groupIds ?? []) groups.add(id);
+    }
+    return [...groups];
+  }
+  /**
+   * Whether any of these groups is the collection or sits inside it (a
+   * sub-collection made in Memory). Collections nest shallowly; the walk stops
+   * after a few levels and at cycles.
+   */
+  async function withinCollection(
+    context: KnowledgeContext,
+    groupIds: readonly string[],
+    collection: string,
+  ): Promise<boolean> {
+    const seen = new Set<string>();
+    let level = [...groupIds];
+    for (let depth = 0; depth < 6 && level.length > 0; depth += 1) {
+      if (level.includes(collection)) return true;
+      const next: string[] = [];
+      for (const id of level) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        next.push(...(await entryGroups(context, id)));
+      }
+      level = next.filter((id) => !seen.has(id));
+    }
+    return false;
+  }
+  /**
+   * Refuse a Knowledge write this agent chat may not make: any save from a
+   * Slack DM, including retaining a message or file (it would land in
+   * workspace scope), and a write into the agent's
+   * Memory collection when the chat may only read it (a private chat of a
+   * shared agent, Memory scope off, or the agent's Memory off). A write
+   * touches the collection when it names the collection or a collection
+   * inside it, is the collection, or corrects or archives an entry in either.
+   */
+  async function requireAgentMemoryWrite(
+    context: KnowledgeContext,
+    target: {
+      kind: "save" | "archive";
+      groupIds?: readonly string[] | undefined;
+      entryId?: string | undefined;
+    },
+  ): Promise<void> {
+    const access = await agentMemoryState();
+    if (!access) return;
+    if (!access.saveKnowledge && target.kind === "save") {
+      throw new AgentMemoryReadOnlyError(agentMemoryReadOnlyMessage(access));
+    }
+    const collection = access.collectionId;
+    if (!collection || access.write) return;
+    const touches =
+      target.entryId === collection ||
+      (await withinCollection(context, target.groupIds ?? [], collection)) ||
+      (target.entryId
+        ? await withinCollection(context, await entryGroups(context, target.entryId), collection)
+        : false);
+    if (touches) throw new AgentMemoryReadOnlyError(agentMemoryReadOnlyMessage(access));
+  }
+  /** Refuse reading the agent's collection while its Memory is off (or from a shared chat with an Only me agent). */
+  async function requireAgentMemoryRead(target: {
+    groupId?: string | undefined;
+    entryId?: string | undefined;
+    groupIds?: readonly string[] | undefined;
+  }): Promise<void> {
+    if (!target.groupId && !target.entryId && !target.groupIds?.length) return;
+    const access = await agentMemoryState();
+    const collection = access?.collectionId;
+    if (!access || !collection || access.read) return;
+    if (
+      target.groupId === collection ||
+      target.entryId === collection ||
+      (target.groupIds ?? []).includes(collection)
+    ) {
+      throw new AgentMemoryReadOnlyError(agentMemoryUnreadableMessage(access), "agent_memory_off");
     }
   }
   // Compatibility recovery for tool selections persisted before the cutover.
@@ -249,15 +364,16 @@ export function registerKnowledgeEntryTools(
       inputSchema: KnowledgeSearchToolRequest.omit({ rootOnly: true }).shape,
     },
     (input) =>
-      run((context) =>
-        searchKnowledgeEntries(
+      run(async (context) => {
+        await requireAgentMemoryRead({ groupId: input.groupId });
+        return searchKnowledgeEntries(
           deps.db,
           context,
           input,
           () => deps.getDocumentServices().embedder,
           deps.settings,
-        ),
-      ),
+        );
+      }),
   );
   server.registerTool(
     "knowledge_browse",
@@ -272,12 +388,13 @@ export function registerKnowledgeEntryTools(
       },
     },
     (input) =>
-      run((context) =>
-        listKnowledgeEntries(deps.db, context, {
+      run(async (context) => {
+        await requireAgentMemoryRead({ groupId: input.groupId });
+        return listKnowledgeEntries(deps.db, context, {
           ...input,
           ...(input.groupId ? {} : { kind: "group" as const }),
-        }),
-      ),
+        });
+      }),
   );
   server.registerTool(
     "knowledge_get",
@@ -299,6 +416,10 @@ export function registerKnowledgeEntryTools(
           view: input.view,
         });
         if (!record) return { found: false };
+        await requireAgentMemoryRead({
+          entryId: input.entryId,
+          groupIds: record.revision.entry.groupIds,
+        });
         const content = record.revision.entry.content;
         const end = Math.min(content.length, input.offset + input.maxChars);
         return {
@@ -328,7 +449,14 @@ export function registerKnowledgeEntryTools(
       },
     },
     ({ fileId, purpose }) =>
-      run((context) => prepareKnowledgeFile(deps, context, fileId, purpose), "knowledge", "write"),
+      run(
+        async (context) => {
+          await requireAgentMemoryWrite(context, { kind: "save" });
+          return prepareKnowledgeFile(deps, context, fileId, purpose);
+        },
+        "knowledge",
+        "write",
+      ),
   );
   server.registerTool(
     "knowledge_retain_message",
@@ -338,7 +466,14 @@ export function registerKnowledgeEntryTools(
       inputSchema: { messageId: z.uuid().optional() },
     },
     ({ messageId }) =>
-      run((context) => retainKnowledgeMessage(deps.db, context, messageId), "knowledge", "write"),
+      run(
+        async (context) => {
+          await requireAgentMemoryWrite(context, { kind: "save" });
+          return retainKnowledgeMessage(deps.db, context, messageId);
+        },
+        "knowledge",
+        "write",
+      ),
   );
   server.registerTool(
     "knowledge_save",
@@ -355,7 +490,19 @@ export function registerKnowledgeEntryTools(
           ),
       },
     },
-    (input) => run((context) => saveKnowledgeEntry(deps.db, context, input), "knowledge", "write"),
+    (input) =>
+      run(
+        async (context) => {
+          await requireAgentMemoryWrite(context, {
+            kind: "save",
+            groupIds: input.entry.groupIds,
+            entryId: input.entryId,
+          });
+          return saveKnowledgeEntry(deps.db, context, input);
+        },
+        "knowledge",
+        "write",
+      ),
   );
   server.registerTool(
     "knowledge_archive",
@@ -369,7 +516,14 @@ export function registerKnowledgeEntryTools(
       },
     },
     (input) =>
-      run((context) => archiveKnowledgeEntry(deps.db, context, input), "knowledge", "write"),
+      run(
+        async (context) => {
+          await requireAgentMemoryWrite(context, { kind: "archive", entryId: input.entryId });
+          return archiveKnowledgeEntry(deps.db, context, input);
+        },
+        "knowledge",
+        "write",
+      ),
   );
   server.registerTool(
     "instruction_policy_get",
@@ -397,6 +551,17 @@ export function registerKnowledgeEntryTools(
       inputSchema: KnowledgeTaskNotePromotionRequest.shape,
     },
     (input) =>
-      run((context) => promoteTaskNoteToKnowledge(deps.db, context, input), "knowledge", "write"),
+      run(
+        async (context) => {
+          await requireAgentMemoryWrite(context, {
+            kind: "save",
+            groupIds: input.groupIds,
+            entryId: input.entryId,
+          });
+          return promoteTaskNoteToKnowledge(deps.db, context, input);
+        },
+        "knowledge",
+        "write",
+      ),
   );
 }

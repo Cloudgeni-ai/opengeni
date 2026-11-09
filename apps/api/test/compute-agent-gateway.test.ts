@@ -85,7 +85,7 @@ describe("agent link frames", () => {
     }
   });
 
-  test("permissions match the NATS callout's grant", () => {
+  test("permissions stay within the NATS callout's grant", () => {
     expect(maySubscribe(SCOPE, `${SCOPE}.rpc`)).toBe(true);
     expect(maySubscribe(SCOPE, `${SCOPE}.>`)).toBe(true);
     expect(maySubscribe(SCOPE, `${SCOPE}.*.x`)).toBe(true);
@@ -95,12 +95,17 @@ describe("agent link frames", () => {
     expect(maySubscribe(SCOPE, "_INBOX.>")).toBe(false);
     expect(maySubscribe(SCOPE, `${SCOPE}..x`)).toBe(false);
     expect(maySubscribe(SCOPE, `${SCOPE}.a b`)).toBe(false);
-    expect(mayPublish(SCOPE, `${SCOPE}.events`)).toBe(true);
-    expect(mayPublish(SCOPE, "_INBOX.abc.1")).toBe(true);
-    expect(mayPublish(SCOPE, "_INBOX.*")).toBe(false);
-    expect(mayPublish(SCOPE, `${SCOPE}.>`)).toBe(false);
-    expect(mayPublish(SCOPE, "_INBOX")).toBe(false);
-    expect(mayPublish(SCOPE, `agent.${WS}.other.connection.${INSTANCE}.rpc`)).toBe(false);
+    const none = new Set<string>();
+    expect(mayPublish(SCOPE, `${SCOPE}.events`, none)).toBe(true);
+    expect(mayPublish(SCOPE, "_INBOX.*", new Set(["_INBOX.*"]))).toBe(false);
+    expect(mayPublish(SCOPE, `${SCOPE}.>`, none)).toBe(false);
+    expect(mayPublish(SCOPE, "_INBOX", new Set(["_INBOX"]))).toBe(false);
+    expect(mayPublish(SCOPE, `agent.${WS}.other.connection.${INSTANCE}.rpc`, none)).toBe(false);
+    // An inbox only as the answer to a request this session was sent and
+    // has not answered yet.
+    expect(mayPublish(SCOPE, "_INBOX.abc.1", new Set(["_INBOX.abc.1"]))).toBe(true);
+    expect(mayPublish(SCOPE, "_INBOX.abc.1", none)).toBe(false);
+    expect(mayPublish(SCOPE, "_INBOX.abc.2", new Set(["_INBOX.abc.1"]))).toBe(false);
     expect(mayReplyTo(SCOPE, `${SCOPE}.reply.1`)).toBe(true);
     expect(mayReplyTo(SCOPE, "_INBOX.abc")).toBe(false);
     expect(validSubject("a.>.b", true)).toBe(false);
@@ -311,9 +316,13 @@ class FakeStore implements ComputeAgentLinkStore {
   powerGate: Promise<void> = Promise.resolve();
   powerThrows = false;
   powerAccepted = true;
-  async power(input: ComputeAgentLinkClaim & { sandboxId: string; asleep: boolean }) {
+  async power(
+    input: ComputeAgentLinkClaim & { sandboxId: string; asleep: boolean; handingOff: boolean },
+  ) {
     await this.powerGate;
-    this.calls.push(`power:${input.sandboxId}:${input.asleep ? "asleep" : "awake"}`);
+    this.calls.push(
+      `power:${input.sandboxId}:${input.asleep ? "asleep" : "awake"}${input.handingOff ? ":handing_off" : ""}`,
+    );
     if (this.powerThrows) throw new Error("db down");
     return { accepted: this.powerAccepted };
   }
@@ -495,13 +504,13 @@ describe("agent gateway sessions", () => {
     now += 10_000;
     socket.data.heard?.();
     await gateway.tick();
-    send({ t: "pub", s: 1, subject: "_INBOX.1", payload: new Uint8Array([1]) });
+    send({ t: "pub", s: 1, subject: `${SCOPE}.events`, payload: new Uint8Array([1]) });
     await settle();
     expect(nats.published).toHaveLength(1);
     // Past it, the session ends as lost before anything else is forwarded,
     // and its subscriptions go with it.
     now += 8_000;
-    send({ t: "pub", s: 1, subject: "_INBOX.1", payload: new Uint8Array([2]) });
+    send({ t: "pub", s: 1, subject: `${SCOPE}.events`, payload: new Uint8Array([2]) });
     await settle();
     expect(nats.published).toHaveLength(1);
     expect(socket.frames.at(-1)).toMatchObject({ t: "closed", s: 1, code: "lost" });
@@ -570,6 +579,40 @@ describe("agent gateway sessions", () => {
     send({ t: "state", s: 1, state: "awake" });
     await settle();
     expect(powerCalls()).toEqual(["power:sbx-1:awake", "power:sbx-1:asleep", "power:sbx-1:awake"]);
+  });
+
+  test("a host handing the sandbox off is recorded as such, and cleared once it says it no longer is", async () => {
+    const { send, settle, store } = await gatewayWithLink();
+    const powerCalls = () => store.calls.filter((call) => call.startsWith("power:"));
+    send({ t: "open", s: 1, sandbox: "sbx-1", ticket: "t", connection: INSTANCE });
+    send({ t: "state", s: 1, state: "asleep" });
+    await settle();
+    send({ t: "state", s: 1, state: "asleep", busy: "handing_off" });
+    await settle();
+    send({ t: "state", s: 1, state: "asleep", busy: "handing_off" });
+    await settle();
+    send({ t: "state", s: 1, state: "asleep" });
+    await settle();
+    expect(powerCalls()).toEqual([
+      "power:sbx-1:asleep",
+      "power:sbx-1:asleep:handing_off",
+      "power:sbx-1:asleep",
+    ]);
+  });
+
+  test("a state frame's busy field is read when known and ignored when not", () => {
+    const decode = (text: string) => decodeHostFrame(new TextEncoder().encode(text));
+    expect(decode('{"t":"state","s":1,"state":"asleep","busy":"handing_off"}\n')).toEqual({
+      t: "state",
+      s: 1,
+      state: "asleep",
+      busy: "handing_off",
+    });
+    expect(decode('{"t":"state","s":1,"state":"asleep","busy":"later_kind"}\n')).toEqual({
+      t: "state",
+      s: 1,
+      state: "asleep",
+    });
   });
 
   test("a request to a sleeping sandbox is logged as its waker; a plain message or a no-wake request is not", async () => {
@@ -760,7 +803,12 @@ describe("agent gateway sessions", () => {
   test("an agent cannot say its own link was lost", async () => {
     const { send, settle, nats } = await gatewayWithLink();
     send({ t: "open", s: 1, sandbox: "sbx", ticket: "t", connection: INSTANCE });
+    send({ t: "sub", s: 1, sid: "r", subject: `${SCOPE}.rpc` });
     await settle();
+    const [subscription] = [...nats.subscriptions.values()];
+    for (const reply of ["_INBOX.forged", "_INBOX.plain"]) {
+      subscription!.deliver({ subject: `${SCOPE}.rpc`, reply, data: new Uint8Array([1]) });
+    }
     send({
       t: "pub",
       s: 1,
@@ -782,6 +830,63 @@ describe("agent gateway sessions", () => {
     expect(nats.published).toEqual([
       { subject: "_INBOX.forged", data: new Uint8Array(0), headers: [["Opengeni-Replay", "1"]] },
       { subject: "_INBOX.plain", data: new Uint8Array(0) },
+    ]);
+  });
+
+  test("an agent answers only a request delivered to its session, and only once", async () => {
+    const { socket, send, settle, nats } = await gatewayWithLink();
+    send({ t: "open", s: 1, sandbox: "sbx", ticket: "t", connection: INSTANCE });
+    send({ t: "sub", s: 1, sid: "r", subject: `${SCOPE}.rpc` });
+    await settle();
+    const [subscription] = [...nats.subscriptions.values()];
+    subscription!.deliver({
+      subject: `${SCOPE}.rpc`,
+      reply: "_INBOX.base.1",
+      data: new Uint8Array([1]),
+    });
+    // Another requester's inbox, never delivered here, is refused.
+    send({ t: "pub", s: 1, subject: "_INBOX.base.2", payload: new Uint8Array([2]) });
+    await settle();
+    expect(nats.published).toEqual([]);
+    expect(socket.frames.at(-1)).toMatchObject({ t: "error", s: 1, code: "permission" });
+    // Its own request's reply goes through, once.
+    send({ t: "pub", s: 1, subject: "_INBOX.base.1", payload: new Uint8Array([3]) });
+    send({ t: "pub", s: 1, subject: "_INBOX.base.1", payload: new Uint8Array([4]) });
+    await settle();
+    expect(nats.published).toEqual([{ subject: "_INBOX.base.1", data: new Uint8Array([3]) }]);
+    expect(socket.frames.at(-1)).toMatchObject({ t: "error", s: 1, code: "permission" });
+    // Its own scope stays open to it.
+    send({ t: "pub", s: 1, subject: `${SCOPE}.events`, payload: new Uint8Array([5]) });
+    await settle();
+    expect(nats.published.map((message) => message.subject)).toEqual([
+      "_INBOX.base.1",
+      `${SCOPE}.events`,
+    ]);
+  });
+
+  test("a request delivered to an ended session cannot be answered from a later one", async () => {
+    const { send, settle, nats } = await gatewayWithLink();
+    send({ t: "open", s: 1, sandbox: "sbx", ticket: "t", connection: INSTANCE });
+    send({ t: "sub", s: 1, sid: "r", subject: `${SCOPE}.rpc` });
+    await settle();
+    const [subscription] = [...nats.subscriptions.values()];
+    subscription!.deliver({
+      subject: `${SCOPE}.rpc`,
+      reply: "_INBOX.earlier",
+      data: new Uint8Array([1]),
+    });
+    send({ t: "close", s: 1 });
+    send({ t: "open", s: 2, sandbox: "sbx", ticket: "t", connection: INSTANCE });
+    await settle();
+    send({ t: "pub", s: 2, subject: "_INBOX.earlier", payload: new Uint8Array([2]) });
+    await settle();
+    // Only the gateway's own link-lost notice reached the requester.
+    expect(nats.published).toEqual([
+      {
+        subject: "_INBOX.earlier",
+        data: new Uint8Array(0),
+        headers: [[AGENT_LINK_LOST_HEADER, "1"]],
+      },
     ]);
   });
 

@@ -7,7 +7,9 @@ import {
   selectTurnSummaryFacets,
   toolDisplayName,
   turnSummaryFallbackLabel,
+  turnSummaryLiveMarkState,
   type TurnSummaryFacetConfiguration,
+  type TurnSummaryLiveMarkState,
 } from "@opengeni/react/timeline-model";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import { nativeLoadingPhrases } from "./composer-state";
@@ -24,7 +26,7 @@ import { ActivityIndicator, Platform, Pressable, Text, View, type TextStyle } fr
 import Animated, { FadeIn, FadeInDown, FadeOut, FadeOutUp } from "react-native-reanimated";
 import { ActivityRow } from "./activity";
 import { Icon } from "./icon";
-import { PulseDot, ShimmerText, ROW_MIN_HEIGHT, useReleaseFollow } from "./primitives";
+import { PulseDot, ShimmerText, ROW_MIN_HEIGHT, useLiveNow, useReleaseFollow } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 
@@ -42,6 +44,8 @@ export type NativeTurnStatus =
       kind: "working" | "waiting";
       since?: string | undefined;
       label?: string | undefined;
+      /** Who the wait is on: `you` when it needs the reader. */
+      waitingOn?: "you" | undefined;
       preview?: ReactNode;
     };
 
@@ -77,15 +81,7 @@ export type StickyWorkHeaderRegistry = {
 const StickyWorkHeaderContext = createContext<StickyWorkHeaderRegistry | null>(null);
 export const StickyWorkHeaderProvider = StickyWorkHeaderContext.Provider;
 
-export function useLiveNow(active: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [active]);
-  return now;
-}
+export { useLiveNow };
 
 function LiveElapsed({ since, style }: { since: string; style: TextStyle }) {
   const t = useOpenGeniText();
@@ -111,6 +107,8 @@ export interface TurnSummaryProps {
   foldKey?: string | undefined;
   contextCompactionCount?: number | undefined;
   status?: NativeTurnStatus | undefined;
+  /** The host's mark at the leading edge of a live status row (the timeline's `renderLiveMark`). */
+  renderLiveMark?: ((state: TurnSummaryLiveMarkState) => ReactNode) | undefined;
   /** The turn has steps that are not loaded yet (opening the row reads them). */
   unloadedSteps?: boolean | undefined;
   /**
@@ -133,6 +131,7 @@ export function TurnSummary({
   foldKey,
   contextCompactionCount,
   status,
+  renderLiveMark,
   unloadedSteps,
   onOpenStateChange,
   children,
@@ -257,6 +256,13 @@ export function TurnSummary({
     );
   }
   const showLive = Boolean(liveHeader) && !open && !status;
+  const liveMarkState = renderLiveMark
+    ? turnSummaryLiveMarkState(
+        status
+          ? { kind: status.kind, waitingOn: "waitingOn" in status ? status.waitingOn : undefined }
+          : undefined,
+      )
+    : null;
   const tail = showLive
     ? ""
     : !hasStatusText && facetText.length === 0 && outcome !== "failed" && outcome !== "cancelled"
@@ -292,6 +298,17 @@ export function TurnSummary({
       <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}>
         <Icon name="chevron-right" size={14} color={theme.colors["fg-subtle"]} />
       </View>
+      {/* The host's own mark leads the live row; decorative, the words say it. */}
+      {renderLiveMark && liveMarkState ? (
+        <View
+          testID={`live-mark-${liveMarkState.kind}`}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          style={{ height: 20, flexShrink: 0, alignItems: "center", justifyContent: "center" }}
+        >
+          {renderLiveMark(liveMarkState)}
+        </View>
+      ) : null}
       {showMarker ? (
         <View
           style={{

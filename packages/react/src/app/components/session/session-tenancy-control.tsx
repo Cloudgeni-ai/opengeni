@@ -1,7 +1,8 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { isTransientRequestError } from "@opengeni/sdk";
 import type {
-  Session,
+  ChatSession as Session,
   SessionEvent,
   SessionVisibility,
   SessionVisibilityWork,
@@ -137,7 +138,7 @@ export default function SessionRouteAuxiliary(
  * and an unknown answer fails closed rather than offering Private optimistically.
  */
 function usePrivateForkCapability(options: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   personalWorkspace: boolean;
   managedSession: boolean;
@@ -245,7 +246,7 @@ export function SessionTenancyControl({
   events?: SessionEvent[] | undefined;
   sourceEventId?: string | undefined;
   onForkClose?: (() => void) | undefined;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   managedSession: boolean;
   /** False also covers "not yet known": a private fork is never offered on a
    *  guess, because the database refuses it under the 0323 product decision. */

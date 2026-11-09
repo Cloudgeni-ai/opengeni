@@ -1,4 +1,9 @@
 import type { Observability } from "@opengeni/observability";
+import type { TurnRecoveryCause } from "../../observability-metrics";
+import {
+  FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE,
+  MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
+} from "./provider-recovery-policy";
 
 export type ProviderRecoveryObservation = {
   startedAt: number;
@@ -12,6 +17,20 @@ export function providerRecoveryCause(code: unknown): ProviderRecoveryObservatio
     return "connectivity";
   }
   return null;
+}
+
+const TOOL_RECOVERY_CODES: ReadonlySet<string> = new Set([
+  FIRST_PARTY_MCP_SETUP_UNAVAILABLE_CODE,
+  MCP_SERVICE_UNAVAILABLE_RECOVERY_CODE,
+  "mcp_transport_unavailable",
+  "mcp_transport_timeout",
+]);
+
+/** Bounded cause of a retryable run-failure recovery, from its recovery code. */
+export function turnRecoveryCauseForCode(code: unknown): TurnRecoveryCause {
+  if (providerRecoveryCause(code)) return "provider";
+  if (typeof code === "string" && TOOL_RECOVERY_CODES.has(code)) return "tool";
+  return "other";
 }
 
 export function readProviderRecoveryObservation(

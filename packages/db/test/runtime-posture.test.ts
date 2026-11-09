@@ -37,6 +37,11 @@ import {
 // Namespace access for the owner-routine lists, which other open PRs import
 // by name in the list above: a merge must not duplicate an imported binding.
 import * as runtimePosture from "../src/runtime-posture";
+import {
+  postureBeforeMigration,
+  privateRoutinesCreatedAfter,
+  publicTablesCreatedAfter,
+} from "./predecessor-runtime-posture";
 
 /** Write-allowed probes pin a fixed search path without the target schema. */
 const FIXED_SEARCH_PATH_PRIVATE_ROUTINES: ReadonlySet<string> = new Set([
@@ -107,32 +112,25 @@ function mcpOperationAuthorityTables(includeWorkspaceMembership = false): Runtim
 }
 
 function googleDriveAuthorityTables(): RuntimeTablePosture[] {
-  return [
-    "connections",
-    "files",
-    "google_drive_object_acl_evidence",
-    "google_drive_object_acl_principals",
-    "knowledge_document_versions",
-    "knowledge_providers",
-    "knowledge_source_sync_index_obligations",
-    "knowledge_source_sync_states",
-  ].map((name) => ({
-    name,
-    owner: "opengeni_migrator",
-    rlsEnabled: false,
-    rlsForced: false,
-    rlsActive: false,
-    policyCount: 0,
-    artifactOutboxDispatcherPolicy: false,
-    artifactMaterializerPolicy: false,
-    select: false,
-    insert: false,
-    update: false,
-    delete: false,
-    truncate: false,
-    references: false,
-    trigger: false,
-  }));
+  return ["connections", "files", "knowledge_document_versions", "knowledge_providers"].map(
+    (name) => ({
+      name,
+      owner: "opengeni_migrator",
+      rlsEnabled: false,
+      rlsForced: false,
+      rlsActive: false,
+      policyCount: 0,
+      artifactOutboxDispatcherPolicy: false,
+      artifactMaterializerPolicy: false,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+      truncate: false,
+      references: false,
+      trigger: false,
+    }),
+  );
 }
 
 function canonicalHumanIdentityAuthorityTables(): RuntimeTablePosture[] {
@@ -582,10 +580,10 @@ function safePosture(): RuntimeDatabasePosture {
       },
       {
         // 0988 reads only session tables present in every current posture;
-        // its runtime grant stays deferred for previous-release compatibility.
+        // 0988 withheld its runtime grant and 1274 granted it.
         name: "summarize_queued_turns_by_hold()",
         owner: "opengeni_migrator",
-        execute: false,
+        execute: true,
         publicExecute: false,
         securityDefiner: true,
         triggerCallable: false,
@@ -603,11 +601,11 @@ function safePosture(): RuntimeDatabasePosture {
         hasDependents: false,
         configuration: ["search_path=pg_catalog, public, pg_temp"],
       },
-      // 1172: created without runtime EXECUTE until its follow-up release.
+      // 1343 activates the read-only identity lookup introduced by 1172.
       {
         name: "read_external_identity_v1(uuid, text, text)",
         owner: "opengeni_migrator",
-        execute: false,
+        execute: true,
         publicExecute: false,
         securityDefiner: true,
         triggerCallable: false,
@@ -930,6 +928,59 @@ describe("runtime database posture evaluator", () => {
       "runtime privilege tables are missing: still_used",
       "protected tables are missing: still_used",
     ]);
+  });
+
+  test("a predecessor check excuses only absent tables that later migrations create", () => {
+    const posture = safePosture();
+    const present = posture.tables[0]!;
+    const contract = {
+      ...options,
+      protectedTables: [...options.protectedTables!, "created_later", "still_used"],
+      tablePrivileges: {
+        ...options.tablePrivileges,
+        created_later: ["SELECT"] as const,
+        still_used: ["SELECT"] as const,
+      },
+      protectedNoDirectDmlTables: [],
+      tablesCreatedByLaterMigrations: ["created_later", present.name],
+    };
+    const missing = evaluateRuntimeDatabasePosture(posture, contract);
+    expect(missing.filter((violation) => violation.includes("tables are missing"))).toEqual([
+      "runtime privilege tables are missing: still_used",
+      "protected tables are missing: still_used",
+    ]);
+    // A named table that is present is still held to the full contract.
+    Object.assign(present, { owner: "opengeni_app", rlsForced: false });
+    const violations = evaluateRuntimeDatabasePosture(posture, contract);
+    expect(violations).toContain(`runtime role owns table ${present.name}`);
+    expect(violations).toContain(`table ${present.name} does not FORCE RLS`);
+  });
+
+  test("predecessor table lists come from the tables later migration files create", () => {
+    const holds = "1295_model_call_credit_holds.sql";
+    const before = publicTablesCreatedAfter(holds, true);
+    expect(before).toContain("model_call_credit_holds");
+    expect(publicTablesCreatedAfter(holds, false)).not.toContain("model_call_credit_holds");
+    // Tables that existed before the boundary, and private-schema tables, are never excused.
+    expect(publicTablesCreatedAfter("0977_baseline_04.sql", true)).toContain("workspaces");
+    expect(before).not.toContain("workspaces");
+    expect(before).not.toContain("tenant_rows");
+    expect(before.every((name) => !name.includes("."))).toBe(true);
+    const automation = "1273_drop_retired_automation_and_pr_review.sql";
+    expect(postureBeforeMigration(automation)).toEqual({
+      rlsStrategy: "force",
+      tablesCreatedByLaterMigrations: publicTablesCreatedAfter(automation, true),
+      routinesCreatedByLaterMigrations: privateRoutinesCreatedAfter(automation, true),
+    });
+    expect(() => postureBeforeMigration("9999_missing.sql")).toThrow("unknown migration");
+  });
+
+  test("predecessor definer lists come from the private functions later migration files create", () => {
+    const ringEnd = "1344_agent_call_ring_end.sql";
+    expect(privateRoutinesCreatedAfter(ringEnd, true)).toContain("end_agent_call_rings_v1");
+    expect(privateRoutinesCreatedAfter(ringEnd, false)).not.toContain("end_agent_call_rings_v1");
+    // A function an earlier file created is never excused, even if a later file replaces it.
+    expect(privateRoutinesCreatedAfter(ringEnd, true)).not.toContain("ring_agent_call_v1");
   });
 
   test("retiring tables retain their exact privileges, ownership and RLS while present", () => {
@@ -2122,6 +2173,48 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
+          // 1263 MCP auto-connect: five full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 5
+            : 0) +
+          // 1241 credit alert state/receipts/deliveries: three full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 3
+            : 0) +
+          // 1294 Teams install welcome claims: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 1300 Teams onboarding reply limits: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 1301 Teams reply claims: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 1241 current billing recipients: one runtime read-only FORCE-RLS projection.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_ONLY_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 1293 GitHub installation repository removal markers: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           // 1257 automatic top-ups: three FORCE-RLS tables; two mutable journals
           // and one append-only consent/mutation receipt table, never DELETE.
           (tables === FORCE_RLS_TABLES || tables === RUNTIME_DML_TABLES
@@ -2131,6 +2224,24 @@ describe("runtime database posture evaluator", () => {
               : tables === RUNTIME_READ_INSERT_TABLES
                 ? 1
                 : 0) +
+          // 1295 model call credit holds: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 1258 Teams conversation context: messages and join cutoffs, two full-DML FORCE-RLS tables.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 2
+            : 0) +
+          // 1351 turn timing profiles: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2203,16 +2314,27 @@ describe("runtime database posture evaluator", () => {
         1 + // 1131 hourly live transcript time per person: full-DML, FORCE-RLS.
         1 + // 1143_agent_call_host_phones: full-DML, FORCE-RLS.
         2 + // 1150 Slack agents and their per-person state: full-DML, FORCE-RLS.
+        1 + // 1293 GitHub installation repository removal markers: full-DML, FORCE-RLS.
         3 + // 1243 agents (full DML), Slack installations (full DML), revisions (read and insert): FORCE-RLS.
         2 + // 1152 Slack agent proposals and Ask forms: full-DML, FORCE-RLS.
         3 + // 1153 Slack agent update settings, recipients and deliveries: full-DML, FORCE-RLS.
         2 + // 1235 Slack agent intro posts and suggestions: full-DML, FORCE-RLS.
-        3; // 1257 automatic top-ups: two read/insert/update and one read/insert, FORCE-RLS.
+        5 + // 1263 MCP auto-connect trusted issuers, their people, events, replays and signing keys.
+        4 + // 1241 credit alert tables: three full-DML and one read-only, FORCE-RLS.
+        3 + // 1257 automatic top-ups: two read/insert/update and one read/insert, FORCE-RLS.
+        1 + // 1295 model call credit holds: full-DML, FORCE-RLS.
+        2 + // 1258 Teams conversation context messages and join cutoffs: full-DML, FORCE-RLS.
+        1 + // 1294 Teams install welcome claims: full-DML, FORCE-RLS.
+        1 + // 1300 Teams onboarding reply limits: full-DML, FORCE-RLS.
+        1 + // 1301 Teams reply claims: full-DML, FORCE-RLS.
+        1; // 1351 turn timing profiles: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
       expect(NON_RLS_RUNTIME_TABLES).toContain("event_ingress_routes");
       expect(RUNTIME_FULL_DML_TABLES).toContain("event_ingress_routes");
+      expect(FORCE_RLS_TABLES).toContain("github_installation_repository_removals");
+      expect(RUNTIME_FULL_DML_TABLES).toContain("github_installation_repository_removals");
       expect(FORCE_RLS_TABLES).toContain("site_opens");
       expect(RUNTIME_FULL_DML_TABLES).toContain("site_opens");
       expect(FORCE_RLS_TABLES).toContain("site_sidebar_states");
@@ -4130,7 +4252,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 0946, 1103, 1060 and 1107 withheld; 0978's, 0984's, 0988's, 1002's, 1091's, 1172's, 1218's, 1211's and 1224's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 grant what 0937, 0946, 1103, 1060, 1107, 0988, 1218, 1224 and 1240 withheld; 0978's, 0984's, 1002's, 1091's, 1172's and 1211's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4165,6 +4287,8 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
     "inbound_events",
     "recording_transcript_versions",
     "recordings",
+    "recording_tracks",
+    "recording_chunks",
     "mcp_event_subscriptions",
     "event_source_feeds",
     "sandboxes",
@@ -4264,24 +4388,34 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
+      "list_uncompacted_recording_tracks_v1(integer, text)",
+      "end_agent_call_rings_v1(uuid)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-      "summarize_queued_turns_by_hold()",
       "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
-      "read_external_identity_v1(uuid, text, text)",
-      "list_organization_vaults_v1(uuid, jsonb)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
-      "list_organization_compute_v1(uuid, uuid, text)",
+      "end_agent_call_rings_v1(uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
       "runtime role lacks EXECUTE on private routine update_organization_inference_residency_v1(uuid, text, text, boolean, bigint, uuid)",
     );
+    for (const granted of [
+      "list_organization_vaults_v1(uuid, jsonb)",
+      "list_organization_compute_v1(uuid, uuid, text)",
+    ]) {
+      expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
+        `runtime role lacks EXECUTE on private routine ${granted}`,
+      );
+    }
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
       "runtime role lacks EXECUTE on private routine grant_subscription_account_administrator(jsonb)",
+    );
+    expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toContain(
+      "runtime role lacks EXECUTE on private routine summarize_queued_turns_by_hold()",
     );
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
       runtimePosture.RUNTIME_DEFINER_ROUTINES.filter(
@@ -4343,6 +4477,8 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
       "list_organization_compute_v1(uuid, uuid, text)",
+      "list_uncompacted_recording_tracks_v1(integer, text)",
+      "end_agent_call_rings_v1(uuid)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);
@@ -4356,7 +4492,8 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
     beforeOutbox.privateRoutines = beforeOutbox.privateRoutines.filter(
       (entry) =>
         entry.name !== "claim_native_push_deliveries_v2(uuid, integer, integer)" &&
-        entry.name !== "ring_agent_call_v1(uuid, boolean)",
+        entry.name !== "ring_agent_call_v1(uuid, boolean)" &&
+        entry.name !== "end_agent_call_rings_v1(uuid)",
     );
     expect(eventViolations(beforeOutbox)).toEqual([]);
     const beforeRecordings = eventPosture(false);
@@ -4366,8 +4503,28 @@ describe("runtime definers: 0947, 0950, 1149, 1210 and 1239 grant what 0937, 094
     beforeRecordings.privateRoutines = beforeRecordings.privateRoutines.filter(
       (entry) =>
         entry.name !== "list_stalled_recording_work_v1(integer)" &&
-        entry.name !== "list_due_recording_retention_v1(integer)",
+        entry.name !== "list_due_recording_retention_v1(integer)" &&
+        entry.name !== "list_uncompacted_recording_tracks_v1(integer, text)",
     );
     expect(eventViolations(beforeRecordings)).toEqual([]);
+    // A predecessor check excuses an absent definer that a later migration
+    // creates over tables that already exist; a present one is still checked.
+    const beforeRingEnd = eventPosture(false);
+    beforeRingEnd.privateRoutines = beforeRingEnd.privateRoutines.filter(
+      (entry) => entry.name !== "end_agent_call_rings_v1(uuid)",
+    );
+    const laterRingEnd = {
+      ...eventOptions,
+      routinesCreatedByLaterMigrations: ["end_agent_call_rings_v1"],
+    };
+    expect(eventViolations(beforeRingEnd, laterRingEnd)).toEqual([]);
+    const presentRingEnd = eventPosture(false);
+    const ringEnd = presentRingEnd.privateRoutines.find(
+      (entry) => entry.name === "end_agent_call_rings_v1(uuid)",
+    )!;
+    Object.assign(ringEnd, { securityDefiner: false });
+    expect(eventViolations(presentRingEnd, laterRingEnd)).toContain(
+      "runtime definer end_agent_call_rings_v1(uuid) is not SECURITY DEFINER",
+    );
   });
 });

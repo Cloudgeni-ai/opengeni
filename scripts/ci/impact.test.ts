@@ -48,6 +48,7 @@ const PERSONAL_GITHUB_IDENTITY_E2E = "test/e2e/personal-github-identity.browser.
 const CRYPTO_RANDOM_UUID_E2E = "test/e2e/crypto-random-uuid.browser.e2e.ts";
 const WORKSPACE_SWITCHER_TRIGGER_E2E = "test/e2e/workspace-switcher-trigger.browser.e2e.ts";
 const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browser.e2e.ts";
+const SESSION_RELAY_HEADERS_E2E = "test/e2e/session-relay-headers.browser.e2e.ts";
 const SESSION_SIDEBAR_E2E = "test/e2e/session-sidebar.browser.e2e.ts";
 const SESSION_SKILL_REVIEW_E2E = "test/e2e/session-skill-review.browser.e2e.ts";
 const SITE_CONVERSATIONS_E2E = "test/e2e/site-conversations.browser.e2e.ts";
@@ -61,6 +62,22 @@ const ARTIFACT_LIBRARY_E2E = "test/e2e/artifact-library.browser.e2e.ts";
 const PREVIEW_LOADING_E2E = "test/e2e/preview-loading.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
+  test("relay header browser coverage follows SDK and header contracts without widening browserd plans", () => {
+    for (const path of [
+      "packages/sdk/src/client.ts",
+      "packages/contracts/src/browser-response-headers.ts",
+      SESSION_RELAY_HEADERS_E2E,
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.e2eTests, path).toContain(SESSION_RELAY_HEADERS_E2E);
+      expect(plan.unitTests, path).not.toContain(SESSION_RELAY_HEADERS_E2E);
+      expect(plan.integrationTests, path).not.toContain(SESSION_RELAY_HEADERS_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(
+      SESSION_RELAY_HEADERS_E2E,
+    );
+    expect(usesBrowserRunner(SESSION_RELAY_HEADERS_E2E)).toBe(true);
+  });
   test("loading/startup is CI-discovered for its web, React, SDK and test-helper dependencies", () => {
     expect(discoverTestFiles().e2e).toContain(SESSION_LOADING_STARTUP_E2E);
     expect(usesBrowserRunner(SESSION_LOADING_STARTUP_E2E)).toBe(true);
@@ -296,6 +313,32 @@ describe("fail-closed change impact", () => {
     expect(web.guards).not.toContain("public-api");
   });
 
+  test("published SDK compatibility runs in the service tier for every relevant producer and fixture", () => {
+    const suite = "test/integration/sdk-compatibility.integration.ts";
+    for (const path of [
+      "apps/api/src/app.ts",
+      "packages/sdk/src/client.ts",
+      "packages/contracts/src/index.ts",
+      "packages/core/src/domain/sessions.ts",
+      "packages/db/src/index.ts",
+      "packages/events/src/index.ts",
+      "packages/runtime/src/index.ts",
+      "apps/worker/src/activities.ts",
+      "packages/react/src/index.ts",
+      "packages/storage/src/index.ts",
+      "packages/testing/src/settings.ts",
+      "test/integration/sdk-compatibility/consumer.ts",
+      "test/integration/sdk-compatibility/versions.json",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.integrationTests, path).toContain(suite);
+      expect(plan.unitTests, path).not.toContain(suite);
+    }
+    expect(createImpactPlan(["test/integration/sdk-compatibility/versions.json"]).guards).toContain(
+      "public-api",
+    );
+  });
+
   test("the subscription contract guard runs on docs-only and focused plans", () => {
     const contract = createImpactPlan(["docs/subscription-accounts.md"]);
     expect(contract.mode).toBe("docs");
@@ -326,9 +369,11 @@ describe("fail-closed change impact", () => {
     expect(sdk.unitTests).toContain("packages/sdk/test/client.test.ts");
     expect(sdk.e2eTests).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
+      "test/e2e/agents.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
       "test/e2e/annotation-scroll.browser.e2e.ts",
       "test/e2e/appearance.browser.e2e.ts",
+      "test/e2e/archived-chat-status.browser.e2e.ts",
       "test/e2e/artifact-desktop.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
@@ -379,6 +424,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_RELAY_HEADERS_E2E,
       SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
       "test/e2e/session-usage-limit.browser.e2e.ts",
@@ -939,9 +985,11 @@ describe("fail-closed change impact", () => {
     expect(tests.integration.length).toBeGreaterThan(0);
     expect(tests.e2e).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
+      "test/e2e/agents.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
       "test/e2e/annotation-scroll.browser.e2e.ts",
       "test/e2e/appearance.browser.e2e.ts",
+      "test/e2e/archived-chat-status.browser.e2e.ts",
       "test/e2e/artifact-desktop.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
@@ -992,6 +1040,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/session-lazy-panels.browser.e2e.ts",
       SESSION_LOADING_STARTUP_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
+      SESSION_RELAY_HEADERS_E2E,
       SESSION_SIDEBAR_E2E,
       SESSION_SKILL_REVIEW_E2E,
       "test/e2e/session-usage-limit.browser.e2e.ts",

@@ -114,7 +114,7 @@ Then open the smallest source files that answer the question:
   new Slack sessions. The worker renders those modes and the Knowledge destination
   in governance; source text and feedback cannot widen policy or access. Older
   Slack sessions can retain their stored explicit-save restriction.
-- GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`.
+- GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, allowlist sync with GitHub (webhooks and listings) in `apps/api/src/github-installation-sync.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`.
 - Connected Machine (bring-your-own-compute / the `selfhosted` backend): API routes `apps/api/src/routes/machines.ts` and `apps/api/src/routes/enrollments.ts`; services `apps/api/src/sandbox/machines.ts` and `apps/api/src/sandbox/enrollment.ts`; the machine-primary turn branch in `apps/worker/src/activities/agent-turn/sandbox-establish.ts` and the clone-guard in `packages/runtime/src/index.ts`; the runtime session at `packages/runtime/src/sandbox/selfhosted/`; the on-machine agent + relay in the `agent/` Rust crate; public behavior in `docs/connected-machines.md`; opt-in UI at the `@opengeni/react/machines` subpath.
 - Web usage examples: `apps/web/src/api.ts`, `packages/react/src/app/types.tsx` (the shared session app layer under `packages/react/src/app/`), relevant UI components.
 - TypeScript SDK: `packages/sdk/src/` (typed client, SSE streaming core with reconnect/replay-by-sequence, proxy re-streaming helpers) and `packages/sdk/README.md`.
@@ -184,7 +184,7 @@ Keep these concepts straight while working:
 
 - **Account**: managed billing/ownership container for members, workspaces, credits, and billing mirrors.
 - **Workspace**: operational data boundary for sessions, events, files, documents, schedules, GitHub installation bindings, usage, and first-party MCP.
-- **GitHub installation binding**: a workspace-local reference to a GitHub App installation plus its repository allowlist. One GitHub installation may be linked to many Opengeni workspaces; unlinking one workspace must not mutate another workspace or uninstall the App from GitHub. New binding is currently fail-closed: setup callback parameters are spoofable, and user-installation visibility, repository administrator permission, and an installation request do not prove that the current human may install or configure the App for the target account. Existing trusted bindings are rechecked before platform token mint / GitHub-authenticated run startup. Connected Machines are exempt because they use their own git auth.
+- **GitHub installation binding**: a workspace-local reference to a GitHub App installation plus its repository allowlist. One GitHub installation may be linked to many Opengeni workspaces; unlinking one workspace must not mutate another workspace or uninstall the App from GitHub. New binding is currently fail-closed: setup callback parameters are spoofable, and user-installation visibility, repository administrator permission, and an installation request do not prove that the current human may install or configure the App for the target account. Existing trusted bindings are rechecked before platform token mint / GitHub-authenticated run startup. An owner-proved binding's allowlist then follows GitHub's repository selection for the installation (webhooks plus every listing; removals immediate, additions only from GitHub's live list); see `docs/github-app.md`. Connected Machines are exempt because they use their own git auth.
 - **Access grant**: resolved subject plus permissions for one workspace. Route code should depend on grants and permissions, not on the caller's auth mechanism.
 - **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn. Normal idle closes without a grace timer after durable rechecks and transactional parent-result settlement; late input can start another workflow run of the same session. Keep the legacy timer replay patch and unrelated lifecycle waits intact; see `docs/run-lifecycle.md`.
 - **Turn**: one queued/running unit of agent work inside a session, run as one non-retryable Temporal activity (`runAgentTurn`). Follow-ups, goal continuations, and scheduled task firings become turns. Inside a turn the SDK makes as many model/tool calls as the work needs; run length is bounded by symptoms (no-progress, budget), not by counts or clocks. A graceful worker shutdown preempts an in-flight turn (checkpoint, requeue, resume on a healthy worker) instead of failing the session. See `docs/run-lifecycle.md`.
@@ -251,6 +251,34 @@ Before editing, identify which layer owns the behavior:
 - Scheduling: scheduled task contracts/routes/core domain helpers, Temporal schedule mapping, dispatch activity.
 - Event-triggered automation: automation contracts/routes/core adapter registry, FORCE-RLS source/event/run state, bounded Temporal dispatch, and the provider adapter layered above it.
 - UI: `apps/web` API helpers/types/components.
+
+### Model-facing text (prompts and tool descriptions)
+
+Every model request carries the prompt modules in
+`packages/runtime/src/agent-instructions/` and every attached tool's
+description and schema, so each sentence there is paid on every call of every
+session. Embedded product agents pay for it too, and their customers compare
+the cost with leaner platforms. Before you add or change this text:
+
+- Gate it on the fact that makes it relevant: a capability, an attached tool,
+  a sandbox, a feature flag or a session kind. It must disappear when that fact
+  is absent. Never write always-on text about a feature that can be off, and
+  name a tool only where it is attached.
+- Say each rule once, where it belongs: tool mechanics go in that tool's
+  description, and a cross-cutting rule goes in the section that owns it. Do
+  not restate a rule elsewhere for emphasis.
+- Fix a behaviour problem by changing the sentence that causes it before you
+  add a new one, and check whether your change makes existing text redundant.
+  Add an example or an edge case only when it changes behaviour.
+- Keep the cached prefix stable. Per-turn data, times and caller context go in
+  the user message, never in instructions or tool definitions (see
+  `AGENTS.md`).
+- Measure the change. Record the byte or token delta in
+  `agent-instructions/PROMPT_CHANGELOG.md`, keep the prompt budget and parity
+  tests green, and do not raise a budget without a reason stated in the PR.
+- Shortening existing behavioural text needs before/after behaviour evidence,
+  for example from `scripts/agent-behavior-eval`, because most of it guards a
+  known failure. Omitting text for a feature that is switched off does not.
 
 ### Public API compatibility
 

@@ -32,6 +32,7 @@ import {
   mcpMessageNeedsSlackBotAvailability,
   resolveSlackBotToolAvailability,
   slackBotFileContentResult,
+  WAIT_FOR_INPUT_DESCRIPTION,
 } from "../src/mcp/server";
 import type { OpenGeniSlackBotClient } from "../src/integrations/slack-bot";
 import { buildFilesMcpServer } from "../src/mcp/files";
@@ -531,38 +532,110 @@ describe("first-party MCP tool visibility policy", () => {
     expect(description("session_wait")).toContain(
       "an unchanged session_get snapshot between waits is not new evidence",
     );
-    for (const name of [
-      "session_create",
-      "session_get",
-      "session_wait",
-      "wait_for_input",
-    ] as const) {
+    for (const name of ["session_create", "session_get", "session_wait"] as const) {
       expect(description(name)).toContain("payload.finalAnswer");
     }
-    expect(description("wait_for_input")).toContain(
-      "no preliminary short wait or status recheck is required",
+  });
+
+  test("wait_for_input states once, first, when not to wait, and names nothing a session may lack", () => {
+    const server = buildOpenGeniMcpServer(deps(), grant(["sessions:control"], ["wait_for_input"]));
+    const registered = (
+      server as unknown as { _registeredTools: Record<string, { description: string }> }
+    )._registeredTools;
+    const description = registered.wait_for_input!.description;
+    expect(description).toBe(WAIT_FOR_INPUT_DESCRIPTION);
+    // A person's answer arrives as a new message; waiting for it only costs a
+    // refused or extra call.
+    expect(description).toStartWith(
+      "End this turn and wait out of turn. If you are only waiting for the person's answer, do not call it: reply and end your turn, and their answer arrives as a new message. Use it only while something you started is still running or for an explicit timer,",
     );
-    expect(description("wait_for_input")).toContain(
-      "potentially hours or days within the schema limits",
+    // Text written just before the call can reach the person only as a
+    // summary, so the answer goes in `reply`, shown verbatim (session
+    // df030716, 2026-10-23); the runtime guard still refuses a wait without it.
+    expect(description).toContain(
+      "When this turn answers a person's message, put the complete answer in reply, shown exactly as written",
     );
-    expect(description("wait_for_input")).toContain(
-      "unless an explicit update cadence requires it",
+    expect(description).toContain("On success the runtime ends the turn after this tool batch.");
+    // Work outside these tools (a CI run, a deployment) wakes the session
+    // only through a configured event trigger or schedule, or the deadline.
+    expect(description).toContain(
+      "A new message, scheduled input, the result of work you started through your tools (outside systems such as CI only through a configured event trigger or schedule), or the deadline starts the next turn.",
     );
-    expect(description("wait_for_input")).toContain(
-      "passing the time remaining, not a fresh full timeout",
+    expect(description).toContain(
+      "for a long or uncertain wait, use it in place of sleeping or polling inside the turn",
     );
-    expect(description("wait_for_input")).toContain(
-      "If less than the schema minimum remains or the deadline has passed",
+    expect(description).toContain("potentially hours or days within the schema limits");
+    expect(description).toContain("no short wait or status check is needed first");
+    expect(description).toContain("the deadline never cancels a command");
+    // Each wait sets a fresh absolute deadline from its timeout, so a re-wait
+    // with the full timeout would push a timed recheck back on every question.
+    expect(description).toContain("The turn's first absolute deadline persists");
+    expect(description).toContain("keep the same reason and pass the time remaining");
+    expect(description).toContain(
+      "If less than the schema minimum remains or the deadline has passed, a turn that only answered a question and consumed no other machine input may end without a new wait",
     );
-    expect(description("wait_for_input")).toContain(
-      "consumed no immediate machine input may finish without replacing the retained wait",
-    );
-    expect(description("wait_for_input")).toContain(
-      "make any unavoidable deadline adjustment explicit",
-    );
-    expect(description("wait_for_input")).toContain(
-      "Pending Codemode calls require the same live attempt",
-    );
+    expect(description).toContain("say how the deadline changed");
+    // Session-specific guidance (goals, children, Steer, Codemode) lives in the
+    // prompt modules that render only with those features.
+    for (const absent of [
+      "goal",
+      "child",
+      "Steer",
+      "Codemode",
+      "session_wait",
+      "session_get",
+      "command_wait",
+      "payload.finalAnswer",
+    ]) {
+      expect(description).not.toContain(absent);
+    }
+  });
+
+  test("wait_for_input validates idempotencyKey as any hex UUID server-side", async () => {
+    const server = buildOpenGeniMcpServer(deps(), grant(["sessions:control"], ["wait_for_input"]));
+    const schema = registeredToolInputSchema(server, "wait_for_input");
+    const args = { reason: "Waiting for the build to finish.", timeoutSeconds: 60 };
+    expect(schema.safeParse(args).success).toBe(true);
+    expect(schema.safeParse({ ...args, idempotencyKey: crypto.randomUUID() }).success).toBe(true);
+    // A key the model makes up need not carry RFC version and variant digits;
+    // it only has to be unique, and it is stored as an opaque operation key.
+    for (const madeUp of [
+      "12345678-1234-1234-1234-123456789abc",
+      "11111111-1111-1111-1111-111111111111",
+      "123e4567-e89b-02d3-a456-426614174000",
+    ]) {
+      expect(schema.safeParse({ ...args, idempotencyKey: madeUp }).success).toBe(true);
+    }
+    expect(schema.safeParse({ ...args, idempotencyKey: "not-a-uuid" }).success).toBe(false);
+    expect(
+      schema.safeParse({ ...args, idempotencyKey: "12345678-1234-1234-1234-123456789ab" }).success,
+    ).toBe(false);
+    expect(schema.safeParse({ ...args, timeoutSeconds: 60.5 }).success).toBe(false);
+    // The listed pattern only repeats format: uuid, so the runtime drops it
+    // from the model's view (mcp-listed-tools.ts).
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "wait-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find(
+        (entry) => entry.name === "wait_for_input",
+      )!;
+      const properties = tool.inputSchema.properties as Record<string, Record<string, unknown>>;
+      const key = properties.idempotencyKey!;
+      expect(key.format).toBe("uuid");
+      expect(key.pattern).toBe(
+        "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$",
+      );
+      // The runtime guard refuses a wait without `reply` when the turn answers
+      // a person's message, so the field must not invite leaving it out; when
+      // to pass it is the description's job.
+      expect(properties.reply!.description).toBe(
+        "Your complete message to the person, shown verbatim (Markdown, tables and artifact images work); do not also write it before this call.",
+      );
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
   });
 
   test("goal pause and resume descriptions preserve evidence and human authority", () => {
@@ -1712,10 +1785,16 @@ describe("app-action tools", () => {
           }) as unknown as SearchableTool,
       );
       const index = new ToolSearchIndex(pool);
-      for (const query of ["read a chat in another workspace", "chat in a different workspace"]) {
-        const names = index.rank(query, 8).map((tool) => tool.name);
-        expect(names, query).toContain("opengeni__admin_actions_search");
-      }
+      // "read" also matches every *_read and *_get tool by name, so there the
+      // app actions sit near the end of the first page, where any wording
+      // change elsewhere in the pool shifts them by a place; the resource
+      // alone ranks them first.
+      expect(index.rank("read a chat in another workspace", 10).map((tool) => tool.name)).toContain(
+        "opengeni__admin_actions_search",
+      );
+      expect(index.rank("chat in a different workspace", 3).map((tool) => tool.name)).toContain(
+        "opengeni__admin_actions_search",
+      );
       // Session-shaped queries rank the session tools by name; those now
       // reach another workspace themselves, through workspaceId.
       const message = index

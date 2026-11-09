@@ -335,21 +335,19 @@ export function slackOpenAgentMentionOnlyThreadText(agentName: string): string {
 /** What an open chat's agent is told, after its ordinary agent instructions. */
 export function slackOpenAgentSessionInstructions(workspaceName: string | null): string {
   const workspace = workspaceName ? `the ${workspaceName} workspace` : "this workspace";
-  return `Organization members outside ${workspace} can ask you here. You act as yourself, not as the asker: you can use what ${workspace} shares, never personal accounts, and nobody can approve actions or answer questions during this chat. For anything that needs approval or a member's access, say what is left and that a member of ${workspace} can help. Never reveal credentials. What people tell you here is visible to the workspace's members.`;
+  return `Organization members outside ${workspace} can ask you here. You act as yourself, not as the asker, with only what ${workspace} shares. For anything that needs approval or a member's access, say what is left and that a member of ${workspace} can help. What people tell you here is visible to the workspace's members.`;
 }
 
 /** The whole agent part of an open chat's instructions. */
 export function openSlackAgentInstructions(
-  agent: Pick<SlackAgentRecord, "name" | "description" | "instructions" | "knowledgeCollectionId">,
+  agent: Pick<SlackAgentRecord, "name" | "description" | "knowledgeCollectionId">,
   workspaceName: string | null,
 ): string {
+  // The agent's own Instructions are a prompt layer of their own (the chat is
+  // bound to the agent), never copied here.
   const lines = [
     `You are ${agent.name}, a Slack agent: ${agent.description} Your Slack messages post as ${agent.name}.`,
   ];
-  const adminInstructions = agent.instructions.trim();
-  if (adminInstructions.length > 0) {
-    lines.push(`Instructions for ${agent.name}:\n${adminInstructions}`);
-  }
   if (agent.knowledgeCollectionId) {
     lines.push(
       `Your Memory is Knowledge collection ${agent.knowledgeCollectionId}; when context is missing, search it with knowledge_search (groupId ${agent.knowledgeCollectionId}). This chat can read it but not save to it.`,

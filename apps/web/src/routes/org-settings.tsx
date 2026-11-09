@@ -124,6 +124,7 @@ export function OrgSettingsRoute({
   workspace,
   developer,
   connectedAgent,
+  autoConnectIssuer,
   connectors,
   insights,
 }: {
@@ -139,6 +140,8 @@ export function OrgSettingsRoute({
   developer?: DeveloperLocation | undefined;
   /** Connected agents: the agent whose page is open. */
   connectedAgent?: string | undefined;
+  /** Connected agents: Set up auto-connect ("new"), or an auto-connect issuer's page. */
+  autoConnectIssuer?: string | undefined;
   /** Integrations: Add connector, or an organization connector's page or form. */
   connectors?: ConnectorLocation | undefined;
   checkout?: "success" | "cancelled";
@@ -180,6 +183,7 @@ export function OrgSettingsRoute({
     organizationAdministratorSession,
     canReadBilling,
     canManageBilling,
+    canManageAutomaticTopUp,
     canManageOrganizationKnowledge,
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,
@@ -351,11 +355,14 @@ export function OrgSettingsRoute({
       params: { workspaceId },
       search: { section: "developer", ...next },
     });
-  const navigateConnectedAgents = (next: { agent?: string }) =>
+  const navigateConnectedAgents = (next: { agent?: string; issuer?: string }) =>
     void navigate({
       to: "/workspaces/$workspaceId/organization",
       params: { workspaceId },
-      search: { section: "agents", ...(next.agent ? { agent: next.agent } : {}) },
+      search: {
+        section: "agents",
+        ...(next.agent ? { agent: next.agent } : next.issuer ? { issuer: next.issuer } : {}),
+      },
     });
   const navigateConnectors = (next: ConnectorLocation) =>
     void navigate({
@@ -388,7 +395,7 @@ export function OrgSettingsRoute({
     (section === "people" && Boolean(person || invitation || organizationView)) ||
     (section === "workspaces" && Boolean(workspace || organizationView)) ||
     (section === "developer" && (organizationView === "new-key" || developerSubPage)) ||
-    (section === "agents" && Boolean(connectedAgent)) ||
+    (section === "agents" && Boolean(connectedAgent || autoConnectIssuer)) ||
     (section === "integrations" && connectorPage) ||
     // Opened from another scope (a workspace's Models): Billing brings its own back link.
     // A workspace's budget page brings its own back link and title too.
@@ -546,7 +553,13 @@ export function OrgSettingsRoute({
                 client={client}
                 organizationId={accountId}
                 organizationName={fallbackLabel}
-                location={connectedAgent ? { agent: connectedAgent } : {}}
+                location={
+                  connectedAgent
+                    ? { agent: connectedAgent }
+                    : autoConnectIssuer
+                      ? { issuer: autoConnectIssuer }
+                      : {}
+                }
                 onNavigate={navigateConnectedAgents}
                 {...(canManageOrganizationApiKeys
                   ? {
@@ -691,6 +704,7 @@ export function OrgSettingsRoute({
                 identity={adminIdentity}
                 canReadBilling={canReadBilling}
                 canManageBilling={canManageBilling}
+                canManageAutomaticTopUp={canManageAutomaticTopUp}
                 budgetWorkspaceId={workspace}
               />
             </BillingSection>

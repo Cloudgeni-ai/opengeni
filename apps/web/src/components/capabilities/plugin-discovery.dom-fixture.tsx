@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { PluginDiscoveryItem, PluginInstallationSummary } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -68,7 +69,7 @@ function client() {
     installPlugin: mock(async () => ({})),
     createCapability: mock(async (_workspaceId: string, input: unknown) => input),
   };
-  return { calls, api: calls as unknown as OpenGeniBrowserClient };
+  return { calls, api: calls as unknown as ChatClient<OpenGeniBrowserClient> };
 }
 
 /** The Capabilities route's page slot: the catalog hides while a page is open. */

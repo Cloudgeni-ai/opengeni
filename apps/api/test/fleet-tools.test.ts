@@ -21,7 +21,10 @@ import { testSettings } from "@opengeni/testing/settings";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { ControlRequest, ControlResponse, ExecResponse } from "@opengeni/agent-proto";
-import { CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE } from "@opengeni/contracts";
+import {
+  CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE,
+  machineAccessNeededMessage,
+} from "@opengeni/contracts";
 import type { OpStreamConnection } from "@opengeni/events";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
@@ -766,6 +769,36 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     await expect(agentRequest()).rejects.toThrow();
   }, 60_000);
 
+  test("an agent moving onto a machine whose approval ended this turn gets machine access needed, not a raw error", async () => {
+    if (!available) return;
+    const { targetWorkspaceId, machine, ctx, services, allowThisChat, revokeThisChat } =
+      await seedPersonalMachineChat("none");
+    await allowThisChat();
+    expect((await swapActiveSandbox(services, ctx, machine.sandboxId)).swapped).toBe(true);
+    // The owner withdraws this chat's approval while the turn runs. Admission
+    // already holds this turn's authorization for the machine, so only the
+    // check right before use can refuse the agent's next move onto it.
+    await revokeThisChat();
+    const before = await readActiveSandbox(db, targetWorkspaceId, ctx.sessionId);
+    const refused = await swapActiveSandbox(services, ctx, machine.sandboxId);
+    expect(refused).toMatchObject({
+      swapped: false,
+      activeSandboxId: before?.activeSandboxId ?? null,
+      activeEpoch: before?.activeEpoch ?? 0,
+      code: "machine_access_required",
+    });
+    expect(refused.reason).toStartWith(machineAccessNeededMessage("Personal laptop"));
+    expect(refused.reason).not.toContain("Failed query");
+    expect(refused.reason).not.toContain("no longer live");
+    expect(await readActiveSandbox(db, targetWorkspaceId, ctx.sessionId)).toEqual(before);
+    const refusedRun = await runOnSandbox(services, ctx, machine.sandboxId, {
+      kind: "exec",
+      cmd: "hostname",
+    });
+    expect(refusedRun).toMatchObject({ ok: false, code: "machine_access_required" });
+    expect(refusedRun.reason).toStartWith(machineAccessNeededMessage("Personal laptop"));
+  }, 60_000);
+
   // The interaction tools move the chat and list its machines through the
   // API with the agent's attempt token. Like sandbox_swap and sandboxes_list,
   // they act for the person who started the turn, so that person's Only me
@@ -1094,6 +1127,61 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(group.operationAvailability).toBe("wakeable");
     expect(group.providerStatus).toBe("exists");
     expect(group.workspaceStatus).toBe("ready");
+  }, 60_000);
+
+  test("a warm compute home whose host is handing it off is recovering, not ready, until that ends", async () => {
+    if (!available) return;
+    const { ctx, services, accountId, workspaceId } = await seedFleet();
+    const ready = {
+      opengeniRecovery: {
+        provider: {
+          status: "exists",
+          instanceId: "compute-home",
+          observedAt: "2026-11-06T01:00:00.000Z",
+        },
+        archive: { status: "none", current: null, previous: null },
+        restore: {
+          status: "not_required",
+          rematerializationId: null,
+          selectedRevision: null,
+          startedAt: null,
+          completedAt: null,
+        },
+        workspace: {
+          status: "ready",
+          verifiedRevision: "compute-home-ready",
+          verifiedAt: "2026-11-06T01:00:00.000Z",
+        },
+      },
+    };
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, instance_id, backend,
+        lease_epoch, workspace_generation, archive_generation, resume_state, expires_at,
+        compute_asleep_since, compute_handing_off_since
+      ) values (
+        ${accountId}, ${workspaceId}, ${ctx.sessionGroupId}, 'warm', 'compute-home', 'compute',
+        3, 5, 5, ${admin.json(ready)}::jsonb, now() + interval '15 minutes',
+        now(), now()
+      )
+    `;
+    const group = async () =>
+      (await listFleet(services, ctx)).sandboxes.find((sandbox) => sandbox.isSessionGroup)!;
+    const busy = await group();
+    expect(busy.operationAvailability).toBe("recovering");
+    expect(busy.liveness).toBe("reconnecting");
+    expect(busy.attachable).toBe(false);
+    expect(busy.hostBusy).toBe("handing_off");
+    expect(busy.leaseLiveness).toBe("warm");
+
+    // A report older than a hand-off may refuse wakes counts for nothing.
+    await admin`
+      update sandbox_leases set compute_handing_off_since = now() - interval '10 minutes'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${ctx.sessionGroupId}`;
+    const settled = await group();
+    expect(settled.operationAvailability).toBe("ready");
+    expect(settled.liveness).toBe("online");
+    expect(settled.hostBusy).toBeUndefined();
   }, 60_000);
 
   test("attach/swap: the epoch-fenced CAS flips active_sandbox_id + bumps active_epoch", async () => {

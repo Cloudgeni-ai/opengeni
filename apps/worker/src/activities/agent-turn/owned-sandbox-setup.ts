@@ -1,6 +1,8 @@
 import {
+  discardHeldSoftSetupFailureNotices,
   runOwnedSandboxSetup,
   withRunCredentialsSession,
+  type CodemodeTokenWriterSession,
   type GitCredentialTokenWriterSession,
   type PreparedAgentInput,
   type RunCredentialCommandSession,
@@ -16,6 +18,7 @@ import {
 } from "@opengeni/db";
 import {
   createSandboxSetupReplayGuard,
+  modalSandboxBoxReplacer,
   recoverSandboxSetupFailure,
 } from "./sandbox-setup-agent-failure";
 import type { TurnStreamAttemptDeps } from "./stream-attempt";
@@ -34,6 +37,8 @@ export type EagerOwnedSandboxSetupDeps = Pick<
   | "leases"
   | "runWorkspaceMutationForSandbox"
   | "attachGitCredentialRenewal"
+  | "prepareCodemodeTokenSeed"
+  | "attachCodemodeTokenRenewal"
   | "attachRunCredentialRenewal"
   | "activeSandboxBackend"
   | "groupBoxBackend"
@@ -97,7 +102,7 @@ export async function runEagerOwnedSandboxSetup(
     // credential session callback. Materialize host-managed run credentials
     // before any setup command (including provider login hooks), then decorate
     // setup commands so they source the active generation.
-    await measure("credential_materialization", () =>
+    const runCredentialSoftFailure = await measure("credential_materialization", () =>
       deps.attachRunCredentialRenewal(
         eagerSetupSession as RunCredentialCommandSession,
         deps.initialRunCredentialMaterial,
@@ -107,6 +112,11 @@ export async function runEagerOwnedSandboxSetup(
     const eagerCredentialSetupSession = deps.initialRunCredentialMaterial
       ? withRunCredentialsSession(eagerSetupSession as object, input.sessionId)
       : eagerSetupSession;
+    // Each model stream of the attempt runs this setup again, which rewrites
+    // the Codemode token file. Write the attempt's newest bearer (never the one
+    // captured when the agent was built, which expires an hour after the
+    // attempt started) and keep renewing exactly that bearer afterwards.
+    const codemodeTokenSeed = await deps.prepareCodemodeTokenSeed();
     // Every setup write runs as a command through this fence, which lets the
     // attempt writer drain settle the setup admission even when the setup
     // itself never returns (an unanswered agent).
@@ -123,6 +133,10 @@ export async function runEagerOwnedSandboxSetup(
             settings: deps.runSettings,
             environment: deps.sandboxEnvironment,
             measureSetup: measure,
+            ...(codemodeTokenSeed ? { codemodeTokenSeedOverride: codemodeTokenSeed.token } : {}),
+            ...(runCredentialSoftFailure
+              ? { priorSoftSetupFailures: [runCredentialSoftFailure] }
+              : {}),
             ...(options.preparedInput ? { preparedInput: options.preparedInput } : {}),
             ...(options.fileDownloadsMaterialized ? { fileDownloadsMaterialized: true } : {}),
             onRuntimeEvent: async (event) => {
@@ -162,6 +176,13 @@ export async function runEagerOwnedSandboxSetup(
       undefined,
       setupCommandFence ? { commandFence: setupCommandFence } : {},
     );
+    if (codemodeTokenSeed) {
+      await deps.attachCodemodeTokenRenewal(
+        eagerSetupSession as CodemodeTokenWriterSession,
+        codemodeTokenSeed,
+        eagerResolvedSandbox,
+      );
+    }
     await deps.attachGitCredentialRenewal(
       eagerSetupSession as GitCredentialTokenWriterSession,
       deps.initialGitCredentials,
@@ -174,6 +195,14 @@ export async function runEagerOwnedSandboxSetup(
     throw await recoverSandboxSetupFailure(setupReplayGuard, error, {
       session: ownedEstablished.session,
       backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
+      boxReplacement: modalSandboxBoxReplacer(deps.db, {
+        backend: deps.activeSandboxBackend ?? deps.groupBoxBackend,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: sandboxState.sandboxGroupId,
+        box: eagerResolvedSandbox,
+        session: ownedEstablished.session,
+      }),
       restartsThisTurn: async () => {
         const turnId = deps.attempt.turnId;
         if (!turnId) throw new Error("the attempt has no turn");
@@ -237,7 +266,11 @@ export function createEagerOwnedSandboxSetup(
         await prestarted;
         // A box rebound while the setup ran (rotation, recovery) gets its
         // own setup; the prestarted one only covered the earlier box.
+        // Its held notices join this stream's input when the run starts.
         if (sandboxIdentity(deps.sandboxState) === startedFor) return;
+        // Its setup failure notices describe the earlier box; the new box's
+        // setup reports its own.
+        discardHeldSoftSetupFailureNotices(deps.agent);
       }
       await runSetup(deps, options);
     },

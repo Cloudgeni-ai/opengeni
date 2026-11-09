@@ -1,6 +1,8 @@
 import type { OpenGeniClient, OpenGeniLinkTarget } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { type OpenGeniText } from "../messages/runtime";
+import { ArtifactLinkScopeContext, type ArtifactLinkScope } from "./artifact-link-scope";
 
 export type { OpenGeniLinkTarget };
 
@@ -100,25 +102,54 @@ export function chainLinkResolvers(
 export function OpenGeniLinkProvider({
   resolveLink,
   renderLink,
+  artifactScope,
   children,
 }: {
   resolveLink?: OpenGeniLinkResolver | null | undefined;
   renderLink?: OpenGeniLinkRenderer | null | undefined;
+  /** Exact artifact metadata reads in the current workspace, before host resolution. */
+  artifactScope?: ArtifactLinkScope | undefined;
   children: ReactNode;
 }) {
   const parent = useContext(OpenGeniLinkContext);
   const parentRenderer = useContext(OpenGeniLinkRendererContext);
+  const parentArtifactScope = useContext(ArtifactLinkScopeContext);
+  const artifactClient = artifactScope?.client;
+  const artifactWorkspaceId = artifactScope?.workspaceId;
+  const artifactSessionId = artifactScope?.sessionId;
+  const artifactOverride = artifactScope?.override;
+  const effectiveArtifactScope = useMemo(
+    () =>
+      artifactClient && artifactWorkspaceId
+        ? {
+            client: artifactClient,
+            workspaceId: artifactWorkspaceId,
+            sessionId: artifactSessionId,
+            override: chainLinkResolvers(artifactOverride, parent),
+          }
+        : parentArtifactScope,
+    [
+      artifactClient,
+      artifactWorkspaceId,
+      artifactSessionId,
+      artifactOverride,
+      parent,
+      parentArtifactScope,
+    ],
+  );
   const value = useMemo(() => chainLinkResolvers(resolveLink, parent), [resolveLink, parent]);
   const renderer = useMemo(
     () => chainLinkRenderers(renderLink, parentRenderer),
     [renderLink, parentRenderer],
   );
   return (
-    <OpenGeniLinkContext.Provider value={value}>
-      <OpenGeniLinkRendererContext.Provider value={renderer}>
-        {children}
-      </OpenGeniLinkRendererContext.Provider>
-    </OpenGeniLinkContext.Provider>
+    <ArtifactLinkScopeContext.Provider value={effectiveArtifactScope}>
+      <OpenGeniLinkContext.Provider value={value}>
+        <OpenGeniLinkRendererContext.Provider value={renderer}>
+          {children}
+        </OpenGeniLinkRendererContext.Provider>
+      </OpenGeniLinkContext.Provider>
+    </ArtifactLinkScopeContext.Provider>
   );
 }
 
@@ -135,7 +166,9 @@ export function useOpenGeniLinkRenderer(): OpenGeniLinkRenderer | null {
 // Every sandbox read the proxy forwards is bounded by the API's own maximum.
 const SANDBOX_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024;
 
-type SessionLinkClient = Partial<Pick<OpenGeniClient, "createFileDownloadUrl" | "fsRead">>;
+type SessionLinkClient = Partial<
+  Pick<ChatClient<OpenGeniClient>, "createFileDownloadUrl" | "fsRead">
+>;
 
 function saveBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
@@ -245,7 +278,7 @@ export function viewerLinkResolver(input: {
 }): OpenGeniLinkResolver {
   return (target) => {
     if (target.kind !== "editable-artifact" && target.kind !== "site") return null;
-    if (target.workspaceId !== input.workspaceId) return null;
+    if (target.workspaceId !== null && target.workspaceId !== input.workspaceId) return null;
     return { open: () => input.open({ kind: target.kind, artifactId: target.artifactId }) };
   };
 }

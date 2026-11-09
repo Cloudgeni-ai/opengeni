@@ -7,6 +7,7 @@
  * an automation is saved on it.
  */
 import { useCallback, useMemo, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 
 import {
   readyEventSourceKey,
@@ -33,7 +34,7 @@ export interface AutomationEventServer {
 
 export interface EventSourceStandInsOptions {
   /** Adds a stand-in's source and reads event types. */
-  client: Pick<OpenGeniClient, "createEventSource" | "listEventSourceTypes">;
+  client: Pick<ChatClient<OpenGeniClient>, "createEventSource" | "listEventSourceTypes">;
   workspaceId: string;
   /** The sources the person can use; undefined while they load. */
   sources: EventSource[] | undefined;

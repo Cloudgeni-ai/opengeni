@@ -33,6 +33,7 @@ import {
   childRequiresActionResolvedSummary,
 } from "./child-lifecycle-notices";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
+import { releaseCapacityWaitingTurnInTransaction } from "./capacity-wait-release";
 import { copySubscriptionAuthorityCompatInTransaction } from "./subscription-core-acceptance-authority";
 import { deleteSubscriptionCoreWaitersForTurns } from "./subscription-core/waiters";
 import {
@@ -3229,6 +3230,38 @@ async function loadParentSessionId(
 }
 
 /**
+ * The sessions whose active turn waits for subscription capacity: among
+ * `sessionIds`, or across the whole workspace when it is null.
+ */
+async function loadCapacityWaitingTurns(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[] | null,
+): Promise<Array<{ sessionId: string; turnId: string }>> {
+  if (sessionIds !== null && sessionIds.length === 0) return [];
+  const rows = await db
+    .select({ sessionId: schema.sessions.id, turnId: schema.sessionTurns.id })
+    .from(schema.sessions)
+    .innerJoin(
+      schema.sessionTurns,
+      and(
+        eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
+        eq(schema.sessionTurns.id, schema.sessions.activeTurnId),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        sessionIds === null ? undefined : inArray(schema.sessions.id, sessionIds),
+        eq(schema.sessions.status, "waiting_capacity"),
+        eq(schema.sessionTurns.status, "waiting_capacity"),
+      ),
+    )
+    .orderBy(schema.sessions.id);
+  return rows;
+}
+
+/**
  * The one control-plane child -> parent outbox insert (terminal cancellation,
  * direct Pause, and cancelled human-input resolutions). The caller holds the
  * canonical prefix with the child and its parent locked UUID-ordered; the
@@ -3887,6 +3920,17 @@ export async function mutateSessionControlInTransaction(
     input.action === "cancel"
       ? await loadCancellationTurnIds(db, input.workspaceId, cancellationSessionIds)
       : [];
+  // Pause stops turns parked on subscription capacity in the paused subtree
+  // (a wait has no attempt to interrupt). The workspace control lock taken
+  // above keeps any new wait from arming until this commit.
+  const capacityWaitingTurns =
+    input.action === "pause"
+      ? await loadCapacityWaitingTurns(
+          db,
+          input.workspaceId,
+          (await loadSessionSubtreeIds(db, input.workspaceId, input.sessionId)).sessionIds,
+        )
+      : [];
   // A direct Pause of a child notifies its parent (child_paused) through the
   // outbox in this same commit, so the parent joins the UUID-ordered session
   // lock exactly like Cancel locks the root's surviving parent.
@@ -3903,13 +3947,22 @@ export async function mutateSessionControlInTransaction(
         ? [
             input.actor.sessionId,
             ...cancellationSessionIds,
+            ...capacityWaitingTurns.map((row) => row.sessionId),
             ...(lineageParentSessionId ? [lineageParentSessionId] : []),
           ]
-        : [...cancellationSessionIds, ...(lineageParentSessionId ? [lineageParentSessionId] : [])],
+        : [
+            ...cancellationSessionIds,
+            ...capacityWaitingTurns.map((row) => row.sessionId),
+            ...(lineageParentSessionId ? [lineageParentSessionId] : []),
+          ],
     turnIds:
       input.actor.type === "agent_attempt"
-        ? [input.actor.turnId, ...cancellationTurnIds]
-        : cancellationTurnIds,
+        ? [
+            input.actor.turnId,
+            ...cancellationTurnIds,
+            ...capacityWaitingTurns.map((row) => row.turnId),
+          ]
+        : [...cancellationTurnIds, ...capacityWaitingTurns.map((row) => row.turnId)],
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
   if (input.action === "cancel" || pauseParentSessionId !== null) {
@@ -4018,6 +4071,8 @@ export async function mutateSessionControlInTransaction(
       input.action === "pause"
         ? targetSession.directControlState !== "paused" ||
           directPauseRevision === null ||
+          // Before Pause released waits, a paused chat could keep one.
+          capacityWaitingTurns.length > 0 ||
           (await sessionPauseEffectsNeeded(db, {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
@@ -4284,6 +4339,25 @@ export async function mutateSessionControlInTransaction(
           cancelledTurnCount: 0,
           affectedSessionEvents: [{ sessionId: input.sessionId, eventIds: [controlEvent.id] }],
         };
+  for (const waiting of capacityWaitingTurns) {
+    const released = await releaseCapacityWaitingTurnInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: waiting.sessionId,
+      turnId: waiting.turnId,
+      trigger: "session_pause",
+    });
+    if (!released) continue;
+    const affected = cancellation.affectedSessionEvents.find(
+      (entry) => entry.sessionId === waiting.sessionId,
+    );
+    if (affected) affected.eventIds.push(...released.eventIds);
+    else
+      cancellation.affectedSessionEvents.push({
+        sessionId: waiting.sessionId,
+        eventIds: released.eventIds,
+      });
+  }
   if (input.action === "pause" && pauseParentSessionId !== null) {
     // Direct Pause only (a recursive ancestor pause never reaches this command
     // for the child), and never when the parent's own live attempt issued it:
@@ -4453,12 +4527,14 @@ export type WorkspaceControlMutationResult = {
   interruptionCount: number;
   backgroundCommandCount: number;
   wakeCount: number;
+  /** Session events the mutation appended (Pause releasing capacity waits), for live fanout. */
+  affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }>;
   outcome: "changed" | "unchanged" | "replayed";
   replay: boolean;
 };
 
 export async function mutateWorkspaceControlInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -4520,6 +4596,12 @@ export async function mutateWorkspaceControlInTransaction(
       interruptionCount: Number(reserved.receipt.result.interruptionCount ?? 0),
       backgroundCommandCount: Number(reserved.receipt.result.backgroundCommandCount ?? 0),
       wakeCount: Number(reserved.receipt.result.wakeCount ?? 0),
+      affectedSessionEvents: Array.isArray(reserved.receipt.result.affectedSessionEvents)
+        ? (reserved.receipt.result.affectedSessionEvents as Array<{
+            sessionId: string;
+            eventIds: string[];
+          }>)
+        : [],
       outcome: "replayed",
       replay: true,
     };
@@ -4528,6 +4610,10 @@ export async function mutateWorkspaceControlInTransaction(
     if (input.expectedRevision !== currentRevision) throw new SessionControlConflictError();
   }
 
+  // The workspace control lock held above keeps any new wait from arming
+  // until this commit.
+  const capacityWaitingTurns =
+    input.action === "pause" ? await loadCapacityWaitingTurns(db, input.workspaceId, null) : [];
   const workspacePauseRevision = asSafeRevision(
     workspace.workspacePauseRevision,
     "workspace pause revision",
@@ -4537,6 +4623,8 @@ export async function mutateWorkspaceControlInTransaction(
     (input.action === "pause"
       ? workspace.workspaceState !== "paused" ||
         workspacePauseRevision === null ||
+        // Before Pause released waits, a paused workspace could keep them.
+        capacityWaitingTurns.length > 0 ||
         (await workspacePauseEffectsNeeded(db, {
           workspaceId: input.workspaceId,
           workspacePauseRevision,
@@ -4563,6 +4651,7 @@ export async function mutateWorkspaceControlInTransaction(
       interruptionCount: 0,
       backgroundCommandCount: 0,
       wakeCount: 0,
+      affectedSessionEvents: [],
       outcome: "unchanged",
       replay: false,
     };
@@ -4621,8 +4710,33 @@ export async function mutateWorkspaceControlInTransaction(
           controlRevision: revision,
         })
       : 0;
+  // Pause stops the capacity waits it pauses, exactly as a chat's Pause does
+  // (a wait has no attempt to interrupt): each waiting turn is released, its
+  // person's "continues by itself" notice withdrawn, and Resume continues it.
+  const affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }> = [];
+  if (capacityWaitingTurns.length > 0) {
+    await lockSessionEventWriteRows(db, {
+      workspaceId: input.workspaceId,
+      controlLock: "already_locked",
+      sessionIds: capacityWaitingTurns.map((row) => row.sessionId),
+      turnIds: capacityWaitingTurns.map((row) => row.turnId),
+    });
+  }
+  for (const waiting of capacityWaitingTurns) {
+    const released = await releaseCapacityWaitingTurnInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: waiting.sessionId,
+      turnId: waiting.turnId,
+      trigger: "session_pause",
+    });
+    if (released)
+      affectedSessionEvents.push({ sessionId: waiting.sessionId, eventIds: released.eventIds });
+  }
   const wakeCount =
-    input.action === "pause"
+    // Each release registered its own workflow wake.
+    affectedSessionEvents.length +
+    (input.action === "pause"
       ? await registerInterruptionWakes(db, {
           operationId: reserved.receipt.id,
           reason: "workspace_pause_interruption",
@@ -4630,7 +4744,7 @@ export async function mutateWorkspaceControlInTransaction(
       : await registerWorkspaceWakes(db, {
           workspaceId: input.workspaceId,
           reason: "workspace_resume",
-        });
+        }));
   const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
     controlRevision: revision,
     result: {
@@ -4639,6 +4753,7 @@ export async function mutateWorkspaceControlInTransaction(
       backgroundCommandCount,
       wakeCount,
       workspaceControlEventId,
+      affectedSessionEvents,
     },
   });
   return {
@@ -4649,6 +4764,7 @@ export async function mutateWorkspaceControlInTransaction(
     interruptionCount,
     backgroundCommandCount,
     wakeCount,
+    affectedSessionEvents,
     outcome: "changed",
     replay: false,
   };
@@ -4719,9 +4835,12 @@ const clearWorkspaceTimerFields = {
 
 /** Called under workspace RLS. The same control fence serializes timers and human actions. */
 export async function setWorkspacePauseTimerInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: WorkspacePauseTimerRequest & { accountId: string; workspaceId: string; subjectId: string },
-): Promise<{ workspaceControlEventId: string | null }> {
+): Promise<{
+  workspaceControlEventId: string | null;
+  affectedSessionEvents: WorkspaceControlMutationResult["affectedSessionEvents"];
+}> {
   let workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update", {
     lockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
   });
@@ -4744,12 +4863,14 @@ export async function setWorkspacePauseTimerInTransaction(
     return {
       workspaceControlEventId:
         (reserved.receipt.result.workspaceControlEventId as string | null) ?? null,
+      affectedSessionEvents: [],
     };
   if (Number(workspace.revision) !== input.expectedRevision)
     throw new SessionControlConflictError();
   let action: "pause" | "resume" = "pause";
   let delay = input.pauseInSeconds ?? 0;
   let pauseRevision: number | null = null;
+  let affectedSessionEvents: WorkspaceControlMutationResult["affectedSessionEvents"] = [];
   if (input.action === "set") {
     if (workspace.workspaceState === "paused") {
       if (delay !== 0 || input.pauseForSeconds == null) {
@@ -4759,13 +4880,14 @@ export async function setWorkspacePauseTimerInTransaction(
       delay = input.pauseForSeconds;
       pauseRevision = Number(workspace.workspacePauseRevision);
     } else if (delay === 0) {
-      await mutateWorkspaceControlInTransaction(db, {
+      const paused = await mutateWorkspaceControlInTransaction(db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         actor: { type: "human", subjectId: input.subjectId },
         operationKey: `timer-pause:${reserved.receipt.id}`,
         action: "pause",
       });
+      affectedSessionEvents = paused.affectedSessionEvents;
       workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
       action = "resume";
       delay = input.pauseForSeconds ?? 0;
@@ -4807,14 +4929,17 @@ export async function setWorkspacePauseTimerInTransaction(
     controlRevision: revision,
     result: { workspaceControlEventId },
   });
-  return { workspaceControlEventId };
+  return { workspaceControlEventId, affectedSessionEvents };
 }
 
 /** Discovery is a hint. Identity, deadline and pause ownership are rechecked under the fence. */
 export async function fireWorkspacePauseTimerInTransaction(
-  db: Database,
+  db: SessionActivityDatabase,
   input: { workspaceId: string; timerId: string },
-): Promise<{ workspaceControlEventId: string | null; wakeCount: number } | null> {
+): Promise<Pick<
+  WorkspaceControlMutationResult,
+  "workspaceControlEventId" | "wakeCount" | "affectedSessionEvents"
+> | null> {
   const workspace = await lockWorkspaceInferenceControl(db, input.workspaceId, "update", {
     lockTimeoutMs: 1000,
   });

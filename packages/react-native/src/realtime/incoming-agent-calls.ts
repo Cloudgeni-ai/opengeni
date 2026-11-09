@@ -1,4 +1,5 @@
 import type { AgentCall, OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useRef, useState } from "react";
 import type {
   NativeCallAdapter,
@@ -24,10 +25,14 @@ export function incomingEndReason(call: Pick<AgentCall, "state">): NativeIncomin
 }
 
 export type IncomingAgentCallsOptions = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   callAdapter: NativeCallAdapter | null;
+  /** Prepare without accepting; provider preconnection requires a native silent-audio gate. */
+  onRinging?(call: NativeIncomingCall, device: string): void;
+  /** Release preparation when the ring or system call ends. */
+  onEnded?(callId: string): void;
   /** The person answered and the server gave the call to this phone: start voice. */
-  onAnswered(call: NativeIncomingCall): void;
+  onAnswered(call: NativeIncomingCall, device: string): void;
   /** Answering failed (offline, or the server refused). */
   onError?(error: unknown): void;
 };
@@ -50,6 +55,24 @@ export function useIncomingAgentCalls(options: IncomingAgentCallsOptions): void 
     const watchers = new Map<string, ReturnType<typeof setInterval>>();
     /** The last state each call was handled in, so a replay does nothing. */
     const handled = new Map<string, NativeIncomingCall["state"]>();
+    const preparations = new Set<string>();
+    const devices = new Map<string, string>();
+    const deviceFor = (callId: string) => {
+      let device = devices.get(callId);
+      if (!device) {
+        device = `${callId}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
+        devices.set(callId, device);
+      }
+      return device;
+    };
+    const prepare = (call: NativeIncomingCall) => {
+      if (preparations.has(call.callId)) return;
+      preparations.add(call.callId);
+      latest.current.onRinging?.(call, deviceFor(call.callId));
+    };
+    const release = (callId: string) => {
+      if (preparations.delete(callId)) latest.current.onEnded?.(callId);
+    };
 
     const stopWatching = (callId: string) => {
       const timer = watchers.get(callId);
@@ -60,11 +83,14 @@ export function useIncomingAgentCalls(options: IncomingAgentCallsOptions): void 
     const ringing = (call: NativeIncomingCall) => {
       if (handled.has(call.callId) || watchers.has(call.callId)) return;
       handled.set(call.callId, "ringing");
+      prepare(call);
       const check = async () => {
         try {
           const current = await client.getAgentCall(call.workspaceId, call.callId);
           if (disposed || !watchers.has(call.callId) || current.state === "ringing") return;
           stopWatching(call.callId);
+          handled.set(call.callId, "declined");
+          release(call.callId);
           incoming.endIncomingCall(call.callId, incomingEndReason(current));
         } catch {
           // Offline for a moment: keep ringing; the ring ends on its own deadline.
@@ -78,20 +104,28 @@ export function useIncomingAgentCalls(options: IncomingAgentCallsOptions): void 
     };
 
     const answered = async (call: NativeIncomingCall) => {
-      if (handled.get(call.callId) === "answered") return;
+      if (handled.get(call.callId) === "answered" || handled.get(call.callId) === "declined")
+        return;
       handled.set(call.callId, "answered");
       stopWatching(call.callId);
+      // Cold launch can deliver Answer without the earlier ringing event.
+      prepare(call);
       try {
         // Names this answer, so a phone that lost the race to another learns it did.
-        const device = `${call.callId}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;
+        const device = deviceFor(call.callId);
         const result = await client.answerAgentCall(call.workspaceId, call.callId, { device });
+        if (disposed || handled.get(call.callId) !== "answered") return;
         if (result.state === "answered" && result.answeredHere === true) {
-          latest.current.onAnswered(call);
+          preparations.delete(call.callId);
+          latest.current.onAnswered(call, device);
           return;
         }
         incoming.endIncomingCall(call.callId, incomingEndReason(result));
+        release(call.callId);
       } catch (error) {
+        if (disposed || handled.get(call.callId) !== "answered") return;
         incoming.endIncomingCall(call.callId, "failed");
+        release(call.callId);
         latest.current.onError?.(error);
       }
     };
@@ -100,6 +134,7 @@ export function useIncomingAgentCalls(options: IncomingAgentCallsOptions): void 
       if (handled.get(call.callId) === "declined") return;
       handled.set(call.callId, "declined");
       stopWatching(call.callId);
+      release(call.callId);
       void client.declineAgentCall(call.workspaceId, call.callId).catch(() => undefined);
     };
 
@@ -113,7 +148,12 @@ export function useIncomingAgentCalls(options: IncomingAgentCallsOptions): void 
       if (event.type === "incoming") ringing(event.call);
       else if (event.type === "incomingAnswered") void answered(event.call);
       else if (event.type === "incomingDeclined") declined(event.call);
-      else if (event.type === "incomingEnded") stopWatching(event.callId);
+      else if (event.type === "incomingEnded" || event.type === "ended") {
+        stopWatching(event.callId);
+        handled.set(event.callId, "declined");
+        if (preparations.has(event.callId)) release(event.callId);
+        else latest.current.onEnded?.(event.callId);
+      }
     });
     // A push can launch the app into a ringing (or already answered) call.
     void incoming.takeIncomingCalls().then((calls) => {
@@ -123,6 +163,7 @@ export function useIncomingAgentCalls(options: IncomingAgentCallsOptions): void 
       disposed = true;
       unsubscribe();
       for (const timer of watchers.values()) clearInterval(timer);
+      for (const callId of preparations) release(callId);
       watchers.clear();
     };
   }, [callAdapter, client, incoming]);

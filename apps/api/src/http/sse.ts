@@ -862,8 +862,7 @@ export async function sseWorkspaceLiveStream(
       ...options.sessionLists,
       workspaceId,
       intervalMs: options.pollIntervalMs ?? SSE_HEARTBEAT_INTERVAL_MS,
-      write: (hint) =>
-        write(`event: workspace.sessions.changed\ndata: ${JSON.stringify(hint)}\n\n`),
+      write: (hint) => write(`event: ${hint.type}\ndata: ${JSON.stringify(hint)}\n\n`),
       fail: channel.fail,
     });
   }

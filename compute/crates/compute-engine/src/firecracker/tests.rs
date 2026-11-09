@@ -536,8 +536,8 @@ fn boot_pins_the_clock_source_restore_can_correct() {
 
 #[test]
 fn a_guest_reports_freed_memory_in_blocks_the_host_can_give_back() {
-    assert_eq!(reporting_order(PageSize::Base), 0);
-    assert_eq!(reporting_order(PageSize::Huge), 9);
+    assert_eq!(balloon::reporting_order(PageSize::Base), 0);
+    assert_eq!(balloon::reporting_order(PageSize::Huge), 9);
     assert_eq!(
         boot_args("console=ttyS0", Some(PageSize::Huge)),
         "console=ttyS0 clocksource=kvm-clock page_reporting.page_reporting_order=9"

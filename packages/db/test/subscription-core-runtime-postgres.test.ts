@@ -946,15 +946,13 @@ describe("provider-neutral subscription runtime persistence", () => {
           ${coMemberWorkspace!.id}::uuid
         )`;
 
-      const rollback = new Error("rollback cutover authorization fixture");
+      const rollback = new Error("rollback personal placement fixture");
       const runAccessCase = async (input: {
         provider?: "codex" | "claude" | "xai";
         ownerMembershipId?: string;
         generation?: number;
         ownerSubjectId?: string;
         humanSubjectId?: string | null;
-        cutover: "enabled" | "disabled" | "absent";
-        cutoverProvider?: "codex" | "claude" | "xai";
         personalEnabled?: boolean;
         workspaceId?: string;
         sessionId?: string;
@@ -981,14 +979,6 @@ describe("provider-neutral subscription runtime persistence", () => {
                   workspaceId: membership!.personal_workspace_id,
                 },
                 async (ownerDb) => {
-                  if (input.cutover !== "absent") {
-                    await rawRows(
-                      ownerDb,
-                      sql`insert into subscription_provider_cutovers (account_id, provider, enabled)
-                        values (${state.accountId}::uuid, ${input.cutoverProvider ?? "codex"}, ${input.cutover === "enabled"})
-                        on conflict (account_id, provider) do update set enabled = excluded.enabled`,
-                    );
-                  }
                   if (input.personalEnabled === false) {
                     await rawRows(
                       ownerDb,
@@ -1091,20 +1081,9 @@ describe("provider-neutral subscription runtime persistence", () => {
         return observed;
       };
 
-      // Account switches no longer select an old runtime. The live provider
-      // protocol receipt and all exact turn/owner/generation fences remain.
-      await shared!.admin`
-        delete from subscription_provider_cutovers
-        where account_id = ${state.accountId}::uuid and provider = 'codex'`;
-      expect(await runAccessCase({ cutover: "absent" })).toMatchObject({
-        authorized: true,
-        visible: true,
-      });
-      expect(await runAccessCase({ cutover: "disabled" })).toMatchObject({
-        authorized: true,
-        visible: true,
-      });
-      expect(await runAccessCase({ cutover: "enabled" })).toMatchObject({
+      // The live provider protocol receipt and all exact
+      // turn/owner/generation fences decide personal placement.
+      expect(await runAccessCase({})).toMatchObject({
         authorized: true,
         visible: true,
         owner: state.subjectId,
@@ -1114,17 +1093,13 @@ describe("provider-neutral subscription runtime persistence", () => {
       });
       // Earlier same-transaction capabilities survive both an allowed and a
       // denied Codex placement unchanged.
-      expect(
-        await runAccessCase({ cutover: "enabled", seedEarlierCapabilities: true }),
-      ).toMatchObject({
+      expect(await runAccessCase({ seedEarlierCapabilities: true })).toMatchObject({
         authorized: true,
         visible: true,
         earlierClaudeProvider: "claude",
         earlierLifecycle: true,
       });
-      expect(
-        await runAccessCase({ cutover: "enabled", generation: 2, seedEarlierCapabilities: true }),
-      ).toMatchObject({
+      expect(await runAccessCase({ generation: 2, seedEarlierCapabilities: true })).toMatchObject({
         authorized: false,
         visible: false,
         earlierClaudeProvider: "claude",
@@ -1132,7 +1107,6 @@ describe("provider-neutral subscription runtime persistence", () => {
       });
       expect(
         await runAccessCase({
-          cutover: "enabled",
           personalEnabled: false,
           seedEarlierCapabilities: true,
         }),
@@ -1163,33 +1137,15 @@ describe("provider-neutral subscription runtime persistence", () => {
       expect(String(uppercaseAuthorityError)).toContain(
         "session_turns_subscription_authority_v2_chk",
       );
-      // A provider without a cutover receipt (migration 0712): the
-      // application role can neither create nor enable its switch row, and a
-      // row that already exists (possible before 0712) with a matching v2
-      // entry still grants no personal placement. Its personal access is
-      // decided by its v1 path. Every known provider has a receipt since its
-      // cutover (Claude's since 0730), so the fixture removes Claude's to
-      // stand for a provider before its cutover.
+      // A provider without a protocol receipt: a matching v2 entry still
+      // grants no personal placement. Every known provider has a receipt
+      // (Claude's since 0730), so the fixture removes Claude's to stand for a
+      // provider before its protocol shipped.
       await shared!.admin.begin(async (owner) => {
         await owner`set local session_replication_role = replica`;
         await owner`delete from opengeni_private.subscription_provider_cutover_receipts
           where provider = 'claude'`;
       });
-      const claudeRowError = await runAccessCase({
-        cutover: "enabled",
-        provider: "claude",
-        cutoverProvider: "claude",
-      }).then(
-        () => null,
-        (error: unknown) => error,
-      );
-      expect(String((claudeRowError as { cause?: unknown } | null)?.cause)).toContain(
-        "subscription_provider_cutovers_receipt_insert",
-      );
-      await shared!.admin`
-        insert into subscription_provider_cutovers (account_id, provider, enabled)
-        values (${state.accountId}::uuid, 'claude', true)
-        on conflict (account_id, provider) do update set enabled = true`;
       await shared!.admin`
         update session_turns
         set subscription_authority = ${shared!.admin.json({
@@ -1201,15 +1157,12 @@ describe("provider-neutral subscription runtime persistence", () => {
         })}::jsonb
         where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
       try {
-        expect(await runAccessCase({ cutover: "enabled", provider: "claude" })).toMatchObject({
+        expect(await runAccessCase({ provider: "claude" })).toMatchObject({
           authorized: false,
         });
         // The same turn still authorizes Codex, which has its receipt.
-        expect(await runAccessCase({ cutover: "enabled" })).toMatchObject({ authorized: true });
+        expect(await runAccessCase({})).toMatchObject({ authorized: true });
       } finally {
-        await shared!.admin`
-          delete from subscription_provider_cutovers
-          where account_id = ${state.accountId}::uuid and provider = 'claude'`;
         await shared!.admin`
           update session_turns
           set subscription_authority = ${shared!.admin.json({
@@ -1220,32 +1173,30 @@ describe("provider-neutral subscription runtime persistence", () => {
           })}::jsonb
           where account_id = ${state.accountId}::uuid and id = ${personalTurn.id}::uuid`;
       }
-      expect(await runAccessCase({ cutover: "enabled", generation: 2 })).toMatchObject({
+      expect(await runAccessCase({ generation: 2 })).toMatchObject({
+        authorized: false,
+        visible: false,
+      });
+      expect(await runAccessCase({ ownerMembershipId: crypto.randomUUID() })).toMatchObject({
         authorized: false,
         visible: false,
       });
       expect(
-        await runAccessCase({ cutover: "enabled", ownerMembershipId: crypto.randomUUID() }),
-      ).toMatchObject({ authorized: false, visible: false });
-      expect(
         await runAccessCase({
-          cutover: "enabled",
           humanSubjectId: coMemberSubjectId,
         }),
       ).toMatchObject({ authorized: false, visible: false });
-      expect(await runAccessCase({ cutover: "enabled", personalEnabled: false })).toMatchObject({
+      expect(await runAccessCase({ personalEnabled: false })).toMatchObject({
         authorized: false,
         visible: false,
       });
       expect(
         await runAccessCase({
-          cutover: "enabled",
           ownerSubjectId: "user:not-the-session-owner",
         }),
       ).toMatchObject({ authorized: false, visible: false });
       expect(
         await runAccessCase({
-          cutover: "enabled",
           workspaceId: sharedWorkspace!.id,
           sessionId: sharedSession.id,
           turnId: sharedTurn.id,
@@ -1275,7 +1226,7 @@ describe("provider-neutral subscription runtime persistence", () => {
       await shared!.admin`
         update session_turns set subscription_authority = '{"version":2,"personal":[]}'::jsonb
         where account_id = ${state.accountId}::uuid and id = ${missingTurn.id}::uuid`;
-      expect(await runAccessCase({ cutover: "enabled", turnId: missingTurn.id })).toMatchObject({
+      expect(await runAccessCase({ turnId: missingTurn.id })).toMatchObject({
         authorized: false,
         visible: false,
       });
@@ -1283,7 +1234,6 @@ describe("provider-neutral subscription runtime persistence", () => {
       const ownerless = await ownerlessFixture(state.accountId, state.workspaceId);
       expect(
         await runAccessCase({
-          cutover: "enabled",
           workspaceId: state.workspaceId,
           sessionId: ownerless.sessionId,
           turnId: ownerless.turnId,

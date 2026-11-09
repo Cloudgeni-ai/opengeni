@@ -295,11 +295,6 @@ beforeAll(async () => {
   await shared.admin`
     update subscription_settings set personal_connections_allowed = true
     where account_id = ${organizationId}::uuid and workspace_id is null`;
-  for (const provider of ["claude", "xai", "codex"])
-    await shared.admin`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${organizationId}::uuid, ${provider}, true)
-      on conflict (account_id, provider) do update set enabled = true`;
 }, 180_000);
 
 afterAll(async () => {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { discardSearchResultsOnError, searchAccessDenied } from "./use-conversation-search";
 
@@ -84,14 +85,14 @@ function lastBefore(
 
 type FindState = SessionFindProgress & {
   identity: string;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   loading: boolean;
   error: string | null;
   accessDenied: boolean;
 };
 type Checkpoint = SessionFindProgress & {
   identity: string;
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   cursor: string | undefined;
 };
 type Demand = {
@@ -144,7 +145,7 @@ function mergeOlderPage(matches: SessionFindMatch[], page: SessionFindMatch[]): 
  * on demand when navigation needs older matches or the oldest one.
  */
 export function useSessionFind(input: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   authority: string;
   workspaceId: string;
   sessionId: string;

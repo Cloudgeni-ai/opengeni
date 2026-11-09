@@ -40,11 +40,27 @@ generation and invalidates existing grants.
 
 ### Control transport recovery
 
+An accepted command's output reattaches from its contiguous received sequence
+when the same runner announces its ready connection, or the controller's shared
+NATS transport reconnects. The existing silence probe remains the fallback, not
+the first opportunity to recover. Reattachment never restarts the command or
+extends its execution deadline. A successor runner has a different subject and
+cannot recover work by impersonating the original process.
+
 The API/worker uses its shared NATS connection for control RPC, operation frames,
-and acknowledgements. The native supervisor treats either control- or bulk-lane
-loss, including scheduled five-minute user-JWT expiry, as a transport-generation
-change: it reconnects, authenticates again, resubscribes, and detaches rather than
-restarts accepted commands. The WebSocket/QUIC relay is a separate stream plane;
+and acknowledgements. The broker's five-minute credential bounds established
+access after enrollment revocation; fresh admission checks enrollment authority.
+Ordinary enrollment-token renewal updates the next-dial bearer and the
+relay's future registrations in place, leaving accepted operations and healthy
+sockets untouched. Authority, consent, endpoint or authentication-state changes
+still replace the link.
+
+The native supervisor treats either control- or bulk-lane loss as a
+transport-generation change: it reconnects, authenticates again, resubscribes, and
+detaches rather than restarts accepted commands. Each generation owns both NATS
+connection tasks and closes them on every exit, including partial setup and
+cancelled dials. Retained RPC client clones cannot keep an old socket reconnecting
+alongside its replacement. The WebSocket/QUIC relay is a separate stream plane;
 it does not carry these NATS control requests. Codemode's NATS dispatch is only
 a wake-up for its PostgreSQL operation journal; clients re-notify the same
 operation, and the worker claims that row before execution.
@@ -156,7 +172,15 @@ once the ledger has recorded that stop. A turn records it through its own
 adoption; a direct terminal or file request records it in the same ledger
 without a turn. If recording fails, the caller keeps custody and goes on
 stopping it, as for a machine that stopped answering, and the text claims no
-stop. A direct terminal exec whose own deadline passes meanwhile ends with that
+stop. For an attempt-owned command whose foreground consumer has ended without
+terminal proof, finalization retries this exact-operation ledger handoff,
+including after protocol failures not classified as offline. Its cancellation
+and observation requests do not block the independent ledger commit. A pending
+live foreground adoption still owns the command; cleanup cannot take it over
+until that consumer ends. Failed ledger writes retain the physical writer,
+while a committed stop request transfers it to the existing reconciler without
+replaying the command or acknowledging output.
+A direct terminal exec whose own deadline passes meanwhile ends with that
 same answer, not exit 124: it reports 124 only when its deadline provably ended
 the command. The reconciler alone decides the outcome: it delivers the stop if the old
 runner answers again, and settles the command as lost once the enrollment
@@ -502,6 +526,15 @@ ComputerSession displaces the previous helper. Open a replacement through
 **Browser → New browser → Connected Chrome**; generic New desktop does not
 infer the Chrome device.
 
+A profile id is announced by the machine and stored per workspace, so the same
+id can be visible from more than one enrollment. Copies collapse into one
+profile only when their enrollments share the machine's key (one computer
+enrolled in two workspaces), and then your own Only me enrollment's copy is the
+one addressed. Copies announced by different machines are each listed; a
+device id without a pinned profile workspace resolves to the copy on your own
+Only me machine, and otherwise is not found until a session pins the copy's
+workspace.
+
 The extension's hello carries two generations. `connectionGeneration` is new
 for every native port and fences that transport: commands, results and
 inventory must name the exact live port. `stateGeneration` names the
@@ -592,6 +625,23 @@ index is built through the sandbox before the first model call: a typed
 offline/timeout control error during that discovery degrades to a short
 "repository skills unavailable" instruction for that run instead of failing the
 turn, and the next run discovers again.
+
+### Bundled rg and jq
+
+Release agents embed SHA-256-pinned builds of ripgrep and jq for their own
+platform (Linux x86_64 and aarch64, macOS x86_64 and arm64, Windows x64 and
+arm64): the official release builds, except on Linux, where jq is a static musl
+build of the official jq source, so it runs on any Linux distribution. At start
+the agent writes them to `/var/lib/opengeni/shell-tools/<generation>` when it runs as root on Linux
+(so `run_as` users can use them), otherwise to `<config dir>/shell-tools/<generation>`,
+and appends that directory to the end of every command's PATH, including the
+PATH a request sets. A machine's own `rg` or `jq` therefore always wins.
+Nothing is downloaded. A tool file that was changed is replaced with the
+agent's own copy. Generations no agent has started with for 14 days are
+removed by the agent holding the instance lock. Exceptions: a command that starts a login shell may have
+PATH reset by the machine's profile, other architectures get no tools, and
+an agent built without them (development builds, or older releases until
+they update) leaves PATH unchanged.
 
 ## Create a session on a machine
 
@@ -1023,7 +1073,41 @@ either; launchd waits its `ThrottleInterval` of 5 s between starts. The Windows
 task's one-minute repetition starts an exited agent within a minute, with no limit;
 a process that keeps the agent's hidden console host open after the agent exits
 delays that start until it ends, because the task skips a tick while its previous
-run is still going.
+run is still going. Commands run on hidden consoles of their own, so they do not
+hold it open.
+
+A command cannot stop the agent by signalling a process group. Each command runs
+in a process group of its own (on Windows a job object and a hidden console of its
+own), so `kill 0`, `kill -TERM -<its group>` or a console control event to its own
+console reach only that command and what it started, never the agent or other
+commands. `kill -1` in a command signals every process of the user, the agent
+included. On Linux the agent therefore keeps running when one of its own
+commands sends it `SIGTERM` or `SIGINT`. It tells a command from other senders
+by the sending process: a descendant of the agent, or a process in the process
+group, session or operation cgroup of one of its commands. A short-lived sender
+(`/bin/kill`, `sh -c 'kill …'`) has often exited before the agent can look it
+up; while a command runs (an open Opengeni terminal or a background command
+counts as running), or within 5 seconds after one ended, such a sender counts as
+that command. Nothing is blocked: the command still receives every
+signal, and a stop signal from anywhere else (the service manager, the desktop
+app, Ctrl-C, `opengeni-agent stop`, the `kill` of a shell outside the agent's
+commands) stops the agent as before. Because of that rule, a `/bin/kill` or
+`pkill` from outside, sent while a command runs, may be ignored; the ways just
+listed always work. A foreground agent's keeper also starts the agent again
+after such a sender's `SIGHUP`, `SIGQUIT` or `SIGUSR2`. Everything started in
+an Opengeni terminal counts as a command, including a `kill` typed there by a
+person.
+
+Other signals still end the agent, and it is started again. A foreground
+agent's keeper ignores stop signals from the agent's commands, passes on one
+whose sender already exited (under that sender's name, so the agent decides),
+and starts again an agent such a signal ended (`SIGHUP`, `SIGQUIT`, `SIGUSR2`).
+A `--system` service, the macOS LaunchAgent and a compute sandbox's guest init
+restart the agent after any signal, `SIGKILL` (`kill -9 -1`) included; a
+foreground agent's keeper dies with it then. Some cases still leave the agent
+offline after `kill -1`: under a systemd user service it also stops the user's
+own service manager, which stops its services until the user logs in again, and
+an agent hosted by the desktop app ends with the app.
 
 Work delegated over a socket to an
 external privileged daemon (for example, a container build) is not a descendant
@@ -1235,6 +1319,29 @@ rechecks authority, capability, and the pinned connection; it never falls back
 to a whole-file write after an uncertain result. Older agents keep their legacy
 small-write behavior and report oversized requests without marking the machine
 offline. See [Transactional file edits](#transactional-file-edits).
+
+### Machines whose shell or working directory was removed
+
+The agent starts every shell command, and each exec's containment anchor,
+through `/bin/sh`. When `/bin/sh` is missing or not executable (a command ran
+`mv /bin/sh …`), agent 0.1.153 and later start the first of `/bin/dash`,
+`/usr/bin/dash`, `/bin/bash` or `/usr/bin/bash` instead, and, running as root
+on Linux, point `/bin/sh` back at it with a symlink (only an empty path or a
+symlink is replaced, never a file or directory). With no shell at all, the start
+fails with the note "the shell /bin/sh is missing and no dash or bash was found",
+which Opengeni reports as a machine that cannot start programs. A missing
+workspace root or home directory used as a command's working directory is
+created again and the command runs. The workspace root gets mode 0755 and stays
+owned by the agent; a home gets mode 0700 inside an existing parent and belongs
+to its user. On Linux and macOS the folder is made under a private name in the
+same parent, given its owner and mode, and only then moved into place, so no
+command starts in a half-made folder; when a home cannot be given to its user,
+it is removed again and that command fails as not found. Placeholder homes such
+as `/nonexistent` and `/var/empty` are never created, and any other missing
+working directory is still a not-found error.
+When the agent uses a fallback shell, it passes the shell's path to commands as
+`OPENGENI_SYSTEM_SHELL`, and Opengeni's own command wrappers start it instead of
+`/bin/sh`.
 
 ### Streaming exec (op-stream)
 
@@ -1624,7 +1731,9 @@ renewal itself cannot change ownership, scope or screen-control consent. Who can
 use a machine changes in place through **Who can use it?** (see
 [Change who can use a machine](#change-who-can-use-a-machine)), and screen
 control through its own request below; neither needs a reconnect. Updated
-credentials load into the existing process, preserving host operations.
+credentials load into the existing process. Renewal of the same credential family
+updates login/relay tokens without replacing its live NATS connections; changes
+to authority or other connection settings still reconcile through link replacement.
 The signed `/v1/enrollments/renew` machine protocol is outside the browser API
 contract-revision fence, like device polling and token exchange. Its install-key,
 enrollment-generation and revocation checks still apply in production.
@@ -1745,6 +1854,12 @@ Two refusals are registered today:
   attempt get no card. Only these API tools emit it today; the worker poster
   passes no requested machine, so an interaction tool that emitted it would get
   a machine card that names no machine.
+  `machine_access_required` is also a plain refusal: the move or `run_on` got
+  past admission, but the check right before the machine is used found this
+  turn's approval used up, revoked or expired. Its reason starts with the same
+  "Machine access needed" sentence a failed turn shows
+  (`machineAccessNeededMessage`, `packages/contracts`), and the chat stays
+  where it was.
 - `attached_browser_unavailable`: `browser_open` with
   `placement: {kind: "attached_device"}` found no connected Chrome profile. The
   **Chrome setup card**, the machine card with `purpose: "chrome"`
@@ -2020,9 +2135,9 @@ machine wherever it works, as `{ machines: [{ id, name, sandboxId, reach }],
 complete }` (`id` is the enrollment), for Organization settings › Shared. It
 needs `enrollments:read` and an organization owner or admin, from a person or
 an agent acting as them; an agent acting as itself gets `403` and sees only
-what works in its workspace. Until a later release grants the
-organization-wide read (migration 1224 adds it), it answers the organization
-machines that work in this workspace with `complete: false`.
+what works in its workspace. `complete` is always `true`; servers before
+migration 1272 could list only the organization machines that work in this
+workspace and sent `false`.
 
 ### Where your own machine works
 

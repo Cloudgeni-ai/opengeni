@@ -41,6 +41,16 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
     userContent: false,
     why: "authentication provider response passthrough",
   },
+  "personal-github-gateway-policy.ts": {
+    count: 2,
+    userContent: false,
+    why: "git receive-pack results that refuse a push, read by git",
+  },
+  "personal-github-gateway.ts": {
+    count: 2,
+    userContent: false,
+    why: "GitHub API passthrough and JSON errors for gh, behind the session pass (sandboxed, nosniff)",
+  },
   "personal-github-git-broker.ts": {
     count: 2,
     userContent: false,

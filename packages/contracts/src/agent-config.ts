@@ -452,6 +452,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
 
   github_connect_link: "workspaceConnectors",
   github_repositories_list: "workspaceConnectors",
+  github_repository_attach: "workspaceConnectors",
   social_connections_list: "workspaceConnectors",
   social_posts_recent: "workspaceConnectors",
   social_daily_analysis_context: "workspaceConnectors",
@@ -594,15 +595,13 @@ export const AGENT_FUNCTION_TOOL_CAPABILITIES = {
   view_image: "sandbox",
   repository_skill_read: "sandbox",
   code_search: "sandbox",
-  // Derived runtime mechanics: search router, operation recovery, credential
-  // renewal, and a scheduled task's own bound knowledge source.
+  // Derived runtime mechanics: search router, operation recovery and credential
+  // renewal.
   tool_search: "runtime",
   tool_list: "runtime",
   tool_invoke: "runtime",
   operation_read: "runtime",
   refresh_credentials: "runtime",
-  knowledge_source_fetch: "runtime",
-  knowledge_source_read: "runtime",
 } as const satisfies Record<string, AgentFunctionToolClass>;
 export type AgentFunctionToolName = keyof typeof AGENT_FUNCTION_TOOL_CAPABILITIES;
 
@@ -677,6 +676,14 @@ export type AgentToolEnvironment = {
    * find a command; undefined means not yet known and keeps them.
    */
   sandboxAttached?: boolean;
+  /**
+   * Whether the session has a goal, in any state, as frozen with the turn.
+   * `false` (proven none) withholds `goal_resume` from a configured agent: it
+   * acts only on an existing goal and otherwise fails. Once a goal exists the
+   * tool stays whatever the goal's state, so pausing or resuming never changes
+   * the tool list. Undefined means not known and keeps it.
+   */
+  sessionGoal?: boolean;
 };
 
 /**
@@ -762,6 +769,7 @@ export function resolveAgentToolFamilies(
     const owner: AgentFirstPartyToolOwner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[name];
     if (owner === "sandbox") return sandboxTools;
     if (name === "wait_for_input") return waitForInput;
+    if (name === "goal_resume" && config && environment.sessionGoal === false) return false;
     if (owner === "notifications") return notifications;
     return owner === "runtime" || enabled(owner);
   };

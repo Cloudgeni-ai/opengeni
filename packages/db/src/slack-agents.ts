@@ -1,86 +1,51 @@
 /**
- * Slack agents: reads and writes.
+ * Slack agents: reads and writes, now backed by agents (see `./agents`).
  *
- * An agent row is HOME-owned, exactly like `slack_channel_routes`: the
- * installation binding's `(accountId, workspaceId, connectionId)` writes it.
- * Its TARGET workspace is where its chats run and is fixed at creation. A
- * read-only organization policy lets anyone in the organization list agents and
- * lets a routed chat read its own agent from the target workspace.
+ * The functions keep the shapes the Slack code was written against: `home`
+ * is the Slack installation's own workspace (where its binding, channel
+ * routes and legacy `slack_agents` row live) and `targetWorkspaceId` is the
+ * agent's home workspace, where its chats run. Agent rows, revisions and
+ * Slack availability are written in the agent's home; the legacy row is kept
+ * in step in the same transaction until the contract step.
  *
  * Authorization (who may create, edit or use an agent) is decided by callers
  * from live grants. Nothing here grants anything.
  */
-import type { SessionAvatar } from "@opengeni/contracts";
-import { and, desc, eq, isNotNull, ne, sql } from "drizzle-orm";
+import { AGENTS_PER_WORKSPACE_MAX, type SessionAvatar } from "@opengeni/contracts";
+import { and, eq, sql } from "drizzle-orm";
 
-import { withRlsContext, withWorkspaceRls, type Database } from "./database";
-import { nestedPostgresSqlState } from "./persistence-errors";
+import {
+  createAgent,
+  deleteAgent,
+  getSessionAgent,
+  getSlackAgentProjection,
+  legacySlackAgentAvatar,
+  listAgentChats,
+  listOrganizationSlackAgentProjections,
+  listSlackAgentProjectionsForConnection,
+  putAgentSlackInstall,
+  lockAgentLegacySlackVersion,
+  setAgentMemoryCollection,
+  updateAgent,
+  type SlackAgentProjection,
+} from "./agents";
+import { withRlsContext, type Database } from "./database";
 import * as schema from "./schema";
 
 export type SlackAgentHome = { accountId: string; workspaceId: string };
 
-export type SlackAgentRecord = {
-  id: string;
-  accountId: string;
-  workspaceId: string;
-  connectionId: string;
-  slackTeamId: string;
-  targetAccountId: string;
-  targetWorkspaceId: string;
-  name: string;
-  nameKey: string;
-  description: string;
-  avatar: SessionAvatar;
-  instructions: string;
-  knowledgeCollectionId: string | null;
-  open: boolean;
-  createdBySubjectId: string;
-  version: number;
-  createdAt: Date;
-  updatedAt: Date;
-};
+/**
+ * An agent as one Slack installation sees it. Read from the agents tables
+ * (see `./agents`); the shape is the one the Slack code was written against.
+ */
+export type SlackAgentRecord = SlackAgentProjection;
 
-function mapAgent(row: typeof schema.slackAgents.$inferSelect): SlackAgentRecord {
-  return {
-    id: row.id,
-    accountId: row.accountId,
-    workspaceId: row.workspaceId,
-    connectionId: row.connectionId,
-    slackTeamId: row.slackTeamId,
-    targetAccountId: row.targetAccountId,
-    targetWorkspaceId: row.targetWorkspaceId,
-    name: row.name,
-    nameKey: row.nameKey,
-    description: row.description,
-    avatar: row.avatar,
-    instructions: row.instructions,
-    knowledgeCollectionId: row.knowledgeCollectionId,
-    open: row.open,
-    createdBySubjectId: row.createdBySubjectId,
-    version: row.version,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  };
-}
-
-function compareAgents(left: SlackAgentRecord, right: SlackAgentRecord): number {
-  if (left.nameKey !== right.nameKey) return left.nameKey < right.nameKey ? -1 : 1;
-  if (left.id === right.id) return 0;
-  return left.id < right.id ? -1 : 1;
-}
-
-/** Every agent in one organization, for the directory. Ordered by name. */
+/** Every Slack-available agent in one organization, for the directory. Ordered by name. */
 export async function listOrganizationSlackAgents(
   db: Database,
   input: { accountId: string },
 ): Promise<SlackAgentRecord[]> {
-  return await withRlsContext(db, { accountId: input.accountId }, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.slackAgents)
-      .where(eq(schema.slackAgents.accountId, input.accountId));
-    return rows.map(mapAgent).sort(compareAgents);
-  });
+  return await listOrganizationSlackAgentProjections(db, input);
 }
 
 /**
@@ -92,39 +57,15 @@ export async function listSlackAgentsForConnection(
   home: SlackAgentHome,
   input: { connectionId: string },
 ): Promise<SlackAgentRecord[]> {
-  return await withRlsContext(db, home, async (scopedDb) => {
-    const rows = await scopedDb
-      .select()
-      .from(schema.slackAgents)
-      .where(
-        and(
-          eq(schema.slackAgents.accountId, home.accountId),
-          eq(schema.slackAgents.workspaceId, home.workspaceId),
-          eq(schema.slackAgents.connectionId, input.connectionId),
-        ),
-      );
-    return rows.map(mapAgent).sort(compareAgents);
-  });
+  return await listSlackAgentProjectionsForConnection(db, home, input.connectionId);
 }
 
-/** One agent by id within an organization, or null. */
+/** One Slack-available agent by id within an organization, or null. */
 export async function getSlackAgent(
   db: Database,
   input: { accountId: string; agentId: string },
 ): Promise<SlackAgentRecord | null> {
-  return await withRlsContext(db, { accountId: input.accountId }, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.slackAgents)
-      .where(
-        and(
-          eq(schema.slackAgents.accountId, input.accountId),
-          eq(schema.slackAgents.id, input.agentId),
-        ),
-      )
-      .limit(1);
-    return row ? mapAgent(row) : null;
-  });
+  return await getSlackAgentProjection(db, input);
 }
 
 export type SlackAgentWriteFields = {
@@ -135,7 +76,18 @@ export type SlackAgentWriteFields = {
   instructions: string;
 };
 
-/** Create an agent. `name_taken` when the installation already has that name. */
+/** The agent write aborted; its transaction rolls back. */
+class SlackAgentWriteAbort extends Error {
+  constructor(readonly outcome: "name_taken" | "version_conflict" | "not_found") {
+    super(`Slack agent write aborted: ${outcome}`);
+  }
+}
+
+/**
+ * Create an agent available in one installation (`home` is the
+ * installation's own workspace), with Memory on. `name_taken` when the
+ * installation already has that name; nothing is created then.
+ */
 export async function insertSlackAgent(
   db: Database,
   home: SlackAgentHome,
@@ -147,40 +99,54 @@ export async function insertSlackAgent(
     targetAccountId: string;
     targetWorkspaceId: string;
     createdBySubjectId: string;
+    /** `slack` for the card a chat posted in Slack; `app` otherwise. */
+    origin?: "slack" | "app";
+    maxPerWorkspace?: number;
   },
 ): Promise<SlackAgentRecord | "name_taken"> {
+  const target = { accountId: input.targetAccountId, workspaceId: input.targetWorkspaceId };
   try {
-    return await withRlsContext(db, home, async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.slackAgents)
-        .values({
-          ...(input.id ? { id: input.id } : {}),
-          accountId: home.accountId,
-          workspaceId: home.workspaceId,
-          connectionId: input.connectionId,
-          slackTeamId: input.slackTeamId,
-          targetAccountId: input.targetAccountId,
-          targetWorkspaceId: input.targetWorkspaceId,
-          name: input.name,
-          nameKey: input.nameKey,
-          description: input.description,
-          avatar: input.avatar,
-          instructions: input.instructions,
-          createdBySubjectId: input.createdBySubjectId,
-        })
-        .returning();
-      if (!row) throw new Error("Slack agent insert returned no row");
-      return mapAgent(row);
+    return await withRlsContext(db, target, async (tx) => {
+      const { agent } = await createAgent(tx, target, {
+        ...(input.id ? { id: input.id } : {}),
+        visibility: "workspace",
+        ownerSubjectId: null,
+        name: input.name,
+        description: input.description,
+        avatar: input.avatar,
+        instructions: input.instructions,
+        firstMessage: "",
+        memoryEnabled: true,
+        origin: input.origin ?? "app",
+        sourceSessionId: null,
+        createdBySubjectId: input.createdBySubjectId,
+        maxPerWorkspace: input.maxPerWorkspace ?? AGENTS_PER_WORKSPACE_MAX,
+      });
+      const saved = await putAgentSlackInstall(tx, target, {
+        agentId: agent.id,
+        connectionId: input.connectionId,
+        slackTeamId: input.slackTeamId,
+        installWorkspaceId: home.workspaceId,
+        actorSubjectId: input.createdBySubjectId,
+      });
+      if (saved.kind !== "saved") throw new SlackAgentWriteAbort("name_taken");
+      const projection = await getSlackAgentProjection(tx, {
+        accountId: target.accountId,
+        agentId: agent.id,
+      });
+      if (!projection) throw new Error("Slack agent insert returned no row");
+      return projection;
     });
   } catch (error) {
-    if (nestedPostgresSqlState(error) === "23505") return "name_taken";
+    if (error instanceof SlackAgentWriteAbort) return "name_taken";
     throw error;
   }
 }
 
 /**
- * Change an agent's own fields at an expected version. The target workspace
- * and installation never change.
+ * Change an agent's own fields at an expected version (the agent's). The
+ * home workspace and installation never change. `home` is the installation's
+ * own workspace.
  */
 export async function updateSlackAgent(
   db: Database,
@@ -192,41 +158,74 @@ export async function updateSlackAgent(
       knowledgeCollectionId?: string | null;
       open?: boolean;
     };
+    /** Who made the change, recorded on a new revision. */
+    actorSubjectId?: string | null;
   },
 ): Promise<SlackAgentRecord | "version_conflict" | "name_taken" | null> {
+  const current = await getSlackAgentProjection(db, {
+    accountId: home.accountId,
+    agentId: input.agentId,
+  });
+  if (!current || current.workspaceId !== home.workspaceId) return null;
+  const target = { accountId: current.targetAccountId, workspaceId: current.targetWorkspaceId };
+  const { patch } = input;
   try {
-    return await withRlsContext(db, home, async (scopedDb) => {
-      const [row] = await scopedDb
-        .update(schema.slackAgents)
-        .set({
-          ...input.patch,
-          version: sql`${schema.slackAgents.version} + 1`,
-          updatedAt: sql`now()`,
-        })
-        .where(
-          and(
-            eq(schema.slackAgents.id, input.agentId),
-            eq(schema.slackAgents.accountId, home.accountId),
-            eq(schema.slackAgents.workspaceId, home.workspaceId),
-            eq(schema.slackAgents.version, input.expectedVersion),
-          ),
-        )
-        .returning();
-      if (row) return mapAgent(row);
-      const [current] = await scopedDb
-        .select({ id: schema.slackAgents.id })
-        .from(schema.slackAgents)
-        .where(
-          and(
-            eq(schema.slackAgents.id, input.agentId),
-            eq(schema.slackAgents.workspaceId, home.workspaceId),
-          ),
-        )
-        .limit(1);
-      return current ? ("version_conflict" as const) : null;
+    return await withRlsContext(db, target, async (tx) => {
+      const versions = await lockAgentLegacySlackVersion(tx, target, {
+        agentId: current.id,
+        connectionId: current.connectionId,
+        installWorkspaceId: home.workspaceId,
+      });
+      if (!versions) throw new SlackAgentWriteAbort("not_found");
+      // A page loaded from either API during the rollout may send its version.
+      if (
+        input.expectedVersion !== versions.version &&
+        input.expectedVersion !== versions.agentVersion
+      ) {
+        throw new SlackAgentWriteAbort("version_conflict");
+      }
+      const fields = {
+        ...(patch.name !== undefined ? { name: patch.name } : {}),
+        ...(patch.description !== undefined ? { description: patch.description } : {}),
+        ...(patch.avatar !== undefined ? { avatar: patch.avatar } : {}),
+        ...(patch.instructions !== undefined ? { instructions: patch.instructions } : {}),
+      };
+      if (Object.keys(fields).length > 0) {
+        const updated = await updateAgent(tx, target, {
+          agentId: current.id,
+          expectedVersion: null,
+          actorSubjectId: input.actorSubjectId ?? null,
+          patch: fields,
+        });
+        if (updated.kind === "slack_name_taken") throw new SlackAgentWriteAbort("name_taken");
+        if (updated.kind !== "updated") throw new SlackAgentWriteAbort("not_found");
+      }
+      if (patch.open !== undefined) {
+        const saved = await putAgentSlackInstall(tx, target, {
+          agentId: current.id,
+          connectionId: current.connectionId,
+          slackTeamId: current.slackTeamId,
+          installWorkspaceId: home.workspaceId,
+          open: patch.open,
+          actorSubjectId: input.actorSubjectId ?? current.createdBySubjectId,
+        });
+        if (saved.kind !== "saved") throw new SlackAgentWriteAbort("not_found");
+      }
+      if (patch.knowledgeCollectionId) {
+        await setAgentMemoryCollection(tx, target, {
+          agentId: current.id,
+          collectionId: patch.knowledgeCollectionId,
+        });
+      }
+      return await getSlackAgentProjection(tx, {
+        accountId: target.accountId,
+        agentId: current.id,
+      });
     });
   } catch (error) {
-    if (nestedPostgresSqlState(error) === "23505") return "name_taken";
+    if (error instanceof SlackAgentWriteAbort) {
+      return error.outcome === "not_found" ? null : error.outcome;
+    }
     throw error;
   }
 }
@@ -237,40 +236,39 @@ export async function setSlackAgentKnowledgeCollection(
   home: SlackAgentHome,
   input: { agentId: string; knowledgeCollectionId: string },
 ): Promise<SlackAgentRecord | null> {
-  return await withRlsContext(db, home, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.slackAgents)
-      .set({ knowledgeCollectionId: input.knowledgeCollectionId, updatedAt: sql`now()` })
-      .where(
-        and(
-          eq(schema.slackAgents.id, input.agentId),
-          eq(schema.slackAgents.workspaceId, home.workspaceId),
-        ),
-      )
-      .returning();
-    return row ? mapAgent(row) : null;
+  const current = await getSlackAgentProjection(db, {
+    accountId: home.accountId,
+    agentId: input.agentId,
   });
+  if (!current || current.workspaceId !== home.workspaceId) return null;
+  const target = { accountId: current.targetAccountId, workspaceId: current.targetWorkspaceId };
+  const updated = await setAgentMemoryCollection(db, target, {
+    agentId: current.id,
+    collectionId: input.knowledgeCollectionId,
+  });
+  if (!updated) return null;
+  return await getSlackAgentProjection(db, { accountId: home.accountId, agentId: current.id });
 }
 
-/** Delete an agent. Its channel settings go with it; its chats stay. */
+/**
+ * Delete an agent through the Slack agents API: the agent itself, as that
+ * API always did. Its channel settings go with it; its chats stay.
+ */
 export async function deleteSlackAgent(
   db: Database,
   home: SlackAgentHome,
   input: { agentId: string },
 ): Promise<boolean> {
-  return await withRlsContext(db, home, async (scopedDb) => {
-    const removed = await scopedDb
-      .delete(schema.slackAgents)
-      .where(
-        and(
-          eq(schema.slackAgents.id, input.agentId),
-          eq(schema.slackAgents.accountId, home.accountId),
-          eq(schema.slackAgents.workspaceId, home.workspaceId),
-        ),
-      )
-      .returning({ id: schema.slackAgents.id });
-    return removed.length > 0;
+  const current = await getSlackAgentProjection(db, {
+    accountId: home.accountId,
+    agentId: input.agentId,
   });
+  if (!current || current.workspaceId !== home.workspaceId) return false;
+  return await deleteAgent(
+    db,
+    { accountId: current.targetAccountId, workspaceId: current.targetWorkspaceId },
+    current.id,
+  );
 }
 
 /**
@@ -376,8 +374,8 @@ export async function listSlackAgentIdsUsedBy(
 }
 
 /**
- * Which Slack agent, if any, a chat was started for, read from the TARGET
- * workspace that owns the chat.
+ * Which agent, if any, a chat was started with (`sessions.agent_id`, or an
+ * older Slack chat's metadata), read from the workspace that owns the chat.
  *
  * `agentChat` stays true when the agent was deleted since, so the caller can
  * keep posting as plain Opengeni rather than falling back to the chat's own
@@ -386,107 +384,69 @@ export async function listSlackAgentIdsUsedBy(
 export async function getSlackAgentForSession(
   db: Database,
   input: { workspaceId: string; sessionId: string },
-): Promise<{ agentChat: boolean; agent: SlackAgentRecord | null }> {
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const [session] = await scopedDb
-      .select({
-        agentId: sql<string | null>`${schema.sessions.metadata} -> 'slackAgent' ->> 'id'`,
-      })
-      .from(schema.sessions)
-      .where(
-        and(
-          eq(schema.sessions.workspaceId, input.workspaceId),
-          eq(schema.sessions.id, input.sessionId),
-        ),
-      )
-      .limit(1);
-    if (!session?.agentId) return { agentChat: false, agent: null };
-    const [interaction] = await scopedDb
-      .select({ slackAgentId: schema.slackInteractions.slackAgentId })
-      .from(schema.slackInteractions)
-      .where(
-        and(
-          eq(schema.slackInteractions.workspaceId, input.workspaceId),
-          eq(schema.slackInteractions.sessionId, input.sessionId),
-        ),
-      )
-      .limit(1);
-    if (!interaction?.slackAgentId) return { agentChat: true, agent: null };
-    const [agent] = await scopedDb
-      .select()
-      .from(schema.slackAgents)
-      .where(eq(schema.slackAgents.id, interaction.slackAgentId))
-      .limit(1);
-    return { agentChat: true, agent: agent ? mapAgent(agent) : null };
-  });
+): Promise<{
+  agentChat: boolean;
+  agent: { id: string; name: string; avatar: SessionAvatar; targetWorkspaceId: string } | null;
+}> {
+  const { agentChat, agent } = await getSessionAgent(db, input);
+  return {
+    agentChat,
+    agent: agent
+      ? {
+          id: agent.id,
+          name: agent.name,
+          avatar: legacySlackAgentAvatar(agent),
+          targetWorkspaceId: agent.workspaceId,
+        }
+      : null,
+  };
 }
 
 export type SlackAgentChatSummary = {
   sessionId: string;
   title: string | null;
-  slackChannelId: string;
-  slackThreadTs: string;
+  /** Null for a chat started in the app. */
+  slackChannelId: string | null;
+  slackThreadTs: string | null;
   initiatingSlackUserId: string | null;
   createdAt: Date;
 };
 
 /**
- * Recent chats of one agent in its own workspace, newest first. Filtered by
- * agent id, so chats of other agents and plain Opengeni chats in the same
- * workspace never appear.
+ * Recent shared chats of one agent in its own workspace, newest first. Only
+ * chats everyone in the workspace can open: an Only me chat (a Slack DM
+ * included) belongs to the person who started it.
  */
 export async function listSlackAgentChats(
   db: Database,
   input: {
+    accountId: string;
     workspaceId: string;
     slackAgentId: string;
     excludeSessionId?: string | null;
     limit: number;
   },
 ): Promise<SlackAgentChatSummary[]> {
-  const limit = Math.max(1, Math.min(50, Math.trunc(input.limit)));
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const rows = await scopedDb
-      .select({
-        sessionId: schema.slackInteractions.sessionId,
-        title: schema.sessions.title,
-        slackChannelId: schema.slackInteractions.slackChannelId,
-        slackThreadTs: schema.slackInteractions.slackThreadTs,
-        initiatingSlackUserId: schema.slackInteractions.initiatingSlackUserId,
-        createdAt: schema.slackInteractions.createdAt,
-      })
-      .from(schema.slackInteractions)
-      .innerJoin(schema.sessions, eq(schema.sessions.id, schema.slackInteractions.sessionId))
-      .where(
-        and(
-          eq(schema.slackInteractions.workspaceId, input.workspaceId),
-          eq(schema.slackInteractions.slackAgentId, input.slackAgentId),
-          isNotNull(schema.slackInteractions.sessionId),
-          // Only chats everyone in the workspace can open; a private DM chat
-          // belongs to the person who started it.
-          eq(schema.slackInteractions.visibility, "workspace"),
-          ...(input.excludeSessionId
-            ? [ne(schema.slackInteractions.sessionId, input.excludeSessionId)]
-            : []),
-        ),
-      )
-      .orderBy(desc(schema.slackInteractions.createdAt))
-      .limit(limit);
-    return rows.flatMap((row) =>
-      row.sessionId
-        ? [
-            {
-              sessionId: row.sessionId,
-              title: row.title,
-              slackChannelId: row.slackChannelId,
-              slackThreadTs: row.slackThreadTs,
-              initiatingSlackUserId: row.initiatingSlackUserId,
-              createdAt: row.createdAt,
-            },
-          ]
-        : [],
-    );
-  });
+  const chats = await listAgentChats(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    {
+      agentId: input.slackAgentId,
+      viewerSubjectId: null,
+      filter: "everyone",
+      sharedOnly: true,
+      excludeSessionId: input.excludeSessionId ?? null,
+      limit: Math.max(1, Math.min(50, Math.trunc(input.limit))),
+    },
+  );
+  return chats.map((chat) => ({
+    sessionId: chat.sessionId,
+    title: chat.title,
+    slackChannelId: chat.slack?.channelId ?? null,
+    slackThreadTs: chat.slack?.threadTs ?? null,
+    initiatingSlackUserId: chat.slack?.initiatingSlackUserId ?? null,
+    createdAt: chat.createdAt,
+  }));
 }
 
 /** Mute or unmute occasional update messages for one Slack person. */

@@ -32,11 +32,15 @@ describe("session control surface architecture", () => {
     expect(route).toContain("suspendAutosave: submitting");
     expect(route).toContain("disabled={newSessionDraft.loading || submitting}");
     expect(route).toContain("if (!outcomeUnknown) await preserveNewerLocalDraft()");
-    // Send saved the draft before each refused create: exhausting the retries
-    // must not leave "Draft not saved" up or autosave paused.
+    // Send is never checked against the draft, so there is no retry loop. Only
+    // an older server can still refuse it; that one attempt must not leave
+    // "Draft not saved" up or autosave paused.
     expect(route).toMatch(
-      /await preserveNewerLocalDraft\(\);\s*(?:\/\/[^\n]*\s*)*newSessionDraft\.clearError\(\);\s*toast\.error\("Couldn't send", \{\s*description: DRAFT_CHANGED_DURING_SEND_TEXT,/,
+      /if \(draftConflict\) \{\s*await preserveNewerLocalDraft\(\);\s*(?:\/\/[^\n]*\s*)*newSessionDraft\.clearError\(\);\s*toast\.error\("Couldn't send", \{\s*description: draftConflictDuringSendText\(draftChangedElsewhere\),/,
     );
+    // Other tabs are named only when the refusal showed the draft moved on.
+    expect(route).toContain("newSessionDraftConflictRevision(error) !== flushed.revision");
+    expect(route).not.toContain("for (let attempt");
     expect(route).not.toContain("newSessionDraft.conflict ||");
     expect(route).not.toContain("!newSessionDraft.conflict &&");
     expect(route).not.toContain("newSessionDraft.conflict !== null ||");
@@ -78,14 +82,14 @@ describe("session control surface architecture", () => {
     expect(plus).not.toContain("setSettingsOpen");
   });
 
-  test("an existing chat's Chat settings opens the dock's Agent tab at Agent learning", async () => {
+  test("an existing chat's Chat settings opens the dock's Settings tab at Agent learning", async () => {
     const route = await source("../../../packages/react/src/app/routes/session.tsx");
     // The composer hands the click to the route, which opens the dock...
     expect(route).toContain("onOpen: props.onOpenAgentSettings,");
-    // (Only where the dock exists: an embed without it has no Agent tab to open.)
+    // (Only where the dock exists: an embed without it has no Settings tab to open.)
     expect(route).toContain("onOpenAgentSettings={dockEnabled ? openAgentSettings : undefined}");
     expect(route).toContain("openAgentSettingsRequest={");
-    // ...on its Agent tab (always present for a loaded chat), focused on Agent learning.
+    // ...on its Settings tab (always present for a loaded chat), focused on Agent learning.
     expect(route).toContain('tab: "agent",');
     expect(route).toContain("openTabRequest={currentTabRequest}");
     expect(route).toContain("learningFocusRequest={agentLearningFocus}");

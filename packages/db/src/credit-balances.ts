@@ -674,6 +674,11 @@ function grantCovers(grant: PromotionalCreditBalance, usage: CreditUsage): boole
   return grant.coversVoice === true;
 }
 
+/** General app funding, without model-scoped promotions or scoped Free credit. */
+export function generalAvailableCreditMicros(balance: BillingBalance): number {
+  return Math.max(0, appGeneralMicros(balance) - (balance.heldGeneralCreditMicros ?? 0));
+}
+
 export function spendableCreditMicros(
   balance: BillingBalance,
   usage?: CreditUsage,
@@ -681,7 +686,7 @@ export function spendableCreditMicros(
 ): number {
   if (origin === "api") return apiSpendableCreditMicros(balance);
   return (
-    Math.max(0, appGeneralMicros(balance) - (balance.heldGeneralCreditMicros ?? 0)) +
+    generalAvailableCreditMicros(balance) +
     (balance.promotionalCredits ?? []).reduce(
       (sum, grant) => sum + (grantCovers(grant, usage) ? grant.remainingMicros : 0),
       0,
@@ -731,31 +736,6 @@ function allocateToCoveringGrants(
     remaining -= allocated;
   }
   return allocations;
-}
-
-export function planCreditDebit(
-  balance: BillingBalance,
-  requestedMicros: number,
-  usage?: CreditUsage,
-  origin: BillingOrigin = "app",
-) {
-  if (!Number.isSafeInteger(requestedMicros) || requestedMicros <= 0) {
-    throw new Error("credit debit requires a positive, safe integer micro amount");
-  }
-  const debitedMicros = Math.min(requestedMicros, spendableCreditMicros(balance, usage, origin));
-  // API work spends credits only: no plan allowance and no promotional grant.
-  if (origin === "api") return { debitedMicros, allocations: [] };
-  // Existing general-credit debt can leave less spendable general funding than
-  // the derived allowance. Prepaid admission must never mint spendable credit
-  // by repeatedly preserving promotional grants while overdrawing general.
-  const planBudget = Math.min(
-    balance.plan?.creditScoped ? 0 : (balance.plan?.creditRemainingMicros ?? 0),
-    Math.max(0, appGeneralMicros(balance)),
-  );
-  return {
-    debitedMicros,
-    allocations: allocateToCoveringGrants(balance, debitedMicros, usage, planBudget),
-  };
 }
 
 /**

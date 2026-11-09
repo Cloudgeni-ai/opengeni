@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   CreateSiteAuthConnectionRequest,
   SiteAuthConnection,
@@ -12,7 +13,7 @@ import {
 } from "../session-context";
 import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
-export type UseSiteAuthConnectionsOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseSiteAuthConnectionsOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   enabled?: boolean | undefined;
   includeArchived?: boolean | undefined;
 };
@@ -223,4 +224,4 @@ function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
-export type SiteAuthConnectionsClient = EmbeddedBrowserInteractionClientLike;
+export type SiteAuthConnectionsClient = EmbeddedBrowserInteractionClientLike<ChatClient>;

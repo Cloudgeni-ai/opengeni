@@ -4,6 +4,7 @@ import {
   resolveDriveConnectReturn,
   completeDriveConnectReturn,
 } from "@opengeni/react/app/lib/drive-connect-return";
+import type { ChatClient } from "@opengeni/sdk";
 import { PERSONAL_INTEGRATION_SETUP_PERMISSION } from "@opengeni/contracts/personal-integration-setup";
 import type { SkillSummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -13,6 +14,7 @@ import {
 } from "@/components/capabilities/catalog-presentation";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
+  attentionFirst,
   ConnectionCatalog,
   McpConnectionCard,
   type ConnectionCatalogService,
@@ -119,9 +121,7 @@ import {
 } from "@opengeni/react/app/components/capabilities/native-connect-readiness";
 import { useCapabilitiesCatalog } from "@opengeni/react/app/components/capabilities/use-capabilities-catalog";
 import { useCatalogConnectionAccounts } from "@/components/capabilities/use-catalog-connection-accounts";
-import { useAtlassianIntegration } from "@/components/capabilities/use-atlassian-integration";
 import { useGitHubIntegration } from "@/components/capabilities/use-github-integration";
-import { useGoogleDriveIntegration } from "@/components/capabilities/use-google-drive-integration";
 import { useOneDriveIntegration } from "@/components/capabilities/use-onedrive-integration";
 import { useSharePointIntegration } from "@/components/capabilities/use-sharepoint-integration";
 import { useOutlookCalendarIntegration } from "@/components/capabilities/use-outlook-calendar-integration";
@@ -183,7 +183,6 @@ import {
   canManageWorkspaceIntegrations,
   hasWorkspacePermission,
 } from "@opengeni/react/app/lib/permissions";
-import { request } from "@/api";
 import { LoadErrorState } from "@opengeni/react/app/components/common";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 
@@ -248,22 +247,17 @@ function providerModeCopy(
         };
   }
   if (serviceId === "atlassian") {
-    return optionName === "Retired sync"
-      ? {
-          title: "Previous sync connections",
-          description: "Native sync is retired. Imported documents and history remain.",
-        }
-      : {
-          title: "Let agents work in Jira and Confluence",
-          description: "Read and update the issues and pages you can already see in Atlassian.",
-        };
+    return {
+      title: "Let agents work in Jira and Confluence",
+      description: "Read and update the issues and pages you can already see in Atlassian.",
+    };
   }
   return null;
 }
 
 /** Keep the OAuth-return connection read alive even when the catalog read fails. */
 export function fetchOAuthReturnRows(
-  client: Pick<OpenGeniBrowserClient, "listCapabilities">,
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "listCapabilities">,
   workspaceId: string,
   fetchConnections: () => Promise<ConnectionMetadata[] | null>,
 ) {
@@ -290,7 +284,6 @@ export function apiIntegrationAccess(
 type CapabilitiesRouteProps = {
   workspaceId: string;
   initialSection?: "skills";
-  slackLinkToken?: string;
   legacyRedirect?: boolean;
 };
 
@@ -302,7 +295,7 @@ export function CapabilitiesRoute(props: CapabilitiesRouteProps) {
   );
 }
 
-function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: CapabilitiesRouteProps) {
+function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProps) {
   const context = useAppContext();
 
   const client = context.client;
@@ -324,7 +317,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     connections,
     connectionsLoadFailed,
     connectionsAccessDenied,
-    replaceConnection,
     fetchConnections,
     apiIntegrationDefinitions,
     apiIntegrationInstances,
@@ -565,20 +557,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     onRuntimeChanged,
   });
   const github = useGitHubIntegration({ workspaceId });
-  const googleDrive = useGoogleDriveIntegration({
-    workspaceId,
-    connections,
-    refresh,
-    replaceConnection,
-  });
-  const atlassian = useAtlassianIntegration({
-    workspaceId,
-    connections,
-    connectionsLoaded,
-    connectionsLoadFailed: connectionsRetryable,
-    refresh,
-    replaceConnection,
-  });
   // Outlook Mail/Calendar/Contacts and OneDrive: one row per provider, folding
   // every connected account into that row's Connected accounts block. Every
   // curated definition here is oauth2-only, so a single shared effect (below)
@@ -640,17 +618,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   const integrations = [
     { ...slack, model: connectionAccessModel(slack.model, connectionsAccessDenied) },
     github,
-    ...(googleDrive.hasHistoricalConnection
-      ? [
-          {
-            ...googleDrive,
-            model: connectionAccessModel(googleDrive.model, connectionsAccessDenied),
-          },
-        ]
-      : []),
-    ...(atlassian.hasHistoricalConnection
-      ? [{ ...atlassian, model: connectionAccessModel(atlassian.model, connectionsAccessDenied) }]
-      : []),
     ...(teamsBot.visible ? [teamsBot] : []),
     microsoftTeams,
     outlookMail,
@@ -692,12 +659,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         options: [
           {
             id: model.id,
-            name:
-              model.id === "slack"
-                ? slack.catalogName
-                : model.id === "atlassian"
-                  ? "Retired sync"
-                  : model.name,
+            name: model.id === "slack" ? slack.catalogName : model.name,
             description: INTEGRATION_ROW_COPY[model.id] ?? model.description,
             status: model.chip.label,
             state: catalogStatusForChip(model.chip),
@@ -778,9 +740,13 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     connectorItems,
   );
   // Connected first, then about 30 popular providers. The long tail of the
-  // public registry is reached only by searching, labelled Community.
-  const connectedServices = connectionServices.filter((service) =>
-    service.options.some((option) => option.connected || option.state === "attention"),
+  // public registry is reached only by searching, labelled Community. Within
+  // Connected, anything that needs attention leads, so neither the All
+  // preview nor the full list hides a problem further down.
+  const connectedServices = attentionFirst(
+    connectionServices.filter((service) =>
+      service.options.some((option) => option.connected || option.state === "attention"),
+    ),
   );
   const popularServices = featuredServices
     .filter((service) => !connectedServices.includes(service))
@@ -941,30 +907,6 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
-
-  const slackUserLinkHandled = useRef(false);
-  useEffect(() => {
-    if (!slackLinkToken || slackUserLinkHandled.current) return;
-    slackUserLinkHandled.current = true;
-    clearReturnParams();
-    void request(
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/integrations/slack/user-links`,
-      {
-        method: "POST",
-        body: JSON.stringify({ linkToken: slackLinkToken }),
-      },
-    )
-      .then(() => {
-        toast.success("Slack identity linked", {
-          description: "You can return to Slack and invoke Opengeni again.",
-        });
-      })
-      .catch((error) => {
-        toast.error("Couldn't link your Slack identity", {
-          description: userErrorText(error),
-        });
-      });
-  }, [slackLinkToken, workspaceId, clearReturnParams]);
 
   // Close the page if a live-bound selection vanished from the catalog after a
   // refresh (deleted/unregistered elsewhere) - never leave a ghost open. A

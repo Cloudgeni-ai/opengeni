@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, mock, spyOn, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ComponentProps } from "react";
@@ -9,11 +10,11 @@ import type { ComposerPlusProps } from "./composer-mobile-plus";
 
 let composer: ComposerPlusProps | null = null;
 const context: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   accessContext: AccessContext | null;
   refreshWorkspaceMcpServers: (workspaceId: string) => Promise<void>;
 } = {
-  client: {} as OpenGeniBrowserClient,
+  client: {} as ChatClient<OpenGeniBrowserClient>,
   accessContext: {
     mode: "managed",
     subjectId: "user-a",
@@ -110,7 +111,7 @@ test("same-client grant loss masks composer status before old responses; restora
             : restored.promise;
       },
       catalogAssetUrl: () => null,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     let sendCalls = 0;
     const props = {
       workspaceId: "workspace-a",
@@ -174,7 +175,7 @@ test("composer treats bootstrapping as unknown and accepts an admin read grant",
       return [];
     },
     catalogAssetUrl: () => null,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {
     workspaceId: "workspace-a",
     servers: [],
@@ -228,7 +229,7 @@ test("a catalog failure and connection 403 mask cached composer account status",
       return [connection];
     },
     catalogAssetUrl: () => null,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
 
   const props = {
     workspaceId: "workspace-a",
@@ -300,7 +301,7 @@ async function concurrentComposerReads(order: "late-denial" | "later-success" | 
             : third.promise;
     },
     catalogAssetUrl: () => null,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {
     workspaceId: "workspace-a",
     servers: [],
@@ -407,12 +408,12 @@ test("a late denial from a replaced client cannot mask the current composer", as
     listCapabilities: async () => ({ items: [entry] }),
     listConnections: async () => stale.promise,
     catalogAssetUrl: () => null,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const newClient = {
     listCapabilities: async () => ({ items: [entry] }),
     listConnections: async () => [connection],
     catalogAssetUrl: () => null,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {
     workspaceId: "workspace-a",
     servers: [],
@@ -465,12 +466,12 @@ test("A -> B -> A masks cached composer status before the new A read and fences 
       return aReads === 1 ? [connection] : aReads === 2 ? staleA.promise : freshA.promise;
     },
     catalogAssetUrl: () => null,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const clientB = {
     listCapabilities: async () => ({ items: [entry] }),
     listConnections: async () => staleB.promise,
     catalogAssetUrl: () => null,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {
     workspaceId: "workspace-a",
     servers: [],
@@ -518,14 +519,14 @@ test("a new identity's transient connection failure does not inherit another ide
       throw { status: 403 };
     },
     catalogAssetUrl: () => null,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const clientB = {
     listCapabilities: async () => ({ items: [] }),
     listConnections: async () => {
       throw { status: 503 };
     },
     catalogAssetUrl: () => null,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {
     workspaceId: "workspace-a",
     servers: [],
@@ -589,7 +590,7 @@ test("a pending OAuth start cannot redirect after a connection 403, even after a
           : { authorizationUrl: "https://provider.example/new" };
     },
     catalogAssetUrl: () => null,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {
     workspaceId: "workspace-a",
     servers: [],
@@ -651,7 +652,7 @@ test("a failed connector OAuth return explains an expired link and strips the ca
     listCapabilities: async () => ({ items: [] }),
     listConnections: async () => [],
     catalogAssetUrl: () => null,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {
     workspaceId: "workspace-a",
     servers: [],
@@ -698,7 +699,7 @@ test("a composer that mounts again opens Connectors from the last rows, refreshi
     listCapabilities: async () => ({ items: [entry] }),
     listConnections: async () => (++reads === 1 ? [connection] : second.promise),
     catalogAssetUrl: () => null,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const props = {
     workspaceId: "workspace-a",
     servers: [],

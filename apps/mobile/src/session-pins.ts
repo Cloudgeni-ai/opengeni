@@ -2,7 +2,8 @@ import {
   applySessionPinToLists,
   type PinnedSessionLists,
 } from "@opengeni/react/session-list-model";
-import type { OpenGeniClient, Session } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
+import type { OpenGeniClient, ChatSession as Session } from "@opengeni/sdk";
 import { useNativeTimelineMessages } from "@opengeni/react-native/timeline";
 import * as Haptics from "expo-haptics";
 import { useCallback, type Dispatch, type SetStateAction } from "react";
@@ -20,7 +21,7 @@ export const EMPTY_SESSION_LISTS: SessionLists = { pinned: [], sessions: [] };
  * it really didn't happen.
  */
 export function useSessionPinToggle(input: {
-  client: Pick<OpenGeniClient, "updateSessionPin" | "getSession">;
+  client: Pick<ChatClient<OpenGeniClient>, "updateSessionPin" | "getSession">;
   workspaceId: string | null;
   setLists: Dispatch<SetStateAction<SessionLists>>;
   /** Called with the lists after each change, to keep a cache in step. */

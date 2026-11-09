@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type { AccessGrant, SessionAuthorizationPort } from "@opengeni/contracts";
 import {
+  armSubscriptionCoreCapacityWait,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -8,6 +9,7 @@ import {
   ensureManagedAccessForUser,
   getOrganizationPrivateSessionSettings,
   getSession,
+  getSessionTurn,
   initializeSessionStartAtomically,
   mutateSessionControlInTransaction,
   updateOrganizationPrivateSessionSettings,
@@ -345,4 +347,59 @@ test("private session settings remain owner-scoped even when a host allows the t
   expect(await call(grant, request(session.id), port)).toMatchObject({
     facts: { reasoningEffort: "high" },
   });
+});
+
+test("switching a chat's model moves its capacity-waiting turn onto the new model", async () => {
+  const value = await fixture();
+  await initializeSessionStartAtomically(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    sessionId: value.session.id,
+    reasoningEffortFallback: "medium",
+    createdEventPayload: {},
+  });
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+    sessionId: value.session.id,
+    workflowId: `session-${value.session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") throw new Error("turn not claimed");
+  const armed = await armSubscriptionCoreCapacityWait(client.db, "codex", {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    sessionId: value.session.id,
+    turnId: claimed.turn.id,
+    attemptId,
+    waitReason: "no_eligible_capacity",
+    earliestResetAt: new Date(Date.now() + 4 * 24 * 60 * 60_000),
+    failurePayload: { error: "No Codex subscription has capacity for this turn right now." },
+  });
+  expect(armed.action).toBe("waiting");
+
+  const receipt = await call(value.grant, {
+    ...request(value.session.id),
+    model: "gpt-5.6-sol",
+  });
+  expect(receipt.facts).toMatchObject({
+    model: "gpt-5.6-sol",
+    capacityWaitingTurnContinuesNow: claimed.turn.id,
+  });
+  expect(await getSessionTurn(client.db, value.grant.workspaceId, claimed.turn.id)).toMatchObject({
+    status: "recovering",
+    model: "gpt-5.6-sol",
+  });
+  const resumed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+    sessionId: value.session.id,
+    workflowId: `session-${value.session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  if (resumed.action !== "claimed") throw new Error(`not claimed: ${resumed.action}`);
+  expect(resumed.turn).toMatchObject({ id: claimed.turn.id, model: "gpt-5.6-sol" });
 });

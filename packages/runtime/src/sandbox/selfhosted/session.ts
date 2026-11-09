@@ -46,7 +46,7 @@ import {
 // Manifest (see the `state` field below); selfhosted exec routes over NATS and
 // does not use the manifest, but the SDK requires it present + well-formed.
 import { Manifest } from "@openai/agents/sandbox";
-import { formatExecResponse } from "@openai/agents-core/sandbox/internal";
+import { formatExecResponse, truncateOutput } from "@openai/agents-core/sandbox/internal";
 import type { ExposedPortEndpoint } from "../stream-port";
 import {
   BROWSER_CONTROL_HTTP_REPLY_GRACE_MS,
@@ -54,6 +54,9 @@ import {
   type BrowserControlHttpOutcome,
 } from "../browser-control-http";
 import {
+  AGENT_UNRESPONSIVE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY,
+  AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY,
   agentErrorToControlError,
   commandOutcomeUnknownAfterReplacementAgentError,
   drainingExhaustedError,
@@ -63,6 +66,7 @@ import {
   subjectFor,
   timeoutAgentError,
   type ControlRpc,
+  type UnresponsiveAgentRecovery,
 } from "./control-rpc";
 import {
   decideSelfhostedRetry,
@@ -297,6 +301,9 @@ export interface SelfhostedOpStreamDeps {
   ackIntervalMs?: number;
   silenceTimeoutMs?: number;
   reconnectHoldMs?: number;
+  /** How long a command's start may go unanswered (op-stream.ts
+   *  `OP_START_UNANSWERED_MS`). */
+  startUnansweredMs?: number;
   /** The live runner serves `OpRelease` (Hello `capabilities.op_release`;
    * every compute agent does): stored output is released in one answered
    * exchange instead of a final ACK. */
@@ -426,8 +433,7 @@ export interface SelfhostedSessionDeps {
     input: SelfhostedBackgroundCommandAdoption,
   ) => Promise<{ commandId: string }>;
   /** Record, with a stop request bound to its exact connection, a command this
-   * caller already reported as failed because its machine stopped answering
-   * or its agent connection was replaced. The session's command ledger then stops or settles
+   * caller already reported as failed without terminal proof. The session's command ledger then stops or settles
    * it, and the caller does not wait for a machine that may never answer.
    * For callers without a turn (direct requests); without it, a turn records
    * the command through adoptBackgroundCommand. */
@@ -966,6 +972,14 @@ export class SelfhostedSession {
     return "";
   }
 
+  /** What this session does about a machine whose agent left a command's
+   *  start unanswered for the op stream's bound. A Connected Machine is the
+   *  person's own, so nothing: they are told it is offline. A compute box may
+   *  be restarted (see `ComputeSandboxSession`). */
+  protected async recoverUnresponsiveAgent(): Promise<UnresponsiveAgentRecovery | null> {
+    return null;
+  }
+
   /** Whether the live runner honors per-request `runAs` right now. */
   protected async liveRunAsSupported(): Promise<boolean> {
     return (await this.admitOperation(false)).runAsSupported;
@@ -1057,6 +1071,9 @@ export class SelfhostedSession {
         ? { silenceTimeoutMs: stream.silenceTimeoutMs }
         : {}),
       ...(stream.reconnectHoldMs !== undefined ? { reconnectHoldMs: stream.reconnectHoldMs } : {}),
+      ...(stream.startUnansweredMs !== undefined
+        ? { startUnansweredMs: stream.startUnansweredMs }
+        : {}),
       ...(connectionCurrent ? { connectionCurrent } : {}),
       ...(stream.outputReleaseSupported === true ? { outputReleaseSupported: true } : {}),
       ...(stream.connectionGeneration !== undefined
@@ -1448,6 +1465,8 @@ export class SelfhostedSession {
     let adoptedCommandId: string | null = null;
     let ownershipTransferPending = false;
     let terminalProof = false;
+    let foregroundFinished = false;
+    let abandonment: Promise<void> | null = null;
     // The start reached no agent before its connection was replaced: it
     // never ran.
     let notDispatched = false;
@@ -1463,7 +1482,47 @@ export class SelfhostedSession {
     this.inFlightOpStreamOutput.set(opId, retainedOutput);
     const yieldBackground = backgroundYieldMs > 0 && this.adoptBackgroundCommand !== undefined;
     const earlyYield = new AbortController();
+    const abandon = async (): Promise<void> => {
+      if (adoptedCommandId) return;
+      if (!this.abandonCommand) throw new Error("No durable command custody is available");
+      abandonment ??= (async () => {
+        notifyDurableOpOwnershipTransferStarted(opId);
+        try {
+          const abandoned = await this.abandonCommand!({
+            controlWorkspaceId: admission.controlWorkspaceId,
+            enrollmentId: this.agentId,
+            connectionInstanceId: admission.connectionInstanceId,
+            opId,
+            command,
+          });
+          adoptedCommandId = abandoned.commandId;
+          notifyDurableOpOwnershipTransferred(opId);
+          if (this.inFlightOpStreamClients.get(opId) === client) {
+            this.inFlightOpStreamClients.delete(opId);
+            this.inFlightOpStreamOutput.delete(opId);
+          }
+        } catch (error) {
+          notifyDurableOpOwnershipTransferFailed(opId);
+          throw error;
+        }
+      })();
+      try {
+        await abandonment;
+      } finally {
+        abandonment = null;
+      }
+    };
     const remoteControl: RemoteOperationControl = {
+      abandonExecCommand: async (requestedOpId) => {
+        if (requestedOpId !== opId || !foregroundFinished || terminalProof || notDispatched)
+          return false;
+        if (!this.abandonCommand) return false;
+        // The command's original consumer has ended. Reuse its exact launch
+        // identity even if the machine never answers again or an earlier
+        // adoption failed. No OpStart, route lookup, or output ACK is needed.
+        await abandon();
+        return true;
+      },
       yieldExecCommand: (requestedOpId) => {
         if (requestedOpId !== opId || !yieldBackground) return false;
         earlyYield.abort();
@@ -1715,19 +1774,10 @@ export class SelfhostedSession {
         // answers again, or settles it once its runner is retired. If recording
         // fails, cleanup keeps ownership.
         try {
-          notifyDurableOpOwnershipTransferStarted(opId);
-          const abandoned = await this.abandonCommand({
-            controlWorkspaceId: admission.controlWorkspaceId,
-            enrollmentId: this.agentId,
-            connectionInstanceId: admission.connectionInstanceId,
-            opId,
-            command,
-          });
-          adoptedCommandId = abandoned.commandId;
+          await abandon();
           stopRecorded = true;
-          notifyDurableOpOwnershipTransferred(opId);
         } catch {
-          notifyDurableOpOwnershipTransferFailed(opId);
+          // Retained exact control retries durable custody during finalization.
         }
       }
       const startConfirmed = controlError.detail[START_CONFIRMED_DETAIL_KEY];
@@ -1755,8 +1805,22 @@ export class SelfhostedSession {
       // The op stream marks a failure never-sent only when no OpStart
       // reached any agent: nothing of it ran, so nothing needs custody.
       if (controlError.neverSent) notDispatched = true;
+      if (controlError.detail[AGENT_UNRESPONSIVE_DETAIL_KEY] !== undefined) {
+        // The agent answered nothing for the bound: say what kind of machine
+        // stopped answering and what was done about it, after the command's
+        // custody is settled above.
+        const recovery = await this.recoverUnresponsiveAgent().catch(
+          () => "restart_failed" as const,
+        );
+        controlError = withDetail(controlError, {
+          [AGENT_UNRESPONSIVE_MACHINE_DETAIL_KEY]:
+            this.backendId === "compute" ? "compute" : "connected_machine",
+          [AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY]: recovery ?? "none",
+        });
+      }
       throw controlError;
     } finally {
+      foregroundFinished = true;
       // An observer failure does not prove that the exact provider operation
       // stopped. Keep its launch client available for cancellation and
       // readExisting recovery; only terminal proof or durable adoption releases
@@ -1795,16 +1859,27 @@ export class SelfhostedSession {
    *  stdout/stderr). This path must match that contract: returning raw stdout
    *  made `ls` ENOENT and `npx --help` look like success with empty output.
    *  The structured `exec()` result stays split for Channel-A parsers; the
-   *  deadline hint already lands on stderr there and is included in this body. */
+   *  deadline hint already lands on stderr there and is included in this body.
+   *
+   *  `maxOutputTokens` bounds the body in both branches with the same head-and-
+   *  tail `truncateOutput` (and "Original token count" line) that the SDK local
+   *  shell, Modal and OpenSandbox use. The status header, the background handles
+   *  and the child-cleanup notice stay outside the bound so they are never cut. */
   async execCommand(args: SelfhostedExecArgs): Promise<string> {
     const startedAt = Date.now();
     const result = await this.execWithYield(this.withExecCommandDefaultShell(args));
+    const output = truncateOutput(
+      joinExecCommandOutput(result.stdout, result.stderr),
+      args.maxOutputTokens,
+    );
     if (result.backgroundCommandId && result.backgroundOpId) {
-      const output = joinExecCommandOutput(result.stdout, result.stderr);
       return [
         `Command running in background with command ID ${result.backgroundCommandId}.`,
         `Connected Machine operation ${result.backgroundOpId} remains pinned to its launch daemon.`,
-        ...(output ? ["", "Output:", output] : []),
+        ...(output.originalTokenCount !== undefined
+          ? [`Original token count: ${output.originalTokenCount}`]
+          : []),
+        ...(output.text ? ["", "Output:", output.text] : []),
       ].join("\n");
     }
     const exitCode =
@@ -1812,9 +1887,12 @@ export class SelfhostedSession {
         ? result.exitCode
         : 1;
     const formatted = formatExecResponse({
-      output: joinExecCommandOutput(result.stdout, result.stderr),
+      output: output.text,
       wallTimeSeconds: Math.max(0, Date.now() - startedAt) / 1000,
       exitCode,
+      ...(output.originalTokenCount !== undefined
+        ? { originalTokenCount: output.originalTokenCount }
+        : {}),
     });
     return result.backgroundChildrenStopped
       ? `${formatted}\n\n${CONNECTED_COMMAND_CHILD_CLEANUP_NOTICE}`
@@ -3227,6 +3305,28 @@ function mediaTypeFromPath(path: string): string | undefined {
   if (p.endsWith(".tif") || p.endsWith(".tiff")) return "image/tiff";
   if (p.endsWith(".svg") || p.endsWith(".svgz")) return "image/svg+xml";
   return undefined;
+}
+
+/** The same error with `extra` added to its detail. */
+function withDetail(
+  error: SelfhostedControlError,
+  extra: Record<string, string>,
+): SelfhostedControlError {
+  return new SelfhostedControlError({
+    message: error.message,
+    code: error.code,
+    reason: error.reason,
+    retryable: error.retryable,
+    fenced: error.fenced,
+    draining: error.draining,
+    agentOffline: error.agentOffline,
+    osNotFound: error.osNotFound,
+    payloadTooLarge: error.payloadTooLarge,
+    neverSent: error.neverSent,
+    connectionReplaced: error.connectionReplaced,
+    controlRequestId: error.controlRequestId,
+    detail: { ...error.detail, ...extra },
+  });
 }
 
 /** How many times an exec whose start reached no agent before its

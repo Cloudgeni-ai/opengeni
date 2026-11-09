@@ -255,10 +255,21 @@ function fixture(
       },
       body: JSON.stringify(body),
     });
+  const resolveLink = async (
+    id: string,
+    permissions: Permission[] = ["files:read", "artifacts:read"],
+    query = "",
+  ) =>
+    app.request(`/v1/workspaces/${workspaceId}/artifact-catalog/${id}/resolve${query}`, {
+      headers: {
+        authorization: `Bearer ${await signDelegatedAccessToken(SECRET, { accountId, workspaceId, subjectId: "user:catalog", principalKind: "human_session", permissions, exp: Math.floor(Date.now() / 1000) + 3600 })}`,
+      },
+    });
   return {
     app,
     request,
     pin,
+    resolveLink,
     reads,
     queries,
     selectedTables,
@@ -266,6 +277,59 @@ function fixture(
     siteVisibilityChecks,
   };
 }
+
+test("exact UUID resolution checks both domains and preserves readable file precedence on a collision", async () => {
+  const id = "40000000-0000-4000-8000-000000000004";
+  const file = {
+    id,
+    accountId,
+    workspaceId,
+    filename: "report.txt",
+    safeFilename: "report.txt",
+    status: "ready",
+    contentType: "text/plain",
+    sizeBytes: 10,
+    sha256: "a".repeat(64),
+    bucket: "private-bucket",
+    objectKey: "private-object-key",
+    createdAt: new Date(createdAt),
+    updatedAt: new Date(createdAt),
+  };
+  const collision = fixture([], { file });
+  const response = await collision.resolveLink(id);
+  expect(response.status, await response.clone().text()).toBe(200);
+  expect(await response.json()).toEqual({ artifactId: id, kind: "file" });
+  expect(response.headers.get("cache-control")).toBe("private, no-store");
+  expect(collision.selectedTables).toContain("files");
+  expect(collision.selectedTables).toContain("workspace_artifacts");
+  // No file permission means no file metadata read, even in a collision.
+  const siteOnly = fixture([], { file });
+  const site = await siteOnly.resolveLink(id, ["artifacts:read"]);
+  expect(await site.json()).toEqual({ artifactId: id, kind: "site" });
+  expect(siteOnly.selectedTables).not.toContain("files");
+  const fileOnly = fixture([], { file });
+  expect(await (await fileOnly.resolveLink(id, ["files:read"])).json()).toEqual({
+    artifactId: id,
+    kind: "file",
+  });
+  expect(fileOnly.selectedTables).not.toContain("workspace_artifacts");
+});
+
+test("exact UUID resolution distinguishes Sites and unavailable artifacts without leaking metadata", async () => {
+  const id = "40000000-0000-4000-8000-000000000004";
+  expect(await (await fixture([]).resolveLink(id)).json()).toEqual({
+    artifactId: id,
+    kind: "site",
+  });
+  const missing = await fixture([], { hiddenSite: true }).resolveLink(id);
+  expect(missing.status).toBe(404);
+  expect(await missing.json()).toEqual({ message: "Artifact not found" });
+  expect((await fixture([]).resolveLink(id, ["sessions:read"])).status).toBe(403);
+  expect((await fixture([]).resolveLink("invalid")).status).toBe(422);
+  expect((await fixture([]).resolveLink(id, ["files:read"], "?sessionId=invalid")).status).toBe(
+    422,
+  );
+});
 
 test("pin mutations require publish plus target-domain read authority and validate closed input", async () => {
   const target = "40000000-0000-4000-8000-000000000004";

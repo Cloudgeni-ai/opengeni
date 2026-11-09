@@ -1,6 +1,6 @@
 /**
- * A chat's avatar: what a bot looks like in the sidebar, its header and the
- * bot templates. A rounded square, so it never reads as a person's round
+ * A chat's avatar: how a chat or agent looks in the sidebar, its header and the
+ * Agents page. A rounded square, so it never reads as a person's round
  * monogram. Emoji sit on a soft tint of their hue; icons and letters are
  * white on it. An image avatar is a workspace image each viewer opens with
  * their own access; until it loads, or when they cannot open it, the chat's
@@ -38,6 +38,11 @@ import type { RetainedArtifactMetadata, RetainedArtifactReference } from "@openg
 import type { SessionAvatar as SessionAvatarValue, SessionAvatarIcon } from "@opengeni/sdk";
 
 import { isRetainedImageContentType, useRetainedImageObjectUrl } from "../../../artifacts";
+import {
+  sessionAvatarFallbackHue,
+  sessionAvatarInitials,
+  sessionAvatarTileCss,
+} from "../../../session-avatar-model";
 import { createWorkspaceRetainedArtifactLoader } from "../../../timeline";
 import { useAppContext } from "../../app-context";
 import { cn } from "../../lib/utils";
@@ -105,25 +110,10 @@ const SIZE: Record<SessionAvatarSize, { box: string; icon: string; text: string;
     },
   };
 
-/** One or two initials for a name: the first letter of its first two words. */
-export function sessionAvatarInitials(name: string): string {
-  const words = name
-    .trim()
-    .split(/\s+/u)
-    .map((word) => [...word].find((char) => /[\p{L}\p{N}]/u.test(char)))
-    .filter((char): char is string => Boolean(char));
-  return words.slice(0, 2).join("").toUpperCase() || "?";
-}
-
-/** A stable hue for a chat without one (its id or name). */
-export function sessionAvatarFallbackHue(seed: string): number {
-  let hash = 0;
-  for (const char of seed) hash = (hash * 31 + char.codePointAt(0)!) >>> 0;
-  return hash % 360;
-}
+export { sessionAvatarFallbackHue, sessionAvatarInitials };
 
 function solid(hue: number): CSSProperties {
-  return { background: `oklch(0.56 0.11 ${hue})` };
+  return { background: sessionAvatarTileCss("solid", hue) };
 }
 
 export function SessionAvatar({
@@ -176,6 +166,7 @@ export function SessionAvatar({
         className={cn(
           box,
           dims.emoji,
+          // SESSION_AVATAR_TILE.emojiLight and .emojiDark (a test keeps them in step).
           "bg-[oklch(0.92_0.045_var(--avatar-hue))] dark:bg-[oklch(0.36_0.055_var(--avatar-hue))]",
         )}
         style={{ "--avatar-hue": avatar.hue } as CSSProperties}

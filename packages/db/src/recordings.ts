@@ -46,6 +46,7 @@ import {
   learnConfirmedVoices,
   rejectedVoices,
   rejectVoiceSuggestion,
+  releaseRecordingVoices,
   suggestSpeakersByVoice,
   syncSpeakerVoice,
   type RecordingSpeakerVoice,
@@ -1059,7 +1060,8 @@ export async function nameRecording(
 /**
  * Start deleting a recording: it disappears from every read at once, and the
  * deletion workflow then removes its media objects and its rows. Only the
- * person who recorded it may delete it. Repeating it is harmless.
+ * person who recorded it may delete it. Its speakers' voices leave the
+ * voiceprints they taught in the same step. Repeating it is harmless.
  */
 export async function markRecordingDeleting(
   db: Database,
@@ -1078,6 +1080,12 @@ export async function markRecordingDeleting(
       .for("update");
     if (!row) throw new RecordingNotFoundError();
     if (row.ownerSubjectId !== input.subjectId) throw new RecordingForbiddenError();
+    // Also on a retry: a recording marked deleting before this step existed
+    // still releases its voices.
+    await releaseRecordingVoices(tx, {
+      workspaceId: input.workspaceId,
+      recordingId: input.recordingId,
+    });
     if (row.state === "deleting") return { ownerSubjectId: row.ownerSubjectId };
     await tx
       .update(schema.recordings)
@@ -1130,6 +1138,7 @@ export async function listDeletingRecordingObjectKeys(
         .select({
           objectKey: schema.recordingTracks.preparedObjectKey,
           kind: schema.recordingTracks.kind,
+          trackNumber: schema.recordingTracks.trackNumber,
         })
         .from(schema.recordingTracks)
         .where(
@@ -1143,6 +1152,12 @@ export async function listDeletingRecordingObjectKeys(
       ...new Set([
         ...chunks.map((chunk) => chunk.objectKey),
         ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
+        // The speaker scan saved while a meeting was still recording.
+        ...tracks.flatMap((track) =>
+          track.kind === "video"
+            ? []
+            : [recordingSpeakerScanObjectKey({ ...input, trackNumber: track.trackNumber })],
+        ),
         // A browser recording's video and the action log beside it, even if
         // the worker saved them without recording it yet.
         ...(tracks.some((track) => track.kind === "video")
@@ -1206,6 +1221,18 @@ export function recordingPreparedTrackObjectKey(input: {
 }
 
 /**
+ * Where the worker keeps a meeting track's speaker scan while the meeting is
+ * still recording, so the final run only scans the audio after it.
+ */
+export function recordingSpeakerScanObjectKey(input: {
+  workspaceId: string;
+  recordingId: string;
+  trackNumber: number;
+}): string {
+  return `workspaces/${input.workspaceId}/recordings/${input.recordingId}/prepared/track-${input.trackNumber}.speakers`;
+}
+
+/**
  * Record the worker's prepared file for a track and its measured duration.
  * The recording's duration becomes the longest prepared track.
  */
@@ -1252,16 +1279,21 @@ export async function setRecordingTrackPrepared(
   });
 }
 
-/** A track's prepared file, for playback and re-runs. Null until the worker made it. */
+/**
+ * A track's prepared file, for playback and re-runs. Null until the worker
+ * made it. `chunkObjectsDeleted`: the uploaded pieces are gone, so this
+ * file is the track's only audio.
+ */
 export async function getRecordingTrackPreparedObject(
   db: Database,
   input: RecordingActor & { recordingId: string; trackNumber: number },
-): Promise<{ objectKey: string; bytes: number } | null> {
+): Promise<{ objectKey: string; bytes: number; chunkObjectsDeleted: boolean } | null> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
     const [row] = await tx
       .select({
         objectKey: schema.recordingTracks.preparedObjectKey,
         bytes: schema.recordingTracks.preparedBytes,
+        chunkObjectsDeletedAt: schema.recordingTracks.chunkObjectsDeletedAt,
         state: schema.recordings.state,
       })
       .from(schema.recordingTracks)
@@ -1281,8 +1313,75 @@ export async function getRecordingTrackPreparedObject(
       );
     if (!row || row.state === "deleting") throw new RecordingNotFoundError();
     if (!row.objectKey || row.bytes === null) return null;
-    return { objectKey: row.objectKey, bytes: Number(row.bytes) };
+    return {
+      objectKey: row.objectKey,
+      bytes: Number(row.bytes),
+      chunkObjectsDeleted: row.chunkObjectsDeletedAt !== null,
+    };
   });
+}
+
+/**
+ * The track's uploaded pieces are deleted: its kept file (`objectKey`) holds
+ * everything they did. Only while that file is still the track's.
+ */
+export async function markRecordingTrackChunkObjectsDeleted(
+  db: Database,
+  input: RecordingActor & { recordingId: string; trackNumber: number; objectKey: string },
+): Promise<boolean> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const updated = await tx
+      .update(schema.recordingTracks)
+      .set({ chunkObjectsDeletedAt: sql`clock_timestamp()` })
+      .where(
+        and(
+          eq(schema.recordingTracks.workspaceId, input.workspaceId),
+          eq(schema.recordingTracks.recordingId, input.recordingId),
+          eq(schema.recordingTracks.trackNumber, input.trackNumber),
+          eq(schema.recordingTracks.preparedObjectKey, input.objectKey),
+          isNull(schema.recordingTracks.chunkObjectsDeletedAt),
+        ),
+      )
+      .returning({ trackNumber: schema.recordingTracks.trackNumber });
+    return updated.length > 0;
+  });
+}
+
+export type UncompactedRecordingTrack = {
+  accountId: string;
+  workspaceId: string;
+  recordingId: string;
+  ownerSubjectId: string;
+  trackNumber: number;
+};
+
+/**
+ * Finished meetings' audio tracks, across every workspace, whose kept file
+ * is not yet in the kept format (its key does not end in `keptSuffix`) or
+ * whose uploaded pieces are still stored beside it (migration 1240).
+ * Identity only; the caller acts on each as its owner.
+ */
+export async function listUncompactedRecordingTracks(
+  db: Database,
+  input: { keptSuffix: string; limit?: number },
+): Promise<UncompactedRecordingTrack[]> {
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    recording_id: string;
+    owner_subject_id: string;
+    track_number: number;
+  }>(
+    db,
+    sql`select * from opengeni_private.list_uncompacted_recording_tracks_v1(${input.limit ?? 20}, ${input.keptSuffix})`,
+  );
+  return rows.map((row) => ({
+    accountId: row.account_id,
+    workspaceId: row.workspace_id,
+    recordingId: row.recording_id,
+    ownerSubjectId: row.owner_subject_id,
+    trackNumber: Number(row.track_number),
+  }));
 }
 
 /**
@@ -3543,6 +3642,41 @@ export const MEETING_SUMMARY_POLICY_ROLE = "meeting_summary";
 export const MEETING_SUMMARY_RECORDING_METADATA_KEY = "meetingSummaryRecordingId";
 export const MEETING_SUMMARY_TOOLS = ["meeting_read", "meeting_notes_save"] as const;
 
+/**
+ * The built-in summary chats of a meeting that nobody has written in and that
+ * are not archived yet. A deleted meeting's summary chat has nothing left to
+ * read, so the deletion archives these; a chat someone wrote in is theirs and
+ * stays. Read as the meeting's owner, who sees its Only me summary chat.
+ */
+export async function listUntouchedMeetingSummarySessions(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<string[]> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const rows = await tx
+      .select({ id: schema.sessions.id })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.createdByKind, "service"),
+          eq(schema.sessions.createdBySubjectId, MEETING_SUMMARY_SUBJECT_ID),
+          eq(schema.sessions.policyRole, MEETING_SUMMARY_POLICY_ROLE),
+          sql`${schema.sessions.metadata} ->> ${MEETING_SUMMARY_RECORDING_METADATA_KEY} = ${input.recordingId}`,
+          isNull(schema.sessions.parentSessionId),
+          isNull(schema.sessions.archivedAt),
+          isNull(schema.sessions.contentArchiveState),
+          sql`not exists (
+            select 1 from ${schema.sessionTurns}
+            where ${schema.sessionTurns.workspaceId} = ${schema.sessions.workspaceId}
+              and ${schema.sessionTurns.sessionId} = ${schema.sessions.id}
+              and ${schema.sessionTurns.initiatorKind} <> 'service')`,
+        ),
+      );
+    return rows.map((row) => row.id);
+  });
+}
+
 export type MeetingSummaryCandidate =
   | {
       start: true;
@@ -4087,7 +4221,11 @@ export async function beginRecordingAudioExpiry(
           ),
         ),
       tx
-        .select({ objectKey: schema.recordingTracks.preparedObjectKey })
+        .select({
+          objectKey: schema.recordingTracks.preparedObjectKey,
+          kind: schema.recordingTracks.kind,
+          trackNumber: schema.recordingTracks.trackNumber,
+        })
         .from(schema.recordingTracks)
         .where(
           and(
@@ -4100,6 +4238,12 @@ export async function beginRecordingAudioExpiry(
       ...new Set([
         ...chunks.map((chunk) => chunk.objectKey),
         ...tracks.flatMap((track) => (track.objectKey ? [track.objectKey] : [])),
+        // Voice features from a scan the final transcript never collected.
+        ...tracks.flatMap((track) =>
+          track.kind === "video"
+            ? []
+            : [recordingSpeakerScanObjectKey({ ...input, trackNumber: track.trackNumber })],
+        ),
       ]),
     ];
   });

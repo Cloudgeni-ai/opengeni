@@ -6,6 +6,7 @@ import { resolve, join } from "node:path";
 import { promisify } from "node:util";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { Manifest } from "@openai/agents/sandbox";
 import {
   createSandboxClientForBackend,
@@ -1860,10 +1861,36 @@ describe("retained-process terminal-owner reconciliation", () => {
       }),
     ).toBeNull();
     expect(await listSessionBackgroundCommands(db, fixture)).toEqual([]);
-    expect(await recoverManagedSessionBackgroundCommand(db, input)).toMatchObject({
+    const controlQueries: string[] = [];
+    const dialect = new PgDialect();
+    const observe = (database: Database): Database =>
+      new Proxy(database, {
+        get(target, property, receiver) {
+          if (property === "transaction")
+            return (run: (tx: Database) => Promise<unknown>, config?: unknown) =>
+              target.transaction((tx) => run(observe(tx)), config as never);
+          if (property === "execute")
+            return (query: Parameters<Database["execute"]>[0]) => {
+              controlQueries.push(
+                typeof query === "string" ? query : dialect.sqlToQuery(query.getSQL()).sql,
+              );
+              return target.execute(query);
+            };
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    expect(await recoverManagedSessionBackgroundCommand(observe(db), input)).toMatchObject({
       id: fixture.process.id,
       state: "running",
     });
+    expect(
+      controlQueries.filter(
+        (query) =>
+          /count\s*\(/i.test(query) &&
+          /session_background_commands|session_attempt_interruptions/i.test(query),
+      ),
+    ).toEqual([]);
     expect(await recoverManagedSessionBackgroundCommand(db, input)).toBeNull();
     expect(await listSessionBackgroundCommands(db, fixture)).toHaveLength(1);
   }, 60_000);

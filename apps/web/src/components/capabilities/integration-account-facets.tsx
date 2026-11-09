@@ -1,12 +1,12 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 
 import { IntegrationFacetsPanel } from "@/components/capabilities/integration-facets-panel";
 import type { ApiIntegrationInstallationSummary } from "@opengeni/react/app/types";
 
 /**
- * The per-account facets surface (Inbound triggers, Delivery destinations,
- * Identity links, and any retired Knowledge source saved earlier) for exactly
- * one installed ApiIntegration instance.
+ * The per-account facets surface (Inbound triggers, Delivery destinations and
+ * Identity links) for exactly one installed ApiIntegration instance.
  *
  * It exists as its own module so the integration sheet can lazy-load the
  * facets panel behind one static boundary, keeping it out of the Capabilities
@@ -20,7 +20,7 @@ export function IntegrationAccountFacets({
   canManage,
   refreshRevision,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
   facetCount: number;

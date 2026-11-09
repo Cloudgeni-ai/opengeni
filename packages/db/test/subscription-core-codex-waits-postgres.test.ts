@@ -508,9 +508,11 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     });
     expect(armed.waiter.nextCheckAt.getTime()).toBeGreaterThanOrEqual(armedAt + 60_000);
     expect(armed.waiter.nextCheckAt.getTime()).toBeLessThan(resetAt);
+    // An hour-long wait is long, so this top-level chat's person is told at once.
     expect(armed.events.map((event) => event.type)).toEqual([
       "codex.capacity.waiting",
       "session.status.changed",
+      "session.notification.posted",
     ]);
     expect(armed.events[0]!.payload).toMatchObject({
       code: "subscription_capacity_unavailable",
@@ -582,6 +584,7 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     expect(resumed.events.map((event) => event.type)).toEqual([
       "codex.capacity.resumed",
       "session.status.changed",
+      "session.notification.withdrawn",
     ]);
     expect(await waiterRows(turn)).toEqual([]);
     expect(await rowState(turn)).toMatchObject({
@@ -596,6 +599,104 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         evaluation: { kind: "run" },
       }),
     ).toEqual({ action: "stale", events: [] });
+  });
+
+  test("the person's notification is restated in place when its reset passes or a later limit binds, never for an earlier one", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "restated");
+    // A short-window reset an hour out: the wait is announced with it.
+    const shortReset = Date.now() + 3_600_000;
+    await exhaust(org, connectionId, shortReset);
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    const armed = await arm(turn, new Date(shortReset));
+    if (armed.action !== "waiting") throw new Error(`arm returned ${armed.action}`);
+    const announced = armed.events.find((event) => event.type === "session.notification.posted");
+    expect(announced!.payload).toMatchObject({
+      key: `capacity-wait:${turn.identity.turnId}`,
+      replaced: false,
+    });
+    const marker = async () => {
+      const [row] = await shared!.admin<{ notice: { key: string; resetsAt: string | null } }[]>`
+        select metadata->'capacityWaitNoticeV1' as notice from session_turns
+        where id = ${turn.identity.turnId}::uuid`;
+      return row!.notice;
+    };
+    expect(await marker()).toEqual({
+      key: `capacity-wait:${turn.identity.turnId}`,
+      resetsAt: new Date(shortReset).toISOString(),
+    });
+    const reconcile = (earliestResetAt: Date | null) =>
+      reconcileSubscriptionCoreCodexCapacityWait(client!.db, {
+        accountId: org.accountId,
+        workspaceId: org.sharedWorkspaceId,
+        sessionId: turn.identity.sessionId,
+        waiterId: armed.waiter.waiterId,
+        generation: armed.waiter.generation,
+        evaluatedWakeRevision: armed.waiter.wakeRevision,
+        evaluation: {
+          kind: "wait" as const,
+          waitReason: "no_eligible_capacity",
+          earliestResetAt,
+          healthRetryAt: null,
+        },
+      });
+
+    // The check finds the weekly limit binding days later: the same
+    // notification now names that reset, silently (replaced).
+    const weeklyReset = new Date(Date.now() + 5 * 86_400_000);
+    const restated = await reconcile(weeklyReset);
+    expect(restated.action).toBe("waiting");
+    expect(restated.events.map((event) => event.type)).toEqual(["session.notification.posted"]);
+    const weeklyText = `${weeklyReset.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+    expect(restated.events[0]!.payload).toMatchObject({
+      key: `capacity-wait:${turn.identity.turnId}`,
+      replaced: true,
+      body: expect.stringContaining(weeklyText),
+    });
+    expect(await marker()).toMatchObject({ resetsAt: weeklyReset.toISOString() });
+    // Unchanged, or expected back sooner than it says: nothing more is posted.
+    expect((await reconcile(weeklyReset)).events).toEqual([]);
+    expect((await reconcile(new Date(weeklyReset.getTime() - 86_400_000))).events).toEqual([]);
+
+    // The time the notification named passes without capacity: the next
+    // check restates the reset that now holds, never leaving a past promise.
+    const passed = new Date(Date.now() - 60_000).toISOString();
+    await shared!.admin`
+      update session_turns
+      set metadata = jsonb_set(metadata, '{capacityWaitNoticeV1,resetsAt}', to_jsonb(${passed}::text))
+      where id = ${turn.identity.turnId}::uuid`;
+    const afterPass = await reconcile(weeklyReset);
+    expect(afterPass.events.map((event) => event.type)).toEqual(["session.notification.posted"]);
+    expect(afterPass.events[0]!.payload).toMatchObject({
+      replaced: true,
+      body: expect.stringContaining(weeklyText),
+    });
+    // An unknown reset is said as unknown.
+    const unknown = await reconcile(null);
+    expect(unknown.events[0]!.payload).toMatchObject({
+      body: expect.stringContaining("no reset time is known"),
+    });
+    expect(await marker()).toMatchObject({ resetsAt: null });
+    expect(await rowState(turn)).toMatchObject({
+      session_status: "waiting_capacity",
+      turn_status: "waiting_capacity",
+    });
+    // The wait's end still withdraws the one notification by its key.
+    await exhaust(org, connectionId, null);
+    const resumed = await reconcileSubscriptionCoreCodexCapacityWait(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId: turn.identity.sessionId,
+      waiterId: armed.waiter.waiterId,
+      generation: armed.waiter.generation,
+      evaluatedWakeRevision: armed.waiter.wakeRevision,
+      evaluation: { kind: "run" },
+    });
+    expect(resumed.action).toBe("resumed");
+    expect(resumed.events.at(-1)).toMatchObject({
+      type: "session.notification.withdrawn",
+      payload: { key: `capacity-wait:${turn.identity.turnId}` },
+    });
   });
 
   test("a redeemed reset credit resumes a turn parked on a stale weekly window without a usage read", async () => {
@@ -1005,7 +1106,10 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     });
     expect(removed).toMatchObject({
       action: "superseded",
-      events: [{ type: "codex.capacity.superseded", payload: { reason: "active_turn_changed" } }],
+      events: [
+        { type: "codex.capacity.superseded", payload: { reason: "active_turn_changed" } },
+        { type: "session.notification.withdrawn" },
+      ],
     });
     expect(await waiterRows(orphaned)).toEqual([]);
     expect(
@@ -1091,8 +1195,9 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     if (claimed.action !== "claimed") throw new Error(`claim failed: ${claimed.reason}`);
     expect(claimed.turn.id).toBe(sent.turnId);
 
-    // A paused chat keeps an ordinary Send inert, as for any other wait: the
-    // parked turn and its waiter stay, and the message waits in the queue.
+    // A paused chat keeps an ordinary Send inert. Pause already released the
+    // parked turn from its wait (no waiter; it stays the active turn, ready for
+    // Resume), and the message waits in the queue behind it.
     const paused = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
     if ((await arm(paused, resetAt)).action !== "waiting") throw new Error("arm failed");
     await asOwner((tx) =>
@@ -1108,10 +1213,11 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     const queued = await send(paused.identity.sessionId, "later");
     expect(queued.turn.metadata).not.toMatchObject({ delivery: "steer" });
     expect(queued.turn.status).toBe("queued");
-    expect(await waiterRows(paused)).toHaveLength(1);
+    expect(await waiterRows(paused)).toEqual([]);
     expect(await rowState(paused)).toMatchObject({
+      session_status: "idle",
       active_turn_id: paused.identity.turnId,
-      turn_status: "waiting_capacity",
+      turn_status: "recovering",
     });
   });
 

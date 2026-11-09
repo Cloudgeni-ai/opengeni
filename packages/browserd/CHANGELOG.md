@@ -1,5 +1,69 @@
 # @opengeni/browserd
 
+## 0.4.24
+
+### Patch Changes
+
+- 8c1e874: A managed browser's preserved profile can be relaunched again after its Linux machine reboots. Linux can give the disk a new device number at boot, and recovery took that for a moved or copied profile and refused it, so the browser was recorded as lost. After a reboot, a profile with the same inode at the exact recorded path now counts as the same directory. Within one boot the device number must still match, and a copied or moved profile is still refused.
+- Updated dependencies [64fd53f]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+  - @opengeni/interaction@6.12.0
+
+## 0.4.23
+
+### Patch Changes
+
+- 7ef5187: In the person's own Chrome, cancelling a dialog only the person can see now takes about 2 seconds instead of about 4: the checks for whether the tab's page answers wait 1 second each instead of 2. Using a tab whose page did not answer once gets the full 10 second attach time again, so a slow page is not reported as not answering forever. The messages for a dismiss that found no dialog now say only what was observed: a tab no longer in front was not hidden, a tab that was hidden for a moment is most likely busy, and a tab that cannot be hidden from here may or may not hold a dialog.
+- 8767fab: In a person's own connected Chrome, Chrome can leave a capture of a tab behind another one in its window unanswered while it draws for the next capture request, and then answers both with that drawing. Such a capture, viewport or full page, is now asked again every second with a small request while it has not answered, so these captures complete in about a second instead of stalling or timing out; a viewport capture still unanswered (or still refused as undrawn) after 5 s stops with a plain reason that suggests trying again. A capture of any other tab has the whole capture deadline instead of being cut short at 3 s. The extension transport now honours command time limits, so no connected Chrome capture waits past the capture deadline. The screenshot API now passes the stall reason, and the reason a capture of a tab Chrome had not drawn yet gave up, to the caller instead of a generic error.
+
+  Chromium serves a full-page capture by changing the tab's emulation and puts back what each capture request saw when it began, so a small request sent while a full-page capture waits puts the capture's emulation back after the capture restored the tab's own; left there, the tab stayed at the capture's size and stopped following its window. Once every request has answered, the driver now clears that emulation, which the extension now admits (`Emulation.clearDeviceMetricsOverride`, which only removes an emulated size). A tab Chrome does not show can keep the page's height as its view size until Chrome next lays it out, when it is shown or its window changes. With an older extension the clear is refused and a full-page capture of such a tab behaves as before.
+
+- 8f31114: Browser clicks reach partly visible elements:
+
+  - A click aims at a part of the element that shows and takes the pointer, including a link whose visible content lies outside its own box or only on one side of its clipped center. Only an element with no reachable visible part is refused. The search skips subtrees that are not rendered (a closed submenu), and stays bounded for large elements.
+  - A refusal made before any input was sent is a definite failure. The driver scrolling the element into view no longer turns it into an unknown outcome.
+
+- a6555b3: A managed browser without a window (headless, or offscreen on macOS) now presents a desktop mouse to pages: `(hover: hover)` and `(pointer: fine)` match, as in any desktop Chrome, so hover styles such as Tailwind's `hover:` variants apply and can be checked. Before, headless Chrome saw no input device and matched `(hover: none)` and `(pointer: none)`. A mobile viewport still presents a touch screen, and a desktop viewport or a reset no longer turns touch emulation off when it was never on, which used to drop the page back to no pointer at all.
+- Updated dependencies [9bb1b56]
+- Updated dependencies [7e92bda]
+- Updated dependencies [88de211]
+- Updated dependencies [5dabaa2]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [276001c]
+- Updated dependencies [0e8b3b2]
+- Updated dependencies [90b961f]
+- Updated dependencies [f12070a]
+- Updated dependencies [56801f4]
+- Updated dependencies [a505ce8]
+- Updated dependencies [06606ef]
+- Updated dependencies [b05587f]
+- Updated dependencies [3345899]
+- Updated dependencies [11550b6]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [650e54a]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [57748cf]
+- Updated dependencies [04d36ce]
+  - @opengeni/contracts@6.11.0
+  - @opengeni/interaction@6.11.0
+
 ## 0.4.22
 
 ### Patch Changes

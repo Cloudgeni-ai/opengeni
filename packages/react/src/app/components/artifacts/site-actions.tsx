@@ -1,4 +1,5 @@
 import { ArrowUpRightIcon } from "lucide-react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { MouseEvent } from "react";
 
@@ -79,7 +80,7 @@ function PublishedSiteItem({
   item: MenuItem;
   workspaceId: string;
   siteId: string;
-  client: Pick<OpenGeniBrowserClient, "getSitePublicationLink">;
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "getSitePublicationLink">;
 }) {
   const { load } = useSitePublicationLink({ client, workspaceId, siteId });
   const link = publishedSiteLink(load);
