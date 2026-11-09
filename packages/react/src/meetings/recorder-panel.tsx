@@ -166,7 +166,9 @@ export function uploadLine(
       : msg("meetings.recorderPanel.notUploadingNoConnectionThe");
   }
   if (recorder.state === "paused")
-    return msg("meetings.recorderPanel.nothingIsRecordedWhilePaused");
+    return recorder.pauseReason === "interruption"
+      ? msg("meetings.recorderPanel.microphoneDisconnectedNothingIsRecorded")
+      : msg("meetings.recorderPanel.nothingIsRecordedWhilePaused");
   if (capturing) {
     // In a browser, closing the tab ends the recording; an app keeps recording.
     return recorder.systemAudioKind === "desktop"
@@ -491,7 +493,9 @@ function RecordingClock({ recorder, stalled }: { recorder: MeetingRecorder; stal
           {recorder.state === "stopping"
             ? msg("meetings.recorderPanel.finishing")
             : paused
-              ? msg("meetings.recorderPanel.paused")
+              ? recorder.pauseReason === "interruption"
+                ? msg("meetings.recorderPanel.microphoneDisconnected")
+                : msg("meetings.recorderPanel.paused")
               : stalled
                 ? msg("meetings.recorderPanel.recordingNotUploading")
                 : msg("meetings.recorderPanel.recording2")}
