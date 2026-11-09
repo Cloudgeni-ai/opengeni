@@ -64,8 +64,7 @@ async function setLimitAndSave(): Promise<string> {
     'input[name="personal-workspace-monthly-limit"]',
   )!;
   await act(async () => {
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
-    setter.call(input, "10");
+    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")!.set!.call(input, "10");
     input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   const button = [...container.querySelectorAll("button")].find(
