@@ -125,7 +125,8 @@ export interface NativeSessionScreenProps extends Omit<
    * The review each pending approval shows, as the web `ApprovalSurface`'s
    * `loadReview`: the server's (`client.getToolActionReview`) or the host's
    * own plain title and consequence instead of the tool's raw arguments.
-   * See `ApprovalStrip`'s `loadReview`.
+   * With `client`, an approval this resolves `null` for shows the server's
+   * saved review. See `ApprovalStrip`'s `loadReview`.
    */
   loadReview?: ApprovalStripProps["loadReview"];
   /** Reads the commands panel (the full client; omit to hide command details). */
@@ -298,6 +299,19 @@ function SessionScreenBody({
   const m = useNativeTimelineMessages();
   const signals = resolveAgentSignals(agentSignals);
   const { composer, queue, humanInput, approvals, control, attachments } = controller;
+  // With the full client, each approval card reads the server's saved review
+  // of its action after any review of the host's own: a Code Mode request
+  // carries no inline arguments, so without it the card can't say what it does.
+  const reviewWorkspaceId = controller.workspaceId;
+  const reviewSessionId = controller.sessionId;
+  const approvalReviews = useMemo<ApprovalStripProps["loadReview"]>(() => {
+    if (!client) return loadReview;
+    const saved = (approval: { id: string }) =>
+      client.getToolActionReview(reviewWorkspaceId, reviewSessionId, approval.id);
+    return loadReview
+      ? async (approval) => (await loadReview(approval)) ?? (await saved(approval))
+      : saved;
+  }, [loadReview, client, reviewWorkspaceId, reviewSessionId]);
   const composerInput = useRef<ComponentRef<typeof TextInput>>(null);
   const annotationReveal = useRef<AnnotationReveal | null>(null);
   const draftAnnotations = composer.annotations ?? [];
@@ -600,7 +614,7 @@ function SessionScreenBody({
               <ApprovalStrip
                 approvals={approvals}
                 messages={approvalMessages}
-                loadReview={loadReview}
+                loadReview={approvalReviews}
                 onDecide={(id, decision, answer) =>
                   (decision === "approve"
                     ? control.approve(id, undefined, answer)

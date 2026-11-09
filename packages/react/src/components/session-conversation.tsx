@@ -42,6 +42,7 @@ import { useRealtimeVoiceModels } from "../hooks/use-realtime-voice-models";
 import type { SessionRealtimeControl } from "../realtime/realtime-control";
 import { EMBEDDED_GENIE_LOADING, type GenieLoadingOptions } from "../timeline/genie-loading";
 import { ApprovalSurface } from "./approval-surface";
+import { savedToolReviewLoaders } from "./saved-tool-reviews";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
 import {
   browserInteractiveAnswerStore,
@@ -300,7 +301,11 @@ export type SessionConversationProps = ClientOverride<ChatClient> &
       HumanInputSurfaceProps,
       "messages" | "autoFocus" | "decisionButtons" | "allowedSaveTo" | "className"
     >;
-    /** Product approval presentation; permission decisions remain stock. */
+    /**
+     * Product approval presentation; permission decisions remain stock.
+     * Where `loadReview` resolves `null` (or is omitted), the card shows the
+     * server's saved review of the action, which the conversation reads itself.
+     */
     approvalProps?: Omit<
       ComponentProps<typeof ApprovalSurface>,
       "approvals" | "onApprove" | "onReject" | "responding" | "error"
@@ -514,6 +519,30 @@ function ConversationView({
     labelOverrides?.sitePreviewUnavailable ?? DEFAULT_CONVERSATION_LABELS(t).sitePreviewUnavailable,
   );
   const retainedLoaders = useRetainedLoaders(context.client, context.workspaceId, sessionId);
+  // Approval cards read the server's saved review of each action, after any
+  // review of the host's own: a Code Mode request carries no inline arguments.
+  // A client without saved reviews (a hand-written session client) keeps the
+  // host's loaders as they are.
+  const hostLoadReview = approvalProps?.loadReview;
+  const hostLoadDetails = approvalProps?.loadDetails;
+  const { client: reviewClient, workspaceId: reviewWorkspaceId } = context;
+  const reviewLoaders = useMemo(() => {
+    const client = reviewClient;
+    const workspaceId = reviewWorkspaceId;
+    if (!sessionId || !client.getToolActionReview || !client.getToolReviewDetails) return null;
+    return savedToolReviewLoaders({
+      readReview: async (approvalId) =>
+        await client.getToolActionReview!(workspaceId, sessionId, approvalId),
+      readDetails: async (review, path, offset) =>
+        await client.getToolReviewDetails!(workspaceId, sessionId, review.id, {
+          actionDigest: review.actionDigest,
+          path,
+          offset,
+        }),
+      loadReview: hostLoadReview,
+      loadDetails: hostLoadDetails,
+    });
+  }, [reviewClient, reviewWorkspaceId, sessionId, hostLoadReview, hostLoadDetails]);
   const transcription = useComposerTranscription(
     context.client,
     context.workspaceId,
@@ -784,6 +813,7 @@ function ConversationView({
                 <ApprovalSurface
                   className="mx-auto max-w-3xl"
                   {...approvalProps}
+                  {...reviewLoaders}
                   approvals={approvals}
                   // A refusal rejects, so the card (or Approve all) names it
                   // and keeps the action waiting.
