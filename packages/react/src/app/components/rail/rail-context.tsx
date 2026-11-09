@@ -18,6 +18,7 @@ import {
 
 import { useAppContext } from "../../app-context";
 import { requestCreateComposerFocus } from "../../lib/create-composer-focus";
+import { CreatorNamesProvider } from "../../lib/creator-names";
 import { requestCommandMenu } from "../../lib/actions/events";
 import { desktopCapability, desktopPlatform } from "../../lib/desktop";
 import { OPEN_SESSION_SEARCH_EVENT } from "../../lib/session-search-route";
@@ -381,7 +382,7 @@ export function RailProvider({
 
   return (
     <RailContext.Provider value={value}>
-      {children}
+      <CreatorNamesProvider workspaceId={workspaceId}>{children}</CreatorNamesProvider>
       {searchMounted ? (
         <Suspense fallback={null}>
           <SessionSearchDialog

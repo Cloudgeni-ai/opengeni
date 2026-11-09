@@ -574,7 +574,7 @@ describe("session control surface architecture", () => {
   test("keeps creator grouping while removing the retired creator/date filter controls", async () => {
     const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
     expect(list).toContain("const creatorSessions = useMemo");
-    expect(list).toContain("sessionCreatorLabelMap(creatorSessions)");
+    expect(list).toContain("sessionCreatorLabelMap(creatorSessions, creatorNames)");
     expect(list).not.toContain("Date filter field");
     expect(list).not.toContain("Filter by</DropdownMenuLabel>");
     expect(list).toContain("archiveStatus: browseStatus");

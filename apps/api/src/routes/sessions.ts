@@ -6541,7 +6541,7 @@ export function sessionListQuery(
   sortBy: "updatedAt" | "createdAt" | "name" | "archivedAt" | undefined;
   archiveStatus: "active" | "archived" | "all" | undefined;
   channelId: string | null | undefined;
-  createdBy: { kind: "subject" | "service"; subjectId: string } | undefined;
+  createdBy: { kind?: "subject" | "service"; subjectId: string } | undefined;
   updatedFrom: Date | undefined;
   updatedBefore: Date | undefined;
   createdFrom: Date | undefined;
@@ -6678,9 +6678,11 @@ export function sessionListQuery(
   }
   const createdByKind = query.createdByKind;
   const createdBySubjectId = query.createdBySubjectId;
-  if ((createdByKind === undefined) !== (createdBySubjectId === undefined)) {
+  // A kind alone names no creator. A subject id alone matches every session
+  // that subject created, whichever kind it was frozen as.
+  if (createdByKind !== undefined && createdBySubjectId === undefined) {
     throw new HTTPException(400, {
-      message: "createdByKind and createdBySubjectId must be supplied together",
+      message: "createdByKind requires createdBySubjectId",
     });
   }
   if (createdByKind !== undefined && createdByKind !== "subject" && createdByKind !== "service") {
@@ -6759,7 +6761,7 @@ export function sessionListQuery(
     originSiteId !== undefined ||
     siteAccessId !== undefined ||
     channelId !== undefined ||
-    createdByKind !== undefined ||
+    createdBySubjectId !== undefined ||
     updatedFrom !== undefined ||
     updatedBefore !== undefined ||
     createdFrom !== undefined ||
@@ -6799,10 +6801,12 @@ export function sessionListQuery(
     sortBy: sortBy.data,
     archiveStatus: archiveStatus.data,
     channelId: channelId === undefined ? undefined : channelId === "null" ? null : channelId,
-    createdBy:
-      createdByKind && createdBySubjectId
-        ? { kind: createdByKind, subjectId: createdBySubjectId }
-        : undefined,
+    createdBy: createdBySubjectId
+      ? {
+          ...(createdByKind ? { kind: createdByKind } : {}),
+          subjectId: createdBySubjectId,
+        }
+      : undefined,
     updatedFrom,
     updatedBefore,
     createdFrom,

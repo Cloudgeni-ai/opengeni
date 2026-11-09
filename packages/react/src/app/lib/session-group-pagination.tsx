@@ -10,7 +10,12 @@ import {
 } from "./sessions-group";
 import type { RailSession as Session } from "./session-list-entry";
 
-type CreatorIdentity = Pick<Session["createdBy"], "kind" | "subjectId">;
+/**
+ * A creator to page by. Without `kind`, every session the subject created is
+ * included, so an API key's subject- and service-frozen sessions page as one.
+ */
+type CreatorIdentity = Pick<Session["createdBy"], "subjectId"> &
+  Partial<Pick<Session["createdBy"], "kind">>;
 
 export type SessionPaginationGroup =
   | {
@@ -225,7 +230,7 @@ export function sessionMatchesPaginationGroup(
     case "creator":
       return (
         !active &&
-        session.createdBy.kind === group.creator.kind &&
+        (group.creator.kind === undefined || session.createdBy.kind === group.creator.kind) &&
         session.createdBy.subjectId === group.creator.subjectId
       );
     case "creatorDiscovery":
@@ -233,7 +238,7 @@ export function sessionMatchesPaginationGroup(
         !active &&
         !group.knownCreators.some(
           (creator) =>
-            creator.kind === session.createdBy.kind &&
+            (creator.kind === undefined || creator.kind === session.createdBy.kind) &&
             creator.subjectId === session.createdBy.subjectId,
         )
       );

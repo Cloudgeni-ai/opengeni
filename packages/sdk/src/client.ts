@@ -1004,8 +1004,11 @@ export type SessionListPageOptions = {
   search?: string;
   /** Restrict rows to one workspace project; null selects unfiled rows. */
   channelId?: string | null;
-  /** Restrict rows to the exact frozen session creator identity. */
-  createdBy?: { kind: "subject" | "service"; subjectId: string };
+  /**
+   * Restrict rows to the exact frozen session creator identity. Omit `kind` to
+   * include every session the subject created, whichever kind it was frozen as.
+   */
+  createdBy?: { kind?: "subject" | "service"; subjectId: string };
   /** Inclusive ISO-8601 activity lower bound. */
   updatedFrom?: string;
   /** Exclusive ISO-8601 activity upper bound. */
@@ -2288,7 +2291,7 @@ export class OpenGeniClient {
       if (search) query.search = search;
       if (options.channelId !== undefined) query.channelId = options.channelId ?? "null";
       if (options.createdBy) {
-        query.createdByKind = options.createdBy.kind;
+        if (options.createdBy.kind) query.createdByKind = options.createdBy.kind;
         query.createdBySubjectId = options.createdBy.subjectId;
       }
       for (const key of SESSION_PAGE_STRING_QUERY_KEYS) {

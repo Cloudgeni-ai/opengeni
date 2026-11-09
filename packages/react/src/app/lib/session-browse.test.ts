@@ -98,14 +98,14 @@ describe("session browse projections", () => {
 
     expect(
       filterSessionsForBrowse([ada, scheduler], {
-        creator: "service:service:scheduler",
+        creator: "service:scheduler",
         dateField: "activity",
         dateRange: "any",
         now: NOW,
       }).map((item) => item.id),
     ).toEqual(["scheduler"]);
-    expect(sessionCreatorLabel(opaqueSubject)).toBe("tenant:ada");
-    expect(sessionCreatorLabel(scheduler)).toBe("Service · service:scheduler");
+    expect(sessionCreatorLabel(opaqueSubject)).toBe("ada");
+    expect(sessionCreatorLabel(scheduler)).toBe("scheduler · Service");
   });
 
   test("groups root browse results by creator or created-date buckets", () => {
@@ -170,7 +170,7 @@ describe("session browse projections", () => {
     });
 
     const matchingWorkstream = filterSessionsForBrowse([manager, worker], {
-      creator: "subject:user:ada",
+      creator: "user:ada",
       dateField: "activity",
       dateRange: "any",
       hierarchical: true,
@@ -181,7 +181,7 @@ describe("session browse projections", () => {
     expect(sessionBrowseResultCount(matchingWorkstream, false)).toBe(2);
     expect(
       filterSessionsForBrowse([manager, worker], {
-        creator: "subject:user:grace",
+        creator: "user:grace",
         dateField: "activity",
         dateRange: "any",
         hierarchical: true,
@@ -197,18 +197,16 @@ describe("session browse projections", () => {
       parentSessionId: manager.id,
       createdBy: { kind: "subject", subjectId: "user:grace", label: "Grace Hopper" },
     });
-    const childCreator = "subject:user:grace";
+    const childCreator = "user:grace";
     const searchLabels = sessionCreatorLabelMap([manager, worker]);
     const hierarchyLabels = sessionCreatorLabelMap([manager]);
 
     expect(normalizeSessionBrowseCreator(childCreator, searchLabels, false)).toBe(childCreator);
     expect(normalizeSessionBrowseCreator(childCreator, hierarchyLabels, true)).toBeNull();
-    expect(normalizeSessionBrowseCreator("subject:user:ada", hierarchyLabels, true)).toBe(
-      "subject:user:ada",
-    );
+    expect(normalizeSessionBrowseCreator("user:ada", hierarchyLabels, true)).toBe("user:ada");
   });
 
-  test("disambiguates duplicate frozen creator labels with opaque identities", () => {
+  test("disambiguates duplicate creator names without showing raw identities", () => {
     const firstAlex = session({
       id: "first-alex",
       createdBy: { kind: "subject", subjectId: "tenant-a:alex", label: "Alex" },
@@ -219,8 +217,8 @@ describe("session browse projections", () => {
     });
 
     expect(sessionCreatorOptions([firstAlex, secondAlex])).toEqual([
-      { value: "subject:tenant-a:alex", label: "Alex · Subject · tenant-a:alex" },
-      { value: "subject:tenant-b:alex", label: "Alex · Subject · tenant-b:alex" },
+      { value: "tenant-a:alex", label: "Alex (1)" },
+      { value: "tenant-b:alex", label: "Alex (2)" },
     ]);
     expect(
       groupSessionsForBrowse([firstAlex, secondAlex], "creator", { now: NOW }).grouped.map(
@@ -230,15 +228,58 @@ describe("session browse projections", () => {
         }),
       ),
     ).toEqual([
+      { key: "creator:tenant-a:alex", label: "Alex (1)" },
+      { key: "creator:tenant-b:alex", label: "Alex (2)" },
+    ]);
+  });
+
+  test("groups an API key once with a friendly name, whichever kind its sessions were frozen as", () => {
+    const subjectId = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
+    const label = "Codex operator 2026-09-11";
+    const legacy = session({ id: "legacy", createdBy: { kind: "subject", subjectId, label } });
+    const current = session({ id: "current", createdBy: { kind: "service", subjectId, label } });
+    const davlet = session({
+      id: "davlet",
+      createdBy: { kind: "subject", subjectId: "user:davlet", label: "davlet@cloudgeni.ai" },
+    });
+    const removed = session({
+      id: "removed",
+      createdBy: { kind: "subject", subjectId: "user:removed", label: "former@cloudgeni.ai" },
+    });
+    const names = new Map([
+      ["user:davlet", "Davlet Dzhakishev"],
+      [subjectId, label],
+    ]);
+
+    const grouped = groupSessionsForBrowse([legacy, current, davlet, removed], "creator", {
+      now: NOW,
+      creatorLabels: sessionCreatorLabelMap([legacy, current, davlet, removed], names),
+    }).grouped.map((group) => ({
+      key: group.group,
+      label: group.label,
+      hint: group.hint ?? null,
+      sessions: group.sessions.map((node) => node.session.id).sort(),
+    }));
+    expect(grouped).toEqual([
       {
-        key: "creator:subject:tenant-a:alex",
-        label: "Alex · Subject · tenant-a:alex",
+        key: `creator:${subjectId}`,
+        label: "Codex operator 2026-09-11",
+        hint: "API key",
+        sessions: ["current", "legacy"],
       },
+      { key: "creator:user:davlet", label: "Davlet Dzhakishev", hint: null, sessions: ["davlet"] },
+      // A person no longer in the workspace keeps the label frozen with the chat.
       {
-        key: "creator:subject:tenant-b:alex",
-        label: "Alex · Subject · tenant-b:alex",
+        key: "creator:user:removed",
+        label: "former@cloudgeni.ai",
+        hint: null,
+        sessions: ["removed"],
       },
     ]);
+    for (const group of grouped) {
+      expect(group.label).not.toContain("api_key:");
+      expect(group.label).not.toMatch(/service|subject/i);
+    }
   });
 
   test("reuses complete creator labels after filtering and excluding pins", () => {
@@ -254,7 +295,7 @@ describe("session browse projections", () => {
     const complete = [firstAlex, pinnedAlex];
     const creatorLabels = sessionCreatorLabelMap(complete);
     const groupedSubset = filterSessionsForBrowse(complete, {
-      creator: "subject:tenant-a:alex",
+      creator: "tenant-a:alex",
       dateField: "activity",
       dateRange: "any",
       now: NOW,
@@ -264,12 +305,7 @@ describe("session browse projections", () => {
       groupSessionsForBrowse(groupedSubset, "creator", { now: NOW, creatorLabels }).grouped.map(
         (group) => ({ key: group.group, label: group.label }),
       ),
-    ).toEqual([
-      {
-        key: "creator:subject:tenant-a:alex",
-        label: "Alex · Subject · tenant-a:alex",
-      },
-    ]);
+    ).toEqual([{ key: "creator:tenant-a:alex", label: "Alex (1)" }]);
   });
 });
 

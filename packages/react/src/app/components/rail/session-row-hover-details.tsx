@@ -18,7 +18,13 @@ import {
   useMinuteNow,
 } from "../../../ui/relative-time";
 import { StatusBadge } from "../../../ui/status-badge";
-import { type CreatorRef, creatorInitials, creatorLabel } from "../../lib/creator-initials";
+import {
+  type CreatorRef,
+  creatorInitials,
+  creatorLabel,
+  creatorType,
+} from "../../lib/creator-initials";
+import { useCreatorNames } from "../../lib/creator-names";
 import { sessionHoverFacts } from "../../lib/session-hover-facts";
 import type { RailSession } from "../../lib/session-list-entry";
 import { cn } from "../../lib/utils";
@@ -87,9 +93,13 @@ export function SessionRowHoverDetails({
   const now = fixedNow ?? Date.now();
   const facts = sessionHoverFacts(session, { descendantCount, descendantCountTruncated, now });
   const createdBy: CreatorRef = session.createdBy;
+  const creatorNames = useCreatorNames();
+  const createdByPerson = creatorType(createdBy) === "person";
   const creatorName =
-    showCreator && (createdBy.kind === "service" || creatorInitials(createdBy) !== null)
-      ? creatorLabel(createdBy)
+    showCreator && (!createdByPerson || creatorInitials(createdBy, creatorNames) !== null)
+      ? creatorType(createdBy) === "unattributed"
+        ? null
+        : creatorLabel(createdBy, creatorNames)
       : null;
   const hasActivity = Boolean(facts.model || facts.subAgents || facts.commands);
 
@@ -183,7 +193,7 @@ export function SessionRowHoverDetails({
       >
         {creatorName ? (
           <div className="flex min-w-0 items-center gap-2">
-            {createdBy.kind === "subject" ? (
+            {createdByPerson ? (
               <CreatorMonogram createdBy={createdBy} showTitle={false} />
             ) : (
               <span className="flex size-4 shrink-0 items-center justify-center">

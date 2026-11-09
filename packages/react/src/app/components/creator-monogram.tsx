@@ -4,6 +4,7 @@ import {
   creatorInitials,
   creatorLabel,
 } from "../lib/creator-initials";
+import { useCreatorNames } from "../lib/creator-names";
 import { cn } from "../lib/utils";
 
 /**
@@ -25,13 +26,14 @@ export function CreatorMonogram({
   /** Disable the native delayed tooltip when a richer parent hover surface owns the label. */
   showTitle?: boolean | undefined;
 }) {
-  const initials = creatorInitials(createdBy);
+  const names = useCreatorNames();
+  const initials = creatorInitials(createdBy, names);
   if (!initials) return null;
   return (
     <span
       data-creator-monogram
       aria-hidden="true"
-      title={showTitle ? creatorLabel(createdBy) : undefined}
+      title={showTitle ? creatorLabel(createdBy, names) : undefined}
       className={cn(
         "flex size-4 shrink-0 items-center justify-center rounded-full text-[8px] font-semibold leading-none text-white/90",
         className,

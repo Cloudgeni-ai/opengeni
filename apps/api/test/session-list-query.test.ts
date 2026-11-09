@@ -50,6 +50,26 @@ describe("session list sorting and archive query", () => {
     expect(() => sessionListQuery({ siteConversations: "include" }, false)).toThrow();
   });
 
+  test("filters by a creator's subject id with or without its frozen kind", () => {
+    const subjectId = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
+    expect(sessionListQuery({ createdBySubjectId: subjectId })).toMatchObject({
+      createdBy: { subjectId },
+      hasPageFilters: true,
+    });
+    expect(sessionListQuery({ createdBySubjectId: subjectId }).createdBy).not.toHaveProperty(
+      "kind",
+    );
+    expect(
+      sessionListQuery({ createdByKind: "service", createdBySubjectId: subjectId }).createdBy,
+    ).toEqual({ kind: "service", subjectId });
+    for (const query of [
+      { createdByKind: "service" },
+      { createdByKind: "robot", createdBySubjectId: subjectId },
+      { createdBySubjectId: " " },
+    ])
+      expect(() => sessionListQuery(query)).toThrow();
+  });
+
   test("accepts Only mine as a page filter", () => {
     expect(sessionListQuery({ parentSessionId: "null", mineOnly: "true" })).toMatchObject({
       mineOnly: true,

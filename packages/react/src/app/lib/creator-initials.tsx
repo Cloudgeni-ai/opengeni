@@ -10,29 +10,88 @@ export type CreatorRef = {
   label?: string | undefined;
 };
 
+/**
+ * Live display names by subject id (workspace members: a person's profile
+ * name, else email; an API key's current name). Optional everywhere: the
+ * label frozen with the session is the fallback.
+ */
+export type CreatorNames = ReadonlyMap<string, string>;
+
+/** What kind of thing created a chat, for wording only. */
+export type CreatorType = "person" | "api_key" | "service" | "unattributed";
+
 /** Rows migrated before creation attribution carry this reserved subject id. */
 const UNATTRIBUTED_LEGACY_SUBJECT_ID = "unattributed-legacy";
 
-function humanizeSubjectId(subjectId: string): string {
-  const withoutPrefix = subjectId.includes(":")
-    ? subjectId.slice(subjectId.indexOf(":") + 1)
-    : subjectId;
-  return withoutPrefix.trim();
+const API_KEY_SUBJECT_PREFIX = "api_key:";
+const SERVICE_SUBJECT_PREFIX = "service:";
+const OPAQUE_ID =
+  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,})$/i;
+
+/** The subject id without its namespace, or null when what is left is an opaque id. */
+function readableSubjectId(subjectId: string): string | null {
+  const withoutPrefix = (
+    subjectId.includes(":") ? subjectId.slice(subjectId.indexOf(":") + 1) : subjectId
+  ).trim();
+  return withoutPrefix.length > 0 && !OPAQUE_ID.test(withoutPrefix) ? withoutPrefix : null;
+}
+
+/**
+ * API keys are one creator whichever kind their sessions were frozen with:
+ * older sessions recorded the key as a subject, newer ones as a service.
+ */
+export function creatorType(createdBy: Pick<CreatorRef, "kind" | "subjectId">): CreatorType {
+  if (createdBy.subjectId === UNATTRIBUTED_LEGACY_SUBJECT_ID) return "unattributed";
+  if (createdBy.subjectId.startsWith(API_KEY_SUBJECT_PREFIX)) return "api_key";
+  if (createdBy.kind === "service" || createdBy.subjectId.startsWith(SERVICE_SUBJECT_PREFIX)) {
+    return "service";
+  }
+  return "person";
+}
+
+/**
+ * The one creator a session belongs to. Keyed by subject id alone, so the
+ * subject- and service-frozen sessions of one API key share a group.
+ */
+export function creatorIdentityKey(createdBy: Pick<CreatorRef, "subjectId">): string {
+  return createdBy.subjectId;
+}
+
+export type CreatorDisplay = {
+  /** A person's name (or email), or a key's or service's friendly name. Never a raw id. */
+  name: string;
+  /** A short kind hint for non-people ("API key", "Service"); null for people. */
+  hint: string | null;
+};
+
+/** How to name a creator anywhere it is shown: group headers, chips, tooltips. */
+export function creatorDisplay(createdBy: CreatorRef, names?: CreatorNames): CreatorDisplay {
+  const type = creatorType(createdBy);
+  if (type === "unattributed") return { name: "Unattributed", hint: null };
+  const live = names?.get(createdBy.subjectId)?.trim();
+  const frozen = createdBy.label?.trim();
+  const readable = readableSubjectId(createdBy.subjectId);
+  switch (type) {
+    case "person":
+      return { name: live || frozen || readable || "Unknown person", hint: null };
+    case "api_key":
+      return { name: live || frozen || "Unnamed API key", hint: "API key" };
+    case "service":
+      return { name: frozen || live || readable || "Service", hint: "Service" };
+  }
 }
 
 /**
  * 1–2 letter monogram for a human creator; null for service/system creators
  * and unattributed legacy rows (the rail shows people, not machinery).
  */
-export function creatorInitials(createdBy: CreatorRef): string | null {
-  if (createdBy.kind !== "subject" || createdBy.subjectId === UNATTRIBUTED_LEGACY_SUBJECT_ID) {
-    return null;
-  }
-  const label = createdBy.label?.trim();
-  const source = label && label.length > 0 ? label : humanizeSubjectId(createdBy.subjectId);
-  if (source.length === 0) {
-    return null;
-  }
+export function creatorInitials(createdBy: CreatorRef, names?: CreatorNames): string | null {
+  if (createdBy.kind !== "subject" || creatorType(createdBy) !== "person") return null;
+  const source =
+    names?.get(createdBy.subjectId)?.trim() ||
+    createdBy.label?.trim() ||
+    readableSubjectId(createdBy.subjectId);
+  if (!source) return null;
   // Spread to code points so astral characters (emoji, supplementary-plane
   // scripts) are not split into lone surrogates.
   const words = source.split(/\s+/).filter(Boolean);
@@ -59,8 +118,9 @@ export function railRowCreator(session: {
 }
 
 /** Human-readable creator name for a tooltip or screen-reader announcement. */
-export function creatorLabel(createdBy: CreatorRef): string {
-  return createdBy.label?.trim() || createdBy.subjectId;
+export function creatorLabel(createdBy: CreatorRef, names?: CreatorNames): string {
+  const { name, hint } = creatorDisplay(createdBy, names);
+  return hint ? `${name} · ${hint}` : name;
 }
 
 /**
@@ -71,9 +131,12 @@ export function creatorLabel(createdBy: CreatorRef): string {
  * reader can hear this. Gate it on exactly the facts that decide whether the
  * chip renders, so a row never announces a creator it does not show.
  */
-export function creatorAnnouncement(createdBy: CreatorRef | null): string | null {
-  if (createdBy === null || creatorInitials(createdBy) === null) return null;
-  return creatorLabel(createdBy);
+export function creatorAnnouncement(
+  createdBy: CreatorRef | null,
+  names?: CreatorNames,
+): string | null {
+  if (createdBy === null || creatorInitials(createdBy, names) === null) return null;
+  return creatorLabel(createdBy, names);
 }
 
 /** Stable hue (0–359) hashed from the subject id, for the monogram chip. */
