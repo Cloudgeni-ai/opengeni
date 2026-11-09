@@ -116,7 +116,7 @@ export default defineConfig({
               // entry-aware merge otherwise folds them into a chunk startup
               // needs for the organization model, so keep them in a leaf.
               name: "row-detail-primitives",
-              test: /packages[\\/]react[\\/]src[\\/]ui[\\/](?:relative-time|disabled-reason|section-variant)\.tsx$/,
+              test: /packages[\\/]react[\\/]src[\\/]ui[\\/](?:relative-time|time-format|disabled-reason|section-variant)\.tsx?$/,
               includeDependenciesRecursively: false,
               priority: 22,
             },

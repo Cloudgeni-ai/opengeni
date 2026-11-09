@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -139,7 +140,7 @@ export interface NativeComposerSurfaceContext {
 export type NativeComposerSurfaceRenderer = (context: NativeComposerSurfaceContext) => ReactNode;
 
 export interface OpenGeniNativeSessionViewProps {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   theme?: OpenGeniNativeTheme | undefined;
   labels?: Partial<OpenGeniNativeLabels> | undefined;
   header?: ReactNode | undefined;
@@ -583,7 +584,7 @@ function ConnectionBanner({
   labels,
   theme,
 }: {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   formatError?: ((error: Error) => string) | undefined;
   labels: OpenGeniNativeLabels;
   theme: OpenGeniNativeTheme;
@@ -1169,7 +1170,7 @@ function ApprovalSurface({
   labels,
   theme,
 }: {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   labels: OpenGeniNativeLabels;
   theme: OpenGeniNativeTheme;
 }) {
@@ -1220,7 +1221,7 @@ function SessionSurfaces({
   labels,
   theme,
 }: {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   labels: OpenGeniNativeLabels;
   theme: OpenGeniNativeTheme;
 }) {
@@ -1268,7 +1269,7 @@ function QueueSurface({
   labels,
   theme,
 }: {
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   labels: OpenGeniNativeLabels;
   theme: OpenGeniNativeTheme;
 }) {
@@ -1843,7 +1844,7 @@ function Composer({
   theme,
 }: {
   accessory?: ReactNode | undefined;
-  controller: OpenGeniNativeSessionController;
+  controller: OpenGeniNativeSessionController<ChatClient>;
   labels: OpenGeniNativeLabels;
   renderActions?: NativeComposerActionRenderer | undefined;
   renderComposer?: NativeComposerRenderer | undefined;

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OwnResourceReachKind, OwnResourceReachWorkspace } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Button } from "../../ui/button";
@@ -16,7 +17,7 @@ import { userErrorText } from "../../ui/api-error";
  * always work in your Personal workspace; a machine can be turned off there too.
  */
 export type OwnReachClient = Pick<
-  OpenGeniBrowserClient,
+  ChatClient<OpenGeniBrowserClient>,
   "getOwnResourceReach" | "setOwnResourceReach"
 >;
 

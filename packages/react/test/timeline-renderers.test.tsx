@@ -383,6 +383,62 @@ describe("context compaction rendering", () => {
     }
   });
 
+  test("a checkpoint that trimmed history reads as a recovery, with the provider's reason behind Details", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        turnSummary={{ rolling: true }}
+        events={[
+          timelineEvent("user.message", { text: "Continue" }, null),
+          timelineEvent("session.context.compaction.started", { trigger: "auto" }),
+          timelineEvent("session.context.compacted", {
+            trigger: "auto",
+            implementation: "deterministic_trim",
+            estimatedTokensBefore: 240_000,
+            estimatedTokensAfter: 9_000,
+            fallback: {
+              reason: "provider_rejected",
+              providerRejection: {
+                httpStatus: 400,
+                type: "invalid_request_error",
+                code: null,
+                param: null,
+                requestId: "req_trim",
+              },
+              providerMessage: "max_tokens exceeds the limit",
+            },
+          }),
+        ]}
+      />,
+    );
+    try {
+      await flush();
+      const status = Array.from(r.container.querySelectorAll<HTMLElement>('[role="status"]')).find(
+        (element) => element.textContent?.includes("Older messages trimmed"),
+      );
+      expect(status?.textContent).toContain("Older messages trimmed · Auto");
+      expect(status?.textContent).toContain(
+        "The model couldn’t summarize them. Chat history above is unchanged.",
+      );
+      expect(status?.textContent).not.toContain("Couldn’t compact");
+      expect(status?.className).not.toContain("status-failed");
+      const panel = r.container.querySelector<HTMLElement>("[data-og-compaction-details]");
+      expect(panel?.hidden).toBe(true);
+      expect(status?.textContent).not.toContain("max_tokens exceeds the limit");
+      const toggle = Array.from(status?.querySelectorAll("button") ?? []).find(
+        (button) => button.textContent === "Details",
+      );
+      await act(async () => toggle?.click());
+      await flush();
+      expect(panel?.hidden).toBe(false);
+      expect(panel?.textContent).toContain("HTTP 400 · invalid_request_error");
+      expect(panel?.textContent).toContain("req_trim");
+      expect(panel?.textContent).toContain("max_tokens exceeds the limit");
+      expect(panel?.textContent).not.toContain("rejects this request the same way");
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("a compaction cut short by worker shutdown reads as interrupted, not failed", async () => {
     const r = await renderComponent(
       <MessageTimeline

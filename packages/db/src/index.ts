@@ -154,10 +154,20 @@ export type SessionEventMutation<Projection extends "full" | "event" = "full"> =
   tx: Database,
   fence: Projection extends "event" ? TurnAttemptEventFenceResult : TurnAttemptFenceResult,
 ) => Promise<boolean>;
+/** Derive attempt state from the canonical events inserted in this same transaction. */
+export type SessionEventProjection = (
+  tx: Database,
+  fence: TurnAttemptEventFenceResult,
+  events: SessionEvent[],
+) => Promise<void>;
 /** Plain callbacks retain full rows; checkpoints may explicitly request only fence fields. */
 export type SessionEventMutationInput =
   | SessionEventMutation
-  | { rowProjection: "event"; mutate: SessionEventMutation<"event"> };
+  | {
+      rowProjection: "event";
+      mutate: SessionEventMutation<"event">;
+      project?: SessionEventProjection;
+    };
 export {
   sessionHasToolRouterHistory,
   sessionsWithToolRouterHistory,
@@ -1332,7 +1342,6 @@ import {
 } from "./quiescence-receipt-wake-repair";
 export * from "./maintenance-work-probes";
 export { configureCodeSearchDeploymentPolicy } from "./code-search-policy";
-export { listRecentSessionRepositoryResources } from "./recent-session-repositories";
 export * from "./session-control";
 import { createArchivedSessionImportPersistence } from "./archived-session-imports";
 export {
@@ -1579,6 +1588,7 @@ export type {
   SessionListDatabaseChange,
   SessionListNotification,
 } from "./session-list-notifications";
+export { notifyActorDraftChanged } from "./session-list-notifications";
 export {
   BROKERED_CREDENTIAL_SHAPE_HINT,
   brokeredCredentialBundleProblem,
@@ -5460,7 +5470,12 @@ export async function findActiveApiKeyByHash(
       }
       // Hash visibility proves this account. The join-table hash lane requires
       // both settings and remains bounded to this key, not sibling key scopes.
-      await tx.execute(sql`select set_config('opengeni.account_id', ${row.accountId}, true)`);
+      if (
+        (row.credentialKind === "organization" || row.credentialKind === "personal") &&
+        row.workspaceScope === "selected"
+      ) {
+        await tx.execute(sql`select set_config('opengeni.account_id', ${row.accountId}, true)`);
+      }
       const scopes = await readOrganizationApiKeyWorkspaceScopes(tx, [row]);
       return {
         ...mapApiKey(row, scopes.get(row.id)),
@@ -38373,17 +38388,14 @@ export async function getSessionForSubject(
     ) {
       throw new Error(`Session event cursor invariant failed for session ${sessionId}`);
     }
-    const [session] = await withEffectiveSessionPolicy(
-      scopedDb,
-      workspaceId,
-      await withCurrentSessionInputWait(scopedDb, workspaceId, [
-        {
-          ...row.session,
-          lastSequence: row.cursor.lastSequence,
-          meaningfulSequence: row.cursor.lastMeaningfulSequence,
-        },
-      ]),
-    );
+    // mapSessionWithControl projects the effective policy below, once.
+    const [session] = await withCurrentSessionInputWait(scopedDb, workspaceId, [
+      {
+        ...row.session,
+        lastSequence: row.cursor.lastSequence,
+        meaningfulSequence: row.cursor.lastMeaningfulSequence,
+      },
+    ]);
     if (!session) throw new Error(`Session event cursor missing for session ${sessionId}`);
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
       sessionId,
@@ -44872,136 +44884,7 @@ export async function appendSessionHistoryItems(
         attemptId: input.expectedAttemptId,
       });
       if (!allowed.allowed) return false;
-      const inserted =
-        input.items.length === 0
-          ? []
-          : await tx
-              .insert(schema.sessionHistoryItems)
-              .values(
-                withLosslessContentWriteVersion(
-                  input.items.map((entry) => ({
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: input.turnId,
-                    position: entry.position,
-                    // This is the canonical model-memory boundary. The pending-call
-                    // ledger and audit event may retain their separate raw/preview
-                    // forms, but conversation truth is always the bounded Codex form
-                    // without Responses output-only fields such as `status`.
-                    item: canonicalizePersistedHistoryItem(
-                      entry.item,
-                      input.modelToolOutputTruncationTokens,
-                    ),
-                  })),
-                  "item",
-                  "itemCodecVersion",
-                ),
-              )
-              .onConflictDoNothing({
-                target: [
-                  schema.sessionHistoryItems.workspaceId,
-                  schema.sessionHistoryItems.sessionId,
-                  schema.sessionHistoryItems.position,
-                ],
-              })
-              .returning({
-                position: schema.sessionHistoryItems.position,
-                turnId: schema.sessionHistoryItems.turnId,
-                item: schema.sessionHistoryItems.item,
-                itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-                // Measured exactly as the active-history guard measures:
-                // bytes of the ordered JSON text, shape of the jsonb projection
-                // the insert trigger maintains.
-                jsonBytes: sql<string>`octet_length(${schema.sessionHistoryItems.item}::text)`,
-                jsonNodes: sql<string>`(
-                  select count(*)
-                  from jsonb_path_query(session_history_items.item, 'strict $.**')
-                )`,
-                jsonProperties: sql<string>`(
-                  select count(*)
-                  from jsonb_path_query(
-                    session_history_items.item,
-                    'strict $.** ? (@.type() == "object")'
-                  ) as object_value
-                  cross join lateral jsonb_object_keys(object_value) as property
-                )`,
-              });
-      // Rows skipped by ON CONFLICT were already stored, so only fresh inserts
-      // add to the active footprint.
-      appendedFootprint = inserted.reduce<ActiveSessionHistoryFootprint>(
-        (total, row) => ({
-          jsonBytes: total.jsonBytes + Number(row.jsonBytes) + 1,
-          rows: total.rows + 1,
-          jsonNodes: total.jsonNodes + Number(row.jsonNodes),
-          jsonProperties: total.jsonProperties + Number(row.jsonProperties),
-        }),
-        { jsonBytes: 0, rows: 0, jsonNodes: 0, jsonProperties: 0 },
-      );
-      const saved = inserted.map(({ position, turnId, item, itemCodecVersion }) => ({
-        position,
-        turnId,
-        item,
-        itemCodecVersion,
-      }));
-      // A position conflict is idempotent only when the exact conversation
-      // item is already there. Never acknowledge a different item as saved.
-      // Fresh inserts already return their durable representation. Re-reading
-      // numeric positions under RLS can scan the session's history while we
-      // hold its write fence, so only fetch rows skipped by ON CONFLICT.
-      const insertedPositions = new Set(saved.map((row) => row.position));
-      const conflictingPositions = input.items
-        .map((entry) => entry.position)
-        .filter((position) => !insertedPositions.has(position));
-      if (conflictingPositions.length > 0)
-        saved.push(
-          ...(await tx
-            .select({
-              position: schema.sessionHistoryItems.position,
-              turnId: schema.sessionHistoryItems.turnId,
-              item: schema.sessionHistoryItems.item,
-              itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-            })
-            .from(schema.sessionHistoryItems)
-            .where(
-              and(
-                eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-                eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-                inArray(schema.sessionHistoryItems.position, conflictingPositions),
-              ),
-            )),
-        );
-      const byPosition = new Map(saved.map((row) => [row.position, row]));
-      for (const entry of input.items) {
-        const row = byPosition.get(entry.position);
-        if (
-          !row ||
-          row.turnId !== input.turnId ||
-          !isDeepStrictEqual(
-            fromPostgresLosslessJson(row.item, row.itemCodecVersion),
-            canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
-          )
-        ) {
-          throw new Error(
-            `Conversation history persistence conflict at position ${entry.position}`,
-          );
-        }
-      }
-      if (input.completedToolCallIds?.length) {
-        await clearDurablePendingSessionToolCallsInTransaction(
-          tx,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            executionGeneration: input.expectedExecutionGeneration,
-            attemptId: input.expectedAttemptId,
-            callIds: input.completedToolCallIds,
-          },
-          allowed,
-        );
-      }
+      appendedFootprint = await appendSessionHistoryItemsInTransaction(tx, input, allowed);
       return true;
     },
   );
@@ -45009,6 +44892,151 @@ export async function appendSessionHistoryItems(
   const delta = appendedFootprint as ActiveSessionHistoryFootprint | null;
   if (appended && delta) input.onAppendedFootprint?.(delta);
   return appended;
+}
+
+/** Append under an existing exact-attempt fence; acknowledge the footprint only after commit. */
+export async function appendSessionHistoryItemsInTransaction(
+  tx: Database,
+  input: Omit<Parameters<typeof appendSessionHistoryItems>[1], "onAppendedFootprint">,
+  allowed: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
+): Promise<ActiveSessionHistoryFootprint> {
+  assertPendingToolCallCheckpointScope(
+    {
+      ...input,
+      executionGeneration: input.expectedExecutionGeneration,
+      attemptId: input.expectedAttemptId,
+    },
+    allowed,
+  );
+  const inserted =
+    input.items.length === 0
+      ? []
+      : await tx
+          .insert(schema.sessionHistoryItems)
+          .values(
+            withLosslessContentWriteVersion(
+              input.items.map((entry) => ({
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                position: entry.position,
+                // This is the canonical model-memory boundary. The pending-call
+                // ledger and audit event may retain their separate raw/preview
+                // forms, but conversation truth is always the bounded Codex form
+                // without Responses output-only fields such as `status`.
+                item: canonicalizePersistedHistoryItem(
+                  entry.item,
+                  input.modelToolOutputTruncationTokens,
+                ),
+              })),
+              "item",
+              "itemCodecVersion",
+            ),
+          )
+          .onConflictDoNothing({
+            target: [
+              schema.sessionHistoryItems.workspaceId,
+              schema.sessionHistoryItems.sessionId,
+              schema.sessionHistoryItems.position,
+            ],
+          })
+          .returning({
+            position: schema.sessionHistoryItems.position,
+            turnId: schema.sessionHistoryItems.turnId,
+            item: schema.sessionHistoryItems.item,
+            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+            // Measured exactly as the active-history guard measures:
+            // bytes of the ordered JSON text, shape of the jsonb projection
+            // the insert trigger maintains.
+            jsonBytes: sql<string>`octet_length(${schema.sessionHistoryItems.item}::text)`,
+            jsonNodes: sql<string>`(
+                  select count(*)
+                  from jsonb_path_query(session_history_items.item, 'strict $.**')
+                )`,
+            jsonProperties: sql<string>`(
+                  select count(*)
+                  from jsonb_path_query(
+                    session_history_items.item,
+                    'strict $.** ? (@.type() == "object")'
+                  ) as object_value
+                  cross join lateral jsonb_object_keys(object_value) as property
+                )`,
+          });
+  // Rows skipped by ON CONFLICT were already stored, so only fresh inserts
+  // add to the active footprint.
+  const appendedFootprint = inserted.reduce<ActiveSessionHistoryFootprint>(
+    (total, row) => ({
+      jsonBytes: total.jsonBytes + Number(row.jsonBytes) + 1,
+      rows: total.rows + 1,
+      jsonNodes: total.jsonNodes + Number(row.jsonNodes),
+      jsonProperties: total.jsonProperties + Number(row.jsonProperties),
+    }),
+    { jsonBytes: 0, rows: 0, jsonNodes: 0, jsonProperties: 0 },
+  );
+  const saved = inserted.map(({ position, turnId, item, itemCodecVersion }) => ({
+    position,
+    turnId,
+    item,
+    itemCodecVersion,
+  }));
+  // A position conflict is idempotent only when the exact conversation
+  // item is already there. Never acknowledge a different item as saved.
+  // Fresh inserts already return their durable representation. Re-reading
+  // numeric positions under RLS can scan the session's history while we
+  // hold its write fence, so only fetch rows skipped by ON CONFLICT.
+  const insertedPositions = new Set(saved.map((row) => row.position));
+  const conflictingPositions = input.items
+    .map((entry) => entry.position)
+    .filter((position) => !insertedPositions.has(position));
+  if (conflictingPositions.length > 0)
+    saved.push(
+      ...(await tx
+        .select({
+          position: schema.sessionHistoryItems.position,
+          turnId: schema.sessionHistoryItems.turnId,
+          item: schema.sessionHistoryItems.item,
+          itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+        })
+        .from(schema.sessionHistoryItems)
+        .where(
+          and(
+            eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+            eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+            inArray(schema.sessionHistoryItems.position, conflictingPositions),
+          ),
+        )),
+    );
+  const byPosition = new Map(saved.map((row) => [row.position, row]));
+  for (const entry of input.items) {
+    const row = byPosition.get(entry.position);
+    if (
+      !row ||
+      row.turnId !== input.turnId ||
+      !isDeepStrictEqual(
+        fromPostgresLosslessJson(row.item, row.itemCodecVersion),
+        canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
+      )
+    ) {
+      throw new Error(`Conversation history persistence conflict at position ${entry.position}`);
+    }
+  }
+  if (input.completedToolCallIds?.length) {
+    await clearDurablePendingSessionToolCallsInTransaction(
+      tx,
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        executionGeneration: input.expectedExecutionGeneration,
+        attemptId: input.expectedAttemptId,
+        callIds: input.completedToolCallIds,
+      },
+      allowed,
+    );
+  }
+  return appendedFootprint;
 }
 
 export type PendingSessionToolCallInput = {
@@ -46374,6 +46402,12 @@ export async function recordSkippedContextCompaction(
       param: string | null;
       requestId: string | null;
     };
+    /**
+     * The provider's own error message (`summarization_failed` only), bounded
+     * by the caller. Session events are the conversation's own data, readable
+     * by the same people as the conversation.
+     */
+    providerMessage?: string;
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }
@@ -46421,6 +46455,9 @@ export async function recordSkippedContextCompaction(
                   reason: input.reason,
                   ...(input.providerRejection && input.reason === "summarization_failed"
                     ? { providerRejection: input.providerRejection }
+                    : {}),
+                  ...(input.providerMessage && input.reason === "summarization_failed"
+                    ? { providerMessage: input.providerMessage }
                     : {}),
                 },
                 occurredAt: new Date(),
@@ -46790,21 +46827,30 @@ export async function setSessionLastInputTokensForTurnAttempt(
         attemptId: input.expectedAttemptId,
       });
       if (!fence.allowed) return false;
-      await tx
-        .update(schema.sessions)
-        .set({
-          lastInputTokens: input.lastInputTokens,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, input.workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-          ),
-        );
+      await setSessionLastInputTokensInTransaction(tx, fence, input.lastInputTokens);
       return true;
     });
   });
+}
+
+/** The caller owns the exact session/turn/attempt locks through commit. */
+export async function setSessionLastInputTokensInTransaction(
+  tx: Database,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
+  lastInputTokens: number | null,
+): Promise<void> {
+  await tx
+    .update(schema.sessions)
+    .set({
+      lastInputTokens,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, fence.workspace.id),
+        eq(schema.sessions.id, fence.session.id),
+      ),
+    );
 }
 
 /** The neutral boundary left as the sole active history row after a clear. */
@@ -95322,6 +95368,9 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                     )
                     .returning(),
               );
+              if (mutate && typeof mutate !== "function") {
+                await mutate.project?.(tx, fence, inserted.map(mapEvent));
+              }
               const canonicalStartupMilestones = await runSessionEventAppendPhase(
                 observer,
                 { ...phaseInput, phase: "projection" },
@@ -97090,6 +97139,9 @@ function mapGitHubInstallation(
 
 function mapUsageEvent(row: typeof schema.usageEvents.$inferSelect): UsageEvent {
   return {
+    ...(typeof row.initiatorContext?.tenantLabel === "string"
+      ? { tenantLabel: row.initiatorContext.tenantLabel }
+      : {}),
     id: row.id,
     workspaceId: row.workspaceId,
     accountId: row.accountId,

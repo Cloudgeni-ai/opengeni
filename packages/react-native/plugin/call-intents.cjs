@@ -73,6 +73,7 @@ function resolveOptions(props = {}) {
     alternativeAppNames: call.alternativeAppNames ?? [],
     microphonePermission: props.microphonePermission ?? DEFAULTS.microphonePermission,
     appIntents: call.appIntents !== false,
+    iosAudioDevice: call.iosAudioDevice === true,
   };
 }
 

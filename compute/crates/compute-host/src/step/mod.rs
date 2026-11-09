@@ -61,8 +61,8 @@ use files::checkpoint_disk;
 #[cfg(target_os = "linux")]
 pub(crate) use files::reconnect_paging;
 use files::{
-    Taken, archive_receipt, diff_files, drop_snapshot, link, paged_marker, pager_control,
-    pager_dir, pager_learned, wake_profile,
+    Taken, archive_receipt, diff_files, drop_snapshot, guest_memory, link, paged_marker,
+    pager_control, pager_dir, pager_learned, wake_profile,
 };
 pub(crate) use files::{
     clear_checkpoint, clear_local, images_of, local_copy, mark_archived, paged, recover_images,
@@ -757,6 +757,29 @@ impl<E: Engine, S: Store> Job<E, S> {
         live.memory.base = Base::Unknown;
         self.engine.snapshot(&live.vm, &files, kind).await?;
         notes::phase("snapshot");
+        // Asked while the VM is still paused, so nothing the guest does
+        // after can count. Without an answer the image holds those pages
+        // as before, which is only larger; so does a VM whose memory
+        // nothing can place, which is no fault.
+        let paths = self.paths.clone();
+        let memory = match kind {
+            SnapshotKind::Diff => blocking(move || guest_memory(&paths)).await.ok().flatten(),
+            SnapshotKind::Full => None,
+        };
+        let freed = match memory {
+            Some(memory) => match self.engine.freed_memory(&live.vm, &memory).await {
+                Ok(freed) => freed,
+                Err(error) => {
+                    tracing::warn!(id = %self.id, %error, "memory the guest gave back not found");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        let given_back: u64 = freed.iter().map(|range| range.end - range.start).sum();
+        if given_back > 0 {
+            notes::bytes("freed", given_back);
+        }
         let scratch = self.paths.dir.join("saving");
         let watching = Arc::clone(&live.memory.disk);
         let files = blocking(move || {
@@ -781,6 +804,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                 // A diff over zeros, or a full snapshot, is already whole.
                 _ => None,
             },
+            freed,
             runtime: self.engine.vm_runtime(&live.vm).to_owned(),
             process,
         })
@@ -801,6 +825,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             let Taken {
                 files,
                 over,
+                freed,
                 runtime,
                 process,
             } = taken;
@@ -809,6 +834,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                     base: generation,
                     state: &files.state,
                     diff: &files.memory,
+                    freed: &freed,
                 },
                 None => Parts::Whole {
                     state: &files.state,
@@ -978,6 +1004,9 @@ impl<E: Engine, S: Store> Job<E, S> {
         // every sandbox's next boot. No VMM of this sandbox runs meanwhile.
         let (kernel, paths) = (self.kernel.clone(), self.paths.clone());
         let prepared = blocking(move || {
+            // Without it, a later save would take this VM's memory for the
+            // last pager's (see `guest_memory`).
+            crate::layout::remove_durably(&paged_marker(&paths))?;
             link_kernel(&kernel, &paths)?;
             DiskWatch::fresh(&paths)
         })

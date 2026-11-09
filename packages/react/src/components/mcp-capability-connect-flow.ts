@@ -10,6 +10,7 @@ import {
   type ConnectNavigation,
   type ConnectOwnership,
 } from "@opengeni/connect";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   OpenGeniApiError,
   type CapabilityCatalogItem,
@@ -84,7 +85,7 @@ export type McpCapabilityConnect = {
 };
 
 export type McpCapabilityConnectInput = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   /** Omit for connection management: no session tool selection is written. */
   sessionId?: string | undefined;

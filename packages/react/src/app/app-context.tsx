@@ -7,6 +7,7 @@ import type {
   PersonalGitHubRepositorySelectionInput,
   SessionEvent,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { SessionEventsConnectionState } from "../hooks/use-session-events";
 import {
@@ -63,7 +64,7 @@ export type GitHubRefreshOptions = {
 };
 
 export type AppContextValue = {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   clientConfig: ClientConfig;
   authSession: AuthSession | null;
   accessContext: AccessContext;

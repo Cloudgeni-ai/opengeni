@@ -1,9 +1,13 @@
+import type { OpenGeniClient } from "./client";
+
 /**
  * Links an agent writes into chat Markdown that point at Opengeni-owned objects.
  *
  * Agents write these forms (tool receipts and bundled Skills teach them):
  *
- * - `artifact:<file uuid>` — a retained workspace file (exports, published files, images).
+ * - `artifact:<uuid>` — a retained workspace file or Site. UUIDs parse as files
+ *   for compatibility; {@link resolveOpenGeniLinkTarget} identifies the kind.
+ * - `artifact:<32-hex id>` — a live editable document, workbook, or presentation.
  * - `sandbox:<path>[:<line>]` — a file in the session's sandbox or Connected Machine.
  * - `session:<session uuid>` — another chat in the same workspace. Each host opens it
  *   its own way (an in-app route, the phone app's chat screen) on its own deployment.
@@ -19,7 +23,12 @@
  */
 export type OpenGeniLinkTarget =
   | { kind: "file"; fileId: string; workspaceId: string | null; fromSession?: string }
-  | { kind: "editable-artifact"; artifactId: string; workspaceId: string; fromSession?: string }
+  | {
+      kind: "editable-artifact";
+      artifactId: string;
+      workspaceId: string | null;
+      fromSession?: string;
+    }
   | { kind: "site"; artifactId: string; workspaceId: string; fromSession?: string }
   | { kind: "sandbox-file"; path: string; line: number | null }
   | { kind: "session"; sessionId: string; workspaceId: string | null };
@@ -112,6 +121,11 @@ export function parseOpenGeniLink(href: string | undefined): OpenGeniLinkTarget 
   if (!href) return null;
   const fileId = parseRetainedFileReference(href);
   if (fileId) return { kind: "file", fileId, workspaceId: null };
+  if (openGeniLinkScheme(href) === "artifact") {
+    const id = href.slice("artifact:".length);
+    if (EDITABLE_ID.test(id))
+      return { kind: "editable-artifact", artifactId: id.toLowerCase(), workspaceId: null };
+  }
   const sessionId = parseSessionReference(href);
   if (sessionId) return { kind: "session", sessionId, workspaceId: null };
   if (openGeniLinkScheme(href) === "sandbox" || href.startsWith(LEGACY_WORKSPACE_PREFIX)) {
@@ -159,6 +173,24 @@ export function parseOpenGeniLink(href: string | undefined): OpenGeniLinkTarget 
     };
   }
   return null;
+}
+
+/**
+ * UUID artifact references historically name files, but Sites use the same ID
+ * format. Resolve those references with one exact, authorized kind lookup before
+ * handing them to a host. Explicit routes and 32-hex IDs need no read.
+ */
+export async function resolveOpenGeniLinkTarget(
+  client: Pick<OpenGeniClient, "resolveArtifactLink">,
+  target: OpenGeniLinkTarget,
+  workspaceId: string,
+  options: { sessionId?: string | undefined; signal?: AbortSignal | undefined } = {},
+): Promise<OpenGeniLinkTarget> {
+  if (target.kind !== "file" || target.workspaceId !== null) return target;
+  const resolution = await client.resolveArtifactLink(workspaceId, target.fileId, options);
+  return resolution.kind === "file"
+    ? { ...target, workspaceId }
+    : { kind: "site", artifactId: resolution.artifactId, workspaceId };
 }
 
 /** The Opengeni console route for a target (the form agents write). */

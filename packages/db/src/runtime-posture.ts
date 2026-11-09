@@ -95,6 +95,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_due_slack_agent_update_installations_v1(integer)",
   "list_organization_compute_v1(uuid, uuid, text)",
   "list_uncompacted_recording_tracks_v1(integer, text)",
+  "end_agent_call_rings_v1(uuid)",
 ] as const;
 
 /**
@@ -127,14 +128,16 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, the sweeper finds nothing and sends no update messages.
  * 1240 withheld the inventory of meeting tracks not yet kept compact and
  * 1282 granted it.
+ * 1344 withholds the end of a call's ring on the other phones; until it is
+ * granted, settling a call sends no ended push and those phones ring out.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
-  "read_external_identity_v1(uuid, text, text)",
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
+  "end_agent_call_rings_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -233,6 +236,11 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "recording_tracks",
     "recording_chunks",
     "recording_transcript_versions",
+  ],
+  "end_agent_call_rings_v1(uuid)": [
+    "agent_calls",
+    "opengeni_private.native_push_deliveries",
+    "opengeni_private.native_push_devices",
   ],
 };
 
@@ -3306,6 +3314,12 @@ export type RuntimeDatabasePostureOptions = {
    * migration creates them; when one is present it is checked like every other contract table.
    */
   tablesCreatedByLaterMigrations?: readonly string[];
+  /**
+   * The same, for runtime definers (named without their argument list): a definer a later
+   * migration creates may be absent even though every table it works on already exists. When
+   * one is present it is checked like every other definer.
+   */
+  routinesCreatedByLaterMigrations?: readonly string[];
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -6827,10 +6841,15 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }
+  const notYetCreatedRoutines = new Set(options.routinesCreatedByLaterMigrations ?? []);
   for (const name of RUNTIME_DEFINER_ROUTINES) {
     if (
       RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) => definerTableByName.has(table)) &&
-      posture.privateRoutines.filter((routine) => routine.name === name).length !== 1
+      posture.privateRoutines.filter((routine) => routine.name === name).length !== 1 &&
+      !(
+        notYetCreatedRoutines.has(name.slice(0, name.indexOf("("))) &&
+        !posture.privateRoutines.some((routine) => routine.name === name)
+      )
     ) {
       violations.push(`runtime definer ${name} is missing or ambiguous`);
     }

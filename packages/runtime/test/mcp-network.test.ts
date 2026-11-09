@@ -39,6 +39,34 @@ const testSettings = {
 };
 
 describe("MCP network and payload boundary", () => {
+  test("tool-call transport checks the actual host against the operator private allowlist", async () => {
+    const calls: string[] = [];
+    const guarded = guardedMcpFetch(
+      {
+        environment: "production",
+        integrationsAllowPrivateNetworkTargets: false,
+        integrationsPrivateNetworkAllowedHosts: ["admin-api.example.com:443"],
+      },
+      async (input: string, init) => {
+        calls.push(input);
+        expect(init?.redirect).toBe("manual");
+        return new Response("tool result");
+      },
+      { dnsLookup: async () => [{ address: "10.0.0.8", family: 4 }] },
+    );
+    const init = {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call" }),
+    };
+    expect(await (await guarded("https://admin-api.example.com/mcp", init)).text()).toBe(
+      "tool result",
+    );
+    await expect(guarded("https://other.example.com/mcp", init)).rejects.toMatchObject({
+      reason: "private_or_special_use",
+    });
+    expect(calls).toEqual(["https://admin-api.example.com/mcp"]);
+  });
+
   test("trace propagation preserves Fetch header replacement semantics and never adopts caller identity", async () => {
     const captured: Headers[] = [];
     const guarded = guardedMcpFetch(

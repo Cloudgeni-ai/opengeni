@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 
 /**
  * Puts `text` in a workspace's new-chat composer, ready to send: the saved
@@ -7,7 +8,7 @@ import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
  * so nothing starts until they do.
  */
 export async function readyNewChat(
-  client: Pick<OpenGeniBrowserClient, "getNewSessionDraft" | "saveNewSessionDraft">,
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "getNewSessionDraft" | "saveNewSessionDraft">,
   workspaceId: string,
   text: string,
 ): Promise<void> {

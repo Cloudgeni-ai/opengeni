@@ -11,16 +11,26 @@ export const englishMessages = {
   "approvalSurface.allow": "Allow",
   "approvalSurface.approvalNeeded": "Approval needed",
   "approvalSurface.approveAction": "Approve action",
+  /** Approves every waiting action the person may approve, one decision each. */
+  "approvalSurface.approveAll": "Approve all {length}",
   "approvalSurface.approving": "Approving…",
+  /** Shown in place of the bulk buttons while their decisions are sent. */
+  "approvalSurface.approvingIndexOfLength": "Approving {index} of {length}…",
   "approvalSurface.backToReview": "Back to review",
   /** Declines an app action's question without running it. */
   "approvalSurface.cancel": "Cancel",
   /** The empty choice of an MCP server's drop-down question. */
   "approvalSurface.choose": "Choose…",
+  /** One action Approve all could not approve; it stays waiting. Selecting it shows its card. */
+  "approvalSurface.couldnTApproveTitle": "Couldn't approve {title}: {error}",
+  "approvalSurface.couldnTDeclineTitle": "Couldn't decline {title}: {error}",
   "approvalSurface.couldnTLoadThisAction":
     "Couldn't load this action, so it can't be approved yet. You can still decline it.",
   "approvalSurface.decline": "Decline",
+  /** Declines every waiting action, one decision each. */
+  "approvalSurface.declineAll": "Decline all",
   "approvalSurface.declining": "Declining…",
+  "approvalSurface.decliningIndexOfLength": "Declining {index} of {length}…",
   "approvalSurface.lengthActionsAreWaitingFor": "{length} actions are waiting for you",
   "approvalSurface.loadingActionDetails": "Loading action details…",
   "approvalSurface.nextAction": "Next action",
@@ -1258,6 +1268,8 @@ export const englishMessages = {
   "composerTranscriptionControl.savedTranscriptionFailedRetryWhen":
     "Saved. Transcription failed, retry when ready.",
   "composerTranscriptionControl.savingAudioLocally": "Saving audio…",
+  "composerTranscriptionControl.speechServiceOutOfCredit":
+    "The speech-to-text service is out of credit. Recording saved; retry once it's topped up.",
   "composerTranscriptionControl.startVoiceInput": "Start voice input",
   "composerTranscriptionControl.stopAndTranscribe": "Stop and transcribe",
   "composerTranscriptionControl.stopsAndTranscribesInSeconds":
@@ -1849,8 +1861,6 @@ export const englishMessages = {
   "hooks.useComposer.seeAttachedContext": "(see attached context)",
   "hooks.useComposer.theDurableComposerDraftIs":
     "The durable composer draft is not ready for delivery.",
-  "hooks.useComposer.theMessageDraftCouldNot":
-    "The message draft could not be saved before delivery.",
   "hooks.useComposer.theRequestCouldNotBe":
     "The request could not be confirmed. Check its status before retrying.",
   "hooks.useComputerFrameStream.desktopViewLostConnection": "Desktop view lost connection.",
@@ -2115,6 +2125,12 @@ export const englishMessages = {
     "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key. Your message is saved.",
   "lib.format.modelPolicyRefused":
     "This workspace's model policy doesn't allow this model. Choose another model. Your message is saved.",
+  "lib.format.repositoryUnavailable":
+    "{repository} is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry. Your message is saved.",
+  "lib.format.repositoriesUnavailable":
+    "These repositories are no longer available to this workspace: {repositories}. Remove them from this chat, or restore their GitHub access, then retry. Your message is saved.",
+  "lib.format.someRepositoryUnavailable":
+    "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry. Your message is saved.",
   "lib.format.now": "now",
   "lib.format.speedUnavailable":
     "This model can't run at the selected speed. Choose another speed. Your message is saved.",
@@ -3605,6 +3621,10 @@ export const englishMessages = {
   "native.realtime.callView.speaker": "Speaker",
   "native.realtime.callView.unmute": "Unmute",
   "native.realtime.nativeCall.couldNotStartTheCall": "Could not start the call.",
+  "native.realtime.nativeCall.noInputAudio":
+    "Your microphone isn't picking up any sound. Check that no other app is using it.",
+  "native.realtime.nativeCall.replyNotPlayed":
+    "A reply arrived but couldn't be played. Check your volume.",
   "native.realtime.nativeCall.voiceDisconnected": "Voice disconnected.",
   "native.realtime.nativeCall.voiceIsNotReadyYet": "Voice is not ready yet.",
   "native.realtime.wakePhrase.copied": "Copied",
@@ -4167,6 +4187,9 @@ export const englishMessages = {
   "realtime.realtimeControl.modeVersion": "mode version",
   "realtime.realtimeControl.muteMicrophone": "Mute microphone",
   "realtime.realtimeControl.muteVoiceAudio": "Mute voice audio",
+  "realtime.realtimeControl.noMicrophoneSound": "No sound from your microphone",
+  "realtime.realtimeControl.noMicrophoneSoundDetail":
+    "The voice can't hear you. Check that no other app is using your microphone.",
   "realtime.realtimeControl.opengeni": "{product}",
   "realtime.realtimeControl.pendingBytes": "pending bytes",
   "realtime.realtimeControl.pendingDurableEvents": "pending durable events",
@@ -4179,6 +4202,9 @@ export const englishMessages = {
   "realtime.realtimeControl.recommendedDescription": "Recommended · {description}",
   "realtime.realtimeControl.reconnectAttempt": "reconnect attempt",
   "realtime.realtimeControl.reconnecting": "Reconnecting…",
+  "realtime.realtimeControl.replyNotPlayed": "Reply not played",
+  "realtime.realtimeControl.replyNotPlayedDetail":
+    "A reply arrived but couldn't be played. Check your volume and audio output.",
   "realtime.realtimeControl.resumeAudio": "Resume audio",
   "realtime.realtimeControl.resumeAudioToHearThe":
     "Your browser didn't let the replies play. Tap to hear them.",
@@ -5277,11 +5303,15 @@ export const englishMessages = {
   "timeline.compactionCopy.noActiveHistoryToCompact": "No active history to compact",
   "timeline.compactionCopy.noSubscriptionCapacityRightNow":
     "No subscription capacity right now. It runs with your next message if still needed.",
+  "timeline.compactionCopy.olderMessagesTrimmed": "Older messages trimmed",
   "timeline.compactionCopy.parameter": "Parameter",
+  "timeline.compactionCopy.providerMessage": "Provider message",
   "timeline.compactionCopy.requestId": "Request ID",
   "timeline.compactionCopy.requestItAgainToRetry":
     "Request it again to retry. Chat history is unchanged.",
   "timeline.compactionCopy.response": "Response",
+  "timeline.compactionCopy.theModelCouldnTSummarizeThem":
+    "The model couldn’t summarize them. Chat history above is unchanged.",
   "timeline.compactionCopy.theProviderRejectsThisRequest":
     "The provider rejects this request the same way until the conversation changes.",
   "timeline.fleetDecisionRow.admission": "Admission",

@@ -1588,6 +1588,11 @@ export function createRecordingActivities(
         if (error instanceof TranscriptionBillingRefusedError) return await fail(error.code, error);
         if (error instanceof TranscriptionServiceError) {
           if (error.subscriptionCode) return await fail(error.subscriptionCode, error);
+          // What the provider said, where voice input's own code is coarser:
+          // an account out of credit is not a service that is down.
+          if (error.providerCode && !error.retryable) {
+            return await fail(`provider_${error.providerCode}`, error);
+          }
           if (!error.retryable) return await fail(`voice_${error.code}`, error);
           throw ApplicationFailure.retryable(error.message, `voice_${error.code}`);
         }

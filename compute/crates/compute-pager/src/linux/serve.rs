@@ -15,6 +15,9 @@
 //! Once every byte is in the file and every page in the guest (zero pages
 //! left to the kernel), the pager unregisters the guest's memory and exits:
 //! a VM that has been awake for a while carries no pager at all.
+//! Before it exits it writes where the guest's memory is, as the VMM's
+//! handshake said, into its done file ([`control::Finished`]): the host
+//! has no other way to learn it.
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -239,12 +242,20 @@ fn run(options: &Options) -> io::Result<()> {
         .unwrap_or_default();
     let (control, control_file) = bind(&options.control)?;
     let (vmm, _vmm_file) = bind(&options.vmm_socket)?;
+    // A done file is this pager's word alone: one an earlier pager left,
+    // even for the same launch (an engine may start the VMM and its pager
+    // again), would tell the host this one finished before it has.
+    let done = control_file.sibling("done");
+    match done.0.remove(&done.1) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
     let prepared = Prepared {
         source: crate::source::filled(&file, Arc::clone(&filling))?,
         profile,
         quiesce: AskVmm::new(&api_socket)?,
         learned: options.learned.as_deref().map(Dir::of).transpose()?,
-        done: control_file.sibling("done"),
+        done,
     };
     // Everything a pager opens by name is open now, while it has one
     // thread: from here on it is no more than the VM, and names files only
@@ -392,6 +403,20 @@ fn serve(
         .regions()
         .first()
         .map_or(0, |region| region.page_size);
+    let finished = serde_json::to_vec(&control::Finished {
+        tag: options.tag.clone(),
+        regions: pager
+            .layout()
+            .regions()
+            .iter()
+            .map(|region| control::Region {
+                address: region.base_host_virt_addr,
+                size: region.size,
+                offset: region.offset,
+            })
+            .collect(),
+    })
+    .map_err(io::Error::other)?;
     let result = pager.run(stopped, |progress| match progress {
         Progress::Prefetched => {
             status.prefetched.store(true, Ordering::Release);
@@ -410,9 +435,14 @@ fn serve(
         }
         Progress::Settled => {
             // Word for a host whose connection dropped just now, which
-            // would otherwise take the pager's exit for its death.
-            if let Err(error) = done.0.touch(&done.1) {
-                eprintln!("pager: done not recorded: {error}");
+            // would otherwise take the pager's exit for its death, and
+            // where the guest's memory is, which only the VMM's handshake
+            // said.
+            if let Err(error) = done.0.write_atomic(&done.1, &finished) {
+                eprintln!("pager: the memory's layout not recorded: {error}");
+                if let Err(error) = done.0.touch(&done.1) {
+                    eprintln!("pager: done not recorded: {error}");
+                }
             }
             status.done.store(true, Ordering::Release);
         }

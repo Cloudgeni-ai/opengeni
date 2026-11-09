@@ -277,6 +277,7 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     const membership = statedMembership(options.membership);
     const Client = this.constructor as new (options: OpenGeniClientOptions) => this;
     const client = new Client({ ...this.options });
+    client.sessionResponse = this.sessionResponse;
     client.externalActorHeader = encodeURIComponent(
       JSON.stringify({
         mode: "external",
@@ -310,6 +311,7 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     const serializedContext = context === undefined ? undefined : serializeServiceContext(context);
     const Client = this.constructor as new (options: OpenGeniClientOptions) => this;
     const client = new Client({ ...this.options });
+    client.sessionResponse = this.sessionResponse;
     client.serviceInitiatorHeader = name;
     client.serviceContextHeader = serializedContext;
     return client;

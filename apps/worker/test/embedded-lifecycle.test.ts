@@ -815,6 +815,18 @@ describe("embedded worker lifecycle contract", () => {
             has_dependents: false,
             configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
           })),
+          // Migration 1344: ends a settled call's ring on the other phones,
+          // created without runtime EXECUTE until a later migration grants it.
+          {
+            name: "end_agent_call_rings_v1(uuid)",
+            owner: "opengeni_migrator",
+            can_execute: false,
+            public_execute: false,
+            security_definer: true,
+            trigger_callable: false,
+            has_dependents: false,
+            configuration: ["search_path=pg_catalog, public, pg_temp"],
+          },
           // Migration 1103: the subscription account-administrator grant,
           // created without runtime EXECUTE; 1149 granted it.
           {
@@ -827,12 +839,12 @@ describe("embedded worker lifecycle contract", () => {
             has_dependents: false,
             configuration: ["search_path=pg_catalog, public, pg_temp"],
           },
-          // Migration 1172: the lock-free external identity read. Its runtime
-          // grant stays deferred for previous-release compatibility.
+          // Migration 1343 activates the external identity reader introduced
+          // by 1172 after the previous release recognizes either grant state.
           {
             name: "read_external_identity_v1(uuid, text, text)",
             owner: "opengeni_migrator",
-            can_execute: false,
+            can_execute: true,
             public_execute: false,
             security_definer: true,
             trigger_callable: false,

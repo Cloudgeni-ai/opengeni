@@ -13,6 +13,7 @@ const { intentsSource, pluginFeatures, resolveOptions } = require("../plugin/cal
     call: Record<string, unknown> & { phrases: string[] };
     alternativeAppNames: string[];
     appIntents: boolean;
+    iosAudioDevice: boolean;
   };
 };
 
@@ -38,6 +39,13 @@ describe("native call config plugin", () => {
     expect(options.call.phrases.length).toBeGreaterThan(0);
     expect(options.alternativeAppNames).toEqual([]);
     expect(options.appIntents).toBe(true);
+    // The call audio device is opt-in: WebRTC keeps its own device by default.
+    expect(options.iosAudioDevice).toBe(false);
+  });
+
+  test("builds the iOS call audio device only when asked", () => {
+    expect(resolveOptions({ call: { iosAudioDevice: true } }).iosAudioDevice).toBe(true);
+    expect(resolveOptions({ call: { iosAudioDevice: "yes" } }).iosAudioDevice).toBe(false);
   });
 
   test("keeps Siri synonyms and can skip the generated intent", () => {

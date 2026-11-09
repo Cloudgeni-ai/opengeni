@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   OpenGeniApiError,
   observedSessionSequence,
@@ -39,7 +40,7 @@ export function isGoalRefreshEvent(event: Pick<SessionEvent, "type">): boolean {
   );
 }
 
-export type UseGoalOptions = EmbeddedGoalClientOverride &
+export type UseGoalOptions = EmbeddedGoalClientOverride<ChatClient> &
   SessionEventFeedOptions & {
     /** Optional safety-net polling (ms). Off by default — event refreshes drive updates. */
     pollIntervalMs?: number | undefined;

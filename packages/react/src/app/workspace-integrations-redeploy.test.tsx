@@ -5,6 +5,7 @@
 // focus. During a deploy those reads get gateway 502s. They must stay quiet
 // and recover by themselves once Opengeni answers again.
 import { afterEach, describe, expect, jest, spyOn, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { forwardRef } from "react";
 import * as Sonner from "sonner";
 import type { ClientConfig } from "@opengeni/sdk";
@@ -123,7 +124,7 @@ function redeployingHost({ personalRateLimited = false } = {}) {
       listApiIntegrations: async () => duringDeploy(() => ({ integrations: [] })),
     } as Record<string, unknown>,
     { get: (target, key) => target[key as string] ?? (async () => ({})) },
-  ) as unknown as OpenGeniBrowserClient;
+  ) as unknown as ChatClient<OpenGeniBrowserClient>;
   const noop = async () => {};
   const host = {
     authority: "host",

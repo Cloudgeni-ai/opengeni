@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type { SitePlatformUsage } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 
@@ -22,7 +23,7 @@ export type SitePlatformUsageLoad =
  * dashboard's selected window. Hidden where the workspace can't publish.
  */
 export function useSitePlatformUsage(
-  client: Pick<OpenGeniBrowserClient, "getSitePlatformUsage">,
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "getSitePlatformUsage">,
   workspaceId: string,
 ): SitePlatformUsageLoad {
   const [load, setLoad] = useState<SitePlatformUsageLoad>({ state: "loading" });

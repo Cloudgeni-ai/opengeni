@@ -131,6 +131,9 @@ A message sent while the agent works is then read as soon as it can, usually
 within seconds. There is no Queue choice beside Send and no Queue or Steer
 words; a message sent while the workstream is paused waits and shows as a
 waiting message. Add `offerQueue: true` to offer Queue beside Send again.
+The server makes the steer-or-start choice when the message arrives
+(`delivery: "steer_or_send"`), so a message reaches the running turn even if
+the page's view of the session is a few seconds old.
 
 An open conversation marks itself read for the signed-in person while they can
 see it: its timeline is on screen, the page is visible, the window is focused,
@@ -1188,8 +1191,11 @@ state remains application-owned; durable draft and session state remain in
   visible queue order (including while paused); `steer()` puts the new direction
   directly in chat, and a running turn reads it as soon as it can, usually
   within seconds, without cutting off running tools. With `busySend: "steer"`,
-  `send()` steers while a turn is running or prompts wait (it still queues
-  while paused) and `sendToQueue()` always queues; the default `"queue"` keeps
+  `send()` submits `delivery: "steer_or_send"` and the server steers the
+  running (or starting) turn or else starts one (it still queues while
+  paused), so a stale local view never queues the message; against a server
+  that predates `steer_or_send` it falls back to its own choice.
+  `sendToQueue()` always queues; the default `"queue"` keeps
   Send queueing. `alternateSend` names the other choice while Send takes that
   busy path (`null` otherwise) and `sendAlternate()` performs it; hosts show it
   beside Send exactly when it is not `null`. Under `busySend: "steer"` there is

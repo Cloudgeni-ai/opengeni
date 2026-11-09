@@ -1,4 +1,5 @@
 import { t } from "../../lib/console-text";
+import type { ChatClient } from "@opengeni/sdk";
 import { expect, mock, test } from "bun:test";
 import { CapabilityCatalogItem as CapabilityCatalogItemSchema } from "@opengeni/contracts";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -11,10 +12,14 @@ import {
 const item = { kind: "mcp", tools: [{ kind: "mcp", id: "new" }] } as CapabilityCatalogItem;
 function harness(mode = "explicit", selectedIds = ["old"], idsTruncated = false) {
   const updateSessionToolPolicy = mock(
-    async (..._args: Parameters<OpenGeniBrowserClient["updateSessionToolPolicy"]>) => ({}),
+    async (
+      ..._args: Parameters<ChatClient<OpenGeniBrowserClient>["updateSessionToolPolicy"]>
+    ) => ({}),
   );
   const continueAfter = mock(
-    async (..._args: Parameters<OpenGeniBrowserClient["continueAfterCapabilitySetup"]>) => ({
+    async (
+      ..._args: Parameters<ChatClient<OpenGeniBrowserClient>["continueAfterCapabilitySetup"]>
+    ) => ({
       outcome: "queued" as const,
       updateId: "update",
     }),
@@ -34,7 +39,7 @@ function harness(mode = "explicit", selectedIds = ["old"], idsTruncated = false)
       },
     }),
     updateSessionToolPolicy,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   return { client, updateSessionToolPolicy, continueAfter };
 }
 test("adding a connection preserves tools and first-party restrictions with CAS", async () => {
@@ -125,7 +130,7 @@ test("native OAuth return attaches freshly enabled tools and first-party names",
           metadata: { firstPartyMcpTools: ["fiken_companies_list", "fiken_invoices_list"] },
         }),
       ],
-    }) as Awaited<ReturnType<OpenGeniBrowserClient["listCapabilities"]>>;
+    }) as Awaited<ReturnType<ChatClient<OpenGeniBrowserClient>["listCapabilities"]>>;
   await completeSessionCapabilityOAuth(t, h.client, "w", "s", "api:fiken");
   expect(h.updateSessionToolPolicy.mock.calls[0]?.[2]).toMatchObject({
     tools: [{ kind: "mcp", id: "old" }],
@@ -139,7 +144,7 @@ test("native OAuth return cannot claim success for an unresolved or disabled int
   const h = harness();
   h.client.listCapabilities = async () =>
     ({ items: [], installations: [] }) as Awaited<
-      ReturnType<OpenGeniBrowserClient["listCapabilities"]>
+      ReturnType<ChatClient<OpenGeniBrowserClient>["listCapabilities"]>
     >;
   await expect(completeSessionCapabilityOAuth(t, h.client, "w", "s", null)).rejects.toThrow(
     "identified",
@@ -157,7 +162,7 @@ test("a native OAuth return whose chat attach fails never continues the agent", 
     ({
       items: [{ ...item, id: "service", enabled: true }],
       installations: [],
-    }) as unknown as Awaited<ReturnType<OpenGeniBrowserClient["listCapabilities"]>>;
+    }) as unknown as Awaited<ReturnType<ChatClient<OpenGeniBrowserClient>["listCapabilities"]>>;
   h.updateSessionToolPolicy.mockImplementationOnce(async () => {
     throw new Error("Version conflict");
   });
@@ -176,7 +181,12 @@ test("continuing after setup never fails the setup the person just finished", as
   // An older client without the method behaves the same way.
   const older = { ...harness().client, continueAfterCapabilitySetup: undefined };
   expect(() =>
-    continueAfterCapabilitySetup(older as unknown as OpenGeniBrowserClient, "w", "s", "service"),
+    continueAfterCapabilitySetup(
+      older as unknown as ChatClient<OpenGeniBrowserClient>,
+      "w",
+      "s",
+      "service",
+    ),
   ).not.toThrow();
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(rejected.continueAfter.mock.calls).toEqual([["w", "s", { capabilityId: "service" }]]);

@@ -75,17 +75,24 @@ fn connect_as(core: &mut Core, now: u64, conn: ConnId, instance: &str) {
 
 /// Answers the session's `open` with `opened`.
 fn open(core: &mut Core, now: u64) -> u32 {
-    let s = core
-        .take()
-        .into_iter()
-        .find_map(|effect| match effect {
-            Effect::Frame {
-                frame: HostFrame::Open { s, .. },
-                ..
-            } => Some(s),
-            _ => None,
-        })
-        .expect("the host opened a session");
+    let s = opening(&core.take()).expect("the host opened a session");
+    opened(core, now, s);
+    s
+}
+
+/// The session the host opens among `effects`, if it opens one.
+fn opening(effects: &[Effect]) -> Option<u32> {
+    effects.iter().find_map(|effect| match effect {
+        Effect::Frame {
+            frame: HostFrame::Open { s, .. },
+            ..
+        } => Some(*s),
+        _ => None,
+    })
+}
+
+/// The gateway answers the host's `open` of session `s`.
+fn opened(core: &mut Core, now: u64, s: u32) {
     core.on(
         now,
         Input::Gateway {
@@ -103,7 +110,6 @@ fn open(core: &mut Core, now: u64) -> u32 {
         },
     );
     core.take();
-    s
 }
 
 fn sub(core: &mut Core, now: u64, conn: ConnId, name: &str, sid: &str) {
@@ -374,6 +380,48 @@ fn a_message_nobody_waits_on_reaches_a_sleeping_agent_without_waking_it() {
     told(&mut core, 21, Running::Asleep);
     assert_eq!(wakes(&core.take()), 0);
     assert_eq!(core.deadline(), None);
+}
+
+#[test]
+fn a_link_that_drops_and_comes_back_never_wakes_a_sleeping_sandbox() {
+    let (mut core, _) = asleep(Settings::default());
+    told(&mut core, 0, Running::Asleep);
+    assert_eq!(wakes(&core.take()), 0);
+    // The gateway's link goes and comes back, again and again, and the
+    // session is opened anew on it each time; time passes.
+    let mut s = 0;
+    for round in 1..=3_u64 {
+        let now = round * 60_000;
+        core.on(now, Input::LinkDown { link: LINK });
+        assert_eq!(wakes(&core.take()), 0, "round {round}: link down");
+        core.on(
+            now + 1,
+            Input::LinkUp {
+                gateway: GATEWAY.into(),
+                link: LINK,
+                max_payload: 1 << 20,
+            },
+        );
+        let effects = core.take();
+        assert_eq!(wakes(&effects), 0, "round {round}: link up");
+        s = opening(&effects).expect("the session is opened again");
+        opened(&mut core, now + 2, s);
+        core.on(now + 3, Input::Tick);
+        assert_eq!(wakes(&core.take()), 0, "round {round}: link back");
+    }
+    // Nor does a message nobody waits on, such as one about another turn
+    // of its session.
+    send(
+        &mut core,
+        300_000,
+        (s, 1),
+        None,
+        Bytes::from_static(b"note"),
+    );
+    assert_eq!(wakes(&core.take()), 0);
+    // Only a request for it does.
+    msg(&mut core, 300_001, s, 1, Bytes::from_static(b"exec"));
+    assert_eq!(wakes(&core.take()), 1);
 }
 
 #[test]

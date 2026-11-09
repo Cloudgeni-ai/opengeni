@@ -2,6 +2,7 @@
 // owns the shortcut, the small window that shows progress and where the text
 // goes; this page records with the signed-in account, as the composer does.
 import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { ClientConfig, ClientVoiceInputConfig, OpenGeniClient } from "@opengeni/sdk";
 import {
   getDesktopDictation,
@@ -21,8 +22,8 @@ import {
 import { readClientConfig } from "../../lib/client-config-read";
 import { useOpenGeniText, type OpenGeniText } from "../../messages/runtime";
 
-export type DesktopDictationClient = Pick<OpenGeniClient, "transcribeAudio"> &
-  Partial<Pick<OpenGeniClient, "requestJson" | "getClientConfig" | "getWorkspace">>;
+export type DesktopDictationClient = Pick<ChatClient<OpenGeniClient>, "transcribeAudio"> &
+  Partial<Pick<ChatClient<OpenGeniClient>, "requestJson" | "getClientConfig" | "getWorkspace">>;
 
 export type DesktopDictationHostProps = {
   /** The signed-in SDK client; dictations are recordings of this account. */
@@ -405,7 +406,7 @@ function useHostVoiceInput(
       if (capabilityKey !== null) return given.current ?? null;
       if (typeof client.getClientConfig !== "function") return null;
       const config = await readClientConfig<ClientConfig>(
-        client as Pick<OpenGeniClient, "getClientConfig">,
+        client as Pick<ChatClient<OpenGeniClient>, "getClientConfig">,
         workspaceId,
       );
       return config.voiceInput ?? null;

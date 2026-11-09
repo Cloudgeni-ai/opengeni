@@ -266,6 +266,26 @@ fn bearer_expiry(bearer: &str) -> Option<u64> {
     value.get("exp")?.as_u64()
 }
 
+/// Local renewal detection only, never authentication: all claims except expiry
+/// must stay identical. Unknown/malformed envelopes take the full reconnect path.
+pub(crate) fn same_bearer_authority(previous: &str, next: &str) -> bool {
+    fn authority(bearer: &str) -> Option<serde_json::Value> {
+        let (payload, _) = bearer.strip_prefix("oge_")?.split_once('.')?;
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .ok()?;
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let claims = value.as_object_mut()?;
+        claims.get("credentialGeneration")?.as_u64()?;
+        claims.remove("exp")?.as_u64()?;
+        Some(value)
+    }
+    match (authority(previous), authority(next)) {
+        (Some(previous), Some(next)) => previous == next,
+        _ => false,
+    }
+}
+
 /// The deployment's correlation id for a failed request, so the failure can be
 /// matched to its server log entry. Only a plain token is accepted, so a server
 /// cannot place arbitrary text in the machine's log.

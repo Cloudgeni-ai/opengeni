@@ -7,16 +7,17 @@ import type {
   FeedbackSentiment,
   OpenGeniClient,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { type OpenGeniText } from "./messages/runtime";
 
-export type FeedbackClient = Pick<OpenGeniClient, "createFeedback" | "listOwnFeedback">;
+export type FeedbackClient = Pick<ChatClient<OpenGeniClient>, "createFeedback" | "listOwnFeedback">;
 
 /** One shared read per session, with recovery after a transient network failure. */
 export function loadSessionFeedback(
-  client: Pick<OpenGeniClient, "listOwnFeedback">,
+  client: Pick<ChatClient<OpenGeniClient>, "listOwnFeedback">,
   workspaceId: string,
   sessionId: string,
-  onLoaded: (result: Awaited<ReturnType<OpenGeniClient["listOwnFeedback"]>>) => void,
+  onLoaded: (result: Awaited<ReturnType<ChatClient<OpenGeniClient>["listOwnFeedback"]>>) => void,
 ): () => void {
   let current = true;
   let delay = 1_000;

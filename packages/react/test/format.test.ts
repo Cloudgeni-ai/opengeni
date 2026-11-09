@@ -502,6 +502,68 @@ describe("composerSubmissionErrorMessage", () => {
     expect(composerSubmissionCanRetry(new Error("network unavailable"))).toBe(true);
   });
 
+  test("a follow-up refused for a repository that lost GitHub access names it and keeps Retry", () => {
+    const refusal = (repositories?: unknown) =>
+      new OpenGeniApiError(
+        422,
+        JSON.stringify({
+          error: {
+            status: 422,
+            code: "validation_failed",
+            message:
+              "GitHub App repository resources must be authorized for a GitHub App installation linked to this workspace",
+            retryable: false,
+            outcomeUnknown: false,
+            details: {
+              code: "github_repository_unavailable",
+              ...(repositories === undefined ? {} : { repositories }),
+            },
+          },
+        }),
+      );
+    const generic = "The request could not be accepted. Check your input and try again.";
+    const one = composerSubmissionErrorMessage(englishText, refusal(["benyhh/grocery-bot"]));
+    expect(one).toBe(
+      "benyhh/grocery-bot is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry. Your message is saved.",
+    );
+    expect(
+      composerSubmissionErrorMessage(
+        englishText,
+        refusal(["acme/a", "acme/b", "acme/c", "acme/d"]),
+      ),
+    ).toBe(
+      "These repositories are no longer available to this workspace: acme/a, acme/b, acme/c, …. Remove them from this chat, or restore their GitHub access, then retry. Your message is saved.",
+    );
+    expect(composerSubmissionErrorMessage(englishText, refusal())).toBe(
+      "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry. Your message is saved.",
+    );
+    expect(one).not.toBe(generic);
+    // Removing the repository or restoring its access makes the same Send succeed.
+    expect(composerSubmissionCanRetry(refusal(["benyhh/grocery-bot"]))).toBe(true);
+  });
+
+  test("a follow-up 422 the server explains shows the server's reason, not 'check your input'", () => {
+    const explained = new OpenGeniApiError(
+      422,
+      JSON.stringify({
+        error: {
+          status: 422,
+          code: "validation_failed",
+          message: "composer draft resources must be included in the accepted resource set",
+          retryable: false,
+          outcomeUnknown: false,
+        },
+      }),
+    );
+    expect(composerSubmissionErrorMessage(englishText, explained)).toBe(
+      "Composer draft resources must be included in the accepted resource set.",
+    );
+    const bare = new OpenGeniApiError(400, "");
+    expect(composerSubmissionErrorMessage(englishText, bare)).toBe(
+      "The request could not be accepted. Check your input and try again.",
+    );
+  });
+
   test("uncertain delivery takes precedence over model-unavailable details", () => {
     const error = new OpenGeniApiError(
       422,

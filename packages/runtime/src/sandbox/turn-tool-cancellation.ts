@@ -1243,15 +1243,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   async clearSecretFiles(): Promise<void> {
-    let failure: unknown = null;
-    for (const session of this.secretFileSessions) {
-      try {
-        await session.clearSecretFilesForAttempt!();
-      } catch (error) {
-        failure ??= error;
-      }
-    }
-    if (failure !== null) throw failure;
+    const sessions = [...this.secretFileSessions];
+    this.secretFileSessions.clear();
+    // One unavailable backend must not prevent cleanup on the others. Observe
+    // every rejection even when another provider never answers.
+    await Promise.all(sessions.map(async (session) => await session.clearSecretFilesForAttempt!()));
   }
 
   runSandboxCommand(
@@ -2870,6 +2866,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     });
     let cancellation: Promise<void> | null = null;
     let cancellationRequest: Promise<void> | null = null;
+    let abandonmentRequest: Promise<void> | null = null;
     let observation: Promise<RemoteOperationObservation | null> | null = null;
     let ownershipTransferPending = false;
     let transport: RemoteOperationControl | null =
@@ -2950,9 +2947,23 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                     cancellationRequest = null;
                   });
               }
+              if (!abandonmentRequest && exactTransport.abandonExecCommand) {
+                abandonmentRequest = exactTransport
+                  .abandonExecCommand(opId)
+                  .then((committed) => {
+                    if (committed) entry.releaseCancellationAuthority(opId);
+                  })
+                  .catch(() => undefined)
+                  .finally(() => {
+                    abandonmentRequest = null;
+                  });
+              }
               // Reconcile only the original operation. readExisting is
               // observation-only and never OpStarts or final-ACKs its output.
-              await entry.observe();
+              // A stuck transport read cannot prevent independent durable
+              // custody from committing. observe() already coalesces reads;
+              // keep the registration until exit proof or committed handoff.
+              void entry.observe().catch(() => undefined);
             }
             await Promise.race([entry.settledPromise, delay(SHELL_POLL_MS)]);
           }

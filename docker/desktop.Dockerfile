@@ -32,6 +32,23 @@ FROM scratch AS chrome-assets
 
 ADD --checksum=sha256:6c92cd22e90c6e3e255d782991543fa2091db8614e8536a971a7433a5c4d7ac8 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.47-1_amd64.deb /google-chrome-stable.deb
 
+# The pinned rg and jq builds the agent embeds and appends to every command's
+# PATH. Pins equal packages/runtime/src/sandbox/shell-tools-manifest.ts
+# (checked by scripts/fetch-shell-tools.test.ts); the cache is keyed by checksum.
+FROM scratch AS shell-tools-linux
+ADD --checksum=sha256:33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz /cache/33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+ADD --checksum=sha256:800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz /cache/800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
+ADD --checksum=sha256:b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64 /cache/b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f
+ADD --checksum=sha256:8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309 https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-arm64 /cache/8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309
+
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS shell-tools-fetch
+WORKDIR /src
+COPY scripts/fetch-shell-tools.ts scripts/
+COPY packages/runtime/src/sandbox/shell-tools-manifest.ts packages/runtime/src/sandbox/shell-tools-THIRD-PARTY-NOTICES.txt packages/runtime/src/sandbox/
+COPY --from=shell-tools-linux /cache/ /cache/
+RUN OPENGENI_SHELL_TOOLS_CACHE=/cache bun scripts/fetch-shell-tools.ts --offline \
+    --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl --out /out
+
 FROM rust:1.82-bookworm AS computer-native-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends bash-builtins \
@@ -40,6 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends bash-builtins \
 WORKDIR /src/agent
 ARG TARGETPLATFORM
 COPY agent .
+COPY --from=shell-tools-fetch /out/ /shell-tools/
 # Cache mounts keep the crates.io registry and the per-target build directory
 # between builds so an edit under agent/ recompiles only the changed crates;
 # the verified binary is installed to /out inside the same step.
@@ -47,7 +65,7 @@ RUN --mount=type=cache,id=opengeni-sandbox-cargo-registry,target=/usr/local/carg
     --mount=type=cache,id=opengeni-sandbox-cargo-git,target=/usr/local/cargo/git,sharing=shared \
     --mount=type=cache,id=opengeni-desktop-cargo-target-${TARGETPLATFORM},target=/src/agent/target,sharing=locked \
     set -eux; \
-    cargo build --locked --release -p opengeni-computer-native -p opengeni-agent; \
+    OPENGENI_EMBEDDED_SHELL_TOOLS=/shell-tools cargo build --locked --release -p opengeni-computer-native -p opengeni-agent; \
     mkdir -p /out; \
     install -m 0755 target/release/opengeni-computer-native /out/opengeni-computer-native; \
     install -m 0755 target/release/opengeni-agent /out/opengeni-agent

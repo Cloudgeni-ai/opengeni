@@ -1,10 +1,12 @@
 import {
+  OpenGeniApiError,
   resolveWorkspaceVoiceInputEnabled,
   SESSION_SCOPE_HEADER,
   type ClientVoiceInputConfig,
   type OpenGeniClient,
   type SessionEvent,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   lazy,
   Suspense,
@@ -108,7 +110,7 @@ const DEFAULT_CONVERSATION_LABELS = (t: OpenGeniText): SessionConversationLabels
   sitePreviewUnavailable: t("sessionConversation.sitePreviewUnavailable"),
 });
 
-export type SessionConversationProps = ClientOverride &
+export type SessionConversationProps = ClientOverride<ChatClient> &
   SessionProxyBaseUrl & {
     /**
      * `null` while your server is still creating the session. Render the
@@ -711,6 +713,12 @@ function ConversationView({
           >
             <MessageTimeline
               renderMessageText={renderMessageText}
+              artifactScope={{
+                client: context.client,
+                workspaceId: context.workspaceId,
+                sessionId: sessionId ?? undefined,
+                override: resolveLink,
+              }}
               resolveLink={links}
               renderInteractiveBlock={
                 renderInteractiveBlock === false
@@ -777,14 +785,21 @@ function ConversationView({
                   className="mx-auto max-w-3xl"
                   {...approvalProps}
                   approvals={approvals}
+                  // A refusal rejects, so the card (or Approve all) names it
+                  // and keeps the action waiting.
                   onApprove={async (approval, answer) => {
-                    await control.approve(approval.id, undefined, answer);
+                    await control.approve(approval.id, undefined, answer, { throwOnError: true });
                   }}
                   onReject={async (approval) => {
-                    await control.reject(approval.id);
+                    await control.reject(approval.id, undefined, { throwOnError: true });
                   }}
                   responding={control.responding}
-                  error={control.error}
+                  // A 409 means it was already decided: nothing to show.
+                  error={
+                    control.error instanceof OpenGeniApiError && control.error.status === 409
+                      ? null
+                      : control.error
+                  }
                 />
               ) : null}
               <ProviderRecoveryNotice
@@ -792,7 +807,15 @@ function ConversationView({
                 recovery={providerRecovery}
               />
               {/* Links in agent questions resolve like links in its replies. */}
-              <OpenGeniLinkProvider resolveLink={links}>
+              <OpenGeniLinkProvider
+                resolveLink={links}
+                artifactScope={{
+                  client: context.client,
+                  workspaceId: context.workspaceId,
+                  sessionId: sessionId ?? undefined,
+                  override: resolveLink,
+                }}
+              >
                 <HumanInputSurface
                   className="mx-auto max-w-3xl"
                   autoFocus={false}
@@ -1063,7 +1086,7 @@ function useDefaultInteractiveBlock(
 
 type RetainedLoaderClient = Partial<
   Pick<
-    OpenGeniClient,
+    ChatClient<OpenGeniClient>,
     | "createRetainedArtifactDownloadUrl"
     | "downloadRetainedArtifact"
     | "downloadRetainedScreenshot"
@@ -1141,7 +1164,9 @@ export function useComposerTranscription(
     key: string;
     enabled: boolean;
   } | null>(null);
-  const reader = client as Partial<Pick<OpenGeniClient, "getWorkspace" | "transcribeAudio">>;
+  const reader = client as Partial<
+    Pick<ChatClient<OpenGeniClient>, "getWorkspace" | "transcribeAudio">
+  >;
   const supported = capability !== null && typeof reader.transcribeAudio === "function";
   useEffect(() => {
     if (!supported) return;
@@ -1173,8 +1198,8 @@ export function useComposerTranscription(
     () =>
       supported
         ? {
-            client: reader as Pick<OpenGeniClient, "transcribeAudio"> &
-              Partial<Pick<OpenGeniClient, "requestJson">>,
+            client: reader as Pick<ChatClient<OpenGeniClient>, "transcribeAudio"> &
+              Partial<Pick<ChatClient<OpenGeniClient>, "requestJson">>,
             workspaceId,
             capability,
             workspaceEnabled:

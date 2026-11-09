@@ -66,8 +66,7 @@ export type NativeCallAudioRoute = "receiver" | "speaker" | "bluetooth" | "headp
 
 /**
  * Why the call audio route changed. `categoryChange` is the audio session being
- * reconfigured (for example WebRTC applying its voice-chat setup once call audio
- * starts), not the person; `activated` is the route the call starts on.
+ * reconfigured, not the person; `activated` is the route the call starts on.
  */
 export type NativeCallRouteChangeReason =
   | "activated"
@@ -80,10 +79,17 @@ export type NativeCallRouteChangeReason =
 
 /**
  * The platform call service seam. The Opengeni Expo module implements it with
- * CallKit; hosts on other platforms can implement it or omit it, in which case
- * the realtime session runs without a system call.
+ * CallKit on iOS and with the phone's call audio setup on Android; hosts on
+ * other platforms can implement it or omit it, in which case the realtime
+ * session runs without a system call.
  */
 export interface NativeCallAdapter {
+  /**
+   * Whether the system shows a started call (CallKit's call screen and
+   * Recents, or Android's call notification). False where the adapter only
+   * sets up call audio (Android without system calls). Absent means true.
+   */
+  showsSystemCall?: boolean | undefined;
   /** Report an outgoing call to the system and activate the call audio session. */
   startCall(call: { callId: string; title: string; target: string | null }): Promise<void>;
   /** The voice connection is live: the system call shows as connected. */
@@ -110,6 +116,12 @@ export interface NativeIncomingCallAdapter {
   takeIncomingCalls(): Promise<NativeIncomingCall[]>;
   /** Stop a ring that was settled elsewhere or rang out. */
   endIncomingCall(callId: string, reason: NativeIncomingCallEndReason): void;
+  /**
+   * Whether a ringing call may connect its voice session before the person
+   * answers: the phone then sends silence and plays nothing, and opens the
+   * microphone only on answer. Absent or false means connect on answer.
+   */
+  connectsBeforeAnswer?: boolean | undefined;
 }
 
 /** Native hosts can stream voice over WebRTC; WebSocket audio transports need a browser. */
@@ -137,8 +149,14 @@ export type NativeRealtimeCall = {
   route: NativeCallAudioRoute | null;
   error: string | null;
   /**
+   * Why the live call is silent on one side, when it is: the microphone picks
+   * up no sound, or a reply arrived but did not play. Null while audio flows.
+   */
+  notice?: string | null | undefined;
+  /**
    * Whether the system shows this call (CallKit). False when the platform has
-   * no call service or refused the call; voice then runs as an in-app call.
+   * no call screen (Android, where only call audio is set up), no call
+   * service, or refused the call; voice then runs as an in-app call.
    */
   systemCall: boolean;
   canStart: boolean;
@@ -189,15 +207,17 @@ export function useNativeRealtimeCall(options: {
   /** The call id the system knows about; null for an in-app call. */
   const systemCallRef = useRef<string | null>(null);
   const connectedRef = useRef<string | null>(null);
-  /**
-   * Loudspeaker or receiver, as the person last chose it during this call; null
-   * between calls. Kept when the audio session is reconfigured underneath it.
-   */
-  const preferredSpeakerRef = useRef<boolean | null>(null);
   const realtimeRef = useRef(realtime);
   realtimeRef.current = realtime;
   const status = realtime.snapshot.status;
   const muted = realtime.snapshot.inputMuted;
+  const audioIssue = status === "active" ? realtime.snapshot.diagnostic?.kind : undefined;
+  const notice =
+    audioIssue === "no_input_audio" && !muted
+      ? t("native.realtime.nativeCall.noInputAudio")
+      : audioIssue === "output_silent"
+        ? t("native.realtime.nativeCall.replyNotPlayed")
+        : null;
 
   const finish = useCallback(
     async (reason: "ended" | "failed") => {
@@ -207,7 +227,6 @@ export function useNativeRealtimeCall(options: {
       callIdRef.current = null;
       systemCallRef.current = null;
       connectedRef.current = null;
-      preferredSpeakerRef.current = null;
       setCallId(null);
       setEnding(false);
       setSpeakerState(false);
@@ -221,22 +240,9 @@ export function useNativeRealtimeCall(options: {
     if (!call) return;
     return call.subscribe((event) => {
       if (event.type === "routeChanged") {
-        const builtIn = event.route === "speaker" || event.route === "receiver";
-        const preferred = preferredSpeakerRef.current;
-        if (builtIn && preferred !== null) {
-          if (event.reason === "categoryChange") {
-            // Not the person: the session was reconfigured (WebRTC's voice-chat
-            // setup when call audio starts falls back to the receiver). Put the
-            // audio back where they had it; the resulting change reports it.
-            if ((event.route === "speaker") !== preferred) {
-              void call.setSpeaker(preferred).catch(() => undefined);
-              return;
-            }
-          } else if (event.reason !== undefined) {
-            // The person picked it (the call screen, Control Center) or a device came or went.
-            preferredSpeakerRef.current = event.route === "speaker";
-          }
-        }
+        // The call adapter keeps the route where the call put it while voice
+        // starts; changes are the person's (call screen, Control Center) or a
+        // headset's, so the screen shows where audio actually plays.
         setRoute(event.route);
         setSpeakerState(event.route === "speaker");
         return;
@@ -247,7 +253,6 @@ export function useNativeRealtimeCall(options: {
         callIdRef.current = null;
         systemCallRef.current = null;
         connectedRef.current = null;
-        preferredSpeakerRef.current = null;
         setCallId(null);
         setEnding(false);
         setSystemCall(false);
@@ -293,19 +298,18 @@ export function useNativeRealtimeCall(options: {
     setError(null);
     if (call) {
       // Every call starts on the loudspeaker (the system call configures it so).
-      preferredSpeakerRef.current = true;
       setSpeakerState(true);
     }
     if (answered) {
       // The system already shows this call: it was answered on the ring screen.
       systemCallRef.current = id;
-      setSystemCall(Boolean(call));
+      setSystemCall(Boolean(call) && call?.showsSystemCall !== false);
     } else if (call) {
       try {
         await call.startCall({ callId: id, title: options.title, target: options.target ?? null });
         if (callIdRef.current === id) {
           systemCallRef.current = id;
-          setSystemCall(true);
+          setSystemCall(call.showsSystemCall !== false);
         }
       } catch (cause) {
         // The system refused the call; talk anyway, without the system call UI.
@@ -345,13 +349,8 @@ export function useNativeRealtimeCall(options: {
 
   const setSpeaker = useCallback(
     (on: boolean) => {
-      const previous = preferredSpeakerRef.current;
-      if (callIdRef.current) preferredSpeakerRef.current = on;
       setSpeakerState(on);
-      void call?.setSpeaker(on).catch(() => {
-        if (callIdRef.current) preferredSpeakerRef.current = previous;
-        setSpeakerState(!on);
-      });
+      void call?.setSpeaker(on).catch(() => setSpeakerState(!on));
     },
     [call],
   );
@@ -372,6 +371,7 @@ export function useNativeRealtimeCall(options: {
     speaker,
     route,
     error,
+    notice,
     systemCall,
     canStart: !callId && realtime.canStart,
     start,

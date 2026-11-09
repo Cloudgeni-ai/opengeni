@@ -81,6 +81,105 @@ async function settle() {
 }
 
 describe("incoming agent calls", () => {
+  test("prepares once on ring, retains it through the answer claim, and starts only after winning", async () => {
+    const { call, client, log, emit } = fakes({
+      answer: serverCall({ state: "answered", answeredHere: true }),
+    });
+    let finish!: (result: AgentCall) => void;
+    client.answerAgentCall = async () => {
+      log.push("claim");
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    };
+    const hook = await renderHook(
+      () =>
+        useIncomingAgentCalls({
+          client,
+          callAdapter: call,
+          onRinging: () => void log.push("prepare"),
+          onEnded: () => void log.push("release"),
+          onAnswered: () => void log.push("start"),
+        }),
+      undefined,
+    );
+    await settle();
+    await act(async () => {
+      emit({ type: "incoming", call: ringing });
+      emit({ type: "incoming", call: ringing });
+    });
+    expect(log).toEqual(["prepare"]);
+    await act(async () =>
+      emit({ type: "incomingAnswered", call: { ...ringing, state: "answered" } }),
+    );
+    expect(log).toEqual(["prepare", "claim"]);
+    await act(async () => finish(serverCall({ state: "answered", answeredHere: true })));
+    expect(log.at(-1)).toBe("start");
+    expect(log).not.toContain("release");
+    await hook.unmount();
+  });
+
+  test("a call ended during the answer request releases preparation and never starts late", async () => {
+    const { call, client, log, emit } = fakes({ answer: serverCall({}) });
+    let finish!: (result: AgentCall) => void;
+    client.answerAgentCall = async () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      });
+    const hook = await renderHook(
+      () =>
+        useIncomingAgentCalls({
+          client,
+          callAdapter: call,
+          onRinging: () => void log.push("prepare"),
+          onEnded: () => void log.push("release"),
+          onAnswered: () => void log.push("start"),
+        }),
+      undefined,
+    );
+    await settle();
+    await act(async () =>
+      emit({ type: "incomingAnswered", call: { ...ringing, state: "answered" } }),
+    );
+    await act(async () => emit({ type: "ended", callId: ringing.callId }));
+    await act(async () => finish(serverCall({ state: "answered", answeredHere: true })));
+    expect(log).toEqual(["prepare", "release"]);
+    await hook.unmount();
+  });
+
+  test("decline, remote settlement, timeout, and unmount release ring preparation", async () => {
+    for (const ending of ["decline", "remote", "timeout", "unmount"] as const) {
+      const { call, client, log, emit } = fakes({
+        answer: serverCall({}),
+        current: serverCall(ending === "remote" ? { state: "cancelled" } : {}),
+      });
+      const hook = await renderHook(
+        () =>
+          useIncomingAgentCalls({
+            client,
+            callAdapter: call,
+            onRinging: () => void log.push("prepare"),
+            onEnded: () => void log.push("release"),
+            onAnswered: () => void log.push("start"),
+          }),
+        undefined,
+      );
+      await settle();
+      await act(async () => emit({ type: "incoming", call: ringing }));
+      if (ending === "decline")
+        await act(async () =>
+          emit({ type: "incomingDeclined", call: { ...ringing, state: "declined" } }),
+        );
+      if (ending === "timeout")
+        await act(async () =>
+          emit({ type: "incomingEnded", callId: ringing.callId, reason: "unanswered" }),
+        );
+      await hook.unmount();
+      expect(log.filter((event) => event === "release")).toHaveLength(1);
+      expect(log).not.toContain("start");
+    }
+  });
+
   test("answering on the ring screen claims the call and opens it here", async () => {
     const { call, client, log, emit } = fakes({
       answer: serverCall({ state: "answered", answeredHere: true }),

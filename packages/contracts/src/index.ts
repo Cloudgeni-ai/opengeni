@@ -1,3 +1,5 @@
+export * from "./model-inference";
+export type * from "./decision-types";
 export * from "./billing-credit-notifications";
 import { BillingCreditNotification } from "./billing-credit-notifications";
 import * as primitives from "./primitives";
@@ -92,6 +94,7 @@ export * from "./skills";
 export * from "./agent-config";
 export * from "./first-party-tool-authorization";
 export * from "./model-availability";
+export * from "./repository-availability";
 export * from "./model-residency";
 import { ClientModelResidencyV1 } from "./model-residency";
 import { InferenceFeatureAvailability } from "./inference-residency";
@@ -5468,6 +5471,8 @@ export const UsageEventType = /* @__PURE__ */ defineSchema(() =>
     "agent_run.completed",
     "model.tokens",
     "model.cost",
+    "model.provider_cost",
+    "model.estimated_provider_cost",
     "file.uploaded",
     "file.deleted",
     "document.indexed",
@@ -5506,6 +5511,8 @@ export const UsageEvent = /* @__PURE__ */ defineSchema(() =>
     recordedAt: primitives.string,
     exportedToBillingAt: primitives.nullableString,
     billingProviderEventId: primitives.nullableString,
+    /** Caller attribution only; does not select the payer or workspace. */
+    tenantLabel: z.string().optional(),
   }),
 );
 export type UsageEvent = z.infer<typeof UsageEvent>;
@@ -7076,9 +7083,9 @@ export const RepositoryResourceRef = /* @__PURE__ */ defineSchema(() =>
      * Best-effort materialization. When true, a failed clone of this repository
      * logs a warning and the session continues without it instead of failing
      * sandbox setup. Opengeni sets it on repositories it attaches on the
-     * person's behalf (a Slack task's recently used repositories); a repository
-     * a caller names explicitly stays strict unless the caller opts in. Only
-     * `true` is stored.
+     * person's behalf (a Slack task's repositories from the person's new-chat
+     * form); a repository a caller names explicitly stays strict unless the
+     * caller opts in. Only `true` is stored.
      */
     optional: primitives.optionalBoolean,
   }),
@@ -8749,7 +8756,11 @@ export function latencyModeForMetadata(
   fallback: LatencyMode = "standard",
 ): LatencyMode {
   const value = metadata.latencyMode;
-  return value === "standard" || value === "priority" || value === "fast" ? value : fallback;
+  // Every LatencyMode; the scheduled-run admission trigger maps session
+  // metadata with the same list.
+  return (LatencyMode.options as readonly unknown[]).includes(value)
+    ? (value as LatencyMode)
+    : fallback;
 }
 
 export function stableJson(value: unknown): string {
@@ -9798,6 +9809,7 @@ export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealti
 
 export const WorkspaceRealtimeModelCatalogItem = /* @__PURE__ */ defineSchema(() =>
   z.object({
+    incomingPreparation: z.boolean().optional(),
     id: SessionRealtimeModel,
     label: primitives.nonEmptyString,
     provider: z.enum([
@@ -9859,7 +9871,9 @@ export type WorkspaceRealtimeModelCatalogResponse = z.infer<
   typeof WorkspaceRealtimeModelCatalogResponse
 >;
 
-export const SessionRealtimeState = /* @__PURE__ */ defineSchema(() => z.enum(["active", "ended"]));
+export const SessionRealtimeState = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["preparing", "active", "ended"]),
+);
 export type SessionRealtimeState = z.infer<typeof SessionRealtimeState>;
 
 export const SessionRealtimeEndReason = /* @__PURE__ */ defineSchema(() =>
@@ -9890,6 +9904,13 @@ export const BeginSessionRealtimeRequest = /* @__PURE__ */ defineSchema(() =>
   SessionRealtimeOwnerProof.extend({
     operationId: primitives.uuid,
     model: SessionRealtimeModel,
+    incomingCall: z
+      .object({
+        callId: primitives.uuid,
+        device: z.string().min(1).max(300),
+        answered: z.boolean().optional(),
+      })
+      .optional(),
   }),
 );
 export type BeginSessionRealtimeRequest = z.infer<typeof BeginSessionRealtimeRequest>;
@@ -10840,6 +10861,21 @@ export const SaveComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
 
 /**
+ * How a person's message reaches the agent. `send` starts a turn when nothing
+ * runs and otherwise waits behind the current one. `steer` has the current
+ * turn read it at its next step. `steer_or_send` lets the server decide,
+ * atomically with the session's turn state: it steers when a turn is running
+ * (or accepted and about to start), and otherwise sends, so a message reaches
+ * a running turn however stale the sender's view of the session is. A paused
+ * chat keeps it waiting, as a Send. The accepted event records which one the
+ * server chose (`delivery` and `routing`).
+ */
+export const SessionPromptDelivery = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["send", "steer", "steer_or_send"]),
+);
+export type SessionPromptDelivery = z.infer<typeof SessionPromptDelivery>;
+
+/**
  * Submit one exact established-session draft. Content is repeated only as an
  * integrity fence for outcome-unknown idempotent replay; the matching durable
  * draft revision remains authoritative and is atomically rotated on acceptance.
@@ -10861,9 +10897,14 @@ export const SubmitComposerDraftRequest = /* @__PURE__ */ defineSchema(() =>
       // A draft that follows the chat's settings is submitted without them.
       .partial({ model: true, reasoningEffort: true, latencyMode: true })
       .extend({
-        expectedDraftRevision: primitives.positiveInteger,
+        // The draft revision this message was composed from. The message is
+        // never refused over the draft; once it is accepted the draft is
+        // cleared only while it is still at this revision or holds exactly what
+        // was sent. At this revision a withdrawn queued message is replaced.
+        // 0 means the sender saw no saved draft.
+        expectedDraftRevision: primitives.nonnegativeInteger,
         clientEventId: SessionOperationKey,
-        delivery: z.enum(["send", "steer"]),
+        delivery: SessionPromptDelivery,
         controlEtag: z.string().min(1).optional(),
         modelContext: primitives.string.trim().min(1).max(32768).optional(),
         // The sender's IANA time zone; the model sees the message's local time.
@@ -20675,11 +20716,13 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         // creation of a brand-new session. Absent means no create-dedup (each call
         // is an independent create).
         idempotencyKey: z.string().min(1).max(200).optional(),
-        // The exact actor-private pre-session draft revision represented by this
-        // create. An ordinary create consumes only this revision. A realtime create
-        // preserves the editable draft and atomically updates only successful-create
-        // selection history. A newer sibling draft survives, while every failed
-        // pre-initialization create leaves the submitted draft intact.
+        // The caller's new-chat draft revision this create was composed from. The
+        // create carries its own content and is never refused over the draft.
+        // Once an ordinary create is accepted, the draft is cleared only while it
+        // is still at this revision or holds exactly what was sent; a newer draft
+        // saved on another device stays. A realtime create keeps the editable
+        // draft and updates only successful-create selection history. A failed
+        // create leaves the draft intact.
         expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
         agentLearning: AgentLearningOverrides.optional(),
         // A child may lower its inherited limit freely; an increase requires
@@ -21394,6 +21437,12 @@ export const SteerSessionMessageRequest = /* @__PURE__ */ defineSchema(() =>
       connectionAuthorities: z.never().optional(),
       connectionAccounts: McpConnectionAccountSelections.default([]),
       personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
+      /**
+       * `steer` (absent) always steers. `steer_or_send` steers only while a
+       * turn runs or is about to start, and otherwise sends; see
+       * `SessionPromptDelivery`.
+       */
+      delivery: z.enum(["steer", "steer_or_send"]).optional(),
     })
     .strict()
     .superRefine(requireMessageTextOrAnnotations)

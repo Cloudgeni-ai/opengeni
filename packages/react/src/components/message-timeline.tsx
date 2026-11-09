@@ -31,9 +31,12 @@ import { useTimelinePauses } from "../timeline/use-timeline-pauses";
 import { ChildSessionLink } from "./child-session-link";
 import { useStartupDetails } from "../timeline/startup-preference";
 import {
+  COMPACTION_TRIMMED_SUBTITLE,
+  COMPACTION_TRIMMED_TITLE,
   compactionFailureDetails,
   compactionSkipSubtitle,
   compactionSkipTitle,
+  isTrimmedCompaction,
 } from "../timeline/compaction-copy";
 import type {
   DraftTimelineAnnotation,
@@ -100,6 +103,7 @@ import {
 } from "../older-history";
 import { InlineMarkdown, Markdown, type MarkdownProps } from "./markdown";
 import { OpenGeniLinkProvider, type OpenGeniLinkResolver } from "./open-geni-links";
+import type { ArtifactLinkScope } from "./artifact-link-scope";
 import {
   TimelineBeforeLayout,
   captureTimelineAnchor,
@@ -342,6 +346,7 @@ export type MessageTimelineProps = {
    * sandbox downloads by default.
    */
   resolveLink?: OpenGeniLinkResolver | undefined;
+  artifactScope?: ArtifactLinkScope | undefined;
   /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
   /** Resolve permanent workspace image/file receipts through the authenticated host SDK. */
@@ -675,6 +680,7 @@ function cssEscapeAttribute(value: string): string {
  */
 export function MessageTimeline({
   resolveLink,
+  artifactScope,
   renderInteractiveBlock,
   userMessageDisclosureLabels,
   searchTarget,
@@ -982,6 +988,10 @@ export function MessageTimeline({
    * or explicit Jump to latest releases this fence.
    */
   const disclosureKeepsUnpinnedRef = useRef(false);
+  /** The in-place disclosure the reader last toggled while that fence holds. */
+  const disclosureToggleRef = useRef<Element | null>(null);
+  /** Distance from the end measured on the DOM right before this commit. */
+  const tipGapBeforeCommitRef = useRef<number | null>(null);
   /**
    * Unarmed scroll-away observed; waiting for scrollend (or rAF fallback).
    * Blocks layout tip-follow so a stream token cannot yank before leave settles.
@@ -1344,6 +1354,7 @@ export function MessageTimeline({
         stopSettlement();
         releasePinFromReader();
         disclosureKeepsUnpinnedRef.current = true;
+        disclosureToggleRef.current = null;
       }
     };
     node.ownerDocument.addEventListener("selectionchange", onSelection);
@@ -1922,6 +1933,8 @@ export function MessageTimeline({
     previousSourceIdsRef.current = new Set(sourceItems?.map((item) => item.id));
     const readingAnchor = readingAnchorRef.current;
     readingAnchorRef.current = null;
+    const tipGapBeforeCommit = tipGapBeforeCommitRef.current;
+    tipGapBeforeCommitRef.current = null;
     const settlement = settlementRef.current;
     settlementRef.current = null;
     const attempt = olderLoadAttemptRef.current;
@@ -2036,6 +2049,25 @@ export function MessageTimeline({
           applyPinned(false);
         }
       }
+    } else if (
+      autoFollow &&
+      !pinnedRef.current &&
+      !hasNewer &&
+      disclosureKeepsUnpinnedRef.current &&
+      tipGapBeforeCommit !== null &&
+      tipGapBeforeCommit <= 1 &&
+      disclosureToggleRef.current?.isConnected === true &&
+      disclosureToggleRef.current.getAttribute("aria-expanded") === "false" &&
+      !timelineHasSelection(node)
+    ) {
+      // A toggle keeps the view where the reader left it, but once the
+      // reader has closed it again and sits at the very end, nothing is open
+      // for them to read: new content follows like any reader at the tip,
+      // instead of growing out of view behind a Jump to latest.
+      disclosureKeepsUnpinnedRef.current = false;
+      disclosureToggleRef.current = null;
+      applyPinned(true);
+      snapToBottom(node);
     } else if (!pinnedRef.current && readingAnchor && readableTurns) {
       // A live work row moves behind newly streamed prose. Correct only the
       // residual movement native anchoring did not absorb, using the reader's
@@ -2751,6 +2783,7 @@ export function MessageTimeline({
                               }
                               releasePinFromReader();
                               disclosureKeepsUnpinnedRef.current = true;
+                              disclosureToggleRef.current = target;
                             }
                           }}
                           onFocusCapture={(event) => {
@@ -2792,6 +2825,9 @@ export function MessageTimeline({
                                 !pinnedRef.current && scrollRef.current
                                   ? captureTimelineAnchor(scrollRef.current)
                                   : null;
+                              tipGapBeforeCommitRef.current = scrollRef.current
+                                ? maxScrollOf(scrollRef.current) - scrollRef.current.scrollTop
+                                : null;
                               settlementRef.current =
                                 readableTurns &&
                                 autoFollow &&
@@ -3136,7 +3172,7 @@ export function MessageTimeline({
   );
   // Agent-authored object links resolve through the host, never the console.
   return (
-    <OpenGeniLinkProvider resolveLink={resolveLink}>
+    <OpenGeniLinkProvider resolveLink={resolveLink} artifactScope={artifactScope}>
       <MessageSenderContext.Provider value={renderMessageSender}>
         <AgentIdentityProvider
           items={resolvedItems}
@@ -4357,6 +4393,8 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
   // Switching a Codex chat to another model rebuilds its context once; say
   // that plainly instead of describing an ordinary compaction.
   const modelSwitch = item.implementation === "portable_model_switch";
+  // The chat's model could not summarize, so older messages were trimmed.
+  const trimmed = isTrimmedCompaction(item);
   const trigger =
     item.trigger && item.phase !== "started" && !modelSwitch
       ? COMPACTION_TRIGGER_LABEL(t)[item.trigger]
@@ -4375,14 +4413,17 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
         ? t("messageTimeline.summarizingEarlierMessagesForNewModel")
         : t("messageTimeline.compactingConversationHistory")
       : item.phase === "compacted"
-        ? modelSwitch
-          ? t("messageTimeline.earlierMessagesSummarizedForNewModel")
-          : before && after
-            ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
-            : t("messageTimeline.conversationHistoryCompacted")
+        ? trimmed
+          ? COMPACTION_TRIMMED_TITLE(t)
+          : modelSwitch
+            ? t("messageTimeline.earlierMessagesSummarizedForNewModel")
+            : before && after
+              ? t("messageTimeline.conversationHistoryCompactedBeforeAfter", { before, after })
+              : t("messageTimeline.conversationHistoryCompacted")
         : compactionSkipTitle(t, item.skipReason);
-  const subtitle =
-    item.phase === "compacted" && !modelSwitch
+  const subtitle = trimmed
+    ? COMPACTION_TRIMMED_SUBTITLE(t)
+    : item.phase === "compacted" && !modelSwitch
       ? t("messageTimeline.chatHistoryAboveIsUnchanged")
       : item.phase === "skipped"
         ? compactionSkipSubtitle(t, item.skipReason, item.providerRejection, item.trigger)
@@ -4390,6 +4431,8 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
   // Provider identifiers are diagnostics: one short line up front, the rest on demand.
   const details = compactionFailureDetails(t, item);
   const failed = item.phase === "skipped" && item.skipReason === "summarization_failed";
+  // Longer copy wraps, centred, instead of truncating.
+  const wraps = failed || trimmed;
   const pill = failed
     ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
     : item.phase === "started"
@@ -4402,7 +4445,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
           "inline-flex min-w-0 max-w-full flex-col items-center gap-0.5 border px-3 py-1.5 text-og-sm",
           // A failure's recovery step may wrap on narrow screens; a full pill
           // radius would pinch its second line.
-          failed ? "rounded-og-lg" : "rounded-full",
+          wraps ? "rounded-og-lg" : "rounded-full",
           pill,
         )}
         role="status"
@@ -4418,13 +4461,13 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
           <span
             className={cn(
               "min-w-0 max-w-full text-og-xs",
-              failed ? "text-balance text-center" : "inline-flex items-center gap-1",
+              wraps ? "text-balance text-center" : "inline-flex items-center gap-1",
             )}
           >
             {subtitle ? (
-              <span className={cn("opacity-80", !failed && "min-w-0 truncate")}>{subtitle}</span>
+              <span className={cn("opacity-80", !wraps && "min-w-0 truncate")}>{subtitle}</span>
             ) : null}
-            {subtitle && details && failed ? " " : null}
+            {subtitle && details && wraps ? " " : null}
             {details ? (
               <button
                 type="button"

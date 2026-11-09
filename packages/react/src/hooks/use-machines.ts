@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useRef, useState } from "react";
 import type {
   RemoveEnrollmentRequest,
@@ -92,7 +93,7 @@ export type MachinesClientLike = {
   attachMachine?: (workspaceId: string, sessionId: string, sandboxId: string) => Promise<unknown>;
 };
 
-export type UseMachinesOptions = ClientOverride & {
+export type UseMachinesOptions = ClientOverride<ChatClient> & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
   /** Scope the list to a session (adds the synthetic Modal group box + pointer). */

@@ -57,6 +57,9 @@ export interface OpStreamTransport {
   subscribe(
     subject: string,
     onMessage: (payload: Uint8Array) => void,
+    /** The pinned runner or our own transport reconnected. Reattach retained
+     * output; this is never permission to execute the operation again. */
+    onReady?: () => void,
   ): Promise<OpStreamSubscription>;
   publish(subject: string, payload: Uint8Array): Promise<void>;
 }
@@ -86,6 +89,7 @@ export class OpStreamUnavailableError extends Error {
 export interface NatsOpStreamConnection {
   subscribe(subject: string): AsyncIterable<{ data: Uint8Array }> & { unsubscribe(): void };
   publish(subject: string, payload: Uint8Array): void;
+  subscribeReconnect?(listener: () => void): () => void;
 }
 
 /**
@@ -126,12 +130,30 @@ export class NatsOpStreamTransport implements OpStreamTransport {
   async subscribe(
     subject: string,
     onMessage: (payload: Uint8Array) => void,
+    onReady?: () => void,
   ): Promise<OpStreamSubscription> {
     const conn = await this.resolveConnection();
     if (!conn) {
       throw new OpStreamUnavailableError("op-stream transport has no live connection");
     }
     const subscription = conn.subscribe(subject);
+    let unsubscribed = false;
+    const ready = () => {
+      if (!unsubscribed) onReady?.();
+    };
+    // Subscribe before OpStart, just like the frame subscription. A Hello is
+    // emitted only after both runner lanes and RPC/ack subscriptions are ready.
+    const process = /^(agent\.[^.]+\.[^.]+\.connection\.[^.]+)\.op\./u.exec(subject)?.[1];
+    const hello = onReady && process ? conn.subscribe(`${process}.hello`) : undefined;
+    const stopReconnect = onReady ? conn.subscribeReconnect?.(ready) : undefined;
+    if (hello)
+      void (async () => {
+        try {
+          for await (const _message of hello) ready();
+        } catch {
+          // The ordinary silence/recovery path still handles an unavailable bus.
+        }
+      })();
     // Pump the async iterator into the callback. The iterator ends when
     // `unsubscribe()` is called (nats.js closes the iterator); a pump error
     // (torn connection) simply ends delivery — the op-stream client's silence
@@ -145,13 +167,14 @@ export class NatsOpStreamTransport implements OpStreamTransport {
         // Delivery ended with the connection; recovery is the client's job.
       }
     })();
-    let unsubscribed = false;
     return {
       unsubscribe: () => {
         if (unsubscribed) {
           return;
         }
         unsubscribed = true;
+        stopReconnect?.();
+        hello?.unsubscribe();
         try {
           subscription.unsubscribe();
         } catch {

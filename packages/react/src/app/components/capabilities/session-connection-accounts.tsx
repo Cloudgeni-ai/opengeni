@@ -1,10 +1,11 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   CapabilityCatalogItem,
   ConnectionMetadata,
   McpConnectionAccountSelection,
   McpServerConnectionRef,
-  Session,
+  ChatSession as Session,
 } from "@opengeni/sdk";
 
 import { normalizeProviderDomain } from "../../lib/capabilities";
@@ -114,7 +115,7 @@ export function connectedAccountGroups(
 }
 
 export async function sessionConnectedAccounts(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   items: CapabilityCatalogItem[],
   knownConnections?: ConnectionMetadata[],
@@ -153,7 +154,7 @@ export function selectedConnectionAccounts(
 }
 
 export async function sessionConnectionAccounts(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   session: Pick<Session, "id" | "workspaceId">,
   items: CapabilityCatalogItem[],
   knownConnections?: ConnectionMetadata[],

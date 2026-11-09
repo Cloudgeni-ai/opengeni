@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   computerFrameSocketUrl,
   decodeComputerFrameMessage,
@@ -46,13 +47,14 @@ const RELAY_TAG_FRAME = 3;
 const RELAY_TAG_CLOSE = 4;
 const MAX_AUTOMATIC_RECONNECTS_WITHOUT_A_FRAME = 2;
 
-export type UseComputerFrameStreamOptions = EmbeddedComputerInteractionClientOverride & {
-  computerSessionId: string | null;
-  targetId: string | null;
-  enabled?: boolean | undefined;
-  stream?: ComputerFrameStreamOptions | undefined;
-  webSocketFactory?: ComputerFrameWebSocketFactory | undefined;
-};
+export type UseComputerFrameStreamOptions =
+  EmbeddedComputerInteractionClientOverride<ChatClient> & {
+    computerSessionId: string | null;
+    targetId: string | null;
+    enabled?: boolean | undefined;
+    stream?: ComputerFrameStreamOptions | undefined;
+    webSocketFactory?: ComputerFrameWebSocketFactory | undefined;
+  };
 
 export type UseComputerFrameStreamResult = {
   state: ComputerFrameConnectionState;

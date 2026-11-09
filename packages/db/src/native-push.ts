@@ -168,6 +168,11 @@ export type ClaimedNativePushDelivery = {
     callId?: string;
     ringUntil?: string;
     /**
+     * The end of a call's ring that was settled elsewhere (rule `call`, 1344):
+     * an Android phone stops ringing, with this reason.
+     */
+    callEnded?: "answeredElsewhere" | "declinedElsewhere" | "remoteEnded";
+    /**
      * An approval whose MCP server asks the person a question (1113): it is
      * answered in the app, where the question is shown, never on the lock
      * screen.

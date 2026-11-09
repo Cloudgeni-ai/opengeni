@@ -1080,7 +1080,7 @@ pub async fn connect_with_options<A: ToServerAddrs>(
     let (info_sender, info_watcher) = tokio::sync::watch::channel(info.clone());
     let (sender, mut receiver) = mpsc::channel(options.sender_capacity);
 
-    let client = Client::new(
+    let mut client = Client::new(
         info_watcher,
         state_rx,
         sender,
@@ -1100,7 +1100,7 @@ pub async fn connect_with_options<A: ToServerAddrs>(
         }
     });
 
-    task::spawn(async move {
+    let connection_task = task::spawn(async move {
         if connection.is_none() && options.retry_on_initial_connect {
             let (info, connection_ok) = match connector.connect().await {
                 Ok((info, connection)) => (info, connection),
@@ -1117,6 +1117,7 @@ pub async fn connect_with_options<A: ToServerAddrs>(
             ConnectionHandler::new(connection, connector, info_sender, ping_period);
         connection_handler.process(&mut receiver).await
     });
+    client.connection_task = Some(connection_task.abort_handle());
 
     Ok(client)
 }

@@ -1,13 +1,20 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { RunRawModelStreamEvent } from "@openai/agents-core";
+import { modelCallProcessingResidency } from "@opengeni/contracts";
+import {
+  createTurnHistorySink,
+  type TurnHistorySinkDeps,
+} from "../src/activities/agent-turn/history-sink";
 import {
   appendSessionEventsForTurnAttempt,
+  appendSessionHistoryItemsInTransaction,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   initializeSessionStartAtomically,
   type AppendEventInput,
+  type SessionEventMutation,
 } from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -85,7 +92,7 @@ async function claimedTurn() {
     trigger: { kind: "next" },
   });
   if (claimed.action !== "claimed") throw new Error("fixture turn not claimed");
-  const publish: TurnEventPublisher = async (events) =>
+  const publish: TurnEventPublisher = async (events, _immediate, mutate, project) =>
     await appendSessionEventsForTurnAttempt(
       client.db,
       workspaceId,
@@ -94,6 +101,14 @@ async function claimedTurn() {
       claimed.turn.executionGeneration,
       attemptId,
       events as AppendEventInput[],
+      undefined,
+      mutate || project
+        ? {
+            rowProjection: "event",
+            mutate: mutate ?? (async () => true),
+            ...(project ? { project } : {}),
+          }
+        : undefined,
     );
   return {
     accountId: grant.accountId,
@@ -101,9 +116,237 @@ async function claimedTurn() {
     sessionId: session.id,
     turnId: claimed.turn.id,
     attemptId,
+    executionGeneration: claimed.turn.executionGeneration,
     publish,
   };
 }
+
+function terminalInput(turn: Awaited<ReturnType<typeof claimedTurn>>, responseId: string) {
+  const settings = testSettings({
+    databaseUrl: shared.appUrl,
+    billingMode: "disabled",
+    usageLimitsMode: "none",
+  });
+  return {
+    ...turn,
+    turnAttemptId: turn.attemptId,
+    dispatchId: turn.attemptId,
+    event: new RunRawModelStreamEvent({
+      type: "response_done",
+      response: { id: responseId, output: [], usage },
+    }),
+    state: createModelResponseEventState(),
+    emittedSourceKeys: new Set<string>(),
+    settings,
+    db: client.db,
+    observability: createObservability(settings, { component: "worker" }),
+    model: MAIN_MODEL,
+    provider: PROVIDER,
+    providerApi: "anthropic-messages" as const,
+    metricProvider: PROVIDER,
+    externallyBilled: true,
+    servingCredentialId: null,
+    priorSessionCredentialId: null,
+    renewLease: async () => {},
+    leaseLost: () => false,
+    leaseLostMessage: "fixture lease lost",
+    processingResidency: modelCallProcessingResidency(null),
+    setLastInputTokens: async () => {
+      throw new Error("unexpected separate token transaction");
+    },
+  };
+}
+
+test("response checkpoint commits canonical usage, token signal and history; replay cannot replace them", async () => {
+  const turn = await claimedTurn();
+  let historyWrites = 0;
+  const history: SessionEventMutation<"event"> = async (tx, fence) => {
+    if (!fence.allowed) throw new Error("lost fixture fence");
+    await appendSessionHistoryItemsInTransaction(
+      tx,
+      {
+        ...turn,
+        expectedAttemptId: turn.attemptId,
+        expectedExecutionGeneration: turn.executionGeneration,
+        items: [
+          {
+            position: 100,
+            item: { type: "message", role: "assistant", content: "durable answer" },
+          },
+        ],
+      },
+      fence,
+    );
+    historyWrites++;
+    return true;
+  };
+  const checkpoint = async (
+    persist: (history: SessionEventMutation<"event">) => Promise<boolean>,
+  ) => persist(history);
+  const first = terminalInput(turn, "response-atomic");
+  expect((await processModelResponseTerminalEvent({ ...first, checkpoint })).status).toBe(
+    "processed",
+  );
+  expect(first.state.contextSignal?.totalTokens).toBe(176);
+  expect(historyWrites).toBe(1);
+  const [session] =
+    await shared.admin`select last_input_tokens from sessions where id = ${turn.sessionId}`;
+  expect(session!.last_input_tokens).toBe(164);
+  const replay = terminalInput(turn, "response-atomic");
+  expect(await processModelResponseTerminalEvent({ ...replay, checkpoint })).toMatchObject({
+    authoritative: false,
+  });
+  expect(replay.state.contextSignal).toBeNull();
+  expect(historyWrites).toBe(1);
+  const [rows] =
+    await shared.admin`select count(*)::int as count from session_history_items where session_id = ${turn.sessionId} and position = 100`;
+  expect(rows!.count).toBe(1);
+});
+
+test("lost credential commits incurred usage but neither token signals nor prepared history", async () => {
+  const turn = await claimedTurn();
+  let historyWrites = 0;
+  const input = terminalInput(turn, "response-lost-lease");
+  await expect(
+    processModelResponseTerminalEvent({
+      ...input,
+      leaseLost: () => true,
+      checkpoint: async (persist) =>
+        persist(async () => {
+          historyWrites++;
+          return true;
+        }),
+    }),
+  ).rejects.toThrow("fixture lease lost");
+  expect(historyWrites).toBe(0);
+  expect(input.state.contextSignal).toBeNull();
+  const [session] =
+    await shared.admin`select last_input_tokens from sessions where id = ${turn.sessionId}`;
+  expect(session!.last_input_tokens).toBeNull();
+  const [events] =
+    await shared.admin`select count(*)::int as count from session_events where session_id = ${turn.sessionId} and type = 'agent.model.usage' and turn_association = 'current'`;
+  expect(events!.count).toBe(1);
+  const [facts] =
+    await shared.admin`select count(*)::int as count from model_call_facts where session_id = ${turn.sessionId}`;
+  expect(facts!.count).toBe(1);
+});
+
+test("a soft fact SQL failure rolls back its savepoint without poisoning the response checkpoint", async () => {
+  const turn = await claimedTurn();
+  await shared.admin.unsafe(`
+    create function fail_checkpoint_fact() returns trigger language plpgsql as $$
+    begin raise exception using errcode = '22000', message = 'synthetic fact failure'; end $$;
+    create trigger fail_checkpoint_fact before insert on model_call_facts
+      for each row execute function fail_checkpoint_fact();
+  `);
+  try {
+    const input = terminalInput(turn, "response-soft-fact");
+    const result = await processModelResponseTerminalEvent({
+      ...input,
+      checkpoint: async (persist) => persist(async () => true),
+    });
+    expect(result).toMatchObject({ authoritative: true });
+    expect(input.state.contextSignal?.totalTokens).toBe(176);
+    const [session] =
+      await shared.admin`select last_input_tokens from sessions where id = ${turn.sessionId}`;
+    expect(session!.last_input_tokens).toBe(164);
+    const [events] =
+      await shared.admin`select count(*)::int as count from session_events where session_id = ${turn.sessionId} and type = 'agent.model.usage'`;
+    expect(events!.count).toBe(1);
+    const [facts] =
+      await shared.admin`select count(*)::int as count from model_call_facts where session_id = ${turn.sessionId}`;
+    expect(facts!.count).toBe(0);
+  } finally {
+    await shared.admin.unsafe(
+      "drop trigger fail_checkpoint_fact on model_call_facts; drop function fail_checkpoint_fact()",
+    );
+  }
+});
+
+test("failed response projection rolls back its whole checkpoint without erasing incurred billing", async () => {
+  const turn = await claimedTurn();
+  const input = terminalInput(turn, "response-rollback");
+  await expect(
+    processModelResponseTerminalEvent({
+      ...input,
+      checkpoint: async (persist) =>
+        persist(async () => {
+          throw new Error("checkpoint crash");
+        }),
+    }),
+  ).rejects.toThrow();
+  expect(input.state.contextSignal).toBeNull();
+  const [session] =
+    await shared.admin`select last_input_tokens from sessions where id = ${turn.sessionId}`;
+  expect(session!.last_input_tokens).toBeNull();
+  const [events] =
+    await shared.admin`select count(*)::int as count from session_events where session_id = ${turn.sessionId} and type = 'agent.model.usage'`;
+  expect(events!.count).toBe(0);
+  const [billing] =
+    await shared.admin`select count(*)::int as count from usage_events where session_id = ${turn.sessionId}`;
+  expect(billing!.count).toBeGreaterThan(0);
+  const retry = terminalInput(turn, "response-rollback");
+  await processModelResponseTerminalEvent({
+    ...retry,
+    checkpoint: async (persist) => persist(async () => true),
+  });
+  const [after] =
+    await shared.admin`select count(*)::int as count from usage_events where session_id = ${turn.sessionId}`;
+  expect(after!.count).toBe(billing!.count);
+  expect(retry.state.contextSignal?.totalTokens).toBe(176);
+});
+
+test("real history savepoint failure retains response truth and can be reconciled after recovery", async () => {
+  const turn = await claimedTurn();
+  const input = terminalInput(turn, "response-history-failure");
+  const sink = createTurnHistorySink({
+    db: client.db,
+    ...turn,
+    getTurnId: () => turn.turnId,
+    getExecutionGeneration: () => turn.executionGeneration,
+    getModelRunSettings: () => input.settings,
+    getStream: () => ({
+      state: { history: [{ type: "message", role: "assistant", content: "recover this answer" }] },
+    }),
+    media: {
+      retainNativeGeneratedImagesFromHistory: async () => {},
+      retainedScreenshotReceiptsByCallId: new Map(),
+      generatedImageReceiptsByProviderItemId: new Map(),
+    },
+  } as unknown as TurnHistorySinkDeps);
+  sink.seedHistory([], 0);
+  sink.nextHistoryPosition = 100;
+  await shared.admin.unsafe(`
+    create function fail_checkpoint_history() returns trigger language plpgsql as $$
+    begin raise exception using errcode = '22000', message = 'synthetic history failure'; end $$;
+    create trigger fail_checkpoint_history before insert on session_history_items
+      for each row execute function fail_checkpoint_history();
+  `);
+  try {
+    await expect(
+      processModelResponseTerminalEvent({
+        ...input,
+        checkpoint: (persist) => sink.reconcileConversationTruth({ requireDurable: true, persist }),
+      }),
+    ).rejects.toThrow();
+    expect(sink.persistedHistoryCount).toBe(0);
+    const [session] =
+      await shared.admin`select last_input_tokens from sessions where id = ${turn.sessionId}`;
+    expect(session!.last_input_tokens).toBe(164);
+    const [events] =
+      await shared.admin`select count(*)::int as count from session_events where session_id = ${turn.sessionId} and type = 'agent.model.usage'`;
+    expect(events!.count).toBe(1);
+  } finally {
+    await shared.admin.unsafe(
+      "drop trigger fail_checkpoint_history on session_history_items; drop function fail_checkpoint_history()",
+    );
+  }
+  await sink.reconcileConversationTruth({ requireDurable: true });
+  expect(sink.persistedHistoryCount).toBe(1);
+  const [history] =
+    await shared.admin`select count(*)::int as count from session_history_items where session_id = ${turn.sessionId} and position = 100`;
+  expect(history!.count).toBe(1);
+});
 
 test("the session-event writer keeps the canonical event's worker-set purpose", async () => {
   const turn = await claimedTurn();

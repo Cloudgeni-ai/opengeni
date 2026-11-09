@@ -3,6 +3,7 @@ import type {
   CodexRealtimeWebrtcRequest,
   CodexRealtimeWebrtcResponse,
 } from "./types";
+import type { PreparedRealtimeWebrtc } from "./realtime-webrtc-preparation";
 
 export type CodexRealtimeNegotiator = (
   request: CodexRealtimeWebrtcRequest,
@@ -36,6 +37,8 @@ export type AcquireCodexRealtimeMicrophoneOptions = {
 };
 
 export type StartCodexRealtimeWebrtcOptions = {
+  /** A caller-owned local offer, consumed once; microphone capture still starts at admission. */
+  prepared?: PreparedRealtimeWebrtc | undefined;
   negotiate: CodexRealtimeNegotiator;
   /** Exact configured provider model expected from the server broker. */
   expectedModel?: CodexRealtimeWebrtcResponse["model"];
@@ -64,6 +67,8 @@ export type StartCodexRealtimeWebrtcOptions = {
   remoteAudio?: HTMLAudioElement | undefined;
   /** Replacement transports defer taking over the shared audio element until promotion. */
   activateRemoteAudio?: boolean | undefined;
+  /** Consume muted incoming-call audio before acceptance to keep playout current. */
+  primeRemoteAudio?: boolean | undefined;
   onAudibleOutputState?: ((state: CodexRealtimeAudibleOutputState) => void) | undefined;
   onMicrophoneEnded?: (() => void) | undefined;
   onConnectionHealth?: ((health: CodexRealtimeConnectionHealth) => void) | undefined;
@@ -99,8 +104,10 @@ export async function startCodexRealtimeWebrtc(
   options: StartCodexRealtimeWebrtcOptions,
 ): Promise<CodexRealtimeWebrtcSession> {
   throwIfAborted(options.signal);
-  const peerConnection = (options.createPeerConnection ?? defaultPeerConnection)();
-  const events = peerConnection.createDataChannel("oai-events");
+  const prepared = options.prepared?.claim();
+  const peerConnection =
+    prepared?.peerConnection ?? (options.createPeerConnection ?? defaultPeerConnection)();
+  const events = prepared?.events ?? peerConnection.createDataChannel("oai-events");
   try {
     options.onEventsCreated?.(events);
   } catch (error) {
@@ -115,6 +122,7 @@ export async function startCodexRealtimeWebrtc(
   let ownsMedia = false;
   let stopped = false;
   let remoteStream: MediaStream | null = null;
+  const remoteTracks = new Set<MediaStreamTrack>();
   let remoteAudioActive = options.activateRemoteAudio ?? true;
   let outputMuted = false;
   let audibleOutput: CodexRealtimeAudibleOutputState = "inactive";
@@ -132,7 +140,7 @@ export async function startCodexRealtimeWebrtc(
     if (stopped || !remoteAudioActive || !remoteAudio || !stream) return false;
     remoteAudio.autoplay = true;
     remoteAudio.muted = outputMuted;
-    remoteAudio.srcObject = stream;
+    if (remoteAudio.srcObject !== stream) remoteAudio.srcObject = stream;
     const attempt = ++audioAttempt;
     publishAudibleOutput("pending");
     try {
@@ -150,10 +158,25 @@ export async function startCodexRealtimeWebrtc(
 
   const onRemoteTrack = (event: RTCTrackEvent): void => {
     if (stopped || event.track.kind !== "audio") return;
+    remoteTracks.add(event.track);
+    event.track.enabled = remoteAudioActive && !outputMuted;
     const stream = event.streams[0];
     if (!stream) return;
     remoteStream = stream;
     if (remoteAudioActive) void playRemoteAudio();
+    else if (
+      options.primeRemoteAudio &&
+      options.remoteAudio &&
+      options.remoteAudio.srcObject === null
+    ) {
+      // Consume incoming silence while ringing instead of accumulating it in
+      // the receiver's playout buffer. The track and sink both remain muted.
+      // A staged replacement must never take the live connection's sink.
+      options.remoteAudio.autoplay = true;
+      options.remoteAudio.muted = true;
+      options.remoteAudio.srcObject = stream;
+      void options.remoteAudio.play().catch(() => undefined);
+    }
   };
   if (options.remoteAudio) peerConnection.addEventListener("track", onRemoteTrack);
   const onConnectionState = (): void => {
@@ -240,16 +263,23 @@ export async function startCodexRealtimeWebrtc(
     }
     for (const track of audioTracks) {
       track.addEventListener?.("ended", onMicrophoneEnded);
-      peerConnection.addTrack(track, media);
+      if (!prepared?.sender) peerConnection.addTrack(track, media!);
     }
-
-    const offer = await peerConnection.createOffer();
-    if (offer.type !== "offer" || !offer.sdp) {
-      throw new Error("Browser did not create a WebRTC SDP offer");
+    let localSdp: string;
+    if (prepared?.sender && prepared.sdp) {
+      // The sendrecv audio section already exists; replacing its null track
+      // does not renegotiate SDP or open the microphone before Answer.
+      await prepared.sender.replaceTrack(audioTracks[0]!);
+      localSdp = peerConnection.localDescription?.sdp ?? prepared.sdp;
+    } else {
+      const offer = await peerConnection.createOffer();
+      if (offer.type !== "offer" || !offer.sdp) {
+        throw new Error("Browser did not create a WebRTC SDP offer");
+      }
+      await peerConnection.setLocalDescription(offer);
+      localSdp = peerConnection.localDescription?.sdp ?? offer.sdp;
     }
-    await peerConnection.setLocalDescription(offer);
     throwIfAborted(options.signal);
-    const localSdp = peerConnection.localDescription?.sdp ?? offer.sdp;
     const answer = await options.negotiate(
       {
         realtimeId: options.realtimeId,
@@ -293,11 +323,17 @@ export async function startCodexRealtimeWebrtc(
       audibleOutputState: () => audibleOutput,
       setOutputMuted: (muted) => {
         outputMuted = muted;
-        if (options.remoteAudio) options.remoteAudio.muted = muted;
+        remoteTracks.forEach((track) => {
+          track.enabled = remoteAudioActive && !muted;
+        });
+        if (options.remoteAudio) options.remoteAudio.muted = !remoteAudioActive || muted;
       },
       activateRemoteAudio: () => {
         if (stopped || remoteAudioActive) return;
         remoteAudioActive = true;
+        remoteTracks.forEach((track) => {
+          track.enabled = !outputMuted;
+        });
         if (remoteStream) void playRemoteAudio();
       },
       retryAudibleOutput: playRemoteAudio,

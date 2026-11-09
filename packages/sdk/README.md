@@ -254,7 +254,13 @@ For navigation lists, `listSessionSummaryPage` uses the same filters, ordering,
 pin rules and cursors, returning `SessionListEntry` records. Entries include
 display/rename titles, creator, lifecycle, personal state, hierarchy counts and
 the model and reasoning effort shown with a row; prompts and the rest of the
-execution configuration remain on `getSession`. Older APIs return
+execution configuration remain available on the default `getSession` response.
+Chat clients explicitly select `client.withSessionResponse("chat")`; those clients
+return `ChatSession` and read
+configuration with `getSessionConfiguration` (requires `sessions:control` and session access).
+The console, mobile and packaged React chat opt in. Compact clients send
+`Accept: application/json; opengeni-session=chat` on JSON requests, without adding
+a CORS request header. Default SDK clients retain the full response and required types. Older APIs return
 full pages that the SDK projects locally. Unknown filters/cursors still fail
 explicitly rather than returning an unfiltered result.
 
@@ -1910,3 +1916,14 @@ hidden. A missing legacy snapshot may return 404; other authorization or transpo
 failures must not be interpreted as permission to execute. Responses are private
 and non-cacheable. Review states distinguish waiting, execution, cancellation,
 failure and uncertain outcome. Exact stored arguments are never client-editable.
+
+## Stateless decisions
+
+`client.decide(workspaceId, { input, questions, tenantLabel? }, { signal? })`
+returns typed predicate, choice or score answers (or typed refusals) from the
+deployment's configured decision model. It uses the same API key and
+`sessions:create` authority as chat completions. The deployment pays; customer
+agent allowances are not consulted or debited. The optional tenant label appears
+on usage receipts for reporting only.
+See [stateless decisions](../../docs/model-inference.md) for examples,
+configuration, receipt durability and residency requirements.

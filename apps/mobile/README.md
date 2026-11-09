@@ -54,6 +54,21 @@ The new-chat and follow-up composers follow the web composer:
 The home header names the current workspace and organization; tapping it opens
 the workspace switcher.
 
+## Automations
+
+**Automations** in the side menu (below Meetings) lists the workspace's
+automations as the web list orders them, each with when it runs, what its
+last run did and a word for one that won't run (Paused, Finished) or keeps
+failing. Pull down to refresh; the list also re-reads while it is open.
+
+An automation's page has the everyday controls: switch it on or off, Run now,
+open the chat its runs continue, read its instructions, open a recent run's
+chat, and delete it. Only its owner (or, for a workspace automation, anyone
+who manages automations) can change or run it. **+** describes a new one to a
+chat that creates it, as the web's "Create with Opengeni" does; the full form
+and event triggers stay on the web ("Edit on the web"). Words and order come
+from `@opengeni/react/automation-model`, shared with the web pages.
+
 ## Calls and other sessions
 
 Generic Siri, Shortcuts and Phone calls start a fresh conversation by default.

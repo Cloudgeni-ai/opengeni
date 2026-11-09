@@ -45,6 +45,7 @@ mod process_cleanup;
 mod pty;
 pub mod run_as;
 pub mod service;
+mod shell_tools;
 #[cfg(target_os = "linux")]
 pub mod signal_sender;
 #[cfg(unix)]
@@ -99,6 +100,7 @@ pub use native::{
     NativePlatform,
 };
 pub use pty::{spawn_pty, PtyProcess};
+pub use shell_tools::{path_with_shell_tools, set_shell_tools_directory, shell_tools_directory};
 
 /// macOS TCC-grant helpers (feature `macos-desktop`, macOS-only): read the Screen
 /// Recording + Accessibility + Input Monitoring state without prompting ([`desktop_grants`])

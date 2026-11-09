@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -310,7 +311,7 @@ async function render(element: ReactNode) {
   };
 }
 
-function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
+function stubClient(empty: boolean, failed = false): ChatClient<OpenGeniBrowserClient> {
   if (failed) {
     return {
       listCapabilities: async () => ({ items: [], installations: [] }),
@@ -322,7 +323,7 @@ function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
       listInstalledPlugins: async () => {
         throw new Error("network is down");
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
   }
   return {
     searchPublicSkills: async () => ({ items: [] }),
@@ -330,7 +331,7 @@ function stubClient(empty: boolean, failed = false): OpenGeniBrowserClient {
     discoverPlugins: async () => ({ items: [], total: 0, nextOffset: null }),
     listInstalledSkills: async () => ({ skills: empty ? [] : [importedSkill()] }),
     listInstalledPlugins: async () => ({ plugins: empty ? [] : [installedPlugin()] }),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
 }
 
 function catalogItems(): CapabilityCatalogItem[] {

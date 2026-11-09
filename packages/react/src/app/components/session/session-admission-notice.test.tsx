@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { Session } from "@opengeni/sdk";
+import type { ChatSession as Session } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {

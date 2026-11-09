@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 /* ----------------------------------------------------------------------------
    An attached image always shows as an image. A draft restored after a reload
    or opened on another device, and a queued message, only carry the stored
@@ -257,7 +258,7 @@ describe("a draft restored on another device or after a reload", () => {
 const QUEUE_CONTEXT = {
   client: storedFilesClient().client,
   workspaceId: WORKSPACE_ID,
-} as unknown as OpenGeniContextValue;
+} as unknown as OpenGeniContextValue<ChatClient>;
 
 describe("a queued message", () => {
   test("shows its attached image as a picture in the queue", async () => {

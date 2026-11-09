@@ -5,6 +5,7 @@
 // machine: the web app with its own sign-in (`authority: "app"`), embeds with a
 // client the embedding page already authenticated (`authority: "host"`).
 import { t } from "./lib/console-text";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   createSessionEventFeedStore,
   useLatestCallback,
@@ -181,7 +182,7 @@ export type AppStateHost = Readonly<{
    * no sign-in step or access-key gate runs.
    */
   authority: "app" | "host";
-  createOpenGeniClient: (beginSharedRead?: () => number) => OpenGeniBrowserClient;
+  createOpenGeniClient: (beginSharedRead?: () => number) => ChatClient<OpenGeniBrowserClient>;
   fetchClientConfig: (signal?: AbortSignal, workspaceId?: string) => Promise<ClientConfig>;
   /** Product analytics for sign-in and sign-up outcomes. */
   captureProductEvent: (name: AnalyticsEventName, properties?: AnalyticsProperties) => void;

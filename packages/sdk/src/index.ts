@@ -1,4 +1,17 @@
 export type {
+  ModelDecisionRequest,
+  ModelDecisionResponse,
+  DecisionQuestion,
+  DecisionResult,
+  DecisionUsage,
+  DecisionAnswer,
+  DecisionAnswerFor,
+  DecisionRefusal,
+  DecisionPredicateQuestion,
+  DecisionChoiceQuestion,
+  DecisionScoreQuestion,
+} from "@opengeni/contracts";
+export type {
   BillingAlertSettings,
   UpdateBillingAlertSettingsRequest,
   BillingCreditNotification,
@@ -208,6 +221,7 @@ export type {
   ArtifactCatalogItem,
   ArtifactCatalogListOptions,
   ArtifactCatalogListResponse,
+  ArtifactLinkResolution,
 } from "./artifact-catalog";
 export type {
   SessionMessageSearchRequest,
@@ -374,6 +388,7 @@ export type {
   GetSessionOptions,
   InteractionSessionListOptions,
   OpenGeniClientOptions,
+  ChatClient,
   OpenGeniRequestOptions,
   SendMessageInput,
   SessionListPageOptions,
@@ -526,6 +541,7 @@ export type { ToolRequestIdentity, ToolRequestLike, VerifyToolRequestOptions } f
 export {
   openGeniConsolePath,
   parseOpenGeniLink,
+  resolveOpenGeniLinkTarget,
   isReservedOpenGeniLink,
   openGeniLinkScheme,
   parseRetainedFileReference,
@@ -646,6 +662,7 @@ export { streamWorkspaceInteractionRevisions } from "./interaction-revision-stre
 export type { WorkspaceInteractionRevisionStreamTransport } from "./interaction-revision-stream";
 export { parseWorkspaceLiveEvent, streamWorkspaceLiveEvents } from "./workspace-live-stream";
 export type {
+  WorkspaceDraftsChangedEvent,
   WorkspaceLiveEvent,
   WorkspaceSessionListEvent,
   WorkspaceLiveStreamOptions,
@@ -871,8 +888,10 @@ export {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_BROWSER_REQUEST_HEADERS,
+  OPENGENI_BROWSER_RESPONSE_HEADERS,
   OPENGENI_CORRELATION_HEADER,
   OPENGENI_SDK_VERSION_HEADER,
+  OPENGENI_SESSION_CHAT_ACCEPT,
   PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING,
   PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION,
   GENERATED_VIDEO_MAX_BYTES,
@@ -1454,6 +1473,13 @@ export type {
   ScheduledTaskStatus,
   ScheduledTaskTriggerType,
   Session,
+  SessionConfiguration,
+  ChatSession,
+  SessionResponseMode,
+  ChatCreateSessionResponse,
+  ChatSessionListResponse,
+  ChatSessionLineageResponse,
+  ChatLineageNode,
   SessionAdmissionBlock,
   SessionBackgroundCommand,
   WorkspaceBackgroundCommand,

@@ -1,4 +1,5 @@
 import type { ClientVoiceInputConfig, RecordingTranscriptVersion } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import {
   OpenGeniRecordingsClient,
@@ -106,8 +107,8 @@ export type UseVoiceInputOptions = {
   automaticRetryDelayMilliseconds?: number | undefined;
 };
 
-type VoiceInputClient = Pick<OpenGeniClient, "transcribeAudio"> &
-  Partial<Pick<OpenGeniClient, "requestJson">>;
+type VoiceInputClient = Pick<ChatClient<OpenGeniClient>, "transcribeAudio"> &
+  Partial<Pick<ChatClient<OpenGeniClient>, "requestJson">>;
 
 /** A dictation's speech, as recorded. */
 export type VoiceInputAudio = {
@@ -1326,6 +1327,8 @@ function chooseMimeType(accepted: string[]): string | undefined {
 function voiceInputCode(code: string | null): string {
   if (!code) return "unknown";
   if (code.startsWith("voice_")) return voiceInputCode(code.slice("voice_".length));
+  // An account out of credit needs someone to top it up, not a retry.
+  if (code === "provider_quota_exceeded") return code;
   if (code.startsWith("provider_")) return "provider";
   switch (code) {
     case "insufficient_credits":

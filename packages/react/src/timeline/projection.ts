@@ -1573,6 +1573,9 @@ export function buildTimeline(
 
       case "session.context.compacted": {
         closeStreamingTail();
+        // A checkpoint that trimmed history keeps why its summary failed.
+        const fallback = asRecord(payload.fallback);
+        const providerMessage = compactionProviderMessage(fallback);
         settleOrPushContextCompaction(items, {
           id: event.id,
           turnId,
@@ -1581,7 +1584,8 @@ export function buildTimeline(
           estimatedTokensBefore: numberOrNull(payload.estimatedTokensBefore),
           estimatedTokensAfter: numberOrNull(payload.estimatedTokensAfter),
           skipReason: null,
-          providerRejection: null,
+          providerRejection: compactionProviderRejection(fallback),
+          ...(providerMessage ? { providerMessage } : {}),
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -1591,6 +1595,7 @@ export function buildTimeline(
 
       case "session.context.compaction.skipped": {
         closeStreamingTail();
+        const providerMessage = compactionProviderMessage(payload);
         settleOrPushContextCompaction(items, {
           id: event.id,
           turnId,
@@ -1600,6 +1605,7 @@ export function buildTimeline(
           estimatedTokensAfter: null,
           skipReason: typeof payload.reason === "string" ? payload.reason : null,
           providerRejection: compactionProviderRejection(payload),
+          ...(providerMessage ? { providerMessage } : {}),
           implementation:
             typeof payload.implementation === "string" ? payload.implementation : null,
           occurredAt: event.occurredAt,
@@ -2932,6 +2938,16 @@ function isActivityItem(item: TimelineItem): item is WorkActivityItem {
   }
 }
 
+/**
+ * Some models emit a whitespace-only assistant message (often just "\n\n")
+ * around every tool call. It has nothing to read, so it never becomes a
+ * timeline row: an empty row still takes the list's row gap, and dozens of
+ * them open a blank band in a long turn. It shows up once it has text.
+ */
+function isBlankAgentMessage(item: TimelineItem): boolean {
+  return item.kind === "agent-message" && !item.text.trim();
+}
+
 export type GroupTimelineOptions = {
   /** Readable assistant prose with an independent work summary for each turn. */
   readableTurns?: boolean;
@@ -2974,6 +2990,7 @@ export function groupTimeline(
       foldSettledTurn(groups, item);
       continue;
     }
+    if (isBlankAgentMessage(item)) continue;
     groups.push({ kind: "item", item });
   }
   return groups;
@@ -3227,7 +3244,8 @@ function groupReadableTurns(
         !item.resolvedAt &&
         current !== undefined &&
         !current.endedAt;
-      if (!liveApprovalWait && !liveStatusWait) groups.push({ kind: "item", item });
+      if (!liveApprovalWait && !liveStatusWait && !isBlankAgentMessage(item))
+        groups.push({ kind: "item", item });
       if (current && !current.endedAt) {
         if (
           item.kind === "notice" &&
@@ -4118,9 +4136,9 @@ function numberOrNull(value: unknown): number | null {
 }
 
 /**
- * Read the closed provider-rejection record a `summarization_failed` skip
- * carries. Only bounded identifiers are accepted; a provider message is never
- * part of the payload and would be ignored here anyway.
+ * Read the closed provider-rejection record a `summarization_failed` skip (or
+ * a trimmed checkpoint's `fallback`) carries. Only bounded identifiers are
+ * accepted; the provider's message is read separately.
  */
 function compactionProviderRejection(
   payload: Record<string, unknown>,
@@ -4138,6 +4156,12 @@ function compactionProviderRejection(
     param: text(record.param),
     requestId: text(record.requestId),
   };
+}
+
+/** The provider's bounded error message on a compaction record, when present. */
+function compactionProviderMessage(record: Record<string, unknown>): string | null {
+  const message = record.providerMessage;
+  return typeof message === "string" && message.trim() ? message.trim().slice(0, 1_000) : null;
 }
 
 function compactionTrigger(payload: Record<string, unknown>): ContextCompactionItem["trigger"] {

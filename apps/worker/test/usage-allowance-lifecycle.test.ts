@@ -176,7 +176,7 @@ describe("allowance admission lifecycle boundaries", () => {
     );
     const beforePromptGate = source.slice(prompt.declaration.start, prompt.gate.start);
     expect(beforePromptGate).toContain(
-      'delivery === "send" && input.expectedDraftRevision != null',
+      'delivery !== "steer" && input.expectedDraftRevision != null',
     );
     expect(beforePromptGate).toContain("draft.sourceTurnId");
   });

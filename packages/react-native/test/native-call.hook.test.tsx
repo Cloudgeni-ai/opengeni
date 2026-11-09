@@ -129,6 +129,54 @@ describe("native realtime call", () => {
     expect(system.log.filter((entry) => entry === "call.connected")).toHaveLength(1);
   });
 
+  test("an adapter that only sets up call audio (Android) is driven like a call without claiming a system call", async () => {
+    const voice = fakeRealtime();
+    const system = fakeCall();
+    system.call.showsSystemCall = false;
+    const hook = await renderHook(
+      (realtime: NativeCallRealtime) =>
+        useNativeRealtimeCall({ realtime, call: system.call, title: "Plan" }),
+      voice.realtime,
+    );
+    await act(async () => await hook.result.current.start());
+    expect(hook.result.current.systemCall).toBe(false);
+    expect(hook.result.current.speaker).toBe(true);
+    await hook.rerender({ ...voice.realtime, snapshot: snapshot("active") });
+    await act(async () => await hook.result.current.end());
+    expect(system.log).toEqual(["call.start:Plan", "call.connected", "call.end:ended"]);
+    await hook.unmount();
+  });
+
+  test("a live call that is silent on one side says why, and stops once audio flows", async () => {
+    const { voice, hook } = await setup();
+    await act(async () => await hook.result.current.start());
+    const silent = (kind: "no_input_audio" | "output_silent" | null, inputMuted = false) =>
+      hook.rerender({
+        ...voice.realtime,
+        snapshot: {
+          ...snapshot("active", inputMuted),
+          diagnostic: kind
+            ? { kind, message: kind, recoverable: true, connectionGeneration: 1, attempt: 0 }
+            : null,
+        },
+      });
+    await silent(null);
+    expect(hook.result.current.notice).toBeNull();
+    await silent("no_input_audio");
+    expect(hook.result.current.notice).toBe(
+      "Your microphone isn't picking up any sound. Check that no other app is using it.",
+    );
+    // Muting silences the microphone on purpose.
+    await silent("no_input_audio", true);
+    expect(hook.result.current.notice).toBeNull();
+    await silent("output_silent");
+    expect(hook.result.current.notice).toBe(
+      "A reply arrived but couldn't be played. Check your volume.",
+    );
+    await silent(null);
+    expect(hook.result.current.notice).toBeNull();
+  });
+
   test("hanging up from the lock screen stops voice", async () => {
     const { voice, system, hook, status } = await setup();
     await act(async () => await hook.result.current.start());
@@ -223,15 +271,12 @@ describe("native realtime call", () => {
 });
 
 describe("call audio route", () => {
-  // What iOS reports when WebRTC applies its own voice-chat audio configuration
-  // as call audio starts: the category changes and the route falls back to the receiver.
-  const webRtcReconfigures = {
-    type: "routeChanged",
-    route: "receiver",
-    reason: "categoryChange",
-  } as const;
+  // The call adapter keeps the route stable while voice starts (on iOS, WebRTC
+  // is given the call's own audio configuration), so the hook never moves the
+  // route itself: it shows where audio plays and passes on the person's choice.
+  const speakerCalls = (log: string[]) => log.filter((entry) => entry.startsWith("call.speaker"));
 
-  test("a call started in the app stays on the loudspeaker when its audio comes up", async () => {
+  test("a call starts on the loudspeaker and voice coming up does not touch the route", async () => {
     const { system, hook, status } = await setup();
     await act(async () => await hook.result.current.start());
     expect(hook.result.current.speaker).toBe(true);
@@ -239,68 +284,40 @@ describe("call audio route", () => {
       system.emit({ type: "routeChanged", route: "speaker", reason: "activated" });
     });
     await status("active");
-    await act(async () => system.emit(webRtcReconfigures));
-    expect(system.log).toContain("call.speaker:true");
-    expect(hook.result.current.speaker).toBe(true);
-    await act(async () => {
-      system.emit({ type: "routeChanged", route: "speaker", reason: "override" });
-    });
+    expect(speakerCalls(system.log)).toEqual([]);
     expect(hook.result.current.speaker).toBe(true);
     expect(hook.result.current.route).toBe("speaker");
   });
 
-  test("an answered system call stays where it started, even when its start was not seen", async () => {
-    const voice = fakeRealtime();
-    const system = fakeCall();
-    const hook = await renderHook(
-      (realtime: NativeCallRealtime) =>
-        useNativeRealtimeCall({
-          realtime,
-          call: system.call,
-          title: "Agent call",
-          answeredCallId: "6F1B3C1E-8C1D-4E59-9E2B-3A3B7D9D5C10",
-        }),
-      voice.realtime,
-    );
+  test("the screen follows the route the person picks on the system call screen", async () => {
+    const { system, hook, status } = await setup();
     await act(async () => await hook.result.current.start());
-    await hook.rerender({ ...voice.realtime, snapshot: snapshot("active") });
-    await act(async () => system.emit(webRtcReconfigures));
-    expect(system.log.filter((entry) => entry.startsWith("call.speaker"))).toEqual([
-      "call.speaker:true",
-    ]);
-    expect(hook.result.current.speaker).toBe(true);
+    await status("active");
+    await act(async () => {
+      system.emit({ type: "routeChanged", route: "receiver", reason: "override" });
+    });
+    expect(hook.result.current.speaker).toBe(false);
+    expect(hook.result.current.route).toBe("receiver");
+    expect(speakerCalls(system.log)).toEqual([]);
   });
 
-  test("the person's own choice stays, and a reconfiguration keeps it", async () => {
+  test("the person's choice in the app goes to the call adapter", async () => {
     const { system, hook, status } = await setup();
     await act(async () => await hook.result.current.start());
     await status("active");
     await act(async () => hook.result.current.setSpeaker(false));
-    await act(async () => system.emit(webRtcReconfigures));
-    expect(system.log.filter((entry) => entry.startsWith("call.speaker"))).toEqual([
-      "call.speaker:false",
-    ]);
+    expect(speakerCalls(system.log)).toEqual(["call.speaker:false"]);
     expect(hook.result.current.speaker).toBe(false);
-    // Picked on the system call screen: a route override, kept from then on.
-    await act(async () => {
-      system.emit({ type: "routeChanged", route: "speaker", reason: "override" });
-    });
-    await act(async () => system.emit(webRtcReconfigures));
-    expect(system.log.filter((entry) => entry.startsWith("call.speaker"))).toEqual([
-      "call.speaker:false",
-      "call.speaker:true",
-    ]);
-    expect(hook.result.current.speaker).toBe(true);
   });
 
-  test("AirPods and headphones are left alone", async () => {
+  test("AirPods and headphones are shown as they are", async () => {
     const { system, hook, status } = await setup();
     await act(async () => await hook.result.current.start());
     await status("active");
     await act(async () => {
-      system.emit({ type: "routeChanged", route: "bluetooth", reason: "categoryChange" });
+      system.emit({ type: "routeChanged", route: "bluetooth", reason: "newDevice" });
     });
-    expect(system.log.filter((entry) => entry.startsWith("call.speaker"))).toEqual([]);
+    expect(speakerCalls(system.log)).toEqual([]);
     expect(hook.result.current.route).toBe("bluetooth");
     expect(hook.result.current.speaker).toBe(false);
   });

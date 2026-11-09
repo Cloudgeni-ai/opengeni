@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { CheckIcon, CopyIcon, KeyRoundIcon, Loader2Icon, SparklesIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -35,7 +36,7 @@ import { clearPendingDeveloperSetup } from "@/lib/pending-developer-setup";
 export type OnboardingDestination = { workspaceId: string; sessionId?: string };
 
 type DeveloperSetupClient = Pick<
-  OpenGeniBrowserClient,
+  ChatClient<OpenGeniBrowserClient>,
   | "createOrganizationApiKey"
   | "listOrganizationApiKeys"
   | "deleteOrganizationApiKey"

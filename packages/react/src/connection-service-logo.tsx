@@ -1,4 +1,5 @@
 import type { CapabilityCatalogItem, OpenGeniClient } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 import { ConnectionLogo } from "./connection-logo";
 import { capabilityLogoFallback } from "./capability-logo-fallback";
@@ -10,14 +11,14 @@ export function ConnectionServiceLogo({
   name,
   fallback = null,
 }: {
-  client?: OpenGeniClient | undefined;
+  client?: ChatClient<OpenGeniClient> | undefined;
   item?: CapabilityCatalogItem | undefined;
   name: string;
   fallback?: string | null;
 }) {
   const path = item?.logoAssetPath;
   const [image, setImage] = useState<{
-    client: OpenGeniClient;
+    client: ChatClient<OpenGeniClient>;
     path: string;
     url: string | null;
   } | null>(null);

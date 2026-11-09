@@ -273,6 +273,12 @@ export type TranscriptionService = {
   availableProviderIds?(context: TranscriptionAvailabilityContext): Promise<string[]>;
   /** Every model a dictation may name, of each ready provider, in the deployment's order. */
   availableModels?(context: TranscriptionAvailabilityContext): Promise<DictationModelOption[]>;
+  /** One live readiness read for all client-config voice projections. */
+  availability?(context: TranscriptionAvailabilityContext): Promise<{
+    available: boolean;
+    providers: string[];
+    models: DictationModelOption[];
+  }>;
   /** Select one provider before a durable segment attempt; retries pin this id. */
   selectProvider?(
     context: TranscriptionAvailabilityContext,

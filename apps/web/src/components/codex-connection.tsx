@@ -1,4 +1,5 @@
 import { trackModelConnection } from "@opengeni/react/app/lib/analytics-observer";
+import type { ChatClient } from "@opengeni/sdk";
 
 // Codex (ChatGPT) subscriptions for Settings > Models: the data and every
 // mutation (useCodexSubscriptions), the usage-limit reset list, the device-code
@@ -735,7 +736,7 @@ export function useCodexSubscriptions({
   canManage,
   enabled: readsAccounts = true,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   canManage: boolean;
   /** False reads nothing. */

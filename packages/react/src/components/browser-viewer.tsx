@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   AttachedBrowserBridge,
   AttachedBrowserDevice,
@@ -109,7 +110,7 @@ export type BrowserViewerNotification = {
   message: string;
 };
 
-export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride & {
+export type BrowserViewerProps = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   /** The selected Opengeni agent/session. Peer BrowserSessions stay discoverable. */
   sessionId: string;
   enabled?: boolean | undefined;

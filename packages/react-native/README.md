@@ -43,6 +43,8 @@ seconds, instead of waiting for the whole turn: a reply it is still writing
 stops and it answers with your message in mind, and running tools are not cut
 off. The message simply
 appears in the conversation. People see one Send and nothing to learn: the
+server decides at arrival whether the message steers the running turn or
+starts a new one, so a stale screen never queues it behind the turn. The
 shared session screen shows no Queue choice beside it and no Queue or Steer
 words (a message sent while the workstream is paused waits and shows as a
 waiting message). Pass `offerQueue: true` as well to offer Queue next to Send.
@@ -145,7 +147,7 @@ pass `useOpenGeniText()` when you build on them.
 
 ## Voice calls with your agent
 
-A call is the web's realtime voice session on native WebRTC, reported to the system as a phone call (CallKit on iOS). It keeps working with the phone locked, follows AirPods and CarPlay, shows in the Phone app's recents, and ends from the lock screen or a headset.
+A call is the web's realtime voice session on native WebRTC, reported to the system as a phone call (CallKit on iOS). It keeps working with the phone locked, follows AirPods and CarPlay, shows in the Phone app's recents, and ends from the lock screen or a headset. On Android the same adapter sets up the phone's call audio (communication mode, audio focus, and the loudspeaker or a connected headset) without a system call screen.
 
 ```sh
 npx expo install react-native-webrtc
@@ -176,7 +178,8 @@ function AgentCall({ session }: { session: SessionInputs }) {
 ```
 
 - `useNativeSessionRealtime` takes the same session inputs as `useSessionRealtime` from `@opengeni/react/session-realtime` (client, workspace, session, status, control, events). Pick the voice model with `useRealtimeModelSelection`. Native voice supports the WebRTC models; check with `nativeRealtimeModelSupported`.
-- `useNativeRealtimeCall` starts and ends the system call with the voice session and mirrors mute both ways. Without a call adapter (for example on Android), voice still works without a system call.
+- `useNativeRealtimeCall` starts and ends the system call with the voice session and mirrors mute both ways. Without a call adapter, voice still works without a system call; on Android, `systemCall` stays false because there is no call screen.
+- When a live call is silent on one side, `notice` says why and the call view shows it: the microphone picks up no sound at all, or a reply arrived but did not play. The realtime snapshot carries the same as the `no_input_audio` and `output_silent` diagnostics.
 - Calls started outside the app (Siri, Phone recents, a home-screen quick action whose type ends in `.call`) arrive as `startRequested` events, or through `takePendingStartRequest()` after a cold launch. The host decides which session they talk to.
 - `NativeAgentCallProvider` defaults generic outside calls to a fresh realtime session; `resolveOutsideCall` can preserve a host's explicit preferences. An explicit session request still wins. Generic calls keep a generic system-recents handle; calling a named session records that session. Selecting another session as conversational context does not change the active voice session.
 
@@ -205,6 +208,8 @@ Expo autolinking picks up this package's call module. Add the config plugin to t
 - **App Intent and App Shortcuts:** a generated Swift file in the app target declares a "start a call" intent and its Siri phrases. `{app}` stands for the app's name and must appear exactly once in each phrase (Siri requires it). Without any setup the action then works from Siri, Spotlight and the Shortcuts app, and can be assigned to the Action button. The intent opens the app and arrives as a `startRequested` event with no target, so the host chooses the session.
 - **`alternativeAppNames`:** extra names Siri accepts for the app (`INAlternativeAppNames`), for example the agent's own name, so "Call Agent" works in an app called something else.
 - Set `"appIntents": false` inside `call` to skip the generated intent.
+- **`androidSystemCall: true`** (inside `call`): Android calls become system calls, a self-managed Telecom call with a call notification and a foreground service that keeps it going with the screen off, so a cellular call holds it and Bluetooth headsets and watches answer and hang up. When the app uses `expo-notifications`, agents' calls also ring the phone like a phone call: the server's high-priority push shows the incoming-call notification and a full-screen ring screen on the lock screen, and answering hands the call to the same `incoming` events as on iOS. The plugin adds the permissions this needs (`MANAGE_OWN_CALLS`, the phone-call and microphone foreground service types, notifications and full-screen intents), the service, the ring screen and the messaging service. Play asks apps that declare these to explain them, so it is off by default; without it, Android calls play through the phone's call audio without a system call.
+- **`iosAudioDevice: true`** (inside `call`, needs `react-native-webrtc`): WebRTC's audio on iOS runs through Opengeni's call audio device instead of WebRTC's built-in one. While a CallKit call rings, the device sends silent audio and plays nothing, so the voice session can connect before the person answers without the microphone opening (`incoming.connectsBeforeAnswer` is then true). Once CallKit activates the audio session it runs Apple's voice-processing I/O, as WebRTC's own device does. Off by default.
 
 For meetings that keep recording with the screen locked, add `"recording": true`: it adds the `audio` background mode on iOS and the microphone foreground service on Android. An entry with only `recording` sets up nothing for calls, so a meetings-only app gets no `voip` mode, call activity or Siri intents. Add `call` as well to set up both, or pass `"call": false` to leave calls out of any entry.
 

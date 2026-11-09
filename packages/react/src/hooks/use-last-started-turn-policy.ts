@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   LatencyMode,
   ReasoningEffort,
@@ -21,7 +22,7 @@ export type LastStartedTurnPolicy = {
   turnId: string;
 };
 
-export type UseLastStartedTurnPolicyOptions = ClientOverride &
+export type UseLastStartedTurnPolicyOptions = ClientOverride<ChatClient> &
   SessionEventFeedOptions & {
     pollIntervalMs?: number | undefined;
     /** Project the last lease-backed serving model without changing the accepted policy. */

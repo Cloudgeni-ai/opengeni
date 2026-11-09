@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { useMemo } from "react";
 
 import { apiBaseUrl } from "@/api";
@@ -19,7 +20,7 @@ export function OrganizationConnectedAgents({
   onNavigate,
   onCreateApiKey,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId: string;
   organizationName: string;
   location: ConnectedAgentsLocation;

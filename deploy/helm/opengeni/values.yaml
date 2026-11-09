@@ -93,6 +93,9 @@ config:
   MIMALLOC_PURGE_DECOMMITS: "1"
   OPENGENI_SERVICE_NAME: opengeni
   OPENGENI_ENVIRONMENT: production
+  # Comma-separated exact hosts, optionally host:port, allowed to resolve privately.
+  # Example: "admin-api.example.com:443,auth.example.com:8443". No wildcards or URLs.
+  OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS: ""
   OPENGENI_DEPLOYMENT_REVISION: dev
   OPENGENI_API_HOST: 0.0.0.0
   OPENGENI_API_PORT: "8000"

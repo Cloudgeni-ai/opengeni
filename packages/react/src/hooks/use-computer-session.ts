@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   ComputerAction,
   ComputerActionReceipt,
@@ -34,7 +35,7 @@ export function computerActionReceiptError(t: OpenGeniText, receipt: ComputerAct
   return error;
 }
 
-export type UseComputerSessionOptions = EmbeddedComputerInteractionClientOverride & {
+export type UseComputerSessionOptions = EmbeddedComputerInteractionClientOverride<ChatClient> & {
   computerSessionId: string | null;
   enabled?: boolean | undefined;
   pollIntervalMs?: number | undefined;

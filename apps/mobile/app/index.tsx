@@ -51,6 +51,7 @@ import {
   useNewSessionOptions,
 } from "@/new-session-options";
 import { useHomeDraftSync } from "@/new-session-draft-sync";
+import { createSessionFromDraft } from "@/new-session-create";
 import { SignInScreen } from "@/sign-in-screen";
 import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
@@ -263,20 +264,27 @@ function Home() {
       // The exact snapshot being sent; acknowledged once the session exists.
       const flushed = await draftSync.flushForSend().catch(() => null);
       const chosen = options.request();
-      const created = await client.createSession(workspaceId, {
-        // A file-only message still says what it carries, as the web composer does.
-        initialMessage: text || "See the attached files.",
-        ...(model ? { model } : {}),
-        ...(effort ? { reasoningEffort: effort } : {}),
-        ...(latencyMode !== "standard" ? { latencyMode } : {}),
-        ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
-        ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
-        ...(chosen.channelId ? { channelId: chosen.channelId } : {}),
-        ...(chosen.excludedMcpServerIds
-          ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
-          : {}),
-        resources: [...chosen.resources, ...attachments.readyResources],
-      });
+      // Names the draft this Send was composed in. Once the chat is accepted
+      // the server clears that draft, unless another device saved a newer one.
+      const created = await createSessionFromDraft(
+        client,
+        workspaceId,
+        {
+          // A file-only message still says what it carries, as the web composer does.
+          initialMessage: text || "See the attached files.",
+          ...(model ? { model } : {}),
+          ...(effort ? { reasoningEffort: effort } : {}),
+          ...(latencyMode !== "standard" ? { latencyMode } : {}),
+          ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
+          ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
+          ...(chosen.channelId ? { channelId: chosen.channelId } : {}),
+          ...(chosen.excludedMcpServerIds
+            ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
+            : {}),
+          resources: [...chosen.resources, ...attachments.readyResources],
+        },
+        flushed?.revision ?? null,
+      );
       rememberPendingPrompt(client, workspaceId, created.id, {
         text: text || "See the attached files.",
         sentAt,
@@ -538,6 +546,7 @@ function Home() {
             <SessionRowList
               sessions={sections.pinned}
               models={models}
+              avatarClient={client}
               onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
               onTogglePin={(session) => void togglePin(session)}
             />
@@ -549,6 +558,7 @@ function Home() {
             <SessionRowList
               sessions={sections.recent}
               models={models}
+              avatarClient={client}
               onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
               onTogglePin={(session) => void togglePin(session)}
             />

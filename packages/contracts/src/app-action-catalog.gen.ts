@@ -8539,6 +8539,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "resolveArtifactLink",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/artifact-catalog/:artifactId/resolve",
+    "request": [],
+    "query": [
+      "sessionId"
+    ],
+    "response": [
+      "ArtifactLinkResolution"
+    ]
+  },
+  {
     "id": "resolveInteractionIntervention",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/interaction-interventions/:interventionId/resolve",

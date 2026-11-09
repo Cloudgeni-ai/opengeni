@@ -4354,7 +4354,6 @@ Minimum production alerts:
 - Sandbox create failures: sandbox create failure ratio is above 20% for 10 minutes.
 - Sandbox orphan growth: `increase(opengeni_sandbox_orphans_terminated_total[30m]) > 0`.
 - Modal backend only: running Modal boxes without a live lease (`opengeni:modal_sandbox_inventory:fresh_max{state="unleased"} > 0` for 15m), warm leases whose exact Modal box is no longer running (`state="lease_missing_instance"` for 15m; draining leases excluded), and a stale/absent `modal_provider` inventory for 15m.
-- Boxes kept warm only by idle Browser/Computer sessions: `sum(opengeni:sandbox_leases_interaction_only:fresh_max{idle_bucket=~"2h_6h|gte_6h"}) > 5` for 30m.
 - Codex credential pool: any zero-eligible observation is critical; repeated one-eligible observations are warning-level reduced redundancy. The default PrometheusRule uses `opengeni_codex_pool_low_total{depth="zero"|"one"}`. The matching "Codex eligible credential pool is low" log line is throttled to the first observation per workspace pool depth and then one line per 10 minutes carrying `suppressedCount` and `reason` (`eligible_pool_zero` or `eligible_pool_one`); alert on the counter, not the log. Connected Machine auth-callout denial warnings use the same per-source throttle (one line per minute per rejected bearer or enrollment, with `reason` `invalid_bearer`, `inactive_enrollment`, or `duplicate_runner`); the denial itself is never throttled.
 - Worker failures: `runAgentTurn` failure ratio is above 5% for 10 minutes.
 - Worker duration: p95 `runAgentTurn` duration is above the expected model/tool budget for 15 minutes.
@@ -4363,6 +4362,13 @@ Minimum production alerts:
 - Streaming health: SSE replay conformance does not return persisted events after reconnect.
 - Collector health: collector pod is not ready or its configured OTLP exporter reports failures.
 - Secret/sandbox hygiene: conformance detects unintended sandbox environment variables or sandbox backend startup failures.
+
+Total MCP tool duration and the idle Browser/Computer inventory
+(`opengeni:sandbox_leases_interaction_only:fresh_max`) remain diagnostic metrics,
+not minimum production alerts: elapsed work or a retained holder alone does not
+prove a failure. Investigate actual operation failures, uncertain outcomes,
+overdue drains and failed snapshots; do not terminate sessions solely to reduce
+an inventory count. See [launch monitoring](launch-monitoring.md#evidence-and-operating-rules).
 
 ## Azure Reference
 

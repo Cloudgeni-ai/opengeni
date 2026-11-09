@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -17,7 +18,7 @@ function Harness({
   authority = "owner",
   canRead = true,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   authority?: string;
   canRead?: boolean | null;
 }) {
@@ -43,7 +44,9 @@ afterEach(async () => {
 
 test("settings request own organization-wide inventory including accounts needing repair", async () => {
   const load = mock(async () => accounts);
-  const client = { listOwnConnectionAccounts: load } as unknown as OpenGeniBrowserClient;
+  const client = {
+    listOwnConnectionAccounts: load,
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   await act(async () => root.render(<Harness client={client} />));
   expect(load).toHaveBeenCalledWith("workspace", { includeInactive: true });
   expect(result.connections).toEqual(accounts);
@@ -56,7 +59,7 @@ test("identity changes clear accounts immediately and fence outstanding reads", 
       new Promise<ConnectionMetadata[]>((resolve) => {
         finish = resolve;
       }),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   await act(async () => root.render(<Harness client={client} />));
   const oldFinish = finish;
   await act(async () => root.render(<Harness client={client} authority="another-owner" />));
@@ -77,7 +80,7 @@ test("failures are retryable and denied responses never retain stale personal ro
       if (failure) throw failure;
       return accounts;
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   await act(async () => root.render(<Harness client={client} />));
   failure = { status: 500 };
   await act(async () => result.onRetry());
@@ -108,7 +111,7 @@ test("an earlier refresh denial clears cached rows while a newer request is pend
         pending.push({ resolve, reject }),
       );
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   await act(async () => root.render(<Harness client={client} />));
   await act(async () => {
     result.onRetry();

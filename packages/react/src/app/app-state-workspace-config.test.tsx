@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { forwardRef } from "react";
 import type { ClientConfig } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -98,7 +99,7 @@ function host(source: ReturnType<typeof configSource>): AppStateHost {
       listWorkspaces: async () => [{ id: WORKSPACE_ID, name: "Platform", settings: {} }],
     } as Record<string, unknown>,
     { get: (target, key) => target[key as string] ?? (async () => ({})) },
-  ) as unknown as OpenGeniBrowserClient;
+  ) as unknown as ChatClient<OpenGeniBrowserClient>;
   const noop = async () => {};
   return {
     authority: "host",

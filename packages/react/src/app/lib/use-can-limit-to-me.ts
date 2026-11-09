@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 
 /**
@@ -7,7 +8,7 @@ import { useEffect, useState } from "react";
  * guess, because the server refuses it when Only me is off.
  */
 export function useCanLimitToMe(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   enabled: boolean,
 ): boolean {

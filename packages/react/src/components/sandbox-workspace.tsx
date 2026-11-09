@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 // The sandbox workbench — the SDK-embeddable dock "brain" (Workbench v2, M4).
 //
 // This module owns the whole session workspace surface an embedder mounts:
@@ -290,7 +291,7 @@ export type WorkspaceMachine = {
   refresh: () => Promise<void>;
 };
 
-export type UseSandboxWorkspaceTabsOptions = ClientOverride & {
+export type UseSandboxWorkspaceTabsOptions = ClientOverride<ChatClient> & {
   sessionId: string;
   /** Live event log (usually `useSessionEvents().events`). */
   events: SessionEvent[];
@@ -1010,7 +1011,7 @@ export function useSandboxWorkspaceTabs(
   };
 }
 
-export type SandboxWorkspaceProps = ClientOverride & {
+export type SandboxWorkspaceProps = ClientOverride<ChatClient> & {
   sessionId: string;
   /** Live event log (usually `useSessionEvents().events`). */
   events: SessionEvent[];

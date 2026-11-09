@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 
 import { IntegrationFacetsPanel } from "@/components/capabilities/integration-facets-panel";
 import type { ApiIntegrationInstallationSummary } from "@opengeni/react/app/types";
@@ -19,7 +20,7 @@ export function IntegrationAccountFacets({
   canManage,
   refreshRevision,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   instance: ApiIntegrationInstallationSummary;
   facetCount: number;

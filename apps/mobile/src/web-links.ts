@@ -23,6 +23,9 @@ export const webPaths = {
     `/workspaces/${encodeURIComponent(workspaceId)}/organization`,
   workspaceSettings: (workspaceId: string) =>
     `/workspaces/${encodeURIComponent(workspaceId)}/settings`,
+  /** One automation's page, where its form and event triggers are edited. */
+  automation: (workspaceId: string, automationId: string) =>
+    `/workspaces/${encodeURIComponent(workspaceId)}/automations/${encodeURIComponent(automationId)}`,
   security: () => "/settings/security",
   home: () => "/",
 };

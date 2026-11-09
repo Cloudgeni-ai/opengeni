@@ -220,6 +220,7 @@ import {
   repositorySelectionFromResources,
 } from "../lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "../lib/use-new-session-draft";
+import { newSessionDraftConflictRevision } from "../../hooks/use-new-session-draft";
 import { userErrorText } from "../../ui/api-error";
 import {
   newSessionCreateSnapshot,
@@ -1344,92 +1345,10 @@ function SessionsIndexRouteContent({
             // an initial message. Persist the draft so a pending autosave is not
             // lost on navigate, but do not consume it — text stays for later.
             if (realtimeModel) {
-              for (let attempt = 0; attempt < 3; attempt += 1) {
-                // Voice launch does not consume the draft. Save local edits if
-                // possible, but never rebase an old voice draft over a sibling's
-                // newer unsent message merely to start a realtime session.
-                const flushed = await newSessionDraft.flush();
-                if (!flushed) {
-                  reportDraftSaveFailure(newSessionDraft);
-                  return null;
-                }
-                const submission = submissionFromSessionDraft(
-                  draft,
-                  defaultFirstPartyMcpTools,
-                  personalResourceAttachment.intent,
-                );
-                let draftConflict = false;
-                let outcomeUnknown = false;
-                const created = await context.startSession(
-                  workspaceId,
-                  {
-                    text: "",
-                    resources: [],
-                    tools: submittedSnapshot.tools,
-                    model,
-                    reasoningEffort,
-                    latencyMode,
-                    ...submission.extras,
-                  },
-                  {
-                    targetSandboxId: submission.options.targetSandboxId,
-                    workingDir: submission.options.workingDir,
-                    channelId: selectedChannelId,
-                    omitWorkspaceResources: submission.omitWorkspaceResources,
-                    installedSkillIds: launch.skillCapabilityId
-                      ? [launch.skillCapabilityId]
-                      : undefined,
-                    agent: newSessionAgent,
-                    startMode: "realtime",
-                    expectedNewSessionDraftRevision: flushed.revision,
-                    newSessionDraftToolPolicy: persistedToolPolicy,
-                    agentLearning: draft.agentLearning,
-                    usageLimitMicros,
-                    visibility: newSessionCreateVisibility(
-                      personalWorkspace,
-                      submission.options.visibility ?? "workspace",
-                      tenancyCapabilities?.canCreatePrivate === true,
-                    ),
-                    onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
-                      draftConflict = newSessionDraft.captureConflict(error);
-                      outcomeUnknown = uncertain;
-                      recoverPersonalResourceAttachment(error, request);
-                      connectionAccounts.onSelectionError(error);
-                      // A brief outage shows the updating notice, not a toast.
-                      return (
-                        draftConflict ||
-                        newSessionDraft.reportUnavailable(error) ||
-                        noteCreditRefusal(error, request) ||
-                        noteCreateFailure(error, sentSignature)
-                      );
-                    },
-                  },
-                );
-                if (!created) {
-                  if (draftConflict) continue;
-                  if (!outcomeUnknown) await preserveNewerLocalDraft();
-                  return null;
-                }
-                setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
-                setCreateCreditRefusal(null);
-                setCreateFailure(null);
-                setUsageLimitSendBlocked(false);
-                return {
-                  sessionId: created.id,
-                  settleDraft: async () => true,
-                };
-              }
-              await preserveNewerLocalDraft();
-              newSessionDraft.clearError();
-              toast.error("Couldn't start voice", {
-                description: DRAFT_CHANGED_DURING_SEND_TEXT,
-              });
-              return null;
-            }
-
-            const submittedResources = submittedSnapshot.resources;
-            for (let attempt = 0; attempt < 3; attempt += 1) {
-              const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
+              // Voice launch does not consume the draft. Unsaved local edits
+              // are saved as autosave would save them; an unchanged form
+              // saves nothing, so it never writes over another device's draft.
+              const flushed = await newSessionDraft.flush();
               if (!flushed) {
                 reportDraftSaveFailure(newSessionDraft);
                 return null;
@@ -1440,18 +1359,18 @@ function SessionsIndexRouteContent({
                 personalResourceAttachment.intent,
               );
               let draftConflict = false;
+              let draftChangedElsewhere = false;
               let outcomeUnknown = false;
               const created = await context.startSession(
                 workspaceId,
                 {
-                  text,
-                  resources: submittedResources,
+                  text: "",
+                  resources: [],
                   tools: submittedSnapshot.tools,
                   model,
                   reasoningEffort,
                   latencyMode,
                   ...submission.extras,
-                  connectionAccounts: connectionAccounts.selections,
                 },
                 {
                   targetSandboxId: submission.options.targetSandboxId,
@@ -1462,6 +1381,7 @@ function SessionsIndexRouteContent({
                     ? [launch.skillCapabilityId]
                     : undefined,
                   agent: newSessionAgent,
+                  startMode: "realtime",
                   expectedNewSessionDraftRevision: flushed.revision,
                   newSessionDraftToolPolicy: persistedToolPolicy,
                   agentLearning: draft.agentLearning,
@@ -1472,13 +1392,16 @@ function SessionsIndexRouteContent({
                     tenancyCapabilities?.canCreatePrivate === true,
                   ),
                   onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
+                    // Only an older server still refuses a Send over its draft.
                     draftConflict = newSessionDraft.captureConflict(error);
+                    if (draftConflict) {
+                      draftChangedElsewhere =
+                        newSessionDraftConflictRevision(error) !== flushed.revision;
+                    }
                     outcomeUnknown = uncertain;
                     recoverPersonalResourceAttachment(error, request);
                     connectionAccounts.onSelectionError(error);
                     // A brief outage shows the updating notice, not a toast.
-                    // An unconfirmed create keeps its idempotency key, so the
-                    // person's next Send cannot start a second session.
                     return (
                       draftConflict ||
                       newSessionDraft.reportUnavailable(error) ||
@@ -1489,67 +1412,160 @@ function SessionsIndexRouteContent({
                 },
               );
               if (!created) {
-                if (draftConflict) continue;
+                if (draftConflict) {
+                  await preserveNewerLocalDraft();
+                  newSessionDraft.clearError();
+                  toast.error("Couldn't start voice", {
+                    description: draftConflictDuringSendText(draftChangedElsewhere),
+                  });
+                  return null;
+                }
                 if (!outcomeUnknown) await preserveNewerLocalDraft();
                 return null;
               }
-              // The limit belongs to the chat just created; the next starts with none.
               setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
               setCreateCreditRefusal(null);
               setCreateFailure(null);
               setUsageLimitSendBlocked(false);
               return {
                 sessionId: created.id,
-                settleDraft: async () => {
-                  const acknowledged = await newSessionDraft.acknowledgeConsumed(
-                    flushed,
-                    visibleSignature,
-                  );
-                  if (
-                    acknowledged?.kind === "consumed" &&
-                    newSessionDraft.isCurrentSignature(visibleSignature)
-                  ) {
-                    setMessage("");
-                    visibilityChosenRef.current = false;
-                    setDraft({
-                      ...emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
-                      visibility:
-                        tenancyCapabilities?.canCreatePrivate === true &&
-                        tenancyCapabilities.defaultVisibility === "private"
-                          ? "private"
-                          : "workspace",
-                    });
-                    attachments.removeReadyFiles(
-                      submittedResources.flatMap((resource) =>
-                        resource.kind === "file" ? [resource.fileId] : [],
-                      ),
-                    );
-                  } else if (
-                    acknowledged?.kind !== "preserved" ||
-                    !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
-                  ) {
-                    // The message was already accepted. If there is no newer
-                    // local edit, leave a sibling's later draft untouched.
-                    if (!acknowledged && newSessionDraft.isCurrentSignature(visibleSignature)) {
-                      return true;
-                    }
-                    const preserved = await newSessionDraft.flushForSend();
-                    if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
-                      return false;
-                    }
-                  }
-                  return true;
-                },
+                settleDraft: async () => true,
               };
             }
-            await preserveNewerLocalDraft();
-            // Each attempt saved the draft before the create refused it, so the
-            // draft is not unsaved: clear that notice and resume autosave.
-            newSessionDraft.clearError();
-            toast.error("Couldn't send", {
-              description: DRAFT_CHANGED_DURING_SEND_TEXT,
-            });
-            return null;
+
+            const submittedResources = submittedSnapshot.resources;
+            // Send carries the clicked snapshot. Saving it first only keeps
+            // the draft in step; the server clears the draft afterwards only
+            // if nothing newer replaced it on another device.
+            const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
+            if (!flushed) {
+              reportDraftSaveFailure(newSessionDraft);
+              return null;
+            }
+            const submission = submissionFromSessionDraft(
+              draft,
+              defaultFirstPartyMcpTools,
+              personalResourceAttachment.intent,
+            );
+            let draftConflict = false;
+            let draftChangedElsewhere = false;
+            let outcomeUnknown = false;
+            const created = await context.startSession(
+              workspaceId,
+              {
+                text,
+                resources: submittedResources,
+                tools: submittedSnapshot.tools,
+                model,
+                reasoningEffort,
+                latencyMode,
+                ...submission.extras,
+                connectionAccounts: connectionAccounts.selections,
+              },
+              {
+                targetSandboxId: submission.options.targetSandboxId,
+                workingDir: submission.options.workingDir,
+                channelId: selectedChannelId,
+                omitWorkspaceResources: submission.omitWorkspaceResources,
+                installedSkillIds: launch.skillCapabilityId
+                  ? [launch.skillCapabilityId]
+                  : undefined,
+                agent: newSessionAgent,
+                expectedNewSessionDraftRevision: flushed.revision,
+                newSessionDraftToolPolicy: persistedToolPolicy,
+                agentLearning: draft.agentLearning,
+                usageLimitMicros,
+                visibility: newSessionCreateVisibility(
+                  personalWorkspace,
+                  submission.options.visibility ?? "workspace",
+                  tenancyCapabilities?.canCreatePrivate === true,
+                ),
+                onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
+                  // Only an older server still refuses a Send over its draft.
+                  draftConflict = newSessionDraft.captureConflict(error);
+                  if (draftConflict) {
+                    draftChangedElsewhere =
+                      newSessionDraftConflictRevision(error) !== flushed.revision;
+                  }
+                  outcomeUnknown = uncertain;
+                  recoverPersonalResourceAttachment(error, request);
+                  connectionAccounts.onSelectionError(error);
+                  // A brief outage shows the updating notice, not a toast.
+                  // An unconfirmed create keeps its idempotency key, so the
+                  // person's next Send cannot start a second session.
+                  return (
+                    draftConflict ||
+                    newSessionDraft.reportUnavailable(error) ||
+                    noteCreditRefusal(error, request) ||
+                    noteCreateFailure(error, sentSignature)
+                  );
+                },
+              },
+            );
+            if (!created) {
+              if (draftConflict) {
+                await preserveNewerLocalDraft();
+                // The draft is saved, so it is not unsaved: clear that notice
+                // and resume autosave.
+                newSessionDraft.clearError();
+                toast.error("Couldn't send", {
+                  description: draftConflictDuringSendText(draftChangedElsewhere),
+                });
+                return null;
+              }
+              if (!outcomeUnknown) await preserveNewerLocalDraft();
+              return null;
+            }
+            // The limit belongs to the chat just created; the next starts with none.
+            setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
+            setCreateCreditRefusal(null);
+            setCreateFailure(null);
+            setUsageLimitSendBlocked(false);
+            return {
+              sessionId: created.id,
+              settleDraft: async () => {
+                const acknowledged = await newSessionDraft.acknowledgeConsumed(
+                  flushed,
+                  visibleSignature,
+                );
+                // A newer draft from another device stayed; the form shows it.
+                if (acknowledged?.kind === "followed") return true;
+                if (
+                  acknowledged?.kind === "consumed" &&
+                  newSessionDraft.isCurrentSignature(visibleSignature)
+                ) {
+                  setMessage("");
+                  visibilityChosenRef.current = false;
+                  setDraft({
+                    ...emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
+                    visibility:
+                      tenancyCapabilities?.canCreatePrivate === true &&
+                      tenancyCapabilities.defaultVisibility === "private"
+                        ? "private"
+                        : "workspace",
+                  });
+                  attachments.removeReadyFiles(
+                    submittedResources.flatMap((resource) =>
+                      resource.kind === "file" ? [resource.fileId] : [],
+                    ),
+                  );
+                } else if (
+                  acknowledged?.kind !== "preserved" ||
+                  !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
+                ) {
+                  // The message was already accepted. If there is no newer
+                  // local edit, leave a sibling's later draft untouched.
+                  if (!acknowledged && newSessionDraft.isCurrentSignature(visibleSignature)) {
+                    return true;
+                  }
+                  const preserved = await newSessionDraft.flushForSend();
+                  if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
+                    return false;
+                  }
+                }
+                return true;
+              },
+            };
           },
           navigate: async (sessionId) => {
             // Voice connects while the session page loads; the page adopts
@@ -2355,9 +2371,16 @@ function SessionsIndexRouteContent({
   );
 }
 
-/** Send kept losing to a newer draft saved elsewhere (another tab or window). */
-const DRAFT_CHANGED_DURING_SEND_TEXT =
-  "Your message is saved, but this draft kept changing in another tab or window. Check it and send again.";
+/**
+ * Send was refused as a draft conflict. Only a draft that really moved on
+ * since this Send saved it was changed somewhere else (another tab, window or
+ * device); otherwise nothing is known to have changed it.
+ */
+function draftConflictDuringSendText(changedElsewhere: boolean): string {
+  return changedElsewhere
+    ? "Your message is saved, but this draft kept changing in another tab or window. Check it and send again."
+    : "Your message is saved, but it couldn't be sent. Check the draft and send again.";
+}
 
 /** A draft that didn't save: the message is kept, then what to do. */
 function draftSaveFailureText(draft: { conflict: Error | null; error: Error | null }): string {
