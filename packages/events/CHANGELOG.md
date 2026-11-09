@@ -1,5 +1,14 @@
 # @opengeni/events
 
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [b15212e]
+- Updated dependencies [1c7aa2a]
+  - @opengeni/db@6.13.0
+  - @opengeni/contracts@6.13.0
+
 ## 6.12.0
 
 ### Patch Changes

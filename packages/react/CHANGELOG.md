@@ -1,5 +1,23 @@
 # @opengeni/react
 
+## 6.13.0
+
+### Minor Changes
+
+- b15212e: A message that couldn't start because of access now starts by itself once that is fixed. When its machine is allowed for the chat, the sender's workspace access is restored, or the chat moves to a machine it may use, the saved message is released and started exactly once. A paused, cancelled or edited chat is left alone, and a claim that raced the change is re-read instead of parked. The "Recheck access" button is gone. The notice says what is blocking the message and offers the one action that fixes it: the machine's owner gets "Allow for this chat", others learn who can allow it, and lost membership names a workspace admin. Only an unknown failure offers "Try again". A claim refused because a personal machine isn't approved now reads as "Machine access needed", not as a generic permission check. `useSessionStart` adds `allowMachine`, `needsMachineAccess` and `refresh`, and `@opengeni/react` exports `allowMachineForChat`, `sessionAdmissionNeedsMachineAccess` and `sessionAdmissionMachineAccessCopy`.
+- 1c7aa2a: People on a plan that doesn't include their own subscriptions (Codex, Claude, SuperGrok) now hear it before Send instead of after it. The workspace model catalog returns `ownSubscriptionPlan` (`{ key, label, monthlyPriceMicros }`) and the same `requiredPlan` on each own-subscription model while the organization's plan doesn't include them. The plan is the cheapest self-service plan that does, from the plan catalog (`ownSubscriptionUpgradePlan` in `@opengeni/contracts/billing-origin`). Connect pages and onboarding say "Using your own subscription needs Pro ($20/month).". The web and React Native model pickers label those models "Needs Pro" (`requiredPlanHint`) and keep them selectable. The new-chat page shows a notice with one action when one is chosen, and a one-time dismissible heads-up to people who connected one earlier.
+
+### Patch Changes
+
+- 460102f: The automation form no longer shows a removable pill for every connector a run gets. The Message box keeps Repository and Environment on top, and one Connectors control under the message shows up to three logos and a count; it opens the list of connected apps to turn each on or off. A chosen app that is no longer connected is flagged on the control and stays in the list, by its catalog name where known, so it can still be removed. Connectors show their real logos there, found in the workspace capability catalog.
+
+  `connectorLogoSources` (in the app's composer-connectors helpers) finds each connector's catalog logo by its own logo, its catalog entry or its provider's domain. `installedApiIntegrationMcpServers` now keeps an API integration's `capabilityId` and `providerDomain`, so API connectors such as Gmail or Grafana find their logos too.
+
+- Updated dependencies [1c7aa2a]
+  - @opengeni/contracts@6.13.0
+  - @opengeni/sdk@6.13.0
+  - @opengeni/connect@6.13.0
+
 ## 6.12.0
 
 ### Minor Changes
