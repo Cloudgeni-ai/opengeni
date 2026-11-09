@@ -1,5 +1,41 @@
 # @opengeni/api-router
 
+## 6.13.0
+
+### Patch Changes
+
+- b15212e: A message that couldn't start because of access now starts by itself once that is fixed. When its machine is allowed for the chat, the sender's workspace access is restored, or the chat moves to a machine it may use, the saved message is released and started exactly once. A paused, cancelled or edited chat is left alone, and a claim that raced the change is re-read instead of parked. The "Recheck access" button is gone. The notice says what is blocking the message and offers the one action that fixes it: the machine's owner gets "Allow for this chat", others learn who can allow it, and lost membership names a workspace admin. Only an unknown failure offers "Try again". A claim refused because a personal machine isn't approved now reads as "Machine access needed", not as a generic permission check. `useSessionStart` adds `allowMachine`, `needsMachineAccess` and `refresh`, and `@opengeni/react` exports `allowMachineForChat`, `sessionAdmissionNeedsMachineAccess` and `sessionAdmissionMachineAccessCopy`.
+- 1c7aa2a: People on a plan that doesn't include their own subscriptions (Codex, Claude, SuperGrok) now hear it before Send instead of after it. The workspace model catalog returns `ownSubscriptionPlan` (`{ key, label, monthlyPriceMicros }`) and the same `requiredPlan` on each own-subscription model while the organization's plan doesn't include them. The plan is the cheapest self-service plan that does, from the plan catalog (`ownSubscriptionUpgradePlan` in `@opengeni/contracts/billing-origin`). Connect pages and onboarding say "Using your own subscription needs Pro ($20/month).". The web and React Native model pickers label those models "Needs Pro" (`requiredPlanHint`) and keep them selectable. The new-chat page shows a notice with one action when one is chosen, and a one-time dismissible heads-up to people who connected one earlier.
+- 67905a7: Workspace budgets and the per-person Personal workspace limit can now be set without extra configuration: `OPENGENI_USAGE_ALLOWANCES_ENABLED` defaults to `true`. It was a rollout gate whose precondition (every API and worker enforcing allowances) always holds now that a release only runs past the 0977 migration baseline, yet it stayed off unless an operator found and set it. `false` still refuses new budgets and limits; existing ones stay enforced and can be removed. Organization settings → Billing → Personal workspaces also shows a plain sentence when a limit can't be saved instead of the raw API error.
+- Updated dependencies [b15212e]
+- Updated dependencies [1c7aa2a]
+- Updated dependencies [67905a7]
+  - @opengeni/db@6.13.0
+  - @opengeni/core@6.13.0
+  - @opengeni/contracts@6.13.0
+  - @opengeni/config@6.13.0
+  - @opengeni/documents@6.13.0
+  - @opengeni/events@6.13.0
+  - @opengeni/artifact-tool@6.13.0
+  - @opengeni/capabilities@6.13.0
+  - @opengeni/codemode@6.13.0
+  - @opengeni/codex@6.13.0
+  - @opengeni/decisions@6.13.0
+  - @opengeni/github@6.13.0
+  - @opengeni/interaction@6.13.0
+  - @opengeni/observability@6.13.0
+  - @opengeni/runtime@6.13.0
+  - @opengeni/storage@6.13.0
+  - @opengeni/tool-gateway@6.13.0
+  - @opengeni/vaults@6.13.0
+  - @opengeni/vaults-bitwarden@6.13.0
+  - @opengeni/vaults-keeper@6.13.0
+  - @opengeni/vaults-onepassword@6.13.0
+  - @opengeni/vaults-protonpass@6.13.0
+  - @opengeni/agent-proto@6.13.0
+  - @opengeni/network@6.13.0
+  - @opengeni/xai-subscription@6.13.0
+
 ## 6.12.0
 
 ### Minor Changes

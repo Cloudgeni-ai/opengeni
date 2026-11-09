@@ -1,5 +1,27 @@
 # @opengeni/runtime
 
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [1c7aa2a]
+- Updated dependencies [67905a7]
+  - @opengeni/contracts@6.13.0
+  - @opengeni/sdk@6.13.0
+  - @opengeni/config@6.13.0
+  - @opengeni/capabilities@6.13.0
+  - @opengeni/codemode@6.13.0
+  - @opengeni/codex@6.13.0
+  - @opengeni/decisions@6.13.0
+  - @opengeni/interaction@6.13.0
+  - @opengeni/observability@6.13.0
+  - @opengeni/tool-gateway@6.13.0
+  - @opengeni/vaults@6.13.0
+  - @opengeni/jev@6.13.0
+  - @opengeni/agent-proto@6.13.0
+  - @opengeni/network@6.13.0
+  - @opengeni/xai-subscription@6.13.0
+
 ## 6.12.0
 
 ### Minor Changes

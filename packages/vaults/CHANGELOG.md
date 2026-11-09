@@ -1,5 +1,12 @@
 # @opengeni/vaults
 
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [1c7aa2a]
+  - @opengeni/contracts@6.13.0
+
 ## 6.12.0
 
 ### Patch Changes
