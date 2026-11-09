@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { mkdtemp, open, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplicationFailure } from "@temporalio/activity";
@@ -118,45 +117,16 @@ async function writeBundle(
  * Write the bundle and the readable transcript (public SessionEvent objects,
  * one per line) together. The transcript comes from the event rows the bundle
  * export reads, in the same sequence order, instead of a second read.
- *
- * Its lines are staged uncompressed while the bundle is written and compressed
- * afterwards, one line per write: zstd output depends on how writes reach the
- * compressor, and two streams compressing at once batch them differently, so
- * this keeps the transcript object byte for byte what a separate pass writes.
+ * Each kept event goes straight into the transcript's compressed stream, which
+ * waits for it to drain and fails the export if writing the file fails.
  */
 async function writeBundleAndTranscript(
   db: Database,
   scope: SessionArchiveScope,
   paths: { bundle: string; transcript: string },
 ) {
-  const staged = `${paths.transcript}.lines`;
-  const handle = await open(staged, "wx", 0o600);
-  let pending: string[] = [];
-  let pendingLength = 0;
-  const flush = async () => {
-    if (pending.length === 0) return;
-    await handle.write(pending.join(""));
-    pending = [];
-    pendingLength = 0;
-  };
   let events = 0;
-  let bundle: Awaited<ReturnType<typeof writeBundle>>;
-  try {
-    bundle = await writeBundle(db, scope, paths.bundle, async (table, row) => {
-      if (table !== "session_events") return;
-      const event = sessionArchiveTranscriptEvent(row);
-      if (!event) return;
-      // JSON.stringify escapes every line break, so one event is one line.
-      const line = `${JSON.stringify({ event })}\n`;
-      pending.push(line);
-      pendingLength += line.length;
-      events += 1;
-      if (pendingLength >= 1 << 20) await flush();
-    });
-    await flush();
-  } finally {
-    await handle.close();
-  }
+  let bundle: Awaited<ReturnType<typeof writeBundle>> | undefined;
   const spool = await writeCompressedJsonLines(paths.transcript, async (write) => {
     await write(
       JSON.stringify({
@@ -166,30 +136,16 @@ async function writeBundleAndTranscript(
         sessionId: scope.sessionId,
       }),
     );
-    for await (const line of stagedLines(staged)) await write(line);
+    bundle = await writeBundle(db, scope, paths.bundle, async (table, row) => {
+      if (table !== "session_events") return;
+      const event = sessionArchiveTranscriptEvent(row);
+      if (!event) return;
+      await write(JSON.stringify({ event }));
+      events += 1;
+    });
     await write(JSON.stringify({ end: true, events }));
   });
-  await rm(staged, { force: true });
-  return { bundle, transcript: { spool, events } };
-}
-
-/**
- * The lines of a staged file, split only at "\n". Line readers also split at
- * "\r" and Unicode line separators, which JSON leaves inside its strings.
- */
-async function* stagedLines(path: string): AsyncGenerator<string> {
-  let partial: string[] = [];
-  for await (const chunk of createReadStream(path, { encoding: "utf8" }) as AsyncIterable<string>) {
-    let start = 0;
-    for (let end = chunk.indexOf("\n"); end !== -1; end = chunk.indexOf("\n", start)) {
-      partial.push(chunk.slice(start, end));
-      yield partial.join("");
-      partial = [];
-      start = end + 1;
-    }
-    if (start < chunk.length) partial.push(chunk.slice(start));
-  }
-  if (partial.length > 0) yield partial.join("");
+  return { bundle: bundle!, transcript: { spool, events } };
 }
 
 export type ArchiveSessionOutcome = "archived" | "skipped" | "failed";
