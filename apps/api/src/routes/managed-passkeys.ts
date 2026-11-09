@@ -13,7 +13,11 @@ import { getManagedSession, type ApiRouteDeps } from "@opengeni/core";
 import { nestedPostgresSqlState } from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
-import { ADMIN_STEP_UP_WINDOW_MS, recordAdminStepUp } from "../auth/admin-step-up";
+import {
+  ADMIN_STEP_UP_WINDOW_MS,
+  adminStepUpEnforced,
+  recordAdminStepUp,
+} from "../auth/admin-step-up";
 import { runManagedAuthProvider } from "../auth/managed-auth-attempt-context";
 import { managedAuthSessionCookieHeaders } from "../auth/managed-auth-session-adapter";
 import {
@@ -165,9 +169,10 @@ async function signInVerifiedPerson(
   if (!session?.token) {
     return refusal(403, "PASSKEY_SIGN_IN_REFUSED", "This account can't sign in right now");
   }
-  // Signing in with a passkey also counts as confirming it's them.
-  if (typeof session.id === "string") {
-    await recordAdminStepUp(deps, { authUserId, authSessionId: session.id });
+  // Signing in with a passkey also counts as confirming it's them. Best
+  // effort: failing to record it only means a prompt later, never no sign-in.
+  if (typeof session.id === "string" && adminStepUpEnforced(deps)) {
+    await recordAdminStepUp(deps, { authUserId, authSessionId: session.id }).catch(() => {});
   }
   for (const cookie of await managedAuthSessionCookieHeaders(
     auth,

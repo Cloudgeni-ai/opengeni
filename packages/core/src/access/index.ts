@@ -261,6 +261,49 @@ const delegatedHumanRequests = new WeakMap<Request, DelegatedHumanAuthorization>
 const delegatedHumanContexts = new WeakMap<AccessContext, DelegatedHumanAuthorization>();
 /** Exact-workspace proofs for external users (see stampWorkspacePersonAuthorization). */
 const workspaceExternalPersonProofs = new WeakSet<DelegatedHumanAuthorization>();
+/** Contexts resolved from an approved native app credential (also canonical managed). */
+const nativeAppContexts = new WeakSet<AccessContext>();
+/** The verified Better Auth session id behind a canonical managed-cookie context. */
+const managedCookieSessionIds = new WeakMap<AccessContext, string>();
+
+export type ManagedPersonForAccessContext = {
+  /** The person's Better Auth user id (the subject without its `user:` prefix). */
+  authUserId: string;
+  /**
+   * How the person is present: signed in in this browser session (with its
+   * id), through an approved native app, or through an agent or personal API
+   * key acting as them.
+   */
+  via:
+    | { kind: "browser_session"; authSessionId: string }
+    | { kind: "native_app" }
+    | { kind: "acting_for_person" };
+};
+
+/**
+ * The Opengeni person this resolved request acts as, from how the resolver
+ * actually authenticated it, never from request headers. Null for
+ * organization and workspace API keys, services, host-signed delegation,
+ * external people and local installs.
+ */
+export function managedPersonForAccessContext(
+  context: AccessContext,
+): ManagedPersonForAccessContext | null {
+  if (context.mode !== "managed" || !context.subjectId.startsWith("user:")) return null;
+  const authUserId = context.subjectId.slice("user:".length);
+  if (nativeAppContexts.has(context)) return { authUserId, via: { kind: "native_app" } };
+  const authSessionId = managedCookieSessionIds.get(context);
+  if (canonicalManagedCookieContexts.has(context) && authSessionId)
+    return { authUserId, via: { kind: "browser_session", authSessionId } };
+  const delegated = delegatedHumanContexts.get(context);
+  if (
+    delegated &&
+    !workspaceExternalPersonProofs.has(delegated) &&
+    delegated.subjectId === context.subjectId
+  )
+    return { authUserId, via: { kind: "acting_for_person" } };
+  return null;
+}
 const delegatedHumanProfileSchema = z.object({
   id: z.string(),
   name: z.string().nullable(),
@@ -2137,6 +2180,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      nativeAppContexts.add(context);
       markAppCredentialGrants(context);
       recordUserPresence(c, deps, context.subjectId);
       return context;
@@ -2171,6 +2215,8 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      const authSessionId = (session as { session?: { id?: unknown } }).session?.id;
+      if (typeof authSessionId === "string") managedCookieSessionIds.set(context, authSessionId);
       markAppCredentialGrants(context);
       recordUserPresence(c, deps, context.subjectId);
       return context;

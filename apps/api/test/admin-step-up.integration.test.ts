@@ -22,6 +22,7 @@ import {
 } from "./helpers/software-passkey";
 
 const ORIGIN = "https://opengeni.test";
+const ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 let shared: SharedTestDatabase | undefined;
 let client: DbClient;
 let admin: postgres.Sql;
@@ -52,6 +53,8 @@ function runtime(mode: "off" | "required" = "required") {
     managedAuthRequireEmailVerification: false,
     managedAuthPasskeySignUpEnabled: true,
     adminPasskeyStepUp: mode,
+    integrationsEnabled: true,
+    environmentsEncryptionKey: ENCRYPTION_KEY,
   });
   const auth = createManagedAuth(settings, client.db, transport)!;
   const adapter = createBetterAuthSessionAdapter(auth, client.db);
@@ -132,13 +135,17 @@ async function passwordPerson(rt: Runtime) {
 
 type Organization = { id: string; updatedAt: string };
 
-async function createOrganization(rt: Runtime, cookie: string): Promise<Organization> {
+async function createOrganization(
+  rt: Runtime,
+  cookie: string,
+): Promise<Organization & { workspaceId: string }> {
   const response = await call(rt, "POST", "/v1/organizations", cookie, {
     name: "Step-up Org",
     operationId: crypto.randomUUID(),
   });
   expect(response.status).toBe(201);
-  return ((await response.json()) as { organization: Organization }).organization;
+  const created = (await response.json()) as { organization: Organization; workspaceId: string };
+  return { ...created.organization, workspaceId: created.workspaceId };
 }
 
 /** Rename the organization; a success moves its updatedAt on. */
@@ -172,6 +179,12 @@ async function stepUp(rt: Runtime, cookie: string, passkey: SoftwarePasskey) {
 async function refusal(response: Response) {
   expect(response.status).toBe(403);
   return ((await response.json()) as { error: { details?: Record<string, unknown> } }).error;
+}
+
+async function stepUpCode(response: Response): Promise<unknown> {
+  if (response.status !== 403) return null;
+  return ((await response.json()) as { error: { details?: { code?: unknown } } }).error.details
+    ?.code;
 }
 
 describe("admin passkey step-up", () => {
@@ -312,5 +325,108 @@ describe("admin passkey step-up", () => {
 
     await expireStepUps(owner.userId);
     expect((await rename(runtime("off"), owner.cookie, organization)).status).toBe(200);
+  }, 120_000);
+
+  test("the request's own form can't skip it: escaped paths, stray headers, personal keys", async () => {
+    const rt = runtime();
+    // A password owner is refused too (told to add a passkey), which is all
+    // this needs; setup runs where step-up is off.
+    const setup = runtime("off");
+    const owner = await passwordPerson(rt);
+    const organization = await createOrganization(setup, owner.cookie);
+    const key = await call(
+      setup,
+      "POST",
+      `/v1/organizations/${organization.id}/personal-api-keys`,
+      owner.cookie,
+      {
+        name: "Step-up key",
+        access: {
+          preset: "full",
+          permissions: organizationAccessPresetPermissions("full"),
+          workspaceScope: { kind: "all" },
+        },
+      },
+    );
+    expect(key.status).toBe(201);
+    const { token } = (await key.json()) as { token: string };
+
+    const renameWith = (path: string, headers: Record<string, string>) =>
+      rt.app.request(path, {
+        method: "PATCH",
+        headers: { origin: ORIGIN, "content-type": "application/json", ...headers },
+        body: JSON.stringify({
+          name: "Never renamed",
+          expectedUpdatedAt: organization.updatedAt,
+          operationId: crypto.randomUUID(),
+        }),
+      });
+    // The router decodes the path; the guard matches the same decoded path.
+    const escaped = await renameWith(`/v1/%6Frganizations/${organization.id}`, {
+      cookie: owner.cookie,
+      "sec-fetch-site": "same-origin",
+    });
+    expect(await stepUpCode(escaped)).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
+    // An Authorization header nothing recognises leaves the cookie in charge.
+    const strayBearer = await renameWith(`/v1/organizations/${organization.id}`, {
+      cookie: owner.cookie,
+      "sec-fetch-site": "same-origin",
+      authorization: "Bearer not-a-credential",
+    });
+    expect(strayBearer.status).not.toBe(200);
+    // A personal API key acts as its owner, so it needs their recent passkey.
+    const personalKey = await renameWith(`/v1/organizations/${organization.id}`, {
+      authorization: `Bearer ${token}`,
+    });
+    const refused = await refusal(personalKey);
+    expect(refused.details).toMatchObject({
+      code: ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+      browserRequired: true,
+    });
+    // Billing reads the organization from the query or the body: any one the
+    // person administers counts.
+    const checkout = await rt.app.request(`/v1/billing/checkout?accountId=${crypto.randomUUID()}`, {
+      method: "POST",
+      headers: {
+        origin: ORIGIN,
+        "sec-fetch-site": "same-origin",
+        "content-type": "application/json",
+        cookie: owner.cookie,
+      },
+      body: JSON.stringify({ accountId: organization.id }),
+    });
+    expect(await stepUpCode(checkout)).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
+  }, 120_000);
+
+  test("shared connections are admin settings; the admin's own are not", async () => {
+    const rt = runtime();
+    const setup = runtime("off");
+    const owner = await passwordPerson(rt);
+    const organization = await createOrganization(setup, owner.cookie);
+    // A shared workspace (the one made with the organization is the owner's own).
+    const made = await call(setup, "POST", "/v1/workspaces", owner.cookie, {
+      accountId: organization.id,
+      name: "Shared",
+    });
+    expect(made.status, await made.clone().text()).toBeLessThan(300);
+    const workspace = (await made.json()) as { id?: string; workspace?: { id: string } };
+    const connections = `/v1/workspaces/${workspace.workspace?.id ?? workspace.id}/connections`;
+    const create = (target: Runtime, ownership?: "personal") =>
+      call(target, "POST", connections, owner.cookie, {
+        providerDomain: "step-up.example.test",
+        kind: "api_key",
+        credential: { headers: { "X-Api-Key": "fixture-key" } },
+        ...(ownership ? { ownership } : {}),
+      });
+    const sharedConnection = await create(setup);
+    expect(sharedConnection.status, await sharedConnection.clone().text()).toBeLessThan(300);
+    const { connection } = (await sharedConnection.json()) as { connection: { id: string } };
+    // Shared by default when no ownership is named.
+    expect(await stepUpCode(await create(rt))).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
+    expect(
+      await stepUpCode(await call(rt, "DELETE", `${connections}/${connection.id}`, owner.cookie)),
+    ).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
+    const personal = await create(rt, "personal");
+    expect(await stepUpCode(personal)).not.toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
   }, 120_000);
 });
