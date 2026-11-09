@@ -188,9 +188,9 @@ describe("Teams app package", () => {
       short: "Example",
       full: "Example",
     });
-    expect(buildTeamsAppManifest({ ...options, appFullName: "Opengeni for Teams" }).name).toEqual({
+    expect(buildTeamsAppManifest({ ...options, appFullName: "Opengeni Assistant" }).name).toEqual({
       short: "Opengeni",
-      full: "Opengeni for Teams",
+      full: "Opengeni Assistant",
     });
     expect(
       buildTeamsAppManifest({ ...options, appFullName: "x".repeat(100) }).name.full,
@@ -218,10 +218,10 @@ describe("Teams app package", () => {
         teamsManifestOptionsFromEnv({
           ...env,
           OPENGENI_TEAMS_APP_NAME: "Opengeni",
-          OPENGENI_TEAMS_APP_FULL_NAME: " Opengeni for Teams ",
+          OPENGENI_TEAMS_APP_FULL_NAME: " Opengeni Assistant ",
         }),
       ).name,
-    ).toEqual({ short: "Opengeni", full: "Opengeni for Teams" });
+    ).toEqual({ short: "Opengeni", full: "Opengeni Assistant" });
   });
 
   test("describes the app, its AI, its requirements and its limits within Store limits", () => {

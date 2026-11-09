@@ -322,8 +322,8 @@ export OPENGENI_TEAMS_PRIVACY_URL='https://YOUR_APPROVED_PRIVACY_PAGE'
 export OPENGENI_TEAMS_TERMS_URL='https://YOUR_APPROVED_TERMS_PAGE'
 export OPENGENI_TEAMS_APP_VERSION='1.0.0'
 export OPENGENI_TEAMS_APP_NAME='Opengeni'
-# The Store listing name; it must match the app name in Partner Center.
-export OPENGENI_TEAMS_APP_FULL_NAME='Opengeni for Teams'
+# Optional: the full app name, here the Partner Center listing name.
+export OPENGENI_TEAMS_APP_FULL_NAME='Opengeni Assistant'
 # Optional: the publisher name and Microsoft AI Cloud Partner Program ID.
 export OPENGENI_TEAMS_DEVELOPER_NAME='Opengeni'
 export OPENGENI_TEAMS_MPN_ID='7181379'
@@ -339,11 +339,10 @@ message and replies must use it. `OPENGENI_TEAMS_APP_FULL_NAME` sets
 fits, and defaults to the short name. The Store requires the Partner Center
 listing name to match the manifest app name, without saying whether it compares
 `name.short` or `name.full`. `Opengeni` is already reserved in Partner Center,
-so the Opengeni listing is `Opengeni for Teams`, set as the full name, with the
-short name `Opengeni`. The Store guidelines also say an app name must not use
-"Teams" or "Microsoft" unless the app is in an official partnership with
-Microsoft, so follow the validation team's feedback on the name if they raise
-it. `developer.name` defaults to `Opengeni`, the
+so the Opengeni listing is `Opengeni Assistant`, set as the full name, with the
+short name `Opengeni`. Neither name may use "Teams" or "Microsoft": the Store
+allows those only for apps in an official partnership with Microsoft.
+`developer.name` defaults to `Opengeni`, the
 Partner Center publisher name (the legal entity is Cloudgeni AS), and must match
 the publisher shown in Partner Center; set `OPENGENI_TEAMS_DEVELOPER_NAME` (at
 most 32 characters) for another publisher. `developer.mpnId` defaults to
