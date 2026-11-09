@@ -37,12 +37,12 @@ export type ConnectionCatalogProps = {
 };
 
 /**
- * Whether a connection needs the person: it reports attention (reconnect,
- * failed health check), or something already connected became unavailable.
- * A catalog entry that is merely unavailable to add here is not a problem.
+ * Whether a connection needs the person to fix it: it reports attention
+ * (reconnect, failed health check). An unavailable entry is a limit the
+ * person can't act on here, such as restricted access, so it is not one.
  */
 export function connectionOptionNeedsAttention(option: ConnectionCatalogOption): boolean {
-  return option.state === "attention" || (option.connected && option.state === "unavailable");
+  return option.state === "attention";
 }
 
 /**

@@ -14,7 +14,6 @@ import {
 } from "@/components/capabilities/catalog-presentation";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
-  attentionFirst,
   ConnectionCatalog,
   McpConnectionCard,
   type ConnectionCatalogService,
@@ -40,6 +39,8 @@ import {
 import { ConnectionAccessNotice } from "@/components/capabilities/connection-access-notice";
 import {
   catalogServiceIdentity,
+  collapseConnectionService,
+  connectedConnectionServices,
   mergeConnectionServices,
   partitionConnectionServices,
 } from "@/components/capabilities/connection-services";
@@ -703,35 +704,15 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
   ]);
   // One row per provider: a provider with several modes opens its own page,
   // where the mode is chosen as an outcome.
-  const connectionServices = allConnectionServices.map((service) => {
-    if (service.options.length < 2) return service;
-    const attention = service.options.find((option) => option.state === "attention");
-    const working = service.options.some((option) => option.state === "loading");
-    const connected = service.options.some((option) => option.connected);
-    return {
-      ...service,
-      options: [
-        {
-          id: service.id,
-          name: service.name,
-          description: SERVICE_ROW_COPY[service.id] ?? service.options[0]?.description,
-          status: attention?.status ?? (connected ? "Connected" : "Not connected"),
-          state: attention
-            ? ("attention" as const)
-            : working
-              ? ("loading" as const)
-              : connected
-                ? ("added" as const)
-                : ("available" as const),
-          connected,
-          onOpen: () => {
-            openIntegrationFrom();
-            goTo(`service:${service.id}`);
-          },
-        },
-      ],
-    };
-  });
+  const connectionServices = allConnectionServices.map((service) =>
+    collapseConnectionService(service, {
+      description: SERVICE_ROW_COPY[service.id] ?? service.options[0]?.description,
+      onOpen: () => {
+        openIntegrationFrom();
+        goTo(`service:${service.id}`);
+      },
+    }),
+  );
   const { featuredServices, remainingServices } = partitionConnectionServices(
     connectionServices,
     true,
@@ -740,14 +721,8 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     connectorItems,
   );
   // Connected first, then about 30 popular providers. The long tail of the
-  // public registry is reached only by searching, labelled Community. Within
-  // Connected, anything that needs attention leads, so neither the All
-  // preview nor the full list hides a problem further down.
-  const connectedServices = attentionFirst(
-    connectionServices.filter((service) =>
-      service.options.some((option) => option.connected || option.state === "attention"),
-    ),
-  );
+  // public registry is reached only by searching, labelled Community.
+  const connectedServices = connectedConnectionServices(connectionServices);
   const popularServices = featuredServices
     .filter((service) => !connectedServices.includes(service))
     .slice(0, POPULAR_LIMIT);

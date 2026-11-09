@@ -1,5 +1,5 @@
 ---
-"@opengeni/react": patch
+"@opengeni/react": minor
 "@opengeni/core": patch
 ---
 
