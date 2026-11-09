@@ -320,6 +320,8 @@ describe("idle-session archive worker", () => {
         select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
           (${types}::text[])[1 + n % ${types.length}],
           case when n % 5 = 0 then ${sql.json(encoded as never)}::jsonb
+            -- One kept event far larger than a file read chunk.
+            when n = 9 then jsonb_build_object('text', repeat('long line ', 400000))
             else jsonb_build_object('text', 'event ' || n, 'n', n) end,
           case when n % 5 = 0 then 1 end,
           now() - interval '40 days' + n * interval '1.0004567 seconds',
@@ -369,9 +371,11 @@ describe("idle-session archive worker", () => {
     };
     expect(expectedEvents).toBeGreaterThan(1000);
     const stored = objects.get(manifest.transcript.key)!;
-    expect(new TextDecoder().decode(zstdDecompressSync(stored))).toBe(
-      new TextDecoder().decode(zstdDecompressSync(expectedBytes)),
+    const expectedText = new TextDecoder().decode(zstdDecompressSync(expectedBytes));
+    expect(Math.max(...expectedText.split("\n").map((line) => line.length))).toBeGreaterThan(
+      1 << 20,
     );
+    expect(new TextDecoder().decode(zstdDecompressSync(stored))).toBe(expectedText);
     expect(manifest.transcript).toMatchObject({
       bytes: expected.byteSize,
       sha256: expected.sha256,
