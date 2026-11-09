@@ -73,7 +73,10 @@ const cases: { name: string; grants: string[]; expected: string[] }[] = [
 
 beforeAll(async () => {
   if (process.env.OPENGENI_REQUIRE_REAL_DB !== "1") return;
-  fixture = await acquireRestrictedRuntimeTestDatabase("posture-column-privileges", options.targetSchema);
+  fixture = await acquireRestrictedRuntimeTestDatabase(
+    "posture-column-privileges",
+    options.targetSchema,
+  );
   if (!fixture) throw new Error("Real PostgreSQL required");
   for (const schema of schemas) {
     for (const item of cases) {
@@ -191,11 +194,15 @@ realTest("a later column grant or revoke is seen by the next inspection", async 
   };
   expect(await later()).toEqual([[], []]);
   for (const schema of schemas) {
-    await fixture!.admin.unsafe(`grant references (b) on ${schema}.col_probe_later to opengeni_app`);
+    await fixture!.admin.unsafe(
+      `grant references (b) on ${schema}.col_probe_later to opengeni_app`,
+    );
   }
   expect(await later()).toEqual([["REFERENCES"], ["REFERENCES"]]);
   for (const schema of schemas) {
-    await fixture!.admin.unsafe(`revoke references (b) on ${schema}.col_probe_later from opengeni_app`);
+    await fixture!.admin.unsafe(
+      `revoke references (b) on ${schema}.col_probe_later from opengeni_app`,
+    );
   }
   expect(await later()).toEqual([[], []]);
   await driver.begin("isolation level repeatable read read only", async (tx) => {
