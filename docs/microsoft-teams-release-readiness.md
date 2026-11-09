@@ -353,13 +353,14 @@ Opengeni's PartnerGlobal ID `7181379`; set `OPENGENI_TEAMS_MPN_ID` to another
 numeric ID, or to `none` to leave it out (for example for a private staging
 package); an empty value uses the default. Anyone publishing their own
 deployment's package must set both to their own publisher, or `none` for the
-partner ID. The manifest descriptions and command text name the product,
-Opengeni, whatever `OPENGENI_TEAMS_APP_NAME` is; a deployment that rebrands
-the product must change that copy in the generator too, because the Store
-requires the name to be consistent across the metadata.
+partner ID. The manifest's full description and command descriptions name the
+bot by `OPENGENI_TEAMS_APP_NAME` and the service, accounts and workspace
+Opengeni; a deployment that rebrands the product itself must change that copy
+in the generator too, because the Store requires the name to be consistent
+across the metadata.
 
 The short and full descriptions are generated for the enabled scopes. They name
-Microsoft Teams on first reference, say that Opengeni is an AI agent whose
+Microsoft Teams on first reference, say that the app is an AI agent whose
 replies can be wrong and how to report one, state the one-time administrator
 setup, the Opengeni account with access to the connected workspace and the
 account link, with the website as the way to sign up, and list the main
@@ -367,7 +368,7 @@ limitations (text messages only; approvals and private information requests
 open Opengeni in a web browser). Copy `description.short` and
 `description.full` verbatim from the submitted `manifest.json` into Partner
 Center, and update both whenever you regenerate the package (the copy depends
-on the group-chat flag, website URL and generator version):
+on the app name, scope flags, website URL and generator version):
 the Store requires them to match.
 
 The bot declares `commandLists`: in personal chats `help`, `link`, `unlink` and

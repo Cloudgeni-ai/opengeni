@@ -262,6 +262,50 @@ describe("Teams app package", () => {
     expect(channelsOnly).not.toContain("group chat");
   });
 
+  test("names the bot by the app name and the service, accounts and workspace Opengeni", () => {
+    const appName = "Opengeni Assistant";
+    const manifest = buildTeamsAppManifest({
+      ...options,
+      appName,
+      channels: true,
+      groupChats: true,
+      conversationContext: true,
+    });
+    const { full } = manifest.description;
+    expect(full).toStartWith(`${appName} is an AI agent that works with Microsoft Teams.`);
+    for (const phrase of [
+      `Chat with ${appName} one-on-one, or mention ${appName} in a channel or group chat`,
+      `${appName} replies in the same conversation`,
+      `mention ${appName} with it`,
+      `The first time you message ${appName}, it asks`,
+      `${appName} also reads recent messages`,
+      `${appName} reads text messages only`,
+    ])
+      expect(full).toContain(phrase);
+    for (const phrase of [
+      "tools your organization has connected to Opengeni.",
+      "to an Opengeni workspace",
+      "you need an Opengeni account",
+      "to your Opengeni account.",
+      "open Opengeni in your web browser",
+    ])
+      expect(full).toContain(phrase);
+    expect(full.length).toBeLessThanOrEqual(4000);
+    expect(manifest.description.short).not.toContain("Opengeni");
+    const [personal, shared] = manifest.bots[0]!.commandLists;
+    expect(personal!.commands.map((command) => command.description)).toEqual([
+      `See what ${appName} can do, its commands and its limits`,
+      "Link your Teams account to your Opengeni account",
+      "Disconnect your Teams account from Opengeni",
+      `Ask ${appName} to research something and report back`,
+      `Ask ${appName} to write or improve a message`,
+      `Ask ${appName} to break work into steps`,
+    ]);
+    expect(shared!.commands).toEqual([
+      { title: "help", description: `See what ${appName} can do in this conversation` },
+    ]);
+  });
+
   test("lists help, account commands and prompt starters for personal chats", () => {
     const personal = buildTeamsAppManifest(options).bots[0]!.commandLists;
     expect(personal).toHaveLength(1);
