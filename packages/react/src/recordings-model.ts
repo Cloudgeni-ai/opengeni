@@ -307,6 +307,8 @@ export function transcriptErrorText(
       return msg("meetings.recordings.errorPolicyBlocked");
     case "timed_out":
       return msg("meetings.recordings.errorTimedOut");
+    case "worker_stopped":
+      return msg("meetings.recordings.errorWorkerStopped");
     default:
       return msg("meetings.recordings.errorUnknown");
   }

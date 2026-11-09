@@ -2980,6 +2980,8 @@ export const englishMessages = {
     "This organization's policy doesn't allow this model. Try another model.",
   "meetings.recordings.errorTimedOut":
     "Transcribing took too long and was stopped. Try again, or try another model.",
+  "meetings.recordings.errorWorkerStopped":
+    "The server kept stopping while it transcribed this meeting, most likely for lack of memory. Try again later, or ask whoever runs this server.",
   "meetings.recordings.errorUnknown":
     "Something went wrong while transcribing. Try again, or pick another model.",
   /** A speaker nobody has named yet. */
