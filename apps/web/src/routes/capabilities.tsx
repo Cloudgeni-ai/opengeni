@@ -14,6 +14,7 @@ import {
 } from "@/components/capabilities/catalog-presentation";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
+  attentionFirst,
   ConnectionCatalog,
   McpConnectionCard,
   type ConnectionCatalogService,
@@ -739,9 +740,13 @@ function CapabilitiesBody({ workspaceId, initialSection }: CapabilitiesRouteProp
     connectorItems,
   );
   // Connected first, then about 30 popular providers. The long tail of the
-  // public registry is reached only by searching, labelled Community.
-  const connectedServices = connectionServices.filter((service) =>
-    service.options.some((option) => option.connected || option.state === "attention"),
+  // public registry is reached only by searching, labelled Community. Within
+  // Connected, anything that needs attention leads, so neither the All
+  // preview nor the full list hides a problem further down.
+  const connectedServices = attentionFirst(
+    connectionServices.filter((service) =>
+      service.options.some((option) => option.connected || option.state === "attention"),
+    ),
   );
   const popularServices = featuredServices
     .filter((service) => !connectedServices.includes(service))

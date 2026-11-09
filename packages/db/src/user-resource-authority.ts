@@ -190,10 +190,25 @@ export async function listSelfUserResourceAuthorities(
     limit: number;
   },
 ): Promise<{ authorities: UserResourceAuthoritySummary[]; nextCursor: string | null }> {
-  return await withOwnerContext(db, input, async (scopedDb) => {
-    const rows = await rawRows<AuthorityRow>(
-      scopedDb,
-      sql`
+  return await withOwnerContext(db, input, async (scopedDb) =>
+    listSelfUserResourceAuthoritiesInOwnerScope(scopedDb, input),
+  );
+}
+
+/** `listSelfUserResourceAuthorities` on a handle already in its owner scope. */
+async function listSelfUserResourceAuthoritiesInOwnerScope(
+  scopedDb: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    resourceKind: UserResourceKind;
+    cursor?: string | undefined;
+    limit: number;
+  },
+): Promise<{ authorities: UserResourceAuthoritySummary[]; nextCursor: string | null }> {
+  const rows = await rawRows<AuthorityRow>(
+    scopedDb,
+    sql`
       select authority_id as "authorityId", organization_id as "organizationId",
         resource_kind as "resourceKind", resource_id as "resourceId",
         origin_workspace_id as "originWorkspaceId",
@@ -209,55 +224,54 @@ export async function listSelfUserResourceAuthorities(
         ${input.cursor ?? null}::uuid, ${input.limit + 1}
       )
     `,
-    );
-    const grouped = new Map<string, UserResourceAuthoritySummary>();
-    for (const row of rows) {
-      const authority = grouped.get(row.authorityId) ?? {
-        authorityId: row.authorityId,
-        resourceKind: row.resourceKind,
-        resourceId: row.resourceId,
-        originWorkspaceId: row.originWorkspaceId,
-        generation: row.authorityGeneration,
-        status: row.authorityStatus,
-        grants: [],
-      };
-      if (row.grantId && row.targetWorkspaceId) {
-        authority.grants.push({
+  );
+  const grouped = new Map<string, UserResourceAuthoritySummary>();
+  for (const row of rows) {
+    const authority = grouped.get(row.authorityId) ?? {
+      authorityId: row.authorityId,
+      resourceKind: row.resourceKind,
+      resourceId: row.resourceId,
+      originWorkspaceId: row.originWorkspaceId,
+      generation: row.authorityGeneration,
+      status: row.authorityStatus,
+      grants: [],
+    };
+    if (row.grantId && row.targetWorkspaceId) {
+      authority.grants.push({
+        grantId: row.grantId,
+        targetWorkspaceId: row.targetWorkspaceId,
+        targetSessionId: row.targetSessionId,
+        action: row.action,
+        mode: row.mode,
+        context: row.context,
+        authorityEpoch: row.authorityEpoch,
+        generation: row.generation,
+        status: row.status,
+        expiresAt: rfc3339(row.expiresAt),
+        delegation: {
+          authorityId: row.authorityId,
           grantId: row.grantId,
-          targetWorkspaceId: row.targetWorkspaceId,
-          targetSessionId: row.targetSessionId,
+          organizationId: row.organizationId,
+          workspaceId: row.targetWorkspaceId,
+          sessionId: row.targetSessionId,
           action: row.action,
           mode: row.mode,
           context: row.context,
           authorityEpoch: row.authorityEpoch,
-          generation: row.generation,
-          status: row.status,
-          expiresAt: rfc3339(row.expiresAt),
-          delegation: {
-            authorityId: row.authorityId,
-            grantId: row.grantId,
-            organizationId: row.organizationId,
-            workspaceId: row.targetWorkspaceId,
-            sessionId: row.targetSessionId,
-            action: row.action,
-            mode: row.mode,
-            context: row.context,
-            authorityEpoch: row.authorityEpoch,
-            authorityGeneration: row.authorityGeneration,
-            grantGeneration: row.generation,
-          },
-        });
-      }
-      grouped.set(row.authorityId, authority);
+          authorityGeneration: row.authorityGeneration,
+          grantGeneration: row.generation,
+        },
+      });
     }
-    const values = [...grouped.values()];
-    const hasMore = values.length > input.limit;
-    const authorities = hasMore ? values.slice(0, input.limit) : values;
-    return {
-      authorities,
-      nextCursor: hasMore ? (authorities.at(-1)?.authorityId ?? null) : null,
-    };
-  });
+    grouped.set(row.authorityId, authority);
+  }
+  const values = [...grouped.values()];
+  const hasMore = values.length > input.limit;
+  const authorities = hasMore ? values.slice(0, input.limit) : values;
+  return {
+    authorities,
+    nextCursor: hasMore ? (authorities.at(-1)?.authorityId ?? null) : null,
+  };
 }
 
 /**
@@ -270,16 +284,46 @@ export async function listOwnLoginsTurnedOn(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string },
 ): Promise<Map<string, string>> {
-  const turnedOn = new Map<string, string>();
-  let cursor: string | undefined;
-  // Bounded: a person has few logins, and a broken cursor must not loop.
-  for (let page = 0; page < 50; page += 1) {
-    const listed = await listSelfUserResourceAuthorities(db, {
+  return await collectOwnLoginsTurnedOn(input, (cursor) =>
+    listSelfUserResourceAuthorities(db, {
       ...input,
       resourceKind: "connection",
       limit: 100,
       ...(cursor ? { cursor } : {}),
-    });
+    }),
+  );
+}
+
+/**
+ * `listOwnLoginsTurnedOn` on a handle already in the owner's scope (its
+ * account, workspace and subject): the same pages and the same answer,
+ * without a scope per page.
+ */
+export async function listOwnLoginsTurnedOnInOwnerScope(
+  scopedDb: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<Map<string, string>> {
+  return await collectOwnLoginsTurnedOn(input, (cursor) =>
+    listSelfUserResourceAuthoritiesInOwnerScope(scopedDb, {
+      ...input,
+      resourceKind: "connection",
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    }),
+  );
+}
+
+async function collectOwnLoginsTurnedOn(
+  input: { workspaceId: string },
+  readPage: (
+    cursor: string | undefined,
+  ) => Promise<{ authorities: UserResourceAuthoritySummary[]; nextCursor: string | null }>,
+): Promise<Map<string, string>> {
+  const turnedOn = new Map<string, string>();
+  let cursor: string | undefined;
+  // Bounded: a person has few logins, and a broken cursor must not loop.
+  for (let page = 0; page < 50; page += 1) {
+    const listed = await readPage(cursor);
     const now = Date.now();
     for (const authority of listed.authorities) {
       if (authority.status !== "active") continue;

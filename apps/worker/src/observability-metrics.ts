@@ -56,6 +56,21 @@ import {
 import { errorMessage } from "@opengeni/contracts/values";
 
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
+/**
+ * Why a turn attempt ended recovering. A closed set chosen at each recovery
+ * site: `provider` (the model provider or its subscription lease), `sandbox`,
+ * `tool` (MCP and first-party tool setup), `worker` (shutdown or death),
+ * `database` (settlement could not be written), `control` (admission holds)
+ * and `other`.
+ */
+export type TurnRecoveryCause =
+  | "provider"
+  | "sandbox"
+  | "tool"
+  | "worker"
+  | "database"
+  | "control"
+  | "other";
 export type WorkerDeathRecoveryOutcome = "recovering" | "exhausted";
 export type CreditMicrosKind = "usage" | "grant" | "topup" | "refund";
 export type SandboxLeaseLiveness = "cold" | "warming" | "warm" | "draining";
@@ -112,6 +127,19 @@ const initializedContextCompactionMetrics = new WeakSet<Observability>();
 // process-local Prometheus registry and this guard together.
 const MAX_MODEL_CACHE_COUNTER_TOTAL = 1_000_000_000_000;
 const TURN_OUTCOMES: readonly TurnOutcome[] = ["completed", "failed", "cancelled", "recovering"];
+const TURN_RECOVERY_CAUSES: readonly TurnRecoveryCause[] = [
+  "provider",
+  "sandbox",
+  "tool",
+  "worker",
+  "database",
+  "control",
+  "other",
+];
+const TURN_RECOVERIES_METRIC = {
+  name: "opengeni_turn_recoveries_total",
+  help: 'Agent turn attempts that ended recovering, by bounded cause. Each also counts as opengeni_turns_total{outcome="recovering"}.',
+} as const;
 const WORKER_DEATH_RECOVERY_OUTCOMES: readonly WorkerDeathRecoveryOutcome[] = [
   "recovering",
   "exhausted",
@@ -499,6 +527,9 @@ export function initializeWorkerOutcomeMetrics(observability: Observability): vo
       amount: 0,
     });
   }
+  for (const cause of TURN_RECOVERY_CAUSES) {
+    observability.incrementCounter({ ...TURN_RECOVERIES_METRIC, labels: { cause }, amount: 0 });
+  }
   for (const outcome of WORKER_DEATH_RECOVERY_OUTCOMES) {
     for (const timeoutType of WORKER_DEATH_TIMEOUT_TYPES) {
       observability.incrementCounter({
@@ -558,6 +589,9 @@ export function recordWorkerDeathRecoveryMetrics(
     help: "Total agent turns by terminal outcome.",
     labels: { outcome: turnOutcome },
   });
+  if (turnOutcome === "recovering") {
+    observability.incrementCounter({ ...TURN_RECOVERIES_METRIC, labels: { cause: "worker" } });
+  }
 }
 
 export class TurnLifecycleMetrics {
@@ -589,6 +623,8 @@ export class TurnLifecycleMetrics {
     attemptId: string;
     outcome: TurnOutcome | null;
     durationSeconds?: number;
+    /** Required in spirit for `recovering`; an unset cause is counted as `other`. */
+    recoveryCause?: TurnRecoveryCause | null | undefined;
   }): void {
     const startedAt = this.attempts.get(input.attemptId)?.startedAt;
     if (startedAt !== undefined) {
@@ -603,6 +639,12 @@ export class TurnLifecycleMetrics {
         help: "Total agent turns by terminal outcome.",
         labels: { outcome: input.outcome },
       });
+      if (input.outcome === "recovering") {
+        this.observability.incrementCounter({
+          ...TURN_RECOVERIES_METRIC,
+          labels: { cause: input.recoveryCause ?? "other" },
+        });
+      }
       this.observability.observeHistogram({
         name: "opengeni_turn_duration_seconds",
         help: "Agent turn duration in seconds by terminal outcome.",
@@ -2918,19 +2960,45 @@ export function recordTurnStartupMilestone(
     backend: string;
     outcome: TurnStartupOutcome;
     durationSeconds: number;
+    /**
+     * Seconds from the start of the turn attempt that reached the milestone.
+     * Ignored for the queue milestone.
+     */
+    sinceAttemptStartSeconds?: number | null;
   },
 ): void {
+  const labels = {
+    milestone: input.milestone,
+    provider: input.provider,
+    backend: input.backend,
+    outcome: input.outcome,
+  };
   observability.observeHistogram({
     name: "opengeni_turn_startup_milestone_duration_seconds",
     help: "Cumulative seconds from durable turn queueing to a bounded startup milestone.",
     buckets: TURN_STARTUP_MILESTONE_BUCKETS,
-    labels: {
-      milestone: input.milestone,
-      provider: input.provider,
-      backend: input.backend,
-      outcome: input.outcome,
-    },
+    labels,
     value: Math.max(0, input.durationSeconds),
+  });
+  if (
+    input.milestone === "queue" ||
+    input.sinceAttemptStartSeconds === null ||
+    input.sinceAttemptStartSeconds === undefined ||
+    !Number.isFinite(input.sinceAttemptStartSeconds)
+  ) {
+    return;
+  }
+  // Same milestone measured from the start of the attempt that reached it
+  // rather than from acceptance. It excludes time a prompt spent queued behind
+  // an earlier turn in its session, a subscription capacity wait or a gap
+  // before a recovery attempt, so it reflects only this attempt's claim,
+  // preparation and provider latency.
+  observability.observeHistogram({
+    name: "opengeni_turn_startup_since_attempt_start_seconds",
+    help: "Seconds from the start of the turn attempt that reached a startup milestone; excludes time queued behind an earlier turn, capacity waits and recovery gaps.",
+    buckets: TURN_STARTUP_MILESTONE_BUCKETS,
+    labels,
+    value: Math.max(0, input.sinceAttemptStartSeconds),
   });
 }
 

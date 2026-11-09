@@ -957,6 +957,42 @@ describe("organization onboarding UI", () => {
   });
 
   test("Codex device login keeps Skip available, explains the ChatGPT setting, and cancels", async () => {
+    // Free organizations hear which plan using it needs before signing in.
+    const plan = { key: "pro", label: "Pro", monthlyPriceMicros: 20_000_000 };
+    for (const ownSubscriptionPlan of [plan, undefined]) {
+      const client = withOrganizationCodex({
+        getWorkspaceModelCatalog: mock(async () => ({ models: [], ownSubscriptionPlan })),
+      });
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        await act(async () =>
+          root.render(
+            <ModelAccessOnboardingPanel
+              client={client as never}
+              organizationId="organization-a"
+              workspaceId="personal-workspace"
+              codexEnabled
+              onComplete={() => undefined}
+            />,
+          ),
+        );
+        await flush();
+        await act(async () => providerRow(container, "Codex")!.click());
+        expect(
+          container.querySelector('[data-testid="own-subscription-plan-note"]')?.textContent ??
+            null,
+        ).toBe(ownSubscriptionPlan ? "Using your own subscription needs Pro ($20/month)." : null);
+        expect(client.getWorkspaceModelCatalog).toHaveBeenCalledWith("personal-workspace", {
+          signal: expect.any(AbortSignal),
+        });
+      } finally {
+        await act(async () => root.unmount());
+        container.remove();
+      }
+    }
+
     const codexConnectStart = mock(async () => ({
       state: "state-a",
       userCode: "CODE-1234",

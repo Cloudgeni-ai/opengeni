@@ -269,6 +269,13 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // Releases an admission block after access changed: the start signal is
+  // written only while effective control is still active.
+  "packages/db/src/index.ts#releaseSessionAdmissionBlocksAfterAccessChange": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#recoverSessionOwner": {
     inserts: 3,
     contract: "canonical",
@@ -330,8 +337,8 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  // Moving a capacity-waiting turn onto a new model, or stopping it for Pause,
-  // under the model switch's or Pause's own canonical locks.
+  // Moving a capacity-waiting turn onto a new model, or stopping it for a
+  // chat's or the workspace's Pause, under that command's own canonical locks.
   "packages/db/src/capacity-wait-release.ts#releaseCapacityWaitingTurnInTransaction": {
     inserts: 1,
     contract: "owned_suffix",
@@ -429,6 +436,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
   releaseCapacityWaitingTurnInTransaction: [
     "mutateSessionControlInTransaction",
+    "mutateWorkspaceControlInTransaction",
     "setSessionModelInTransaction",
   ],
   supersedeSubscriptionCoreCodexCapacityWaitInTransaction: [

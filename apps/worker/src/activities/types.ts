@@ -312,6 +312,8 @@ export type FailSessionAttemptInput = {
    * attempt instead of terminally failing it. */
   preClaimFailure?: PreClaimFailureDetail;
   admissionFence?: SessionAdmissionFence;
+  /** Wake revision observed with `admissionFence`; omitted by older histories. */
+  admissionWakeRevision?: number;
   /** Added in v4. A claimed attempt that lost operational database access
    * before turn-start completion carries its exact immutable turn identity so
    * the DB-only control lane can recover it instead of terminally failing it. */

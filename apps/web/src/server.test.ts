@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   createWebHandler,
   demoApiProxyFromEnvironment,
+  noindexFromEnvironment,
   previousAssetRootsFromEnvironment,
   publicWebOriginFromEnvironment,
   withAbsoluteLinkPreviewUrls,
@@ -146,6 +147,54 @@ describe("production web handler", () => {
     const lookalike = await handler(new Request("https://example.test/officers"));
     expect(lookalike.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
     expect(lookalike.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+  });
+
+  test("asks search engines not to index anything when the deployment opts in", async () => {
+    const root = await fixture();
+    const requests = () => [
+      new Request("https://example.test/"),
+      new Request("https://example.test/workspaces/ws/sessions/id"),
+      new Request("https://example.test/assets/app-abc123.js"),
+      new Request("https://example.test/assets/missing.js"),
+      new Request("https://example.test/robots.txt"),
+      new Request("https://example.test/%2e%2e%2fsecret"),
+      new Request("https://example.test/", { method: "POST" }),
+      new Request("https://example.test/react-demo"),
+      new Request("https://example.test/", { method: "HEAD" }),
+      new Request(`https://example.test/setup-account?token=${VALID_SETUP_TOKEN}`),
+      new Request("https://example.test/demo-api/healthz"),
+    ];
+
+    const noindex = createWebHandler(root, {
+      noindex: true,
+      publicOrigin: "https://console.example.test",
+      demoApiProxy: {
+        targetBaseUrl: "http://api.internal:8000",
+        fetch: async () => Response.json({ ok: true }),
+      },
+    });
+    for (const response of await Promise.all(requests().map(noindex))) {
+      expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    }
+    const shell = await noindex(new Request("https://example.test/workspaces/x"));
+    expect(shell.status).toBe(200);
+    expect(await shell.text()).toContain("Opengeni");
+
+    // Off by default: only share and setup pages opt out of indexing.
+    const indexed = createWebHandler(root);
+    for (const path of ["/", "/workspaces/x", "/assets/app-abc123.js", "/robots.txt"]) {
+      const response = await indexed(new Request(`https://example.test${path}`));
+      expect(response.headers.get("x-robots-tag")).toBeNull();
+    }
+  });
+
+  test("reads the noindex opt-in from the environment", () => {
+    expect(noindexFromEnvironment({})).toBe(false);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: "" })).toBe(false);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: "false" })).toBe(false);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: "0" })).toBe(false);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: " TRUE " })).toBe(true);
+    expect(noindexFromEnvironment({ OPENGENI_WEB_NOINDEX: "1" })).toBe(true);
   });
 
   test("does not turn missing assets or path traversal into the SPA shell", async () => {

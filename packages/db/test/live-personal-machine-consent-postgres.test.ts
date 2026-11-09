@@ -9,6 +9,9 @@ import { sql } from "drizzle-orm";
 import {
   acceptOrganizationInvitation,
   applySessionTurnSettlement,
+  blockSessionWorkBeforeAttemptClaim,
+  isPersonalMachineAccessRefusal,
+  releaseSessionAdmissionBlocksAfterAccessChange,
   claimSessionWorkForAttempt,
   confirmDrainCold,
   createDb,
@@ -1174,6 +1177,73 @@ describe("the owner's own machine runs their turns wherever they have it on", ()
     expect(
       (await standingGrants(f, f.enrollmentId)).filter((grant) => grant.status === "active"),
     ).toEqual([]);
+  }, 120_000);
+
+  test("a saved message refused for the machine starts by itself once the owner allows it for the chat", async () => {
+    const f = await fixture();
+    await turnOffHere(f, f.enrollmentId);
+    const session = await chatOnOwnersMachine(f);
+    const sent = await submitWithoutApproval(f, session.id, "Keep going");
+    // The claim is refused for the machine's approval, which the worker names
+    // as machine access, not a bare permission check.
+    let refused: unknown;
+    try {
+      await claim(f.workspaceId, session.id);
+    } catch (error) {
+      refused = error;
+    }
+    expect(isPersonalMachineAccessRefusal(refused)).toBe(true);
+    const peek = await peekSessionWork(client.db, f.workspaceId, session.id, true);
+    if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("expected runnable");
+    expect(
+      await blockSessionWorkBeforeAttemptClaim(client.db, f.workspaceId, {
+        accountId: f.accountId,
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        attemptId: crypto.randomUUID(),
+        fence: peek.admissionFence,
+        wakeRevision: peek.admissionWakeRevision!,
+        reason: "personal_resource_grant_required",
+        sqlState: "42501",
+      }),
+    ).toMatchObject({ action: "blocked" });
+    // Nothing changed yet: the block holds.
+    expect(
+      (
+        await releaseSessionAdmissionBlocksAfterAccessChange(client.db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          change: "membership",
+          sessionIds: [session.id],
+        })
+      ).released,
+    ).toHaveLength(0);
+
+    // "Allow for this chat": one approval for this chat, then the release the
+    // grant API runs after it.
+    const [authority] = await shared.admin`select authority_epoch, visibility from sessions
+      where id = ${session.id}`;
+    await issueSelfUserResourceGrant(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId: f.owner,
+      authorityId: await machineAuthorityId(f.enrollmentId),
+      resourceKind: "connected_machine",
+      mode: "session",
+      context: authority!.visibility,
+      sessionId: session.id,
+      expectedAuthorityEpoch: Number(authority!.authority_epoch),
+      workspaceSharedAcknowledged: authority!.visibility === "workspace_shared",
+    });
+    const released = await releaseSessionAdmissionBlocksAfterAccessChange(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      change: "personal_resource",
+      sessionIds: [session.id],
+    });
+    expect(released.released.map((entry) => entry.sessionId)).toEqual([session.id]);
+    // The saved message itself starts, once.
+    expect((await claim(f.workspaceId, session.id)).turnId).toBe(sent.turnId);
   }, 120_000);
 
   test("a message sent with Allow once runs on the machine, including its retry, and the next message needs approval again", async () => {
