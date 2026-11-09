@@ -262,6 +262,8 @@
     "ip-address": "10.7.5",
     "js-yaml": "3.15.2",
     "katex": "0.18.11",
+    "linkify-it": "5.0.2",
+    "markdown-it": "14.3.3",
     "mermaid": "11.16.1",
     "miniflare": {
       "sharp": "0.35.5",
@@ -275,9 +277,6 @@
     "protobufjs": "7.6.5",
     "proxy-addr": "2.0.8",
     "qs": "6.16.1",
-    "react-native-markdown-display": {
-      "markdown-it": "14.3.3"
-    },
     "seroval": "1.7.7",
     "tinypool": "2.1.2",
     "uuid": "11.1.1",

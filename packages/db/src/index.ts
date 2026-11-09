@@ -36,6 +36,7 @@ export {
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./session-resource-removal";
+export * from "./session-repository-attach";
 import { admitRequestedRepositories } from "./session-resource-removal";
 export * from "./github-gateway";
 import { isGitHubGatewayApprovalId } from "./github-gateway";
@@ -1285,8 +1286,11 @@ import {
 import {
   CAPACITY_WAIT_NOTICE_KEY,
   capacityWaitAttention,
+  capacityWaitNoticeMarker,
+  capacityWaitNoticeNeedsRestating,
   capacityWaitNoticeWithdrawal,
   capacityWaitNotificationPayload,
+  readCapacityWaitNotice,
   withoutCapacityWaitNotice,
 } from "./capacity-wait-attention";
 import { codeSearchDeploymentPolicyForCreate } from "./code-search-policy";
@@ -27529,7 +27533,13 @@ export async function armSubscriptionCoreCapacityWait(
               )
             : null;
         const waitingMetadata = personNotice
-          ? { ...recoveryMetadata, [CAPACITY_WAIT_NOTICE_KEY]: { key: personNotice.key } }
+          ? {
+              ...recoveryMetadata,
+              [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
+                personNotice.key,
+                attention!.resetsAt,
+              ),
+            }
           : recoveryMetadata;
         const waitingPrompt = stopped
           ? await runnableQueuedTurnExists(tx, {
@@ -28064,22 +28074,40 @@ export async function reconcileSubscriptionCoreCapacityWait(
             waiter.waitReason !== waitEvaluation.waitReason
               ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
               : null;
-          let changedReasonEvents: SessionEvent[] = [];
-          if (changedReasonText) {
-            const insertedReasonEvents = await tx
-              .insert(schema.sessionEvents)
-              .values(
-                withLosslessContentWriteVersion(
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    sequence: session.lastSequence + 1,
-                    type: vocabulary.waitingEventType,
+          // A top-level chat's person is told again, in place, once the reset
+          // their notification named no longer holds (it passed without
+          // capacity, or a longer limit binds), and told for the first time
+          // when a short wait has become a long one. Only an evaluation that
+          // found no capacity says when it returns; a held false-resumption
+          // delay or legacy evaluation leaves the notice as it is.
+          const attention =
+            session.parentSessionId || evaluation.kind !== "wait"
+              ? null
+              : capacityWaitAttention({
+                  waitReason: waitEvaluation.waitReason,
+                  earliestResetAt: waitEvaluation.earliestResetAt,
+                  healthRetryAt: waitEvaluation.healthRetryAt,
+                  now,
+                });
+          const openNotice = readCapacityWaitNotice(blockedTurn.metadata);
+          const personNotice =
+            attention &&
+            (!openNotice || capacityWaitNoticeNeedsRestating(openNotice, attention.resetsAt))
+              ? SessionNotificationPostedPayload.parse({
+                  ...capacityWaitNotificationPayload({
                     turnId: blockedTurn.id,
-                    turnGeneration: blockedTurn.executionGeneration,
-                    turnAssociation: "current",
-                    occurredAt: now,
+                    provider: waiter.provider,
+                    resetsAt: attention.resetsAt,
+                  }),
+                  // Same key: the open notification is updated in place, silently.
+                  replaced: openNotice !== null,
+                })
+              : null;
+          const restated = [
+            ...(changedReasonText
+              ? [
+                  {
+                    type: vocabulary.waitingEventType,
                     payload: {
                       ...vocabulary.waitingPayload,
                       code: "subscription_capacity_unavailable",
@@ -28093,8 +28121,32 @@ export async function reconcileSubscriptionCoreCapacityWait(
                       resetKind: scheduled.resetKind,
                       earliestResetAt: waitEvaluation.earliestResetAt?.toISOString() ?? null,
                       nextCheckAt: nextCheckAt.toISOString(),
-                    },
+                    } as Record<string, unknown>,
                   },
+                ]
+              : []),
+            ...(personNotice
+              ? [{ type: "session.notification.posted", payload: personNotice }]
+              : []),
+          ];
+          let restatedEvents: SessionEvent[] = [];
+          if (restated.length > 0) {
+            const insertedEvents = await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  restated.map((event, index) => ({
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: session.lastSequence + 1 + index,
+                    type: event.type,
+                    turnId: blockedTurn.id,
+                    turnGeneration: blockedTurn.executionGeneration,
+                    turnAssociation: "current" as const,
+                    occurredAt: now,
+                    payload: event.payload,
+                  })),
                   "payload",
                   "payloadCodecVersion",
                 ),
@@ -28102,19 +28154,50 @@ export async function reconcileSubscriptionCoreCapacityWait(
               .returning();
             await tx
               .update(schema.sessions)
-              .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+              .set({ lastSequence: session.lastSequence + restated.length, updatedAt: now })
               .where(
                 and(
                   eq(schema.sessions.workspaceId, input.workspaceId),
                   eq(schema.sessions.id, input.sessionId),
                 ),
               );
-            changedReasonEvents = insertedReasonEvents.map(mapEvent);
+            restatedEvents = insertedEvents.map(mapEvent);
+          }
+          if (personNotice) {
+            // The turn remembers what the notification now says, and its key
+            // for the withdrawal when the wait ends.
+            const [noticedTurn] = await tx
+              .update(schema.sessionTurns)
+              .set({
+                metadata: {
+                  ...blockedTurn.metadata,
+                  [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
+                    personNotice.key,
+                    attention!.resetsAt,
+                  ),
+                },
+                version: blockedTurn.version + 1,
+                updatedAt: now,
+              })
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.id, blockedTurn.id),
+                  eq(schema.sessionTurns.status, "waiting_capacity"),
+                  isNull(schema.sessionTurns.activeAttemptId),
+                ),
+              )
+              .returning({ id: schema.sessionTurns.id });
+            if (!noticedTurn) {
+              throw new Error(
+                `Core ${vocabulary.label} capacity blocked turn changed during reconcile`,
+              );
+            }
           }
           return {
             action: "waiting",
             waiter: mapSubscriptionCoreCodexWaiter(row),
-            events: changedReasonEvents,
+            events: restatedEvents,
           } as const;
         }
 
@@ -97470,6 +97553,7 @@ export * from "./canonical-human-identities";
 export * from "./managed-auth-session-sets";
 export * from "./organization-recovery";
 export * from "./active-sandbox";
+export * from "./personal-machine-access";
 export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./event-triggers";

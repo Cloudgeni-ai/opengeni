@@ -1853,6 +1853,12 @@ Two refusals are registered today:
   attempt get no card. Only these API tools emit it today; the worker poster
   passes no requested machine, so an interaction tool that emitted it would get
   a machine card that names no machine.
+  `machine_access_required` is also a plain refusal: the move or `run_on` got
+  past admission, but the check right before the machine is used found this
+  turn's approval used up, revoked or expired. Its reason starts with the same
+  "Machine access needed" sentence a failed turn shows
+  (`machineAccessNeededMessage`, `packages/contracts`), and the chat stays
+  where it was.
 - `attached_browser_unavailable`: `browser_open` with
   `placement: {kind: "attached_device"}` found no connected Chrome profile. The
   **Chrome setup card**, the machine card with `purpose: "chrome"`

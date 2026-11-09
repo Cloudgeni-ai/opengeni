@@ -12176,7 +12176,13 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // access) or runs at once (a read, or full access); the API enforces it.
       // A bot send follows the person's own Slack send permission in an
       // interactive chat; the worker decides it per call the same way.
-      requireApproval: ["admin_action_call", "slack_bot_send_prepared_message"],
+      // An agent's request to attach a repository always waits for a person,
+      // and the API attaches only a call a person approved.
+      requireApproval: [
+        "admin_action_call",
+        "slack_bot_send_prepared_message",
+        "github_repository_attach",
+      ],
     },
     ...(hasFiles
       ? []

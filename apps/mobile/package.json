@@ -57,10 +57,9 @@
   },
   "overrides": {
     "decode-uri-component": "0.5.1",
+    "linkify-it": "5.0.2",
+    "markdown-it": "14.3.3",
     "node-forge": "1.4.3",
-    "react-native-markdown-display": {
-      "markdown-it": "14.3.3"
-    },
     "uuid": "11.1.1"
   },
   "expo": {

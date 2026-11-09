@@ -1112,6 +1112,8 @@
     "ip-address": "10.7.5",
     "js-yaml": "3.15.2",
     "katex": "0.18.11",
+    "linkify-it": "5.0.2",
+    "markdown-it": "14.3.3",
     "mermaid": "11.16.1",
     "miniflare": {
       "sharp": "0.35.5",
@@ -1125,9 +1127,6 @@
     "protobufjs": "7.6.5",
     "proxy-addr": "2.0.8",
     "qs": "6.16.1",
-    "react-native-markdown-display": {
-      "markdown-it": "14.3.3",
-    },
     "seroval": "1.7.7",
     "tinypool": "2.1.2",
     "uuid": "11.1.1",
@@ -5455,7 +5454,7 @@
 
     "e2b/openapi-fetch": ["openapi-fetch@0.17.0", "", { "dependencies": { "openapi-typescript-helpers": "^0.1.0" } }, "sha512-PsbZR1wAPcG91eEthKhN+Zn92FMHxv+/faECIwjXdxfTODGSGegYv0sc1Olz+HYPvKOuoXfp+0pA2XVt2cI0Ig=="],
 
-    "e2b/undici": ["undici@8.12.2", "", {}, "sha512-XtuDWVdqTLr3NAxm2ly9/hU6kUsJOgGh1RASzMBbsw6aWCOaQzHdW+QQDfdERjfJ2V5vL5pRPa4RetO9UfivDg=="],
+    "e2b/undici": ["undici@8.12.4", "", {}, "sha512-8Mx+uNKKER2bA4AdtedkqRbwUCIJFr2nJckXRe5yrDqzePqwLP7VNcctN8/XdmDSbF7mS+jJKIszlL+vbam1VA=="],
 
     "ecdsa-sig-formatter/safe-buffer": ["safe-buffer@5.2.1", "", {}, "sha512-rp3So07KcdmmKbGvgaNxQSJr7bGVSVk5S9Eq1F+ppbRo70+YeaDxkw5Dd8NPN+GD6bjnYm2VuPuCXmpuYvmCXQ=="],
 

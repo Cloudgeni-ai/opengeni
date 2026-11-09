@@ -228,6 +228,11 @@ export function quotaAfterRateLimitReset(
  * never with a header reading. A caller's own refusal must be tagged
  * `refusal`, not `usage_endpoint`, or a complete adapter's reading would
  * erase the stored windows.
+ * A running quota exhaustion (`exhaustedKind: "quota"`) lasts at least until
+ * every window still exhausted beside it resets (`quotaExhaustionHeldByWindows`):
+ * the provider refused while those limits were spent, so it serves the
+ * account again (extra credits included) only once the last of them resets,
+ * not when a refusal's own fallback deadline guessed.
  * Clearing a cooldown early is an explicit, revision-fenced store operation,
  * not an observation. Revision numbers are assigned by the store.
  */
@@ -264,7 +269,8 @@ export function applyQuotaObservation(
     current.exhaustedUntil !== null &&
     current.exhaustedUntil > observedAt &&
     (observation.exhaustedUntil === null || observation.exhaustedUntil < current.exhaustedUntil);
-  const exhaustedUntil = keepCurrentDeadline ? current.exhaustedUntil : observation.exhaustedUntil;
+  const mergedUntil = keepCurrentDeadline ? current.exhaustedUntil : observation.exhaustedUntil;
+  const exhaustedKind = keepCurrentDeadline ? current.exhaustedKind : observation.exhaustedKind;
   // A block keeps its evidence only where every observation that set its
   // merged deadline explained it (`QuotaBlockClaim`).
   const sources = [current, observation];
@@ -279,11 +285,11 @@ export function applyQuotaObservation(
     );
     if (claim) modelCooldownClaims[modelId] = claim;
   }
-  const exhaustedClaim =
-    exhaustedUntil === null
+  const mergedExhaustedClaim =
+    mergedUntil === null
       ? null
       : mergedClaim(
-          exhaustedUntil,
+          mergedUntil,
           sources.map((source) => ({
             until: source.exhaustedUntil,
             claim: quotaBlockClaim(source, null),
@@ -300,18 +306,68 @@ export function applyQuotaObservation(
             window.resetsAt !== null &&
             window.resetsAt > observedAt,
         );
+  const windows = omittedExhausted.length
+    ? [...observation.windows, ...omittedExhausted]
+    : observation.windows;
+  const held = quotaExhaustionHeldByWindows(
+    { exhaustedUntil: mergedUntil, exhaustedKind, exhaustedClaim: mergedExhaustedClaim, windows },
+    observedAt,
+  );
+  const exhaustedUntil = held.exhaustedUntil;
+  const exhaustedClaim = held.exhaustedClaim;
   const merged: SubscriptionQuota = {
     ...observation,
-    windows: omittedExhausted.length
-      ? [...observation.windows, ...omittedExhausted]
-      : observation.windows,
+    windows,
     modelCooldowns,
     exhaustedUntil,
-    exhaustedKind: keepCurrentDeadline ? current.exhaustedKind : observation.exhaustedKind,
+    exhaustedKind,
   };
   delete merged.modelCooldownClaims;
   delete merged.exhaustedClaim;
   if (Object.keys(modelCooldownClaims).length > 0) merged.modelCooldownClaims = modelCooldownClaims;
   if (exhaustedClaim) merged.exhaustedClaim = exhaustedClaim;
   return merged;
+}
+
+/**
+ * The deadline of a quota exhaustion still running at `at`, held until every
+ * window exhausted beside it with a known later reset has reset. A refusal
+ * that came without a reset gets an adapter's fallback deadline (a few
+ * hours), and a refusal while the included windows are already spent is the
+ * provider refusing the account's extra credits too; either way the account
+ * serves again only once the last spent window resets. Its claim then names
+ * those windows as well, so a usage reading that shows them below the limit
+ * can still end the block early; an unexplained block stays unexplained
+ * (fail closed). A rate limit, a deadline that ended, and an exhausted window
+ * with no known reset (which keeps the account exhausted by itself) change
+ * nothing.
+ */
+export function quotaExhaustionHeldByWindows(
+  quota: Pick<SubscriptionQuota, "exhaustedUntil" | "exhaustedKind" | "windows"> & {
+    exhaustedClaim: QuotaBlockClaim | null;
+  },
+  at: number,
+): { exhaustedUntil: number | null; exhaustedClaim: QuotaBlockClaim | null } {
+  const { exhaustedUntil, exhaustedClaim } = quota;
+  if (quota.exhaustedKind !== "quota" || exhaustedUntil === null || exhaustedUntil <= at) {
+    return { exhaustedUntil, exhaustedClaim };
+  }
+  const holding = quota.windows.filter(
+    (window) =>
+      window.status === "exhausted" && window.resetsAt !== null && window.resetsAt > exhaustedUntil,
+  );
+  if (holding.length === 0) return { exhaustedUntil, exhaustedClaim };
+  const until = Math.max(...holding.map((window) => window.resetsAt!));
+  return {
+    exhaustedUntil: until,
+    exhaustedClaim: exhaustedClaim
+      ? {
+          until,
+          observedAt: exhaustedClaim.observedAt,
+          windowIds: [
+            ...new Set([...exhaustedClaim.windowIds, ...holding.map((window) => window.id)]),
+          ],
+        }
+      : null,
+  };
 }
