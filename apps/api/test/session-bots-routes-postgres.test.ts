@@ -481,6 +481,11 @@ describe("bots through the API (real PostgreSQL)", () => {
       visibility: "workspace",
       revision: 1,
     });
+    // The result says what happened to its Memory, so the agent can tell the person.
+    expect(["ready", "pending_review", "learning_off", "not_saved"]).toContain(
+      saved.body.memory.status,
+    );
+    expect(typeof saved.body.memory.note).toBe("string");
     const stored = await getAgent(client.db, workspace, saved.body.agent.id);
     expect(stored).toMatchObject({
       origin: "app",

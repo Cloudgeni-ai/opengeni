@@ -453,6 +453,43 @@ test("the icon picker of a new agent opens on the emoji choices and colours", as
   expect(emoji[1]!.getAttribute("aria-pressed")).toBe("true");
 });
 
+test("browsing the icon picker's tabs and colours chooses nothing", async () => {
+  const client = fakeAgentsClient([]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <NewAgentPage workspaceId={WORKSPACE_ID} />
+    </AgentsTestHost>,
+  );
+  await act(async () => button(container, "Change icon").click());
+  await flush();
+  const picker = document.querySelector<HTMLElement>("[role='dialog'][aria-label='Icon']")!;
+  const tab = (label: string) =>
+    [...picker.querySelectorAll<HTMLButtonElement>("[data-slot='segmented-control-item']")].find(
+      (item) => item.textContent?.trim() === label,
+    )!;
+  await act(async () => tab("Icon").click());
+  await flush();
+  const icons = [...picker.querySelectorAll<HTMLButtonElement>("[aria-label='Icons'] button")];
+  expect(icons.length).toBeGreaterThan(0);
+  expect(icons.some((candidate) => candidate.getAttribute("aria-pressed") === "true")).toBe(false);
+  const colours = [
+    ...picker.querySelectorAll<HTMLButtonElement>("[aria-label='Colour'] [role='radio']"),
+  ];
+  await act(async () => colours[2]!.click());
+  expect(colours[2]!.getAttribute("aria-checked")).toBe("true");
+  await act(async () => tab("Letters").click());
+  await flush();
+  // Still no icon: the agent is created without one.
+  const name = container.querySelector<HTMLInputElement>("input[placeholder='Release manager']")!;
+  await act(async () => setValue(name, "Browser"));
+  await act(async () => button(container, "Create agent").click());
+  await flush();
+  const created = client.calls.find((call) => call[0] === "createAgent")?.[2] as
+    | Record<string, unknown>
+    | undefined;
+  expect(created?.avatar ?? null).toBeNull();
+});
+
 test("a name is the only required field", async () => {
   const client = fakeAgentsClient([]);
   const container = await render(

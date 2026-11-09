@@ -4,7 +4,7 @@
  * set. The caller owns the draft; `sessionAvatarFromDraft` turns it into the
  * saved avatar (null while the draft is incomplete or "none").
  */
-import { useId } from "react";
+import { useId, useState } from "react";
 import { PencilIcon, XIcon } from "lucide-react";
 import { Popover as PopoverPrimitive } from "radix-ui";
 import { SESSION_AVATAR_ICONS, isSingleSessionAvatarEmoji } from "@opengeni/contracts";
@@ -172,10 +172,14 @@ export function SessionAvatarPicker({
   const set = (patch: Partial<SessionAvatarDraft>) => onChange({ ...draft, ...patch });
   const { kind, hue, emoji, icon, letters } = draft;
   // With no avatar yet, show the emoji choices instead of an empty picker.
-  // Nothing is selected until the person picks, and picking makes it the avatar.
-  const shown: Exclude<SessionAvatarKind, "none"> = kind === "none" ? "emoji" : kind;
+  // Browsing tabs or colours chooses nothing; picking an emoji, icon or
+  // letters makes it the avatar, in the colour browsed so far.
+  const [browsed, setBrowsed] = useState<Exclude<SessionAvatarKind, "none">>("emoji");
+  const [browsedHue, setBrowsedHue] = useState<boolean>(false);
   const chosen = kind !== "none";
+  const shown: Exclude<SessionAvatarKind, "none"> = chosen ? kind : browsed;
   const pick = (patch: Partial<SessionAvatarDraft>) => set({ kind: shown, ...patch });
+  const hueShown = chosen || browsedHue;
   const kinds: { value: SessionAvatarKind; label: string }[] = [
     { value: "emoji", label: "Emoji" },
     { value: "icon", label: "Icon" },
@@ -208,7 +212,11 @@ export function SessionAvatarPicker({
           className="self-start"
           options={kinds}
           value={shown}
-          onValueChange={(next) => set({ kind: next })}
+          onValueChange={(next) => {
+            if (next === "none") return;
+            if (chosen) set({ kind: next });
+            else setBrowsed(next);
+          }}
         />
         {shown === "emoji" ? (
           <div className="flex flex-col gap-2">
@@ -254,11 +262,11 @@ export function SessionAvatarPicker({
                   type="button"
                   aria-label={ICON_LABELS[candidate]}
                   title={ICON_LABELS[candidate]}
-                  aria-pressed={icon === candidate}
-                  onClick={() => set({ icon: candidate })}
+                  aria-pressed={chosen && icon === candidate}
+                  onClick={() => pick({ icon: candidate })}
                   className={cn(
                     "flex size-9 items-center justify-center rounded-md text-fg-label outline-hidden transition-colors hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-11",
-                    icon === candidate && "bg-selection text-fg ring-1 ring-brand/30",
+                    chosen && icon === candidate && "bg-selection text-fg ring-1 ring-brand/30",
                   )}
                 >
                   <Icon className="size-4" />
@@ -274,12 +282,12 @@ export function SessionAvatarPicker({
             error={errors.letters ?? undefined}
           >
             <TextInput
-              value={letters}
+              value={chosen ? letters : ""}
               placeholder={sessionAvatarInitials(name || "Bot").slice(0, 2)}
               maxLength={2}
               autoComplete="off"
               className="w-24 uppercase"
-              onChange={(event) => set({ letters: event.target.value })}
+              onChange={(event) => pick({ letters: event.target.value })}
             />
           </Field>
         ) : null}
@@ -296,12 +304,16 @@ export function SessionAvatarPicker({
                 key={candidate}
                 type="button"
                 role="radio"
-                aria-checked={chosen && hue === candidate}
+                aria-checked={hueShown && hue === candidate}
                 aria-label={`Colour ${SESSION_AVATAR_HUES.indexOf(candidate) + 1}`}
-                onClick={() => pick({ hue: candidate })}
+                onClick={() => {
+                  // A colour alone isn't an avatar yet: it's kept for the next pick.
+                  if (!chosen) setBrowsedHue(true);
+                  set({ hue: candidate });
+                }}
                 className={cn(
                   "size-6 rounded-full outline-hidden ring-offset-2 ring-offset-surface transition-shadow focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:size-9",
-                  chosen && hue === candidate && "ring-2 ring-fg/70",
+                  hueShown && hue === candidate && "ring-2 ring-fg/70",
                 )}
                 style={{ background: `oklch(0.56 0.11 ${candidate})` }}
               />

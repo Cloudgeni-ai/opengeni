@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import {
+  classifyLearningRefusal,
+  nestedAuthorityRefusalMessage,
   saveKnowledgeEntry,
   setAgentMemoryCollection,
   type AgentRecord,
@@ -30,10 +32,19 @@ export function agentMemoryOperationId(
 }
 
 /**
+ * What happened to an agent's Memory collection: `ready` (it has one),
+ * `pending_review` (it waits for review under Review-first), `learning_off`
+ * (Agent learning is Off, so none was saved), `not_saved` (the save failed or
+ * was refused) or `off` (Memory is off).
+ */
+export type AgentMemoryStatus = "ready" | "pending_review" | "learning_off" | "not_saved" | "off";
+
+/**
  * Create the agent's Memory collection when Memory is on and it has none.
  * Best effort, like a Slack agent's: a failure leaves Memory without a
- * collection rather than failing the save. Under Review-first the collection
- * itself may wait for review; its id is kept either way.
+ * collection rather than failing the save, and the status says so. Under
+ * Review-first the collection itself may wait for review; its id is kept
+ * either way.
  *
  * `withKnowledge` runs the save as the caller (a person's request or an
  * agent's chat), with that caller's Knowledge context and row-level security.
@@ -43,8 +54,9 @@ export async function ensureAgentMemoryCollection(
   home: Home,
   agent: AgentRecord,
   withKnowledge: <T>(save: (context: KnowledgeContext) => Promise<T>) => Promise<T>,
-): Promise<AgentRecord> {
-  if (!agent.memoryEnabled || agent.memoryCollectionId) return agent;
+): Promise<{ agent: AgentRecord; memory: AgentMemoryStatus }> {
+  if (!agent.memoryEnabled) return { agent, memory: "off" };
+  if (agent.memoryCollectionId) return { agent, memory: "ready" };
   try {
     const receipt = await withKnowledge((context) =>
       saveKnowledgeEntry(db, context, {
@@ -58,15 +70,25 @@ export async function ensureAgentMemoryCollection(
         },
       }),
     );
-    const entryId = z.object({ entryId: z.string().uuid() }).safeParse(receipt);
-    if (!entryId.success) return agent;
-    return (
+    const saved = z
+      .object({ entryId: z.string().uuid(), outcome: z.string().optional() })
+      .safeParse(receipt);
+    if (!saved.success) return { agent, memory: "not_saved" };
+    if (saved.data.outcome === "rejected" || saved.data.outcome === "archived") {
+      return { agent, memory: "not_saved" };
+    }
+    const updated =
       (await setAgentMemoryCollection(db, home, {
         agentId: agent.id,
-        collectionId: entryId.data.entryId,
-      })) ?? agent
-    );
-  } catch {
-    return agent;
+        collectionId: saved.data.entryId,
+      })) ?? agent;
+    return {
+      agent: updated,
+      memory: saved.data.outcome === "pending" ? "pending_review" : "ready",
+    };
+  } catch (error) {
+    const message = nestedAuthorityRefusalMessage(error);
+    const refusal = message ? classifyLearningRefusal({ destination: "knowledge", message }) : null;
+    return { agent, memory: refusal?.reason === "learning_off" ? "learning_off" : "not_saved" };
   }
 }

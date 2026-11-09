@@ -26,7 +26,10 @@ import {
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
-import { ensureAgentMemoryCollection } from "../integrations/agent-memory-collection";
+import {
+  ensureAgentMemoryCollection,
+  type AgentMemoryStatus,
+} from "../integrations/agent-memory-collection";
 import { requireUsableSessionAvatar } from "../routes/session-avatar";
 
 /**
@@ -130,6 +133,25 @@ export async function setSessionProfileFromTool(
   };
 }
 
+/** What `bot_template_save` reports about the new agent's Memory, for the person. */
+const AGENT_MEMORY_RESULT: Record<AgentMemoryStatus, { status: AgentMemoryStatus; note: string }> =
+  {
+    ready: { status: "ready", note: "It remembers across chats." },
+    pending_review: {
+      status: "pending_review",
+      note: "Its memory starts once its Memory collection is approved in Knowledge review.",
+    },
+    learning_off: {
+      status: "learning_off",
+      note: "Agent learning is Off for this chat, so its memory wasn't set up. Saving the agent once in Agents sets it up.",
+    },
+    not_saved: {
+      status: "not_saved",
+      note: "Its memory couldn't be set up. Saving the agent once in Agents sets it up.",
+    },
+    off: { status: "off", note: "Memory is off: each chat starts fresh." },
+  };
+
 export function registerBotTemplateTools(input: {
   server: McpServer;
   deps: ApiRouteDeps;
@@ -143,7 +165,7 @@ export function registerBotTemplateTools(input: {
     "bot_template_save",
     {
       description:
-        "Make an agent from this chat when the person asks to make this an agent or a template. Write its Instructions, which every chat with it follows, from what this chat established: its job, how it works, its standing rules and preferences, and the Skills, plugins, connections and machines it relies on. Leave out one-off tasks and one-time setup, history, personal details and secrets. Show the person your draft first unless they asked you to save it directly. It is shared like this chat. avatar takes the same shapes as in set_session_title.",
+        "Make an agent from this chat when the person asks to make this an agent or a template. Write its Instructions, which every chat with it follows, from what this chat established: its job, how it works, its standing rules and preferences, and the Skills, plugins, connections and machines it relies on. Leave out one-off tasks and one-time setup, history, personal details and secrets. Show the person your draft first unless they asked you to save it directly. It is shared like this chat. If the result's memory status isn't ready, tell the person its note. avatar takes the same shapes as in set_session_title.",
       inputSchema: {
         name: z4.string().min(1).max(AGENT_NAME_MAX_LENGTH),
         description: z4.string().max(AGENT_DESCRIPTION_MAX_LENGTH).optional(),
@@ -222,27 +244,32 @@ export function registerBotTemplateTools(input: {
           maxPerWorkspace: AGENTS_PER_WORKSPACE_MAX,
         });
         // Its Memory collection is saved by this chat, under its Agent learning.
-        const agent = await ensureAgentMemoryCollection(deps.db, home, created, async (save) => {
-          const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
-          return await withSessionRlsActorContext(
-            {
-              subjectId: attempt.subjectId,
-              initiatingHumanSubjectId: attempt.initiatingHumanSubjectId,
-            },
-            () =>
-              save({
-                accountId: grant.accountId,
-                workspaceId: grant.workspaceId,
-                actor: {
-                  kind: "agent",
-                  sessionId: attempt.callerSessionId,
-                  turnId: attempt.turnId,
-                  attemptId: attempt.attemptId,
-                  executionGeneration: attempt.executionGeneration,
-                },
-              }),
-          );
-        });
+        const { agent, memory } = await ensureAgentMemoryCollection(
+          deps.db,
+          home,
+          created,
+          async (save) => {
+            const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+            return await withSessionRlsActorContext(
+              {
+                subjectId: attempt.subjectId,
+                initiatingHumanSubjectId: attempt.initiatingHumanSubjectId,
+              },
+              () =>
+                save({
+                  accountId: grant.accountId,
+                  workspaceId: grant.workspaceId,
+                  actor: {
+                    kind: "agent",
+                    sessionId: attempt.callerSessionId,
+                    turnId: attempt.turnId,
+                    attemptId: attempt.attemptId,
+                    executionGeneration: attempt.executionGeneration,
+                  },
+                }),
+            );
+          },
+        );
         return input.json({
           ok: true,
           agent: {
@@ -252,6 +279,7 @@ export function registerBotTemplateTools(input: {
             visibility: agent.visibility,
             revision: agent.currentRevision,
           },
+          memory: AGENT_MEMORY_RESULT[memory],
         });
       } catch (error) {
         if (error instanceof AgentLimitError) {

@@ -154,11 +154,16 @@ async function ensureAgentMemory(
   context: RequestContext,
   agent: AgentRecord,
 ): Promise<AgentRecord> {
-  return await ensureAgentMemoryCollection(deps.db, context.home, agent, (save) =>
-    withAccessGrantSessionRlsContext(deps, context.grant, async () =>
-      save(await knowledgeContextForAccess(deps, context.access, "documents:manage")),
-    ),
+  const { agent: updated } = await ensureAgentMemoryCollection(
+    deps.db,
+    context.home,
+    agent,
+    (save) =>
+      withAccessGrantSessionRlsContext(deps, context.grant, async () =>
+        save(await knowledgeContextForAccess(deps, context.access, "documents:manage")),
+      ),
   );
+  return updated;
 }
 
 export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
