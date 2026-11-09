@@ -52,7 +52,6 @@ import {
   failureFallbackReason,
   MACHINE_ACCESS_REQUIRED_CODE,
 } from "../lib/failed-session-copy";
-import { ARCHIVED_CHAT_SEND_BLOCKED, ENDED_CHAT_SEND_BLOCKED } from "../lib/chat-send-blocked";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import {
   pickerPolicyRunnable,
@@ -3125,9 +3124,9 @@ function SessionChatPane(props: {
   });
   chatSendContext.current = {
     blocked: sessionReadOnlyArchive(props.session)
-      ? ARCHIVED_CHAT_SEND_BLOCKED
+      ? "This chat is archived. Continue in a new chat to use a repository."
       : isTerminalSessionStatus(props.session.status)
-        ? ENDED_CHAT_SEND_BLOCKED
+        ? "This chat has ended. Start a new chat to use a repository."
         : connectionAccounts.requiresAccountChoice
           ? "Choose an account for this chat's connected tools in the composer first."
           : personalAttachment.requiresDecision

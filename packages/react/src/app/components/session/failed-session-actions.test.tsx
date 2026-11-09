@@ -1154,9 +1154,9 @@ test("a chat its owner's machine isn't allowed for offers Allow in place of Retr
   expect(onAllow).toHaveBeenCalledTimes(1);
   expect(buttons()[0]!.textContent).toBe("Allowing…");
   expect(buttons()[0]!.disabled).toBe(true);
-  await act(async () => resolveAllow("This chat has ended. Start a new chat."));
+  await act(async () => resolveAllow("This chat has ended. Start a new chat to use a repository."));
   expect(owner.querySelector('[role="alert"]')!.textContent).toBe(
-    "This chat has ended. Start a new chat.",
+    "This chat has ended. Start a new chat to use a repository.",
   );
   expect(buttons()[0]!.textContent).toBe("Allow for this chat");
 });
