@@ -706,6 +706,12 @@ export function accountIdentityVerifierFor(mcpUrl: string): AccountIdentityVerif
 export const OIDC_IDENTITY_KEYS: readonly string[] = ["oidcSubject"];
 
 export const GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo";
+/** Google's published ID-token signing keys, and the issuers its ID tokens name. */
+export const GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs";
+export const GOOGLE_ID_TOKEN_ISSUERS: string[] = [
+  "https://accounts.google.com",
+  "accounts.google.com",
+];
 const GOOGLE_SUBJECT_MCP_URLS: ReadonlySet<string> = new Set([
   OFFICIAL_GMAIL_MCP_URL,
   OFFICIAL_DRIVE_MCP_URL,
@@ -717,9 +723,9 @@ export function stableAccountSubjectKeyFor(mcpUrl: string): string | undefined {
   return GOOGLE_SUBJECT_MCP_URLS.has(mcpUrl) ? GOOGLE_SUBJECT_KEY : undefined;
 }
 
-/** The account ID from a tokeninfo answer, only for a token issued to our own
- * client; anything else proves nothing and throws. */
-export function googleSubjectFromTokenInfo(
+/** The account ID from verified ID-token claims or a tokeninfo answer, only for
+ * a token issued to our own client; anything else proves nothing and throws. */
+export function googleSubjectFromClaims(
   payload: Record<string, unknown>,
   clientId: string,
 ): string {

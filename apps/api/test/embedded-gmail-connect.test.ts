@@ -205,7 +205,15 @@ test.each([
             ...(hasRefreshToken ? { refresh_token: "synthetic-refresh" } : {}),
             token_type: "Bearer",
             expires_in: 3600,
-            ...(reportedScopes !== undefined ? { scope: reportedScopes } : {}),
+            // Google lists the "openid" it was asked for among the scopes.
+            ...(reportedScopes !== undefined
+              ? {
+                  scope:
+                    typeof reportedScopes === "string" && reportedScopes
+                      ? `openid ${reportedScopes}`
+                      : reportedScopes,
+                }
+              : {}),
           });
         }
         throw new Error(`Unexpected synthetic OAuth destination: ${url}`);
@@ -554,16 +562,19 @@ test.each([
         credentialsCommitted: false,
         error: { code: "account_mismatch" },
       });
-      // A failed account-ID read matches by email and keeps the recorded ID.
+      // A failed account-ID read proves nothing: the login keeps its account
+      // and asks for another try instead of trusting the email alone.
       googleAccountId = "google-account-1001";
       tokenInfoAvailable = false;
+      const beforeUnread = await savedLogin();
       const unread = await begin("gmail", completed.account.id);
       await callback(unread.state);
-      expect(await read(unread.attempt.id)).toMatchObject({ state: "complete" });
-      expect((await savedLogin())?.metadata).toMatchObject({
-        gmailEmail: "renamed@example.test",
-        googleSubject: "google-account-1001",
+      expect(await read(unread.attempt.id)).toMatchObject({
+        state: "failed",
+        credentialsCommitted: false,
+        error: { code: "account_identity_unavailable" },
       });
+      expect(await savedLogin()).toEqual(beforeUnread);
       tokenInfoAvailable = true;
       // A login saved before the account ID was recorded adopts it when its
       // email matches; one whose email has changed since can't be told apart
@@ -587,6 +598,15 @@ test.each([
         gmailEmail: "mailbox@example.test",
         googleSubject: "google-account-1001",
       });
+      // Connecting the same account again reuses its login: the "openid"
+      // Google now reports is not access, so the saved grant still covers it.
+      const again = await begin();
+      await callback(again.state);
+      expect(await read(again.attempt.id)).toMatchObject({
+        state: "complete",
+        account: { id: completed.account.id },
+      });
+      expect((await savedLogin())?.grantedScopes).not.toContain("openid");
 
       // Incremental consent. A plain reconnect keeps exactly what the account
       // holds; here Google grants only read access this time.

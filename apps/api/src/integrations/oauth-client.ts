@@ -91,8 +91,10 @@ import {
   accountIdentityKeysFor,
   accountIdentityVerifierFor,
   accountMcpUrlGroup,
+  GOOGLE_JWKS_URL,
+  GOOGLE_ID_TOKEN_ISSUERS,
   GOOGLE_TOKENINFO_URL,
-  googleSubjectFromTokenInfo,
+  googleSubjectFromClaims,
   stableAccountSubjectKeyFor,
   assertAuthorizationServerNotReserved,
   assertAuthorizationServerPins,
@@ -1103,7 +1105,12 @@ async function completeMcpOAuthCallbackWithinDeadline(
         new Error("Google did not grant offline access. Start a new connector connection attempt."),
       );
     }
-    const scopes = grantedScopes(token.scopeText, state.authorizeScopes, profile);
+    // "openid" is asked for only so Google names the account (see
+    // stableAccountSubjectKeyFor); it is not access, so it never counts as a
+    // grant: logins saved before it was asked for still cover a new sign-in.
+    const scopes = grantedScopes(token.scopeText, state.authorizeScopes, profile).filter(
+      (scope) => !(scope === "openid" && stableAccountSubjectKeyFor(state.mcpUrl)),
+    );
     if (
       profile?.fullRequestedScopesRequired &&
       profile.requestedScopes?.some((scope) => !scopes.includes(scope))
@@ -1250,17 +1257,6 @@ async function completeMcpOAuthCallbackWithinDeadline(
       // A repeated Add is a successful no-op. Do not rotate credentials, reset
       // approvals or invalidate accepted work just because OAuth ran again.
       if (decision.kind === "reuse") return decision.connection;
-      // A reconnect whose account-ID read failed this time matched by email;
-      // it keeps the ID the login already had rather than dropping it.
-      const subjectKey = stableAccountSubjectKeyFor(state.mcpUrl);
-      const keptSubject =
-        subjectKey && state.connectionId && !stableAccount[subjectKey]
-          ? accounts.get(state.connectionId)?.metadata[subjectKey]
-          : undefined;
-      const savedMetadata =
-        subjectKey && typeof keptSubject === "string" && keptSubject
-          ? { ...metadata, [subjectKey]: keptSubject }
-          : metadata;
       return state!.connectionId
         ? await updateConnection(scopedDb, {
             workspaceId: state.workspaceId,
@@ -1274,7 +1270,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
             credentialEncrypted,
             grantedScopes: scopes,
             expiresAt: token.expiresAt,
-            metadata: savedMetadata,
+            metadata,
             updatedBySubjectId: state.subjectId,
           })
         : await createConnection(scopedDb, {
@@ -3117,15 +3113,17 @@ function mcpToolResultObject(result: {
 
 /**
  * The stable account ID of a sign-in whose account was just verified, for the
- * services that have one (see stableAccountSubjectKeyFor). A bounded read with
- * the new token; any failure leaves it unknown, and the verified email still
- * identifies the account as it did before. Exported for tests.
+ * services that have one (see stableAccountSubjectKeyFor): from the ID token
+ * Google returns for "openid", verified with Google's published keys, else
+ * from Google's token info for the new access token. Either is accepted only
+ * for our own client. Bounded; any failure leaves it unknown, and the verified
+ * email still identifies the account as it did before. Exported for tests.
  */
 export async function stableAccountIdentity(
   observability: Observability | undefined,
   settings: Settings,
   state: Pick<OAuthStatePayload, "mcpUrl">,
-  token: Pick<TokenResponse, "accessToken">,
+  token: Pick<TokenResponse, "accessToken" | "raw">,
   clientId: string,
   deadline: Pick<OAuthCallbackDeadline, "signal" | "remainingMs">,
 ): Promise<Record<string, string>> {
@@ -3133,28 +3131,49 @@ export async function stableAccountIdentity(
   const budgetMs = Math.min(IDENTITY_MAX_MS, deadline.remainingMs() - IDENTITY_RESERVE_MS);
   if (!subjectKey || budgetMs <= 0) return {};
   const signal = AbortSignal.any([deadline.signal, AbortSignal.timeout(budgetMs)]);
-  try {
-    // POSTed so the token never appears in a URL.
-    const response = await fetchOAuth(GOOGLE_TOKENINFO_URL, settings, {
-      method: "POST",
-      signal,
-      headers: {
-        accept: "application/json",
-        "content-type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({ access_token: token.accessToken }).toString(),
-    });
+  const readJson = async (url: string, init: RequestInit, label: string) => {
+    const response = await fetchOAuth(url, settings, { ...init, signal });
     if (!response.ok) {
       await cancelResponseBody(response);
-      throw new Error(`Google token info returned HTTP ${response.status}`);
+      throw new Error(`${label} returned HTTP ${response.status}`);
     }
     const payload = await readResponseJsonBounded<Record<string, unknown>>(
       response,
       OAUTH_MAX_RESPONSE_BYTES,
-      "Google token info",
+      label,
       { signal },
     );
-    return { [subjectKey]: googleSubjectFromTokenInfo(isRecord(payload) ? payload : {}, clientId) };
+    return isRecord(payload) ? payload : {};
+  };
+  const idToken = token.raw.id_token;
+  try {
+    if (typeof idToken === "string" && idToken) {
+      const jwks = await readJson(
+        GOOGLE_JWKS_URL,
+        { method: "GET", headers: { accept: "application/json" } },
+        "Google signing keys",
+      );
+      const { payload } = await jwtVerify(idToken, createLocalJWKSet(jwks as JSONWebKeySet), {
+        issuer: GOOGLE_ID_TOKEN_ISSUERS,
+        audience: clientId,
+        algorithms: ID_TOKEN_ALGORITHMS,
+      });
+      return { [subjectKey]: googleSubjectFromClaims(payload, clientId) };
+    }
+    // POSTed so the token never appears in a URL.
+    const info = await readJson(
+      GOOGLE_TOKENINFO_URL,
+      {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ access_token: token.accessToken }).toString(),
+      },
+      "Google token info",
+    );
+    return { [subjectKey]: googleSubjectFromClaims(info, clientId) };
   } catch (error) {
     observability?.warn("MCP OAuth stable account identity stayed unknown", {
       reason: identityFailureReason(error),

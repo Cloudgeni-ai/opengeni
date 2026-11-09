@@ -127,6 +127,15 @@ export function decideOAuthAccountConnection(input: {
     const expected = verifiedIdentity(requested.metadata, input.identityKeys);
     // A failed identity read is not evidence of a different account.
     if (expected && !identity) return { kind: "reject", reason: "account_identity_unavailable" };
+    // Nor is a failed account-ID read: once a login has its account ID, its
+    // email alone can't prove the sign-in is that account (an address can move
+    // to another account), so reconnecting it waits for a read that works.
+    if (
+      input.subjectKey &&
+      text(requested.metadata[input.subjectKey]) &&
+      !text(input.metadata[input.subjectKey])
+    )
+      return { kind: "reject", reason: "account_identity_unavailable" };
     if (expected && (!sameIssuer(requested) || !sameAccountAs(requested))) {
       return { kind: "reject", reason: "account_mismatch" };
     }

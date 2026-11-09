@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import * as network from "@opengeni/network";
 import { testSettings } from "@opengeni/testing/settings";
 import type { ConnectionMetadata } from "@opengeni/contracts";
@@ -8,7 +9,7 @@ import {
   OFFICIAL_DRIVE_MCP_URL,
   OFFICIAL_GMAIL_MCP_URL,
   OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
-  googleSubjectFromTokenInfo,
+  googleSubjectFromClaims,
   stableAccountSubjectKeyFor,
 } from "../src/integrations/oauth-profiles";
 
@@ -86,12 +87,20 @@ describe("Google logins are identified by Google's account ID", () => {
     );
   });
 
-  test("without the account ID this time, the email decides as before", () => {
+  test("a login with its account ID isn't reconnected on email alone", () => {
     const stored = login({ gmailEmail: "person@new.test", googleSubject: "1001" });
     expect(decide({ stored, signedIn: { gmailEmail: "person@new.test" } })).toEqual({
-      kind: "write",
+      kind: "reject",
+      reason: "account_identity_unavailable",
     });
-    expect(decide({ stored, signedIn: { gmailEmail: "person@other.test" } })).toEqual(mismatch);
+    // Adding finds it by email as before (nothing is written on reuse).
+    const active = login(
+      { gmailEmail: "person@new.test", googleSubject: "1001" },
+      { status: "active" },
+    );
+    expect(
+      decide({ stored: active, signedIn: { gmailEmail: "person@new.test" }, reconnect: false }),
+    ).toEqual({ kind: "reuse", connection: active });
   });
 
   test("adding the renamed account again points at its existing login", () => {
@@ -141,15 +150,15 @@ describe("Google logins are identified by Google's account ID", () => {
 
 describe("reading Google's account ID", () => {
   test("only a token issued to our own client counts", () => {
-    expect(googleSubjectFromTokenInfo({ sub: "1001", aud: "client" }, "client")).toBe("1001");
-    expect(googleSubjectFromTokenInfo({ sub: "1001", azp: "client" }, "client")).toBe("1001");
+    expect(googleSubjectFromClaims({ sub: "1001", aud: "client" }, "client")).toBe("1001");
+    expect(googleSubjectFromClaims({ sub: "1001", azp: "client" }, "client")).toBe("1001");
     for (const payload of [
       { sub: "1001", aud: "another-client" },
       { sub: "", aud: "client" },
       { aud: "client" },
       { sub: "x".repeat(256), aud: "client" },
     ])
-      expect(() => googleSubjectFromTokenInfo(payload, "client")).toThrow(
+      expect(() => googleSubjectFromClaims(payload, "client")).toThrow(
         "Google account verification failed",
       );
   });
@@ -158,13 +167,52 @@ describe("reading Google's account ID", () => {
 describe("the callback's account ID read", () => {
   const settings = testSettings({});
   const deadline = { signal: new AbortController().signal, remainingMs: () => 30_000 };
-  const token = { accessToken: "new-access" };
+  const token = { accessToken: "new-access", raw: {} as Record<string, unknown> };
   let spy: ReturnType<typeof spyOn> | undefined;
   afterEach(() => spy?.mockRestore());
-  const read = (mcpUrl: string) =>
-    stableAccountIdentity(undefined, settings, { mcpUrl }, token, "client", deadline);
+  const read = (mcpUrl: string, raw: Record<string, unknown> = {}) =>
+    stableAccountIdentity(undefined, settings, { mcpUrl }, { ...token, raw }, "client", deadline);
 
-  test("reads the account ID with the token in the body, never the URL", async () => {
+  test("reads the account ID from Google's signed ID token", async () => {
+    const { privateKey, publicKey } = await generateKeyPair("RS256");
+    const jwk = { ...(await exportJWK(publicKey)), kid: "k1", alg: "RS256", use: "sig" };
+    const idToken = (claims: Record<string, unknown>, issuer = "https://accounts.google.com") =>
+      new SignJWT(claims)
+        .setProtectedHeader({ alg: "RS256", kid: "k1" })
+        .setIssuer(issuer)
+        .setIssuedAt()
+        .setExpirationTime("5m")
+        .sign(privateKey);
+    const seen: string[] = [];
+    spy = spyOn(network, "pinnedFetch").mockImplementation(async (input) => {
+      seen.push(String(input));
+      if (String(input) === "https://www.googleapis.com/oauth2/v3/certs")
+        return Response.json({ keys: [jwk] });
+      throw new Error(`Unexpected destination: ${String(input)}`);
+    });
+    for (const issuer of ["https://accounts.google.com", "accounts.google.com"])
+      expect(
+        await read(OFFICIAL_GMAIL_MCP_URL, {
+          id_token: await idToken({ sub: "1001", aud: "client" }, issuer),
+        }),
+      ).toEqual({ googleSubject: "1001" });
+    // Another client's token, another issuer, or a forged signature prove nothing.
+    for (const raw of [
+      { id_token: await idToken({ sub: "1001", aud: "another-client" }) },
+      { id_token: await idToken({ sub: "1001", aud: "client" }, "https://issuer.test") },
+      {
+        id_token: await new SignJWT({ sub: "1001", aud: "client" })
+          .setProtectedHeader({ alg: "RS256", kid: "k1" })
+          .setIssuer("https://accounts.google.com")
+          .setExpirationTime("5m")
+          .sign((await generateKeyPair("RS256")).privateKey),
+      },
+    ])
+      expect(await read(OFFICIAL_GMAIL_MCP_URL, raw)).toEqual({});
+    expect(seen.every((url) => url === "https://www.googleapis.com/oauth2/v3/certs")).toBe(true);
+  });
+
+  test("without an ID token, reads token info with the token in the body, never the URL", async () => {
     const seen: string[] = [];
     spy = spyOn(network, "pinnedFetch").mockImplementation(async (input, init) => {
       seen.push(String(input));
