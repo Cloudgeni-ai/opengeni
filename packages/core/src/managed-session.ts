@@ -212,7 +212,8 @@ export async function getNativeAppManagedSession(
 /**
  * Does the request carry a sign-in cookie: the managed session's own cookie
  * or a browser login session set? Only says what was sent, never whether it
- * is still valid.
+ * is still valid. It only explains a refusal, so it never throws: without a
+ * readable cookie name it answers from the session-set cookie alone.
  */
 export async function requestCarriesManagedSignInCookie(
   request: Request,
@@ -220,8 +221,10 @@ export async function requestCarriesManagedSignInCookie(
 ): Promise<boolean> {
   if (requestCookie(request, MANAGED_AUTH_SESSION_SET_COOKIE) !== null) return true;
   if (!auth) return false;
-  const context = await auth.$context;
-  return requestCookie(request, context.authCookies.sessionToken.name) !== null;
+  const name = await Promise.resolve(auth.$context)
+    .then((context) => context?.authCookies?.sessionToken?.name)
+    .catch(() => undefined);
+  return typeof name === "string" && requestCookie(request, name) !== null;
 }
 
 export function assertManagedUserAdmission(
