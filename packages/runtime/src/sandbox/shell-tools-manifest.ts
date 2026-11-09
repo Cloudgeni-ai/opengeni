@@ -1,24 +1,32 @@
 /**
- * The exact ripgrep and jq release binaries Opengeni ships with its own runtime
- * tools, so the agent's shell has `rg` and `jq` on every placement even when
- * the image or machine lacks them. They are appended to the end of PATH, so a
+ * The exact ripgrep and jq binaries Opengeni ships with its own runtime tools,
+ * so the agent's shell has `rg` and `jq` on every placement even when the
+ * image or machine lacks them. They are appended to the end of PATH, so a
  * system `rg` or `jq` always wins.
  *
- * Every entry is an official upstream release asset. `sha256` pins the
+ * Most entries are official upstream release assets. `sha256` pins the
  * downloaded asset and `binarySha256` the executable inside it (the same value
  * for jq, which publishes bare executables). They were checked against the
  * publishers' own checksum files (ripgrep's `<asset>.sha256`, jq's
  * `sha256sum.txt`) and GitHub's asset digests.
  *
+ * The Linux jq is the exception: jq's Linux release executables statically
+ * link glibc, so Opengeni ships static musl builds of the same jq release
+ * instead. `scripts/build-static-jq.sh` builds them reproducibly from the
+ * checksum-pinned jq source and zig toolchain, and they are committed under
+ * `agent/vendor/jq/`, so no consumer builds or downloads them.
+ *
  * Consumers: the machine agent's release builds (`scripts/fetch-shell-tools.ts`
  * and `agent/crates/opengeni-agent/build.rs`), the managed sandbox delivery in
  * `shell-tools.ts`, and the image builds in `docker/`, whose `ADD --checksum`
- * pins `scripts/fetch-shell-tools.test.ts` keeps equal to this file.
+ * pins and vendored copies `scripts/fetch-shell-tools.test.ts` keeps equal to
+ * this file.
  */
 
 export type ShellToolName = "rg" | "jq";
 
-export type ShellToolAsset = {
+/** An official upstream release download. */
+export type ShellToolDownload = {
   /** Official release download. */
   url: string;
   /** SHA-256 of the downloaded asset. */
@@ -28,6 +36,16 @@ export type ShellToolAsset = {
   /** SHA-256 of the executable itself. */
   binarySha256: string;
 };
+
+/** An executable Opengeni builds reproducibly and commits to the repository. */
+export type ShellToolVendored = {
+  /** Repository-relative path of the committed executable. */
+  path: string;
+  /** SHA-256 of the executable. */
+  binarySha256: string;
+};
+
+export type ShellToolAsset = ShellToolDownload | ShellToolVendored;
 
 export type ShellToolsTarget =
   | "x86_64-unknown-linux-musl"
@@ -53,11 +71,19 @@ function ripgrep(target: string, archive: "tar.gz" | "zip", sha256: string, bina
     sha256,
     member: `${stem}/${executable}`,
     binarySha256,
-  } satisfies ShellToolAsset;
+  } satisfies ShellToolDownload;
 }
 
 function jq(asset: string, sha256: string) {
-  return { url: `${JQ}/${asset}`, sha256, binarySha256: sha256 } satisfies ShellToolAsset;
+  return { url: `${JQ}/${asset}`, sha256, binarySha256: sha256 } satisfies ShellToolDownload;
+}
+
+/** A static musl jq from `scripts/build-static-jq.sh`. */
+function jqMusl(arch: "x86_64" | "aarch64", binarySha256: string) {
+  return {
+    path: `agent/vendor/jq/jq-${SHELL_TOOLS_VERSIONS.jq.version}-${arch}-linux-musl`,
+    binarySha256,
+  } satisfies ShellToolVendored;
 }
 
 export const SHELL_TOOLS_TARGETS: Record<
@@ -71,7 +97,7 @@ export const SHELL_TOOLS_TARGETS: Record<
       "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c",
       "e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849",
     ),
-    jq: jq("jq-linux-amd64", "b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f"),
+    jq: jqMusl("x86_64", "e63dbcb3b65f9ae42c5a124285f7817a66098c37d49f3357aa855eaa8d7df0a8"),
   },
   "aarch64-unknown-linux-musl": {
     rg: ripgrep(
@@ -80,7 +106,7 @@ export const SHELL_TOOLS_TARGETS: Record<
       "800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915",
       "c14cdb389f34e504d69e386cfc67d5c5d9a730a990de03ca6910b2a15e30386a",
     ),
-    jq: jq("jq-linux-arm64", "8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309"),
+    jq: jqMusl("aarch64", "c516228342afe07bab5dddcf39035ade7035e10cee5800d4180d5939eba4fb0d"),
   },
   "x86_64-apple-darwin": {
     rg: ripgrep(

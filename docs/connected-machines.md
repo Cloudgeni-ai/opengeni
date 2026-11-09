@@ -628,10 +628,11 @@ turn, and the next run discovers again.
 
 ### Bundled rg and jq
 
-Release agents embed official, SHA-256-pinned builds of ripgrep and jq for
-their own platform (Linux x86_64 and aarch64, macOS x86_64 and arm64, Windows
-x64 and arm64). At start the agent writes them to
-`/var/lib/opengeni/shell-tools/<generation>` when it runs as root on Linux
+Release agents embed SHA-256-pinned builds of ripgrep and jq for their own
+platform (Linux x86_64 and aarch64, macOS x86_64 and arm64, Windows x64 and
+arm64): the official release builds, except on Linux, where jq is a static musl
+build of the official jq source, so it runs on any Linux distribution. At start
+the agent writes them to `/var/lib/opengeni/shell-tools/<generation>` when it runs as root on Linux
 (so `run_as` users can use them), otherwise to `<config dir>/shell-tools/<generation>`,
 and appends that directory to the end of every command's PATH, including the
 PATH a request sets. A machine's own `rg` or `jq` therefore always wins.

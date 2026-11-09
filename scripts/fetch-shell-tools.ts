@@ -1,8 +1,9 @@
 /**
- * Fetches the pinned ripgrep and jq release builds and writes, for each
- * requested target, `<out>/<target>/rg[.exe]` and `jq[.exe]` plus one
- * `<out>/THIRD-PARTY-NOTICES.txt`. Every download and every extracted
- * executable is checked against `packages/runtime/src/sandbox/shell-tools-manifest.ts`.
+ * Fetches the pinned ripgrep and jq builds and writes, for each requested
+ * target, `<out>/<target>/rg[.exe]` and `jq[.exe]` plus one
+ * `<out>/THIRD-PARTY-NOTICES.txt`. Every download, every extracted executable
+ * and every executable committed to the repository (the Linux jq) is checked
+ * against `packages/runtime/src/sandbox/shell-tools-manifest.ts`.
  *
  *   bun scripts/fetch-shell-tools.ts --out <dir> (--all | --target <target>...) [--offline]
  *
@@ -20,15 +21,14 @@ import {
   SHELL_TOOLS_NOTICES_FILE,
   SHELL_TOOLS_TARGETS,
   shellToolFileName,
-  type ShellToolAsset,
+  type ShellToolDownload,
   type ShellToolName,
   type ShellToolsTarget,
+  type ShellToolVendored,
 } from "../packages/runtime/src/sandbox/shell-tools-manifest";
 
-const NOTICES = resolve(
-  import.meta.dir,
-  "../packages/runtime/src/sandbox/shell-tools-THIRD-PARTY-NOTICES.txt",
-);
+const REPOSITORY = resolve(import.meta.dir, "..");
+const NOTICES = join(REPOSITORY, "packages/runtime/src/sandbox/shell-tools-THIRD-PARTY-NOTICES.txt");
 
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -88,7 +88,7 @@ export function zipMember(zip: Uint8Array, name: string): Uint8Array | null {
 }
 
 /** The executable inside a downloaded asset, checked against its pin. */
-export function extractShellTool(asset: ShellToolAsset, bytes: Uint8Array): Uint8Array {
+export function extractShellTool(asset: ShellToolDownload, bytes: Uint8Array): Uint8Array {
   if (sha256(bytes) !== asset.sha256) {
     throw new Error(`${asset.url} does not match its pinned SHA-256`);
   }
@@ -109,7 +109,19 @@ function cacheDirectory(): string {
   return process.env.OPENGENI_SHELL_TOOLS_CACHE || join(homedir(), ".cache/opengeni/shell-tools");
 }
 
-async function assetBytes(asset: ShellToolAsset, offline: boolean): Promise<Uint8Array> {
+/** A committed executable, checked against its pin. Never downloaded. */
+export async function vendoredShellTool(
+  asset: ShellToolVendored,
+  repository = REPOSITORY,
+): Promise<Uint8Array> {
+  const executable = new Uint8Array(await readFile(join(repository, asset.path)));
+  if (sha256(executable) !== asset.binarySha256) {
+    throw new Error(`${asset.path} does not match its pinned SHA-256`);
+  }
+  return executable;
+}
+
+async function assetBytes(asset: ShellToolDownload, offline: boolean): Promise<Uint8Array> {
   const cached = join(cacheDirectory(), asset.sha256);
   if (existsSync(cached)) {
     const bytes = new Uint8Array(await readFile(cached));
@@ -151,7 +163,10 @@ export async function fetchShellTools(input: {
     await mkdir(directory, { recursive: true });
     for (const tool of ["rg", "jq"] as const satisfies readonly ShellToolName[]) {
       const asset = SHELL_TOOLS_TARGETS[target][tool];
-      const executable = extractShellTool(asset, await assetBytes(asset, input.offline === true));
+      const executable =
+        "path" in asset
+          ? await vendoredShellTool(asset)
+          : extractShellTool(asset, await assetBytes(asset, input.offline === true));
       const path = join(directory, shellToolFileName(target, tool));
       await writeFile(path, executable);
       await chmod(path, 0o755);

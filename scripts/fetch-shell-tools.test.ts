@@ -3,17 +3,23 @@ import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { parse } from "yaml";
 import {
   MANAGED_SHELL_TOOLS_TARGETS,
   SHELL_TOOLS_TARGETS,
   SHELL_TOOLS_VERSIONS,
-  type ShellToolAsset,
+  type ShellToolDownload,
 } from "../packages/runtime/src/sandbox/shell-tools-manifest";
 import { buildManagedShellToolsBundle } from "../packages/runtime/src/sandbox/shell-tools";
-import { extractShellTool, fetchShellTools, tarMember, zipMember } from "./fetch-shell-tools";
+import {
+  extractShellTool,
+  fetchShellTools,
+  tarMember,
+  vendoredShellTool,
+  zipMember,
+} from "./fetch-shell-tools";
 
 const root = resolve(import.meta.dir, "..");
 const scratch = mkdtempSync(join(tmpdir(), "opengeni-fetch-shell-tools-"));
@@ -67,13 +73,58 @@ describe("pinned shell tools manifest", () => {
         "x86_64-unknown-linux-musl",
       ].sort(),
     );
-    for (const assets of Object.values(SHELL_TOOLS_TARGETS)) {
-      expect(assets.rg.url).toStartWith("https://github.com/BurntSushi/ripgrep/releases/download/");
-      expect(assets.jq.url).toStartWith("https://github.com/jqlang/jq/releases/download/");
+    for (const [target, assets] of Object.entries(SHELL_TOOLS_TARGETS)) {
+      expect("url" in assets.rg && assets.rg.url).toStartWith(
+        "https://github.com/BurntSushi/ripgrep/releases/download/",
+      );
+      // jq's Linux release executables statically link glibc; Linux gets the
+      // static musl builds committed by scripts/build-static-jq.sh instead.
+      if (target.endsWith("-linux-musl")) {
+        expect("path" in assets.jq && assets.jq.path).toStartWith("agent/vendor/jq/");
+      } else {
+        expect("url" in assets.jq && assets.jq.url).toStartWith(
+          "https://github.com/jqlang/jq/releases/download/",
+        );
+      }
       for (const asset of [assets.rg, assets.jq]) {
-        expect(asset.sha256).toMatch(/^[0-9a-f]{64}$/u);
+        if ("sha256" in asset) expect(asset.sha256).toMatch(/^[0-9a-f]{64}$/u);
         expect(asset.binarySha256).toMatch(/^[0-9a-f]{64}$/u);
       }
+    }
+  });
+
+  test("the committed Linux jq is the pinned static musl build of the pinned release", async () => {
+    const script = await readFile(join(root, "scripts/build-static-jq.sh"), "utf8");
+    expect(script).toContain(`JQ_VERSION=${SHELL_TOOLS_VERSIONS.jq.version}\n`);
+    // The source jq publishes, pinned as in jq's sha256sum.txt.
+    expect(script).toContain(
+      "JQ_SOURCE_SHA256=71b8d6e8f5fe81f6c6d0d110e3892251f6ce76ed095abd315e26e6e1193af3af",
+    );
+    const machines = { x86_64: 62, aarch64: 183 } as const;
+    for (const [arch, target] of Object.entries(MANAGED_SHELL_TOOLS_TARGETS)) {
+      const asset = SHELL_TOOLS_TARGETS[target].jq;
+      if (!("path" in asset)) throw new Error(`${target} jq is not the committed build`);
+      // The file name scripts/build-static-jq.sh writes.
+      expect(asset.path).toBe(
+        `agent/vendor/jq/jq-${SHELL_TOOLS_VERSIONS.jq.version}-${arch}-linux-musl`,
+      );
+      const bytes = await vendoredShellTool(asset);
+      const elf = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      expect(elf.getUint32(0, false)).toBe(0x7f454c46);
+      expect(elf.getUint16(16, true)).toBe(2); // ET_EXEC: not position-independent, not a library
+      expect(elf.getUint16(18, true)).toBe(machines[arch as keyof typeof machines]);
+      // Static: no program interpreter and no dynamic section.
+      const programHeaders = Number(elf.getBigUint64(32, true));
+      const entrySize = elf.getUint16(54, true);
+      const types = Array.from({ length: elf.getUint16(56, true) }, (_, index) =>
+        elf.getUint32(programHeaders + index * entrySize, true),
+      );
+      expect(types.length).toBeGreaterThan(0);
+      expect(types).not.toContain(2); // PT_DYNAMIC
+      expect(types).not.toContain(3); // PT_INTERP
+      const text = new TextDecoder("latin1").decode(bytes);
+      expect(text).not.toContain("GLIBC");
+      expect(text).toContain("--with-oniguruma=builtin");
     }
   });
 
@@ -82,7 +133,15 @@ describe("pinned shell tools manifest", () => {
       SHELL_TOOLS_TARGETS[target].rg,
       SHELL_TOOLS_TARGETS[target].jq,
     ]);
-    const expected = linux.map((asset) => `${asset.sha256} ${asset.url}`).sort();
+    const expected = linux
+      .flatMap((asset) => ("url" in asset ? [`${asset.sha256} ${asset.url}`] : []))
+      .sort();
+    const vendored = [
+      ...new Set(
+        linux.flatMap((asset) => ("path" in asset ? [`${dirname(asset.path)}/`] : [])),
+      ),
+    ];
+    expect(vendored).toEqual(["agent/vendor/jq/"]);
     for (const path of [
       "docker/opengeni.Dockerfile",
       "docker/sandbox.Dockerfile",
@@ -101,6 +160,14 @@ describe("pinned shell tools manifest", () => {
         .sort();
       expect({ path, pins }).toEqual({ path, pins: expected });
       expect(source).toContain("bun scripts/fetch-shell-tools.ts --offline");
+      // The committed executables reach the fetch: a minimal fetch stage
+      // copies them beside the script, the worker build has the whole tree.
+      for (const directory of vendored) {
+        expect(
+          source.includes(`COPY ${directory} ${directory}`) ||
+            source.includes("COPY --chown=bun:bun . ."),
+        ).toBe(true);
+      }
     }
   });
 
@@ -170,7 +237,7 @@ describe("fetch-shell-tools", () => {
 
   test("extracts and verifies a tar.gz member, a zip member and a bare executable", () => {
     const bundle = buildManagedShellToolsBundle({ rg, jq, notices: new Uint8Array() });
-    const tarGz: ShellToolAsset = {
+    const tarGz: ShellToolDownload = {
       url: "https://example.invalid/x.tar.gz",
       sha256: bundle.sha256,
       member: "rg",
@@ -179,7 +246,7 @@ describe("fetch-shell-tools", () => {
     expect(extractShellTool(tarGz, bundle.bytes)).toEqual(rg);
 
     const zip = storedZip("ripgrep/rg.exe", rg);
-    const zipAsset: ShellToolAsset = {
+    const zipAsset: ShellToolDownload = {
       url: "https://example.invalid/x.zip",
       sha256: sha256(zip),
       member: "ripgrep/rg.exe",
@@ -188,7 +255,7 @@ describe("fetch-shell-tools", () => {
     expect(extractShellTool(zipAsset, zip)).toEqual(rg);
     expect(zipMember(zip, "other")).toBeNull();
 
-    const bare: ShellToolAsset = {
+    const bare: ShellToolDownload = {
       url: "https://example.invalid/jq",
       sha256: sha256(jq),
       binarySha256: sha256(jq),
@@ -197,14 +264,14 @@ describe("fetch-shell-tools", () => {
   });
 
   test("rejects a changed download and a changed executable", () => {
-    const bare: ShellToolAsset = {
+    const bare: ShellToolDownload = {
       url: "https://example.invalid/jq",
       sha256: sha256(jq),
       binarySha256: sha256(jq),
     };
     expect(() => extractShellTool(bare, rg)).toThrow("does not match its pinned SHA-256");
     const bundle = buildManagedShellToolsBundle({ rg, jq, notices: new Uint8Array() });
-    const wrongMember: ShellToolAsset = {
+    const wrongMember: ShellToolDownload = {
       url: "https://example.invalid/x.tar.gz",
       sha256: bundle.sha256,
       member: "jq",
@@ -214,6 +281,18 @@ describe("fetch-shell-tools", () => {
       "does not match its pinned SHA-256",
     );
     expect(tarMember(new Uint8Array(Bun.gunzipSync(bundle.bytes)), "missing")).toBeNull();
+  });
+
+  test("rejects a changed committed executable", async () => {
+    const repository = join(scratch, "repository");
+    await mkdir(join(repository, "vendor"), { recursive: true });
+    await writeFile(join(repository, "vendor/jq"), jq);
+    const asset = { path: "vendor/jq", binarySha256: sha256(jq) };
+    expect(await vendoredShellTool(asset, repository)).toEqual(jq);
+    await writeFile(join(repository, "vendor/jq"), rg);
+    await expect(vendoredShellTool(asset, repository)).rejects.toThrow(
+      "vendor/jq does not match its pinned SHA-256",
+    );
   });
 
   test("offline mode never downloads", async () => {
@@ -236,6 +315,7 @@ describe("fetch-shell-tools", () => {
   test("a corrupted cache entry is not used offline", async () => {
     const cache = join(scratch, "bad-cache");
     const asset = SHELL_TOOLS_TARGETS["x86_64-unknown-linux-musl"].rg;
+    if (!("sha256" in asset)) throw new Error("rg is an official download");
     await mkdir(cache, { recursive: true });
     await writeFile(join(cache, asset.sha256), gzipSync(new Uint8Array(16)));
     const previous = process.env.OPENGENI_SHELL_TOOLS_CACHE;
