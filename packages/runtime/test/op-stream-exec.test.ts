@@ -532,6 +532,18 @@ describe("op-stream exec (fake runner)", () => {
       session.execCommand({ cmd: "live", yieldTimeMs: 0 }),
     );
     expect((await reader.readExisting("read_live:0", 5, async () => {})).status).toBe("running");
+    // A yielded consumer stops following: its generation's last word to the
+    // runner is a detach, so nothing keeps streaming to an unsubscribed
+    // subject over the machine's shared bulk connection. Older runners read
+    // the accompanying full credit range and keep draining as before.
+    const liveAcks = transport.decodedAcks().filter((ack) => ack.opId === "read_live:0");
+    const detaches = liveAcks.filter((ack) => ack.detach);
+    expect(detaches.length).toBeGreaterThan(0);
+    expect(liveAcks.at(-1)?.detach).toBe(true);
+    expect(detaches.every((ack) => ack.creditBytes === "18446744073709551615")).toBe(true);
+    expect(
+      liveAcks.filter((ack) => !ack.detach).every((ack) => BigInt(ack.creditBytes) < 2n ** 32n),
+    ).toBe(true);
     expect(runner.runs.get("read_live:0")!.exit.cancelled).toBe(false);
     expect(calls).not.toContain("opStart");
     expect(calls).not.toContain("opCancel");
