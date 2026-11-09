@@ -18,7 +18,7 @@ const {
   reconcileSubscriptionCoreCapacityWait,
   withSessionRlsActorContext,
   withRlsContext,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
 } = await import("../src");
 import { rawRows } from "../src/database";
@@ -380,48 +380,40 @@ describe.skipIf(!realDb)("SUB-WAIT-01/02 candidate-provider waiter persistence",
     expect((await peekSessionWork(client.db, f.workspaceId, f.sessionId)).kind).toBe("runnable");
   }, 180_000);
 
-  test("workspace Pause keeps the waiter and defers delivery; workspace Resume reconstructs the wait", async () => {
+  test("workspace Pause releases the waiting turn; capacity no longer wakes it and workspace Resume runs it", async () => {
     const f = await fixture([]);
-    await withWorkspaceRls(client.db, f.workspaceId, (db) =>
-      db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
-          accountId: f.accountId,
-          workspaceId: f.workspaceId,
-          actor: { type: "human", subjectId: f.subjectId },
-          operationKey: crypto.randomUUID(),
-          action: "pause",
-        }),
-      ),
-    );
+    const workspaceControl = async (action: "pause" | "resume") =>
+      await withWorkspaceSessionActivityRls(client.db, f.workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
+            accountId: f.accountId,
+            workspaceId: f.workspaceId,
+            actor: { type: "human", subjectId: f.subjectId },
+            operationKey: crypto.randomUUID(),
+            action,
+          }),
+        ),
+      );
+    await workspaceControl("pause");
+    // Exactly like a session Pause: no waiter is left, and the same turn parks
+    // recovering on an idle chat.
+    expect(await waiterCount(f)).toBe(0);
+    expect(await turnState(f)).toEqual({
+      session_status: "idle",
+      active_turn_id: f.turnId,
+      turn_status: "recovering",
+    });
     await shared.admin`update session_workflow_wake_outbox set delivered_revision = wake_revision
       where session_id=${f.sessionId}::uuid`;
-    let baseline = await deliveries(f);
-    const revision = (await state(f)).wake_revision;
+    const baseline = await deliveries(f);
     await wake(f, "codex");
     expect(await deliveries(f)).toEqual(baseline);
-    expect((await state(f)).wake_revision).toBe(revision + 1);
-    expect(await turnState(f)).toMatchObject({ turn_status: "waiting_capacity" });
+    expect((await peekSessionWork(client.db, f.workspaceId, f.sessionId)).kind).toBe("idle");
 
-    // Workspace Resume reconstructs the deferred wait like session Resume.
-    await shared.admin`update session_workflow_wake_outbox set delivered_revision = wake_revision
-      where session_id=${f.sessionId}::uuid`;
-    baseline = await deliveries(f);
-    await withWorkspaceRls(client.db, f.workspaceId, (db) =>
-      db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
-          accountId: f.accountId,
-          workspaceId: f.workspaceId,
-          actor: { type: "human", subjectId: f.subjectId },
-          operationKey: crypto.randomUUID(),
-          action: "resume",
-        }),
-      ),
-    );
+    // Workspace Resume commits its own wake, and the run it starts claims the same turn.
+    await workspaceControl("resume");
     expect((await deliveries(f)).generic).toBe(baseline.generic + 1);
-    expect(await peekSessionWork(client.db, f.workspaceId, f.sessionId)).toMatchObject({
-      kind: "capacity-wait",
-      ref: { waiterId: f.armed.waiter.waiterId, wakeRevision: revision + 1 },
-    });
+    expect((await peekSessionWork(client.db, f.workspaceId, f.sessionId)).kind).toBe("runnable");
   }, 180_000);
 
   test("a Steer that auto-resumes a paused branch wakes the descendants its Pause released", async () => {

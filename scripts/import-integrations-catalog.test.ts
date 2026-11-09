@@ -411,7 +411,7 @@ describe("integrations.sh catalog import normalization", () => {
       credentialFacts: [],
       tier: "verified",
       provenance: "official:mcp-registry:com.mobbin/mobbin@1.0.1",
-      logoSourceUrl: null,
+      logoSourceUrl: "https://integrations.sh/logo/mobbin.com",
       homepageUrl: "https://mobbin.com/mcp",
       installUrl: "https://docs.mobbin.com/mcp/clients/overview",
       documentationUrl: "https://docs.mobbin.com/mcp/introduction",
@@ -442,8 +442,8 @@ describe("integrations.sh catalog import normalization", () => {
       installUrl: "https://docs.mobbin.com/mcp/clients/overview",
       logoAssetPath: null,
       metadata: {
-        logoSource: "generic_monogram",
-        originalLogoUrl: null,
+        logoSource: "integrations.sh",
+        originalLogoUrl: "https://integrations.sh/logo/mobbin.com",
         documentationUrl: "https://docs.mobbin.com/mcp/introduction",
         officialMcpRegistry: {
           name: "com.mobbin/mobbin",

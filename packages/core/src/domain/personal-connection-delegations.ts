@@ -43,6 +43,7 @@ import { personalGitHubRepositoryResources } from "./resources";
 import { connectAutoConnectLoginsForTurn } from "./mcp-auto-connect";
 import { ConnectionAccountSelectionError } from "./connection-account-selection-error";
 export { ConnectionAccountSelectionError } from "./connection-account-selection-error";
+import type { ConnectionAccountReads } from "./connection-account-reads";
 import {
   mcpAccountBindingsFromVisibleConnections,
   personalDelegationsForAccountBindings,
@@ -98,8 +99,15 @@ export type PersonalConnectionDelegationSource =
 async function ownerStillBelongsToWorkspace(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string },
+  reads?: ConnectionAccountReads,
 ): Promise<boolean> {
-  return await namedSubjectHasLiveWorkspaceAuthority(db, input);
+  return reads
+    ? await reads.ownerHasLiveWorkspaceAuthority(ownerOf(input))
+    : await namedSubjectHasLiveWorkspaceAuthority(db, input);
+}
+
+function ownerOf(input: { accountId: string; workspaceId: string; subjectId: string }) {
+  return { accountId: input.accountId, workspaceId: input.workspaceId, subjectId: input.subjectId };
 }
 export type AuthorizedSocialConnection = { connection: SocialConnection; subjectId: string | null };
 
@@ -219,11 +227,20 @@ export type PersonalWorkspaceOriginConnections = {
 export async function personalWorkspaceOwnerOriginConnections(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string },
+  /** One resolution's shared reads (see `ConnectionAccountReads`). */
+  reads?: ConnectionAccountReads,
 ): Promise<PersonalWorkspaceOriginConnections[]> {
   // Shared workspaces stop here, before any membership or connection read.
-  if (!(await isSubjectOwnPersonalWorkspace(db, input))) return [];
+  const personalWorkspace = reads
+    ? await reads.isOwnPersonalWorkspace(ownerOf(input))
+    : await isSubjectOwnPersonalWorkspace(db, input);
+  if (!personalWorkspace) return [];
   const byOrigin = new Map<string, ConnectionMetadata[]>();
-  for (const connection of await listOwnConnectionMetadata(db, { ...input, reach: "anywhere" })) {
+  for (const connection of await listOwnConnectionMetadata(db, {
+    ...input,
+    reach: "anywhere",
+    ...(reads ? { reads } : {}),
+  })) {
     if (
       connection.workspaceId === input.workspaceId ||
       connection.accountId !== input.accountId ||
@@ -240,11 +257,11 @@ export async function personalWorkspaceOwnerOriginConnections(
   // `db` may be one bounded transaction: these reads must not overlap.
   for (const originWorkspaceId of [...byOrigin.keys()].sort()) {
     if (
-      !(await ownerStillBelongsToWorkspace(db, {
-        accountId: input.accountId,
-        workspaceId: originWorkspaceId,
-        subjectId: input.subjectId,
-      }))
+      !(await ownerStillBelongsToWorkspace(
+        db,
+        { accountId: input.accountId, workspaceId: originWorkspaceId, subjectId: input.subjectId },
+        reads,
+      ))
     )
       continue;
     origins.push({ originWorkspaceId, connections: byOrigin.get(originWorkspaceId)! });
@@ -272,8 +289,11 @@ export async function listOwnConnectionMetadata(
     includeInactive?: boolean;
     /** Read only these owned accounts (a live target fence); omit for all. */
     connectionIds?: ReadonlySet<string>;
+    /** One resolution's shared reads (see `ConnectionAccountReads`). */
+    reads?: ConnectionAccountReads;
   },
 ): Promise<ConnectionMetadata[]> {
+  if (input.reads) return await listOwnConnectionMetadataFromReads(input.reads, input);
   const accounts = (await listOwnedConnectionAccounts(db, input)).filter(
     (account) => !input.connectionIds || input.connectionIds.has(account.connectionId),
   );
@@ -305,6 +325,65 @@ export async function listOwnConnectionMetadata(
       connections.push({
         ...connection,
         turnedOnHere,
+        turnedOnHereGrantId: turnedOn.get(account.connectionId) ?? null,
+      });
+  }
+  return connections;
+}
+
+/**
+ * `listOwnConnectionMetadata` from one resolution's shared reads: the same
+ * accounts, Personal-workspace check, turned-on logins and per-connection
+ * metadata, filtered and ordered the same way. Metadata is read by ids, one
+ * scope per origin workspace, in the order the accounts first name it.
+ */
+async function listOwnConnectionMetadataFromReads(
+  reads: ConnectionAccountReads,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    reach: "turned_on_here" | "anywhere";
+    includeInactive?: boolean;
+    connectionIds?: ReadonlySet<string>;
+  },
+): Promise<ConnectionMetadata[]> {
+  const own = await reads.ownConnectionAccounts(ownerOf(input));
+  const accounts = own.accounts.filter(
+    (account) => !input.connectionIds || input.connectionIds.has(account.connectionId),
+  );
+  if (accounts.length === 0) return [];
+  const { personalWorkspace, turnedOn } = own;
+  const turnedOnHere = (connectionId: string) => personalWorkspace || turnedOn.has(connectionId);
+  const used = accounts.filter(
+    (account) => input.reach !== "turned_on_here" || turnedOnHere(account.connectionId),
+  );
+  const idsByOrigin = new Map<string, string[]>();
+  for (const account of used) {
+    idsByOrigin.set(account.originWorkspaceId, [
+      ...(idsByOrigin.get(account.originWorkspaceId) ?? []),
+      account.connectionId,
+    ]);
+  }
+  const metadata = new Map<string, ConnectionMetadata | null>();
+  for (const [originWorkspaceId, connectionIds] of idsByOrigin) {
+    const read = await reads.connectionMetadata(originWorkspaceId, connectionIds, input.subjectId);
+    for (const [connectionId, connection] of read) {
+      metadata.set(`${originWorkspaceId}\u0000${connectionId}`, connection);
+    }
+  }
+  const connections: ConnectionMetadata[] = [];
+  for (const account of used) {
+    const connection = metadata.get(`${account.originWorkspaceId}\u0000${account.connectionId}`);
+    if (
+      connection?.accountId === input.accountId &&
+      connection.subjectId === input.subjectId &&
+      connection.authorityId != null &&
+      (input.includeInactive === true || connection.status === "active")
+    )
+      connections.push({
+        ...connection,
+        turnedOnHere: turnedOnHere(account.connectionId),
         turnedOnHereGrantId: turnedOn.get(account.connectionId) ?? null,
       });
   }
@@ -1054,6 +1133,7 @@ export async function freezeConnectionAccounts(
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               source: input.source,
+              ...(input.reads ? { reads: input.reads } : {}),
             }),
       ...(input.authoritySelections
         ? {
@@ -1097,20 +1177,27 @@ export async function visibleMcpAccountConnections(
     accountId: string;
     workspaceId: string;
     source: Exclude<PersonalConnectionDelegationSource, { kind: "turn" }>;
+    /** One resolution's shared reads (see `ConnectionAccountReads`). */
+    reads?: ConnectionAccountReads;
   },
 ): Promise<ConnectionMetadata[]> {
   const personal =
     input.source.kind === "subject" &&
-    (await ownerStillBelongsToWorkspace(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: input.source.subjectId,
-    }))
+    (await ownerStillBelongsToWorkspace(
+      db,
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.source.subjectId,
+      },
+      input.reads,
+    ))
       ? await listOwnConnectionMetadata(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId: input.source.subjectId,
           reach: "turned_on_here",
+          ...(input.reads ? { reads: input.reads } : {}),
         })
       : [];
   const workspace = await listConnectionsMetadata(db, input.workspaceId, null);
@@ -1205,6 +1292,11 @@ export async function freezePersonalConnectionDelegations(input: {
   authoritySelections?: McpConnectionAccountSelection[];
   /** Exact target for successor-mode projection (`session` never crosses it). */
   targetSessionId?: string;
+  /**
+   * One resolution's shared reads (see `ConnectionAccountReads`), when every
+   * read of this call runs on that resolution's transaction.
+   */
+  reads?: ConnectionAccountReads;
 }): Promise<McpPersonalConnectionDelegation[]> {
   const retiredSelections = (input.authoritySelections ?? []).filter(
     (selection) => selection.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
@@ -1275,11 +1367,15 @@ export async function freezePersonalConnectionDelegations(input: {
     });
   }
   const ownerSubjectId = input.source.subjectId;
-  const membership = await ownerStillBelongsToWorkspace(input.db, {
-    accountId: input.source.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: ownerSubjectId,
-  });
+  const membership = await ownerStillBelongsToWorkspace(
+    input.db,
+    {
+      accountId: input.source.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: ownerSubjectId,
+    },
+    input.reads,
+  );
   if (!membership) {
     if ((input.authoritySelections?.length ?? 0) > 0) {
       throw new ConnectionAccountSelectionError(
@@ -1304,6 +1400,7 @@ export async function freezePersonalConnectionDelegations(input: {
           // Personal GitHub keeps its own per-chat repository choice; MCP
           // logins below are bound only where they are turned on (D-54).
           reach: "anywhere",
+          ...(input.reads ? { reads: input.reads } : {}),
         })
       : [];
   const selectedMcpServerIds = new Set(servers.map((server) => server.id));

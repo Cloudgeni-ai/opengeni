@@ -2,6 +2,10 @@ import { publishStartupProgress } from "./model-usage";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
 import {
+  githubRepositoryAttachUri,
+  withRepositoryAttachApproval,
+} from "./repository-attach-approval";
+import {
   PERSONAL_SLACK_SEND_TOOL_NAME,
   personalSlackSendTargets,
   slackBotSendHasPerson,
@@ -34,6 +38,8 @@ import {
   readPreparedBotMessage,
   resolveAttemptConnectorToolDecision,
   getSessionChainRoot,
+  getSessionRepositoryMembershipForAuthority,
+  sessionRepositoryRemoved,
   resolveSessionAppActionAuthority,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
@@ -829,47 +835,66 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       cards: eventing.appActionApprovalCards,
     },
   );
+  // Whether a person can answer an approval in this chat: not in a scheduled
+  // or unattended run, or a worker of one. Read once per attempt.
+  let chatHasPerson: Promise<boolean> | undefined;
+  const chatInteractive = () =>
+    (chatHasPerson ??= slackBotSendHasPerson({
+      scheduled: scheduledTurnMcpServerIds(turn) !== null,
+      unattended,
+      chainRoot: async () => {
+        const root = await getSessionChainRoot(db, input.workspaceId, input.sessionId);
+        return root
+          ? {
+              rootUnattended: root.rootUnattended,
+              rootTurnScheduled:
+                root.rootTurnMetadata !== null &&
+                scheduledTurnMcpServerIds({ metadata: root.rootTurnMetadata }) !== null,
+            }
+          : null;
+      },
+    }));
   // A bot send where a person can answer follows the person's own Slack send
   // permission; scheduled and unattended runs, and workers of them, keep
   // sending at once.
-  const connectorActionPolicy: ConnectorActionPolicyHooks = withSlackBotSendApproval(
-    appActionPolicy,
-    {
-      interactive: async () =>
-        await slackBotSendHasPerson({
-          scheduled: scheduledTurnMcpServerIds(turn) !== null,
-          unattended,
-          chainRoot: async () => {
-            const root = await getSessionChainRoot(db, input.workspaceId, input.sessionId);
-            return root
-              ? {
-                  rootUnattended: root.rootUnattended,
-                  rootTurnScheduled:
-                    root.rootTurnMetadata !== null &&
-                    scheduledTurnMcpServerIds({ metadata: root.rootTurnMetadata }) !== null,
-                }
-              : null;
-          },
-        }),
-      personalSlackSendDecision: async () =>
-        strictestDecision(
-          await Promise.all(
-            personalSlackSendTargets(turn.personalConnectionDelegations, runSettings).map(
-              async (target) =>
-                await resolveAttemptConnectorToolDecision(db, connectorActionIdentity, {
-                  ...target,
-                  toolName: PERSONAL_SLACK_SEND_TOOL_NAME,
-                }),
-            ),
+  const slackBotSendPolicy: ConnectorActionPolicyHooks = withSlackBotSendApproval(appActionPolicy, {
+    interactive: chatInteractive,
+    personalSlackSendDecision: async () =>
+      strictestDecision(
+        await Promise.all(
+          personalSlackSendTargets(turn.personalConnectionDelegations, runSettings).map(
+            async (target) =>
+              await resolveAttemptConnectorToolDecision(db, connectorActionIdentity, {
+                ...target,
+                toolName: PERSONAL_SLACK_SEND_TOOL_NAME,
+              }),
           ),
         ),
-      preparedMessage: async (messageId) =>
-        await readPreparedBotMessage(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          id: messageId,
-        }),
+      ),
+    preparedMessage: async (messageId) =>
+      await readPreparedBotMessage(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        id: messageId,
+      }),
+  });
+  // An agent's request to attach a repository to this chat always waits for
+  // a person; where nobody can answer it is refused.
+  const connectorActionPolicy: ConnectorActionPolicyHooks = withRepositoryAttachApproval(
+    slackBotSendPolicy,
+    {
+      interactive: chatInteractive,
+      removedEarlier: async (repository) => {
+        const uri = githubRepositoryAttachUri(repository);
+        if (!uri) return false;
+        const membership = await getSessionRepositoryMembershipForAuthority(
+          db,
+          input.workspaceId,
+          input.sessionId,
+        );
+        return membership !== null && sessionRepositoryRemoved(membership, { uris: [uri] });
+      },
     },
   );
   const bundledSkills =

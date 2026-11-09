@@ -314,5 +314,6 @@ test("the first-party server routes bot sends through the per-call approval", ()
   expect(opengeni?.requireApproval).toEqual([
     "admin_action_call",
     "slack_bot_send_prepared_message",
+    "github_repository_attach",
   ]);
 });

@@ -171,6 +171,7 @@ export * from "./domain/file-audience";
 export * from "./domain/sessions";
 export { UNATTENDED_REQUEST_GOAL } from "./domain/unattended-request-goal";
 export * from "./domain/session-resource-removal";
+export * from "./domain/session-repository-attach";
 export * from "./domain/insights";
 export * from "./domain/insights-usage";
 export * from "./domain/memory-slack-publication";

@@ -1,0 +1,4576 @@
+{
+ "description": "Responses provider with per-request server timing; remote MCP (integration) tools, first-party tools and a context compaction.",
+ "turn": {
+  "createdAt": "2026-11-09T11:21:51.513Z",
+  "startedAt": "2026-11-09T11:21:52.327Z",
+  "finishedAt": "2026-11-09T11:37:00.392Z",
+  "status": "completed"
+ },
+ "attempts": [
+  {
+   "id": "00000000-0000-4000-8000-000000000001",
+   "startedAt": "2026-11-09T11:21:51.513Z",
+   "closedAt": "2026-11-09T11:37:00.392Z",
+   "outcome": "completed"
+  }
+ ],
+ "events": [
+  {
+   "type": "turn.started",
+   "sequence": 3,
+   "occurredAt": "2026-11-09T11:21:52.327Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {}
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 5,
+   "occurredAt": "2026-11-09T11:21:53.184Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "credential_mint",
+    "durationMs": 0.32623299956321716
+   }
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 7,
+   "occurredAt": "2026-11-09T11:21:53.406Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "tools",
+    "durationMs": 125
+   }
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 8,
+   "occurredAt": "2026-11-09T11:21:53.506Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "credential_materialization",
+    "durationMs": 0.4280939996242523
+   }
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 10,
+   "occurredAt": "2026-11-09T11:21:53.711Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "model_preparation",
+    "durationMs": 87
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 11,
+   "occurredAt": "2026-11-09T11:21:53.711Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:1",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.06264999974519014,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 12,
+   "occurredAt": "2026-11-09T11:21:55.411Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:1",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 1704.882345000282,
+    "dispatchDelayMs": 103.53490000031888,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 13,
+   "occurredAt": "2026-11-09T11:21:55.429Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:1",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 1728.9706089999527,
+    "dispatchDelayMs": 103.53490000031888,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 17,
+   "occurredAt": "2026-11-09T11:22:07.827Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:1",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 14092.403123000637,
+    "dispatchDelayMs": 103.53490000031888,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 11747.654234,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 72.4403629999997,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 972.337525,
+       "responsesHarnessUnblockedMs": 12792.432122
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 18,
+   "occurredAt": "2026-11-09T11:22:07.871Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 13993,
+     "preDispatchMs": 170,
+     "timeToFirstTextMs": 12343,
+     "timeToFirstTokenMs": 12316
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 19,
+   "occurredAt": "2026-11-09T11:22:07.970Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_1",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 20,
+   "occurredAt": "2026-11-09T11:22:08.011Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_2",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 21,
+   "occurredAt": "2026-11-09T11:22:08.583Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_3",
+    "name": "mcp_000000000000000000000001__list_issues",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 22,
+   "occurredAt": "2026-11-09T11:22:09.081Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_3",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 23,
+   "occurredAt": "2026-11-09T11:22:09.529Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_4",
+    "name": "mcp_000000000000000000000001__list_issues",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 24,
+   "occurredAt": "2026-11-09T11:22:09.966Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_4",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 25,
+   "occurredAt": "2026-11-09T11:22:10.060Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_1",
+    "output": "Chunk ID: f6504c\nWall time: 2.1880 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 26,
+   "occurredAt": "2026-11-09T11:22:10.107Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_2",
+    "output": "Chunk ID: 61db2b\nWall time: 0.7810 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 28,
+   "occurredAt": "2026-11-09T11:22:10.245Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:2",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.018389999866485596,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 29,
+   "occurredAt": "2026-11-09T11:22:12.388Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:2",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 2146.7642829995602,
+    "dispatchDelayMs": 56.071619999594986,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "http",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 30,
+   "occurredAt": "2026-11-09T11:22:12.401Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:2",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 2160.705819999799,
+    "dispatchDelayMs": 56.071619999594986,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "http",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 31,
+   "occurredAt": "2026-11-09T11:25:33.697Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:2",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 203439.8277669996,
+    "dispatchDelayMs": 56.071619999594986,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "http",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 32,
+   "occurredAt": "2026-11-09T11:25:33.712Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "compaction"
+   }
+  },
+  {
+   "type": "turn.startup.phase.completed",
+   "sequence": 34,
+   "occurredAt": "2026-11-09T11:25:34.031Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "credential_materialization",
+    "durationMs": 0.019960000179708004
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 35,
+   "occurredAt": "2026-11-09T11:25:34.156Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:3",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.011620000004768372,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 36,
+   "occurredAt": "2026-11-09T11:25:35.035Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:3",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 880.8289600005373,
+    "dispatchDelayMs": 46.83443700056523,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 37,
+   "occurredAt": "2026-11-09T11:25:35.053Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:3",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 896.1140420008451,
+    "dispatchDelayMs": 46.83443700056523,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 41,
+   "occurredAt": "2026-11-09T11:25:42.086Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:3",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 7919.1865500006825,
+    "dispatchDelayMs": 46.83443700056523,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 6506.199098,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 40.168791000000056,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 684.105683,
+       "responsesHarnessUnblockedMs": 7230.473572
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 42,
+   "occurredAt": "2026-11-09T11:25:42.127Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 7874,
+     "preDispatchMs": 140,
+     "timeToFirstTextMs": 6428,
+     "timeToFirstTokenMs": 6428
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 43,
+   "occurredAt": "2026-11-09T11:25:42.200Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_5",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 44,
+   "occurredAt": "2026-11-09T11:25:44.154Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_5",
+    "output": "Chunk ID: 905512\nWall time: 2.0010 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 45,
+   "occurredAt": "2026-11-09T11:25:44.235Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:4",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.015589999966323376,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 46,
+   "occurredAt": "2026-11-09T11:25:44.941Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:4",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 704.4939709994942,
+    "dispatchDelayMs": 44.54477099981159,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 47,
+   "occurredAt": "2026-11-09T11:25:44.959Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:4",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 719.8858539992943,
+    "dispatchDelayMs": 44.54477099981159,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 48,
+   "occurredAt": "2026-11-09T11:25:53.126Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:4",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 8884.212926999666,
+    "dispatchDelayMs": 44.54477099981159,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 7516.719253,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 102.9830350000002,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 584.05119,
+       "responsesHarnessUnblockedMs": 8203.753478
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 49,
+   "occurredAt": "2026-11-09T11:25:53.145Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 8841,
+     "preDispatchMs": 154
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 50,
+   "occurredAt": "2026-11-09T11:25:53.185Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_6",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 51,
+   "occurredAt": "2026-11-09T11:25:53.198Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_7",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 52,
+   "occurredAt": "2026-11-09T11:25:54.111Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_6",
+    "output": "Chunk ID: 9c24bc\nWall time: 0.1050 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 53,
+   "occurredAt": "2026-11-09T11:25:54.204Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_7",
+    "output": "Chunk ID: 9f05a4\nWall time: 0.9430 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 54,
+   "occurredAt": "2026-11-09T11:25:54.220Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:5",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.019859999418258667,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 55,
+   "occurredAt": "2026-11-09T11:25:55.152Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:5",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 928.6571920001879,
+    "dispatchDelayMs": 50.417334999889135,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 56,
+   "occurredAt": "2026-11-09T11:25:55.170Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:5",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 945.3763999994844,
+    "dispatchDelayMs": 50.417334999889135,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 58,
+   "occurredAt": "2026-11-09T11:26:11.686Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:5",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 17459.01379599981,
+    "dispatchDelayMs": 50.417334999889135,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 15977.869105,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 86.93051200000264,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 687.793934,
+       "responsesHarnessUnblockedMs": 16752.593551
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 59,
+   "occurredAt": "2026-11-09T11:26:11.706Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 17411,
+     "preDispatchMs": 163,
+     "timeToFirstTokenMs": 8882
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 60,
+   "occurredAt": "2026-11-09T11:26:11.738Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_8",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 61,
+   "occurredAt": "2026-11-09T11:26:11.747Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_9",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 62,
+   "occurredAt": "2026-11-09T11:26:12.337Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_10",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 63,
+   "occurredAt": "2026-11-09T11:26:12.792Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_10",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 64,
+   "occurredAt": "2026-11-09T11:26:13.716Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_11",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 65,
+   "occurredAt": "2026-11-09T11:26:14.176Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_11",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 66,
+   "occurredAt": "2026-11-09T11:26:16.793Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_12",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 67,
+   "occurredAt": "2026-11-09T11:26:17.005Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_12",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 68,
+   "occurredAt": "2026-11-09T11:26:17.658Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_13",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 69,
+   "occurredAt": "2026-11-09T11:26:18.024Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_13",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 70,
+   "occurredAt": "2026-11-09T11:26:18.669Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_8",
+    "output": "Command running in background with command ID 7152371c-ec14-4d4d"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 71,
+   "occurredAt": "2026-11-09T11:26:18.759Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_9",
+    "output": "Chunk ID: ea1cda\nWall time: 6.9420 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 72,
+   "occurredAt": "2026-11-09T11:26:18.771Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:6",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.014209999702870846,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 73,
+   "occurredAt": "2026-11-09T11:26:19.122Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_14",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 74,
+   "occurredAt": "2026-11-09T11:26:19.353Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_14",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 75,
+   "occurredAt": "2026-11-09T11:26:19.405Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:6",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 647.047107999213,
+    "dispatchDelayMs": 54.60643899999559,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 76,
+   "occurredAt": "2026-11-09T11:26:19.425Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:6",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 662.9918969999999,
+    "dispatchDelayMs": 54.60643899999559,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 77,
+   "occurredAt": "2026-11-09T11:26:19.899Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_15",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 78,
+   "occurredAt": "2026-11-09T11:26:20.238Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_15",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 79,
+   "occurredAt": "2026-11-09T11:26:20.869Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_16",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 80,
+   "occurredAt": "2026-11-09T11:26:21.124Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_16",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 81,
+   "occurredAt": "2026-11-09T11:26:21.524Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_17",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 82,
+   "occurredAt": "2026-11-09T11:26:21.879Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_17",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 83,
+   "occurredAt": "2026-11-09T11:26:22.283Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_18",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 84,
+   "occurredAt": "2026-11-09T11:26:22.525Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_18",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 85,
+   "occurredAt": "2026-11-09T11:26:23.114Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_19",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 86,
+   "occurredAt": "2026-11-09T11:26:23.436Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_19",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 87,
+   "occurredAt": "2026-11-09T11:26:23.807Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_20",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 88,
+   "occurredAt": "2026-11-09T11:26:24.005Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_20",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 89,
+   "occurredAt": "2026-11-09T11:26:24.449Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_21",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 90,
+   "occurredAt": "2026-11-09T11:26:24.776Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_21",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 91,
+   "occurredAt": "2026-11-09T11:26:25.146Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_22",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 92,
+   "occurredAt": "2026-11-09T11:26:25.318Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_22",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 93,
+   "occurredAt": "2026-11-09T11:26:25.678Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_23",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 95,
+   "occurredAt": "2026-11-09T11:26:26.124Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_23",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 96,
+   "occurredAt": "2026-11-09T11:26:26.497Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_24",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 97,
+   "occurredAt": "2026-11-09T11:26:26.678Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_24",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 98,
+   "occurredAt": "2026-11-09T11:26:27.026Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_25",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 99,
+   "occurredAt": "2026-11-09T11:26:27.401Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_25",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 100,
+   "occurredAt": "2026-11-09T11:26:27.805Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_26",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 101,
+   "occurredAt": "2026-11-09T11:26:27.976Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_26",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 102,
+   "occurredAt": "2026-11-09T11:26:28.265Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_27",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 103,
+   "occurredAt": "2026-11-09T11:26:28.719Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_27",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 104,
+   "occurredAt": "2026-11-09T11:26:29.004Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_28",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 105,
+   "occurredAt": "2026-11-09T11:26:29.232Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_28",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 106,
+   "occurredAt": "2026-11-09T11:26:29.682Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_29",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 107,
+   "occurredAt": "2026-11-09T11:26:30.079Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_29",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 108,
+   "occurredAt": "2026-11-09T11:26:30.419Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_30",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 109,
+   "occurredAt": "2026-11-09T11:26:30.576Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_30",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 110,
+   "occurredAt": "2026-11-09T11:26:30.976Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_31",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 111,
+   "occurredAt": "2026-11-09T11:26:31.317Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_31",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 114,
+   "occurredAt": "2026-11-09T11:26:31.794Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:6",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 13017.105632999912,
+    "dispatchDelayMs": 54.60643899999559,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 11614.313712,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 104.20019499999944,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 688.693343,
+       "responsesHarnessUnblockedMs": 12407.20725
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 115,
+   "occurredAt": "2026-11-09T11:26:31.817Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 12966,
+     "preDispatchMs": 149,
+     "timeToFirstTokenMs": 7257
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 116,
+   "occurredAt": "2026-11-09T11:26:31.864Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_32",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 117,
+   "occurredAt": "2026-11-09T11:26:31.900Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_33",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 118,
+   "occurredAt": "2026-11-09T11:26:31.930Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_32",
+    "output": "Chunk ID: cd8934\nWall time: 0.1060 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 119,
+   "occurredAt": "2026-11-09T11:26:32.006Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_33",
+    "output": "Chunk ID: bf5b3e\nWall time: 0.0610 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 120,
+   "occurredAt": "2026-11-09T11:26:32.016Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:7",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.013279999606311321,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 121,
+   "occurredAt": "2026-11-09T11:26:32.597Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:7",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 592.6538929995149,
+    "dispatchDelayMs": 56.65775099955499,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 122,
+   "occurredAt": "2026-11-09T11:26:32.608Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:7",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 600.2200229996815,
+    "dispatchDelayMs": 56.65775099955499,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 124,
+   "occurredAt": "2026-11-09T11:26:50.065Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:7",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 18051.29493399989,
+    "dispatchDelayMs": 56.65775099955499,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 16812.175386,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 112.78006500000265,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 568.969544,
+       "responsesHarnessUnblockedMs": 17493.924995
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 125,
+   "occurredAt": "2026-11-09T11:26:50.081Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 17996,
+     "preDispatchMs": 135,
+     "timeToFirstTokenMs": 5352
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 126,
+   "occurredAt": "2026-11-09T11:26:50.147Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_34",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 127,
+   "occurredAt": "2026-11-09T11:26:50.168Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_35",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 128,
+   "occurredAt": "2026-11-09T11:26:50.177Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_36",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 129,
+   "occurredAt": "2026-11-09T11:26:50.223Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_34",
+    "output": "Chunk ID: fcee38\nWall time: 0.1170 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 130,
+   "occurredAt": "2026-11-09T11:26:50.308Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_35",
+    "output": "Chunk ID: 766d0a\nWall time: 0.0920 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 131,
+   "occurredAt": "2026-11-09T11:26:50.317Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:8",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.013279999606311321,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 132,
+   "occurredAt": "2026-11-09T11:26:50.338Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_36",
+    "output": "Chunk ID: d807dc\nWall time: 0.1150 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 133,
+   "occurredAt": "2026-11-09T11:26:51.086Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:8",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 771.3416430000216,
+    "dispatchDelayMs": 60.95403799973428,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 134,
+   "occurredAt": "2026-11-09T11:26:51.104Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:8",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 785.3858420001343,
+    "dispatchDelayMs": 60.95403799973428,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 139,
+   "occurredAt": "2026-11-09T11:27:09.945Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:8",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 19618.419700999744,
+    "dispatchDelayMs": 60.95403799973428,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 16750.646244,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 1040.1753240000035,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 558.799492,
+       "responsesHarnessUnblockedMs": 18349.62106
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 140,
+   "occurredAt": "2026-11-09T11:27:09.968Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 19560,
+     "preDispatchMs": 160,
+     "timeToFirstTextMs": 9190,
+     "timeToFirstTokenMs": 9171
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 141,
+   "occurredAt": "2026-11-09T11:27:10.003Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_37",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 142,
+   "occurredAt": "2026-11-09T11:27:10.013Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_38",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 143,
+   "occurredAt": "2026-11-09T11:27:10.348Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_39",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 144,
+   "occurredAt": "2026-11-09T11:27:10.609Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_39",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 145,
+   "occurredAt": "2026-11-09T11:27:11.020Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_40",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 146,
+   "occurredAt": "2026-11-09T11:27:11.542Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_40",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 147,
+   "occurredAt": "2026-11-09T11:27:11.630Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_37",
+    "output": "Chunk ID: ff6e98\nWall time: 0.0780 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 148,
+   "occurredAt": "2026-11-09T11:27:11.715Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_38",
+    "output": "Chunk ID: f88b4e\nWall time: 1.6460 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 149,
+   "occurredAt": "2026-11-09T11:27:11.726Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:9",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.01732099987566471,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 150,
+   "occurredAt": "2026-11-09T11:27:12.477Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:9",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 763.2556119998917,
+    "dispatchDelayMs": 58.96281599998474,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 151,
+   "occurredAt": "2026-11-09T11:27:12.495Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:9",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 778.6490050004795,
+    "dispatchDelayMs": 58.96281599998474,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 154,
+   "occurredAt": "2026-11-09T11:27:27.811Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:9",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 16055.15064300038,
+    "dispatchDelayMs": 58.96281599998474,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 13389.391535,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 1444.1715139999997,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 537.540317,
+       "responsesHarnessUnblockedMs": 15371.103366
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 155,
+   "occurredAt": "2026-11-09T11:27:27.821Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 16013,
+     "preDispatchMs": 148,
+     "timeToFirstTokenMs": 11830
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 156,
+   "occurredAt": "2026-11-09T11:27:27.854Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_41",
+    "name": "tool_search",
+    "toolFamily": "tool_search"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 157,
+   "occurredAt": "2026-11-09T11:27:27.926Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_41",
+    "output": {
+     "text": "Disclosed tools: opengeni__knowledge_prepare_save, opengeni__kno"
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 158,
+   "occurredAt": "2026-11-09T11:27:27.937Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:10",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.015370000153779984,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 159,
+   "occurredAt": "2026-11-09T11:27:28.933Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:10",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 989.1877960003912,
+    "dispatchDelayMs": 50.9007219998166,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 160,
+   "occurredAt": "2026-11-09T11:27:28.949Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:10",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 1018.9651819998398,
+    "dispatchDelayMs": 50.9007219998166,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 162,
+   "occurredAt": "2026-11-09T11:27:46.935Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:10",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 18994.40164299961,
+    "dispatchDelayMs": 50.9007219998166,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 16513.79779,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 108.3888560000014,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 1660.039263,
+       "responsesHarnessUnblockedMs": 18282.225909
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 163,
+   "occurredAt": "2026-11-09T11:27:46.961Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 18945,
+     "preDispatchMs": 164,
+     "timeToFirstTokenMs": 10172
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 164,
+   "occurredAt": "2026-11-09T11:27:47.004Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_42",
+    "name": "opengeni__knowledge_prepare_save",
+    "toolFamily": "knowledge_prepare_save"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 165,
+   "occurredAt": "2026-11-09T11:27:47.014Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_43",
+    "name": "opengeni__knowledge_prepare_save",
+    "toolFamily": "knowledge_prepare_save"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 166,
+   "occurredAt": "2026-11-09T11:27:47.024Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_44",
+    "name": "opengeni__knowledge_prepare_save",
+    "toolFamily": "knowledge_prepare_save"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 167,
+   "occurredAt": "2026-11-09T11:27:47.035Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_45",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 168,
+   "occurredAt": "2026-11-09T11:27:48.251Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_42",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 169,
+   "occurredAt": "2026-11-09T11:27:48.265Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_43",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 170,
+   "occurredAt": "2026-11-09T11:27:48.373Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_44",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 171,
+   "occurredAt": "2026-11-09T11:27:48.389Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:11",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.11015099938958883,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 172,
+   "occurredAt": "2026-11-09T11:27:48.410Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_45",
+    "output": "Chunk ID: 5e6566\nWall time: 1.1340 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 173,
+   "occurredAt": "2026-11-09T11:27:49.046Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:11",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 673.9076059991494,
+    "dispatchDelayMs": 71.63483199942857,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 174,
+   "occurredAt": "2026-11-09T11:27:49.060Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:11",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 682.8259609993547,
+    "dispatchDelayMs": 71.63483199942857,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 181,
+   "occurredAt": "2026-11-09T11:28:32.916Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:11",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 44532.024946999736,
+    "dispatchDelayMs": 71.63483199942857,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 43217.265898,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 105.01608799999667,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 574.612585,
+       "responsesHarnessUnblockedMs": 43896.894571
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 182,
+   "occurredAt": "2026-11-09T11:28:32.936Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 44463,
+     "preDispatchMs": 200,
+     "timeToFirstTextMs": 38725,
+     "timeToFirstTokenMs": 9676
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 183,
+   "occurredAt": "2026-11-09T11:28:32.983Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_46",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 184,
+   "occurredAt": "2026-11-09T11:28:32.994Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_47",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 185,
+   "occurredAt": "2026-11-09T11:28:33.433Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_48",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 186,
+   "occurredAt": "2026-11-09T11:28:33.547Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_48",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 187,
+   "occurredAt": "2026-11-09T11:28:34.061Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_49",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 188,
+   "occurredAt": "2026-11-09T11:28:34.184Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_49",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 189,
+   "occurredAt": "2026-11-09T11:28:34.647Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_50",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 190,
+   "occurredAt": "2026-11-09T11:28:34.721Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_50",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 191,
+   "occurredAt": "2026-11-09T11:28:35.210Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_51",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 192,
+   "occurredAt": "2026-11-09T11:28:35.326Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_51",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 193,
+   "occurredAt": "2026-11-09T11:28:35.822Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_52",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 194,
+   "occurredAt": "2026-11-09T11:28:35.918Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_52",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 195,
+   "occurredAt": "2026-11-09T11:28:35.975Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_46",
+    "output": "Chunk ID: 0d4809\nWall time: 3.0000 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 196,
+   "occurredAt": "2026-11-09T11:28:36.078Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_47",
+    "output": "Chunk ID: 7561ce\nWall time: 0.0710 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 197,
+   "occurredAt": "2026-11-09T11:28:36.112Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:12",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.009870000183582306,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 198,
+   "occurredAt": "2026-11-09T11:28:36.955Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:12",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 875.5766089996323,
+    "dispatchDelayMs": 93.1835009995848,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 199,
+   "occurredAt": "2026-11-09T11:28:36.974Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:12",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 890.9085820000619,
+    "dispatchDelayMs": 93.1835009995848,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 201,
+   "occurredAt": "2026-11-09T11:28:44.017Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:12",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 7934.488065999933,
+    "dispatchDelayMs": 93.1835009995848,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 6258.192971,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 79.79696299999978,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 896.783843,
+       "responsesHarnessUnblockedMs": 7234.773777
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 202,
+   "occurredAt": "2026-11-09T11:28:44.044Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 7843,
+     "preDispatchMs": 201,
+     "timeToFirstTokenMs": 6273
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 203,
+   "occurredAt": "2026-11-09T11:28:44.163Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_53",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 204,
+   "occurredAt": "2026-11-09T11:28:44.223Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_53",
+    "output": "Chunk ID: 05678c\nWall time: 0.0430 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 205,
+   "occurredAt": "2026-11-09T11:28:44.241Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:13",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.010929999873042107,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 206,
+   "occurredAt": "2026-11-09T11:28:45.146Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:13",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 927.3795720003545,
+    "dispatchDelayMs": 80.3962369998917,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 207,
+   "occurredAt": "2026-11-09T11:28:45.162Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:13",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 941.2739810002968,
+    "dispatchDelayMs": 80.3962369998917,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 213,
+   "occurredAt": "2026-11-09T11:31:03.592Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:13",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 139357.83117400017,
+    "dispatchDelayMs": 80.3962369998917,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 137740.566699,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 121.91351600000053,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 841.060872,
+       "responsesHarnessUnblockedMs": 138703.541087
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 214,
+   "occurredAt": "2026-11-09T11:31:03.617Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 139281,
+     "preDispatchMs": 202,
+     "timeToFirstTextMs": 20633,
+     "timeToFirstTokenMs": 15759
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 215,
+   "occurredAt": "2026-11-09T11:31:03.666Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_54",
+    "name": "apply_patch",
+    "toolFamily": "apply_patch"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 216,
+   "occurredAt": "2026-11-09T11:31:03.738Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_54",
+    "output": "Patch applied.\nPatch applied."
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 217,
+   "occurredAt": "2026-11-09T11:31:03.828Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:14",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.020580999553203583,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 218,
+   "occurredAt": "2026-11-09T11:31:04.386Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:14",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 562.8628909997642,
+    "dispatchDelayMs": 48.372514999471605,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 219,
+   "occurredAt": "2026-11-09T11:31:04.397Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:14",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 571.7554200002924,
+    "dispatchDelayMs": 48.372514999471605,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 221,
+   "occurredAt": "2026-11-09T11:31:14.015Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:14",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 10184.76524099987,
+    "dispatchDelayMs": 48.372514999471605,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 9147.617201,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 37.59678400000121,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 446.640033,
+       "responsesHarnessUnblockedMs": 9631.854018
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 222,
+   "occurredAt": "2026-11-09T11:31:14.036Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 10138,
+     "preDispatchMs": 153,
+     "timeToFirstTokenMs": 7824
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 223,
+   "occurredAt": "2026-11-09T11:31:14.073Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_55",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 224,
+   "occurredAt": "2026-11-09T11:31:14.124Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_55",
+    "output": "Chunk ID: 3a79a7\nWall time: 0.0650 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 225,
+   "occurredAt": "2026-11-09T11:31:14.199Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:15",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.018319999799132347,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 226,
+   "occurredAt": "2026-11-09T11:31:14.899Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:15",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 704.5622910000384,
+    "dispatchDelayMs": 49.05069100018591,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 227,
+   "occurredAt": "2026-11-09T11:31:14.909Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:15",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 712.8910429999232,
+    "dispatchDelayMs": 49.05069100018591,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 229,
+   "occurredAt": "2026-11-09T11:32:49.616Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:15",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 95401.32266199961,
+    "dispatchDelayMs": 49.05069100018591,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 94183.517423,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 55.67043399999966,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 525.002263,
+       "responsesHarnessUnblockedMs": 94764.19012
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 230,
+   "occurredAt": "2026-11-09T11:32:49.647Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 95355,
+     "preDispatchMs": 136,
+     "timeToFirstTokenMs": 11603
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 231,
+   "occurredAt": "2026-11-09T11:32:49.738Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_56",
+    "name": "apply_patch",
+    "toolFamily": "apply_patch"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 232,
+   "occurredAt": "2026-11-09T11:32:49.836Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_56",
+    "output": "Patch applied."
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 233,
+   "occurredAt": "2026-11-09T11:32:49.854Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:16",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.013269999995827675,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 234,
+   "occurredAt": "2026-11-09T11:32:50.600Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:16",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 774.039753000252,
+    "dispatchDelayMs": 79.01923900004476,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 235,
+   "occurredAt": "2026-11-09T11:32:50.613Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:16",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 783.9867319995537,
+    "dispatchDelayMs": 79.01923900004476,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 237,
+   "occurredAt": "2026-11-09T11:33:01.737Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:16",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 11904.400709999725,
+    "dispatchDelayMs": 79.01923900004476,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 8590.956633,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 1997.2414369999988,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 486.567929,
+       "responsesHarnessUnblockedMs": 11074.765999
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 238,
+   "occurredAt": "2026-11-09T11:33:01.757Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 11827,
+     "preDispatchMs": 196,
+     "timeToFirstTokenMs": 11283
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 239,
+   "occurredAt": "2026-11-09T11:33:01.790Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_57",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 240,
+   "occurredAt": "2026-11-09T11:33:02.405Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_58",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 241,
+   "occurredAt": "2026-11-09T11:33:02.752Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_58",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 242,
+   "occurredAt": "2026-11-09T11:33:02.926Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_57",
+    "output": "Command running in background with command ID eb329e64-17d9-472c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 243,
+   "occurredAt": "2026-11-09T11:33:03.008Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:17",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.011220999993383884,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 244,
+   "occurredAt": "2026-11-09T11:33:03.197Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_59",
+    "name": "mcp_000000000000000000000002__get_issue",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 245,
+   "occurredAt": "2026-11-09T11:33:03.399Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_59",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 246,
+   "occurredAt": "2026-11-09T11:33:03.619Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:17",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 616.8623040001839,
+    "dispatchDelayMs": 49.449273000471294,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 247,
+   "occurredAt": "2026-11-09T11:33:03.631Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:17",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 626.2031460003927,
+    "dispatchDelayMs": 49.449273000471294,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 248,
+   "occurredAt": "2026-11-09T11:33:03.815Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_60",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 249,
+   "occurredAt": "2026-11-09T11:33:03.902Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_60",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 250,
+   "occurredAt": "2026-11-09T11:33:04.341Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_61",
+    "name": "opengeni__knowledge_save",
+    "toolFamily": "knowledge_save"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 251,
+   "occurredAt": "2026-11-09T11:33:04.424Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_61",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 252,
+   "occurredAt": "2026-11-09T11:33:04.940Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_62",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 253,
+   "occurredAt": "2026-11-09T11:33:05.059Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_62",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 254,
+   "occurredAt": "2026-11-09T11:33:05.671Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_63",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 255,
+   "occurredAt": "2026-11-09T11:33:05.752Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_63",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 256,
+   "occurredAt": "2026-11-09T11:33:06.197Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_64",
+    "name": "opengeni__knowledge_save",
+    "toolFamily": "knowledge_save"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 257,
+   "occurredAt": "2026-11-09T11:33:06.305Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_64",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 258,
+   "occurredAt": "2026-11-09T11:33:06.797Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_65",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 259,
+   "occurredAt": "2026-11-09T11:33:06.871Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_65",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 260,
+   "occurredAt": "2026-11-09T11:33:07.264Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_66",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 261,
+   "occurredAt": "2026-11-09T11:33:07.351Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_66",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 262,
+   "occurredAt": "2026-11-09T11:33:07.805Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_67",
+    "name": "opengeni__knowledge_save",
+    "toolFamily": "knowledge_save"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 263,
+   "occurredAt": "2026-11-09T11:33:07.885Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_67",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 264,
+   "occurredAt": "2026-11-09T11:33:08.294Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_68",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 265,
+   "occurredAt": "2026-11-09T11:33:08.363Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_68",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 266,
+   "occurredAt": "2026-11-09T11:33:08.872Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_69",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 267,
+   "occurredAt": "2026-11-09T11:33:08.955Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_69",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 269,
+   "occurredAt": "2026-11-09T11:33:09.363Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_70",
+    "name": "opengeni__knowledge_save",
+    "toolFamily": "knowledge_save"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 270,
+   "occurredAt": "2026-11-09T11:33:09.441Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_70",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 271,
+   "occurredAt": "2026-11-09T11:33:09.871Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_71",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 272,
+   "occurredAt": "2026-11-09T11:33:09.990Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_71",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 273,
+   "occurredAt": "2026-11-09T11:33:10.400Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_72",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 274,
+   "occurredAt": "2026-11-09T11:33:10.501Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_72",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 275,
+   "occurredAt": "2026-11-09T11:33:10.945Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_73",
+    "name": "opengeni__knowledge_save",
+    "toolFamily": "knowledge_save"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 276,
+   "occurredAt": "2026-11-09T11:33:11.024Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_73",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 277,
+   "occurredAt": "2026-11-09T11:33:11.407Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_74",
+    "name": "opengeni__knowledge_get",
+    "toolFamily": "knowledge_get"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 278,
+   "occurredAt": "2026-11-09T11:33:11.495Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_74",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 279,
+   "occurredAt": "2026-11-09T11:33:11.883Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_75",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 280,
+   "occurredAt": "2026-11-09T11:33:12.392Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_75",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 281,
+   "occurredAt": "2026-11-09T11:33:12.817Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_76",
+    "name": "mcp_000000000000000000000004__save_comment",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 282,
+   "occurredAt": "2026-11-09T11:33:13.294Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_76",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 283,
+   "occurredAt": "2026-11-09T11:33:13.724Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_77",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 284,
+   "occurredAt": "2026-11-09T11:33:14.145Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_77",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 285,
+   "occurredAt": "2026-11-09T11:33:14.616Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_78",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 286,
+   "occurredAt": "2026-11-09T11:33:15.030Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_78",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 287,
+   "occurredAt": "2026-11-09T11:33:15.458Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_79",
+    "name": "mcp_000000000000000000000004__save_comment",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 288,
+   "occurredAt": "2026-11-09T11:33:15.859Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_79",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 289,
+   "occurredAt": "2026-11-09T11:33:16.298Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_80",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 290,
+   "occurredAt": "2026-11-09T11:33:16.754Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_80",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 291,
+   "occurredAt": "2026-11-09T11:33:17.179Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_81",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 292,
+   "occurredAt": "2026-11-09T11:33:17.798Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_81",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 293,
+   "occurredAt": "2026-11-09T11:33:18.205Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_82",
+    "name": "mcp_000000000000000000000004__save_comment",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 294,
+   "occurredAt": "2026-11-09T11:33:18.689Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_82",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 295,
+   "occurredAt": "2026-11-09T11:33:19.103Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_83",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 296,
+   "occurredAt": "2026-11-09T11:33:19.475Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_83",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 300,
+   "occurredAt": "2026-11-09T11:34:00.169Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:17",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 57156.365125999786,
+    "dispatchDelayMs": 49.449273000471294,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 56066.263498,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 54.104706000005535,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 460.997798,
+       "responsesHarnessUnblockedMs": 56581.366002
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 301,
+   "occurredAt": "2026-11-09T11:34:00.191Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 57109,
+     "preDispatchMs": 141,
+     "timeToFirstTokenMs": 6172
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 302,
+   "occurredAt": "2026-11-09T11:34:00.259Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_84",
+    "name": "apply_patch",
+    "toolFamily": "apply_patch"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 303,
+   "occurredAt": "2026-11-09T11:34:00.354Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_84",
+    "output": "Patch applied."
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 304,
+   "occurredAt": "2026-11-09T11:34:00.379Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:18",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.02804000023752451,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 305,
+   "occurredAt": "2026-11-09T11:34:01.011Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:18",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 654.5404920000583,
+    "dispatchDelayMs": 86.07870400045067,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 306,
+   "occurredAt": "2026-11-09T11:34:01.027Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:18",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 667.1477589998394,
+    "dispatchDelayMs": 86.07870400045067,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 308,
+   "occurredAt": "2026-11-09T11:34:11.979Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:18",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 11610.697054000571,
+    "dispatchDelayMs": 86.07870400045067,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 9953.697048,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 425.87973800000145,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 585.504275,
+       "responsesHarnessUnblockedMs": 10965.081061
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 309,
+   "occurredAt": "2026-11-09T11:34:12.028Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 11527,
+     "preDispatchMs": 186,
+     "timeToFirstTokenMs": 9946
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 310,
+   "occurredAt": "2026-11-09T11:34:12.076Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_85",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 311,
+   "occurredAt": "2026-11-09T11:34:12.529Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_86",
+    "name": "opengeni__editable_artifact_inspect",
+    "toolFamily": "editable_artifact_inspect"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 313,
+   "occurredAt": "2026-11-09T11:34:13.158Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_85",
+    "output": "Command running in background with command ID b9485c5a-b1a7-4722"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 314,
+   "occurredAt": "2026-11-09T11:34:13.252Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:19",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.010460999794304371,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 315,
+   "occurredAt": "2026-11-09T11:34:13.919Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:19",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 673.4059170000255,
+    "dispatchDelayMs": 70.61474400013685,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 316,
+   "occurredAt": "2026-11-09T11:34:13.933Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:19",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 682.2622330002487,
+    "dispatchDelayMs": 70.61474400013685,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 317,
+   "occurredAt": "2026-11-09T11:34:20.488Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_86",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 318,
+   "occurredAt": "2026-11-09T11:34:20.939Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_87",
+    "name": "opengeni__editable_artifact_inspect",
+    "toolFamily": "editable_artifact_inspect"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 319,
+   "occurredAt": "2026-11-09T11:34:28.722Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_87",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 320,
+   "occurredAt": "2026-11-09T11:34:29.222Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_88",
+    "name": "opengeni__editable_artifact_apply",
+    "toolFamily": "editable_artifact_apply"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 322,
+   "occurredAt": "2026-11-09T11:34:31.606Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:19",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 18351.157259000465,
+    "dispatchDelayMs": 70.61474400013685,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 15715.902706,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 1158.0130449999997,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 874.131459,
+       "responsesHarnessUnblockedMs": 17748.04721
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 323,
+   "occurredAt": "2026-11-09T11:34:31.629Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 18282,
+     "preDispatchMs": 181,
+     "timeToFirstTokenMs": 17972
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 324,
+   "occurredAt": "2026-11-09T11:34:31.670Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_89",
+    "name": "opengeni__command_wait",
+    "toolFamily": "command_wait"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 325,
+   "occurredAt": "2026-11-09T11:34:36.807Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_88",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 326,
+   "occurredAt": "2026-11-09T11:34:37.273Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_90",
+    "name": "opengeni__editable_artifact_inspect",
+    "toolFamily": "editable_artifact_inspect"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 327,
+   "occurredAt": "2026-11-09T11:34:44.735Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_90",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 328,
+   "occurredAt": "2026-11-09T11:34:45.162Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_91",
+    "name": "opengeni__editable_artifact_inspect",
+    "toolFamily": "editable_artifact_inspect"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 329,
+   "occurredAt": "2026-11-09T11:34:57.584Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_91",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 330,
+   "occurredAt": "2026-11-09T11:34:58.359Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_92",
+    "name": "opengeni__editable_artifact_inspect",
+    "toolFamily": "editable_artifact_inspect"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 331,
+   "occurredAt": "2026-11-09T11:35:11.493Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_92",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 332,
+   "occurredAt": "2026-11-09T11:35:12.104Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_93",
+    "name": "opengeni__editable_artifact_apply",
+    "toolFamily": "editable_artifact_apply"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 333,
+   "occurredAt": "2026-11-09T11:35:20.765Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_89",
+    "output": {
+     "isError": false
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 334,
+   "occurredAt": "2026-11-09T11:35:20.837Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:20",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.010580999776721,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 335,
+   "occurredAt": "2026-11-09T11:35:22.478Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:20",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 1645.8044790001586,
+    "dispatchDelayMs": 50.279031000100076,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 336,
+   "occurredAt": "2026-11-09T11:35:22.496Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:20",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 1657.8740710001439,
+    "dispatchDelayMs": 50.279031000100076,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 337,
+   "occurredAt": "2026-11-09T11:35:25.266Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_93",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 338,
+   "occurredAt": "2026-11-09T11:35:25.815Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_94",
+    "name": "opengeni__editable_artifact_inspect",
+    "toolFamily": "editable_artifact_inspect"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 340,
+   "occurredAt": "2026-11-09T11:35:30.816Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:20",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 9973.928566000424,
+    "dispatchDelayMs": 50.279031000100076,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 7120.217101,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 752.6761380000007,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 553.043506,
+       "responsesHarnessUnblockedMs": 8425.936745
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 341,
+   "occurredAt": "2026-11-09T11:35:30.841Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 9925,
+     "preDispatchMs": 130,
+     "timeToFirstTokenMs": 9401
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 342,
+   "occurredAt": "2026-11-09T11:35:30.875Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_95",
+    "name": "exec_command",
+    "toolFamily": "exec_command"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 343,
+   "occurredAt": "2026-11-09T11:35:31.227Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_95",
+    "output": "Chunk ID: b01547\nWall time: 0.3440 seconds\nProcess exited with c"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 344,
+   "occurredAt": "2026-11-09T11:35:31.319Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:21",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.012620000168681145,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 345,
+   "occurredAt": "2026-11-09T11:35:32.109Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:21",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 795.6048029996455,
+    "dispatchDelayMs": 49.06460599973798,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 346,
+   "occurredAt": "2026-11-09T11:35:32.127Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:21",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 805.3710300000384,
+    "dispatchDelayMs": 49.06460599973798,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 347,
+   "occurredAt": "2026-11-09T11:35:38.902Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_94",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 348,
+   "occurredAt": "2026-11-09T11:35:39.541Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_96",
+    "name": "opengeni__editable_artifact_inspect",
+    "toolFamily": "editable_artifact_inspect"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 350,
+   "occurredAt": "2026-11-09T11:35:44.670Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:21",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 13349.921918000095,
+    "dispatchDelayMs": 49.06460599973798,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 10088.566628,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 1843.9928619999991,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 765.05304,
+       "responsesHarnessUnblockedMs": 12697.61253
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 351,
+   "occurredAt": "2026-11-09T11:35:44.688Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 13302,
+     "preDispatchMs": 154,
+     "timeToFirstTokenMs": 12938
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 352,
+   "occurredAt": "2026-11-09T11:35:44.724Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_97",
+    "name": "opengeni__command_wait",
+    "toolFamily": "command_wait"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 353,
+   "occurredAt": "2026-11-09T11:35:47.523Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_96",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 354,
+   "occurredAt": "2026-11-09T11:35:47.886Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_98",
+    "name": "opengeni__editable_artifact_inspect",
+    "toolFamily": "editable_artifact_inspect"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 355,
+   "occurredAt": "2026-11-09T11:35:55.508Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_98",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 356,
+   "occurredAt": "2026-11-09T11:35:55.900Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_99",
+    "name": "opengeni__editable_artifact_apply",
+    "toolFamily": "editable_artifact_apply"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 357,
+   "occurredAt": "2026-11-09T11:36:04.000Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_99",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 358,
+   "occurredAt": "2026-11-09T11:36:04.852Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_100",
+    "name": "opengeni__editable_artifact_inspect",
+    "toolFamily": "editable_artifact_inspect"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 359,
+   "occurredAt": "2026-11-09T11:36:13.413Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_100",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 360,
+   "occurredAt": "2026-11-09T11:36:14.468Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_101",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 361,
+   "occurredAt": "2026-11-09T11:36:14.924Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_101",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 362,
+   "occurredAt": "2026-11-09T11:36:15.467Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_102",
+    "name": "mcp_000000000000000000000004__save_comment",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 363,
+   "occurredAt": "2026-11-09T11:36:16.093Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_102",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 364,
+   "occurredAt": "2026-11-09T11:36:16.565Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_103",
+    "name": "mcp_000000000000000000000003__list_comments",
+    "toolFamily": "integration:mcp.linear.app"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 365,
+   "occurredAt": "2026-11-09T11:36:16.933Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_103",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 369,
+   "occurredAt": "2026-11-09T11:36:17.239Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_97",
+    "output": {
+     "isError": false
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 370,
+   "occurredAt": "2026-11-09T11:36:17.399Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:22",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.015020000748336315,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 371,
+   "occurredAt": "2026-11-09T11:36:18.198Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:22",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 816.7291130004451,
+    "dispatchDelayMs": 108.99171000067145,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 372,
+   "occurredAt": "2026-11-09T11:36:18.231Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:22",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 846.0673640007153,
+    "dispatchDelayMs": 108.99171000067145,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 374,
+   "occurredAt": "2026-11-09T11:36:45.190Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:22",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 27792.78412800003,
+    "dispatchDelayMs": 108.99171000067145,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 26570.159198,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 35.77809100000013,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 428.108544,
+       "responsesHarnessUnblockedMs": 27034.045833
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 375,
+   "occurredAt": "2026-11-09T11:36:45.219Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 27687,
+     "preDispatchMs": 266,
+     "timeToFirstTokenMs": 19693
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 377,
+   "occurredAt": "2026-11-09T11:36:45.342Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_104",
+    "name": "opengeni__goal_progress",
+    "toolFamily": "goal_progress"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 378,
+   "occurredAt": "2026-11-09T11:36:45.448Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_104",
+    "output": {}
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 379,
+   "occurredAt": "2026-11-09T11:36:45.463Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "started",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:23",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 0.010370000265538692,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra"
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 380,
+   "occurredAt": "2026-11-09T11:36:46.101Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "headers",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:23",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 661.2426509996876,
+    "dispatchDelayMs": 77.41506399959326,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 381,
+   "occurredAt": "2026-11-09T11:36:46.116Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "first_byte",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:23",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 672.2147399997339,
+    "dispatchDelayMs": 77.41506399959326,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {}
+    }
+   }
+  },
+  {
+   "type": "agent.model.request",
+   "sequence": 382,
+   "occurredAt": "2026-11-09T11:37:00.198Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "phase": "completed",
+    "requestId": "00000000-0000-4000-8000-000000000001:4:1:23",
+    "transportAttempt": 1,
+    "dispatchId": "4",
+    "durationMs": 14750.714707000181,
+    "dispatchDelayMs": 77.41506399959326,
+    "provider": "codex-subscription",
+    "model": "gpt-6-astra",
+    "transport": {
+     "kind": "websocket",
+     "timing": {
+      "server": {
+       "engineWallMs": 13417.074008,
+       "numEngineCalls": 1,
+       "responsesOtherMs": 78.5716510000002,
+       "clientToolPauseMs": 0,
+       "responsesPreInferenceMs": 534.465231,
+       "responsesHarnessUnblockedMs": 14030.11089
+      }
+     }
+    }
+   }
+  },
+  {
+   "type": "agent.model.usage",
+   "sequence": 383,
+   "occurredAt": "2026-11-09T11:37:00.219Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "provider": "codex-subscription",
+    "model": "codex/gpt-6-astra",
+    "purpose": "main",
+    "timing": {
+     "durationMs": 14675,
+     "preDispatchMs": 178
+    }
+   }
+  },
+  {
+   "type": "agent.toolCall.created",
+   "sequence": 385,
+   "occurredAt": "2026-11-09T11:37:00.288Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_105",
+    "name": "opengeni__wait_for_input",
+    "toolFamily": "wait_for_input"
+   }
+  },
+  {
+   "type": "agent.toolCall.output",
+   "sequence": 387,
+   "occurredAt": "2026-11-09T11:37:00.333Z",
+   "attemptId": "00000000-0000-4000-8000-000000000001",
+   "payload": {
+    "id": "call_105",
+    "output": {}
+   }
+  }
+ ]
+}

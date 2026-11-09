@@ -1171,6 +1171,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "custom_mcp_setup_request",
   "github_connect_link",
   "github_repositories_list",
+  "github_repository_attach",
   "social_connections_list",
   "social_posts_recent",
   "social_daily_analysis_context",
@@ -17462,6 +17463,9 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     // A person removed repositories from the chat; access ends on the next
     // Git or GitHub call and the next turn removes their sandbox folders.
     "session.resources.removed",
+    // A repository was attached to the chat after it started, such as one the
+    // agent asked for and a person approved. The next turn clones it.
+    "session.resources.added",
     // Multi-account Codex (P1): the account a session's turn runs on changed
     // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
     // the in-session "Running on:" indicator's live flip.
@@ -17721,6 +17725,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.agent.updated",
     "session.skills.updated",
     "session.resources.removed",
+    "session.resources.added",
     "session.model_settings.updated",
     "session.usage_limit.updated",
   ],
@@ -23515,6 +23520,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: primitives.optionalBoolean,
+    // Whether Connect provider offers "Claude Code (API key)". Absent on older
+    // servers and when not offered.
+    claudeCodeApiKeyEnabled: primitives.optionalBoolean,
     // Whether organization admins may connect Azure OpenAI as this
     // deployment's own Microsoft Entra identity (the operator offers it).
     // Absent on older servers and when not offered.

@@ -624,9 +624,12 @@ const SettingsSchema = z.object({
   creditPromotionPolicy: EnvCreditPromotionPolicy,
   entitlementsMode: EntitlementsMode.default("none"),
   usageLimitsMode: UsageLimitsMode.default("none"),
-  // Gate new allowance policies until every API/worker in the fleet enforces
-  // them. Persisted-policy enforcement and recovery reads/clears stay active.
-  usageAllowancesEnabled: EnvBoolean.default(false),
+  // New allowance policies (workspace budgets, member and per-person limits).
+  // On by default: this release only runs on a database past the 0977
+  // migration baseline, so every API and worker beside it already enforces
+  // them. `false` is an operator opt-out of new policies only; persisted ones
+  // stay enforced and can still be cleared.
+  usageAllowancesEnabled: EnvBoolean.default(true),
   staticEntitlementsJson: z.string().default("{}"),
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
@@ -984,6 +987,11 @@ const SettingsSchema = z.object({
   // that may call the unauthenticated API besides this stack's own web and
   // public origins. Local access mode ignores `corsAllowOriginRegex`.
   localAllowedOrigins: z.string().optional(),
+  // Exact marketing-site origins, comma-separated, that may read the signed-in
+  // visitor's display name and avatar from `GET /v1/auth/display-identity` with
+  // cookies. Grants credentialed CORS on that one read-only path only; empty
+  // (the default) disables it. Never widens `corsAllowOriginRegex`.
+  landingOrigins: z.string().optional(),
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
@@ -1298,6 +1306,10 @@ const SettingsSchema = z.object({
   // account pool and a distinct rail from the existing xai/* API-key provider.
   supergrokSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
   claudeSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED
+  // Offers "Claude Code (API key)" in Connect provider: the Anthropic API key
+  // connection, explained for people whose Claude plan includes monthly API
+  // credits. Display only; it is independent of the Claude subscription.
+  claudeCodeApiKeyEnabled: EnvBoolean.default(false), // OPENGENI_CLAUDE_CODE_API_KEY_ENABLED
   // Maximum silence between complete, valid SuperGrok SSE data events. This is
   // not a request/run duration cap; every valid event resets the timer.
   supergrokResponseStreamIdleTimeoutMs: z.coerce
@@ -6042,6 +6054,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),
     corsAllowOriginRegex: optional("OPENGENI_CORS_ALLOW_ORIGIN_REGEX"),
     localAllowedOrigins: optional("OPENGENI_LOCAL_ALLOWED_ORIGINS"),
+    landingOrigins: optional("OPENGENI_LANDING_ORIGINS"),
     openaiProvider: optional("OPENGENI_OPENAI_PROVIDER"),
     openaiApiKey: optional("OPENGENI_OPENAI_API_KEY") ?? optional("OPENAI_API_KEY"),
     openaiBaseUrl: optional("OPENGENI_OPENAI_BASE_URL") ?? optional("OPENAI_BASE_URL"),
@@ -6140,6 +6153,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
+    claudeCodeApiKeyEnabled: optional("OPENGENI_CLAUDE_CODE_API_KEY_ENABLED"),
     supergrokResponseStreamIdleTimeoutMs: optional(
       "OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS",
     ),
@@ -12176,7 +12190,13 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // access) or runs at once (a read, or full access); the API enforces it.
       // A bot send follows the person's own Slack send permission in an
       // interactive chat; the worker decides it per call the same way.
-      requireApproval: ["admin_action_call", "slack_bot_send_prepared_message"],
+      // An agent's request to attach a repository always waits for a person,
+      // and the API attaches only a call a person approved.
+      requireApproval: [
+        "admin_action_call",
+        "slack_bot_send_prepared_message",
+        "github_repository_attach",
+      ],
     },
     ...(hasFiles
       ? []
@@ -12348,6 +12368,19 @@ export function trustedProxyCidrEntries(raw: string): TrustedProxyCidr[] {
  * browser boundary.
  */
 export function localAllowedOriginEntries(raw: string | undefined): string[] {
+  return exactOriginEntries(raw, "OPENGENI_LOCAL_ALLOWED_ORIGINS", "http://127.0.0.1:5173");
+}
+
+/**
+ * Parse `OPENGENI_LANDING_ORIGINS`: comma-separated exact marketing-site origins
+ * allowed to read `GET /v1/auth/display-identity` with cookies. Same strict
+ * exact-origin rules as {@link localAllowedOriginEntries}.
+ */
+export function landingOriginEntries(raw: string | undefined): string[] {
+  return exactOriginEntries(raw, "OPENGENI_LANDING_ORIGINS", "https://www.example.com");
+}
+
+function exactOriginEntries(raw: string | undefined, variable: string, example: string): string[] {
   const origins: string[] = [];
   for (const entry of (raw ?? "").split(",")) {
     const value = entry.trim();
@@ -12371,7 +12404,7 @@ export function localAllowedOriginEntries(raw: string | undefined): string[] {
       value.endsWith("#")
     ) {
       throw new Error(
-        `OPENGENI_LOCAL_ALLOWED_ORIGINS entry "${value.slice(0, 64)}" is not an exact http(s) origin such as http://127.0.0.1:5173`,
+        `${variable} entry "${value.slice(0, 64)}" is not an exact http(s) origin such as ${example}`,
       );
     }
     origins.push(url.origin);
@@ -12466,6 +12499,7 @@ function validateRecordingTranscriptionSettings(settings: Settings): void {
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
+  landingOriginEntries(settings.landingOrigins);
   validateSitesDomain(settings);
   if (
     settings.organizationUserSetupEmailTokenTransport === "query" &&

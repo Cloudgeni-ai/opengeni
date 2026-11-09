@@ -1340,6 +1340,7 @@ export function createRecordingActivities(
                     ourDiarizer.diarize(trackAudio, {
                       // What was scanned while the meeting was recorded.
                       cache: await speakerScan(objectStorage, plan.trackNumber),
+                      durationMilliseconds: audio.durationMilliseconds,
                       // A known head count is exact only when everyone is on
                       // this one track; split across tracks, it is each one's
                       // upper bound.
@@ -2180,7 +2181,7 @@ export function createRecordingActivities(
           mimeType: audio.mimeType,
           fileName: `track-${track.trackNumber}.${audio.extension}`,
         },
-        { cache: previous, signal },
+        { cache: previous, durationMilliseconds: audioMilliseconds, signal },
       );
       await objectStorage.putObject({
         key,

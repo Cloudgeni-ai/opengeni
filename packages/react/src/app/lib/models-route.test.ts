@@ -52,6 +52,29 @@ describe("Models URLs", () => {
     expect(connectStepOf("connect")).toBeNull();
   });
 
+  test("Claude Code (API key) is the Anthropic API-key step, marked", () => {
+    expect(parseModelsView("connect:claude_code_api")).toBe("connect:claude_code_api");
+    expect(parseModelsView("connect-org:claude_code_api")).toBe("connect-org:claude_code_api");
+    expect(connectStepOf("connect-org:claude_code_api")).toEqual({
+      provider: "anthropic",
+      organization: true,
+      claudeCodeApi: true,
+    });
+    expect(connectStepOf("connect:claude_code_api")).toEqual({
+      provider: "anthropic",
+      organization: false,
+      claudeCodeApi: true,
+    });
+    // An organization's page keeps the entry it was opened from.
+    expect(
+      organizationModelsSearch({
+        workspace: undefined,
+        account: undefined,
+        view: "connect:claude_code_api",
+      }).view,
+    ).toBe("connect-org:claude_code_api");
+  });
+
   test("an Azure OpenAI account page is the organization's; both connect steps exist", () => {
     // A workspace's own Azure key is a row in its list, not a Models account page.
     expect(parseModelsAccount("org:gateway:azure_openai")).toBe("org:gateway:azure_openai");

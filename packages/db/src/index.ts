@@ -36,6 +36,7 @@ export {
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./session-resource-removal";
+export * from "./session-repository-attach";
 import { admitRequestedRepositories } from "./session-resource-removal";
 export * from "./github-gateway";
 import { isGitHubGatewayApprovalId } from "./github-gateway";
@@ -43,6 +44,8 @@ export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./session-search-records";
 export * from "./model-call-timing";
+export * from "./turn-timing-profile";
+export * from "./turn-timing-profile-store";
 export * from "./model-provider-execution-inputs";
 export * from "./workspace-model-catalog-inputs";
 import {
@@ -108,6 +111,7 @@ import {
 } from "./disconnect-audit";
 export {
   getConnectionMetadata,
+  getConnectionMetadataByIds,
   getProviderConnectionHomeWorkspace,
   listConnectionsMetadata,
   type ConnectionMetadataWithVerification,

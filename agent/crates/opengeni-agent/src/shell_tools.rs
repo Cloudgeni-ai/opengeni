@@ -1,7 +1,7 @@
 //! Release-contained ripgrep and jq for the commands this agent runs.
 //!
-//! Release builds embed the official, checksum-pinned binaries for their own
-//! target (see `scripts/fetch-shell-tools.ts`). At start the agent writes them
+//! Release builds embed the checksum-pinned binaries for their own target (see
+//! `scripts/fetch-shell-tools.ts`). At start the agent writes them
 //! to one immutable generation directory and appends that directory to the
 //! end of every command's `PATH` (`opengeni_agent_platform::shell_tools`), so
 //! a copy the machine already has always wins. Nothing is downloaded: the

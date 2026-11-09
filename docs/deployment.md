@@ -9,10 +9,9 @@ image. Helm's `backup` settings schedule it without giving backup credentials to
 the application. This is database-only protection, not a snapshot of object files
 or host state; retain provider-native recovery where appropriate.
 
-Workspace/member allowances use rolling migrations and a default-off producer
-gate. Upgrade every API, control worker, and turn worker before enabling
-`OPENGENI_USAGE_ALLOWANCES_ENABLED`; disabling it does not disable enforcement
-of persisted policies. See [usage allowance rollout](usage-allowances.md#rollout-and-activation).
+Workspace/member allowances are on by default. `OPENGENI_USAGE_ALLOWANCES_ENABLED=false`
+refuses new budgets and limits but does not disable enforcement of persisted
+policies. See [usage allowance rollout](usage-allowances.md#rollout-and-activation).
 
 Per-task usage limits follow the same pattern: apply migrations 0773–0775, upgrade
 every API, worker, web, SDK/React and embedded consumer, then enable
@@ -1788,6 +1787,19 @@ Browser and desktop controller requests also admit the configured
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_WEB_BASE_URL` origins directly; this
 does not grant those origins credentialed cross-origin responses.
 
+A marketing site on another origin of the same site (for example `opengeni.ai`
+beside `app.opengeni.ai`) can show a signed-in visitor as signed in through
+`GET /v1/auth/display-identity`. It resolves the visitor like
+`GET /v1/auth/get-session` on a freshly loaded app tab and returns only `{"signedIn": false}` or
+`{"signedIn": true, "name": ..., "image": ...}`, never an email, id or session
+data, with `Cache-Control: private, no-store` and `Vary: Origin`. List the
+site's exact origins in `OPENGENI_LANDING_ORIGINS` (comma-separated, no
+wildcards; empty by default, which disables it). Those origins get credentialed
+CORS for that one GET path only; the regex above is unchanged and every other
+path answers them like any unlisted origin. The session cookie must reach the
+API on that request, so the marketing site must be same-site with the API (a
+host-only `SameSite=Lax` cookie is sent on same-site fetches).
+
 The unauthenticated local access mode (`OPENGENI_PRODUCT_ACCESS_MODE=local`)
 never answers with wildcard CORS, whatever `OPENGENI_ENVIRONMENT` is: a request
 without credentials acts as the local user, so any site could otherwise read
@@ -2068,6 +2080,14 @@ strict-origin-when-cross-origin` (the setup-account page keeps its stricter
 `frame-ancestors`, or other CSP, because the console supports embedding. The
 API compresses JSON responses and leaves SSE and other streaming transports
 uncompressed.
+
+Set `OPENGENI_WEB_NOINDEX=true` on a deployment search engines should not
+index, such as staging: every response the web server sends then carries
+`X-Robots-Tag: noindex, nofollow`. It is off by default. Keep `/robots.txt`
+crawlable, because a crawler that may not fetch a page never sees its
+`noindex` and keeps an already indexed URL. The Helm chart passes the shared
+`config` values to the web pod, so `config.OPENGENI_WEB_NOINDEX: "true"` is
+enough.
 
 The shell carries a meta description plus Open Graph and Twitter card tags so
 shared console links unfurl with the bundled 1200x630 `/og-image.png`. Link
@@ -3811,6 +3831,11 @@ version only after the corresponding `agent-v<version>` release and its signed
 assets exist; never move or delete an agent release tag. A baked asset still
 takes precedence so a deployed control-plane image serves its release-coherent
 binary directly.
+The Agent Release workflow publishes that release when a push to `main`
+changes `agent/Cargo.toml` to a version without an `agent-v<version>` release,
+so raising the agent version is enough. A tag left without a release fails the
+run until that tag's workflow is re-run. Its protected environment still
+approves each publication, and a pushed tag or a manual dispatch still works.
 Explicit `/agent/v<version>/<asset>` binary and signature requests always use
 that immutable archive release; a baked canary cannot override a version pin.
 Linux canary builds use `scripts/bake-agent.sh` with the exact source commit as
@@ -4245,7 +4270,7 @@ Minimum production dashboards should cover:
 - Workspace Insights: `opengeni_workspace_insights_request_duration_seconds{range,provider_filter,model_filter,outcome}` measures the complete route handler, including access resolution, aggregation, contract projection, and response construction. Its exact `le="2"` bucket verifies the default unfiltered weekly view's two-second target. Labels carry only closed range/outcome values and filter-presence flags, never workspace, subject, provider, or model values. If the `usage_bundle` or `model_bundle` phase dominates `opengeni_workspace_insights_phase_duration_seconds`, check the fact authority functions still carry `enable_nestloop=off` (migration 0512): a time window newer than the last `ANALYZE` is estimated at about one row, and a nested-loop plan rescans every workspace session per fact. The route shares one in-flight rollup only between concurrent requests with the same workspace, range, filters, and database RLS actor.
 - Worker execution: activity run rate, failure rate, and p50/p95/p99 `runAgentTurn` duration by `activity`, `status`, `environment`, and `component`.
 - Turn lifecycle: `opengeni_turns_total{outcome}`, `opengeni_turn_duration_seconds`, `opengeni_turns_inflight`, `opengeni_turn_oldest_inflight_age_seconds`, and `opengeni_turn_oldest_no_progress_age_seconds`. Durable recovery is a separate control-worker projection: `opengeni_session_recovery_backlog{state}` counts recovering sessions with no active attempt (including ones in recorded backoff), `opengeni_session_recovery_scheduled{state}` counts those still inside their recorded Retry-After/connectivity backoff, and `opengeni_session_recovery_oldest_overdue_seconds{state}` drives `OpenGeniSessionRecoveryBacklogStale`; see [`run-lifecycle.md`](run-lifecycle.md). In-flight and progress gauges are worker-local and exact-attempt-qualified: recoverable replacement attempts coexist without overwriting one another, and physical activity finalization always removes its own attempt even when durable outcome classification is unavailable.
-- Turn startup: the canonical `Opengeni · Turn Startup` dashboard exposes 7-day and 30-day views of `opengeni_turn_worker_preparation_duration_seconds`, every bounded `opengeni_turn_startup_phase_duration_seconds` phase, and real cumulative `opengeni_turn_startup_milestone_duration_seconds{milestone="queue"|"provider_dispatch"|"first_byte"}` p50/p95/p99. Phase observations can overlap or nest: never sum them as elapsed critical-path time. `runtime_stream_initialization` replaces the misleading phase name `provider_dispatch`; the actual wire-dispatch milestone is unchanged. Nonblocking MCP preparation is recorded separately as `opengeni_tool_background_preparation_duration_seconds`, not as startup, even when it overlaps startup. The production observability example retains 30 days; environment overlays must preserve equivalent local or remote-write retention if they promise the 30-day view.
+- Turn startup: the canonical `Opengeni · Turn Startup` dashboard exposes 7-day and 30-day views of `opengeni_turn_worker_preparation_duration_seconds`, every bounded `opengeni_turn_startup_phase_duration_seconds` phase, and real cumulative `opengeni_turn_startup_milestone_duration_seconds{milestone="queue"|"provider_dispatch"|"first_byte"}` p50/p95/p99. The same dispatch and first-byte milestones are also recorded from the start of the attempt that reached them as `opengeni_turn_startup_since_attempt_start_seconds`, which excludes time behind an earlier turn, capacity waits and recovery gaps; the latency alerts use it, and runnable waiting alerts on `opengeni_turns_queued_oldest_age_seconds{hold="ready"}`. Phase observations can overlap or nest: never sum them as elapsed critical-path time. `runtime_stream_initialization` replaces the misleading phase name `provider_dispatch`; the actual wire-dispatch milestone is unchanged. Nonblocking MCP preparation is recorded separately as `opengeni_tool_background_preparation_duration_seconds`, not as startup, even when it overlaps startup. The production observability example retains 30 days; environment overlays must preserve equivalent local or remote-write retention if they promise the 30-day view.
 - Model, MCP, Codex, and sandbox SLIs: `opengeni_model_calls_total{provider,outcome}`, `opengeni_model_call_duration_seconds{provider}`, `opengeni_model_invalid_requests_total{provider,path,code}` (a provider 400 by the request path it names with indices collapsed, such as `input[].tools[].name`; monitoring only, never the message), `opengeni_context_compaction_starts_total{trigger}`, `opengeni_context_compactions_total{trigger}`, `opengeni_context_compaction_pending`, `opengeni_context_compaction_oldest_pending_age_seconds`, `opengeni_context_compaction_monitor_fresh`, `opengeni_mcp_tool_calls_total{outcome,tool}`, `opengeni_mcp_tool_call_duration_seconds{outcome,tool}` (`tool` is a first-party catalog name or `external`), `opengeni_codex_credential_selections_total{strategy,reason}`, `opengeni_codex_credential_failures_total{kind,outcome}`, `opengeni_codex_pool_observations_total{depth}`, `opengeni_codex_pool_low_total{depth}`, the shared subscription core shadow (`opengeni_subscription_core_shadow_comparisons_total{provider,parity,placement}`, `..._parity_failures_total{provider,reason}`, `..._violations_total{provider,requirement}`, `..._inputs_total{provider,input}`, `..._skips_total{provider,reason}`, `..._duration_seconds{provider}`; see [subscription-accounts.md](subscription-accounts.md#shadow-comparison)), `opengeni_sandbox_creates_total{backend,image_source,outcome}`, `opengeni_sandbox_create_duration_seconds{backend,image_source}`, logical `opengeni_sandbox_provisions_total{backend,stage,category,outcome,expected}` plus `opengeni_sandbox_provision_duration_seconds` and `opengeni_sandbox_provision_internal_attempts`, internal `opengeni_sandbox_provision_attempts_total{backend,stage,category,outcome}` plus its duration histogram, `opengeni_sandbox_operations_total{backend,op,outcome}` (`ok`, expected path `not_found`, or actual `failed`), `opengeni_sandbox_operation_duration_seconds{backend,op}`, `opengeni_sandbox_inventory_refresh_timestamp_seconds{domain}`, the chart's freshness-filtered `opengeni:*:fresh_max` inventory recording rules, `opengeni_sandbox_warming_timeouts_total{backend,stage}`, `opengeni_sandbox_orphans_terminated_total`, and the Modal orphan sweep's provider inventory `opengeni_modal_sandbox_inventory{state=running|unleased|lease_missing_instance}` (inventory domain `modal_provider`, published only after a complete app listing). `opengeni_sandbox_leases_interaction_only{idle_bucket}` (inventory domain `interaction_idle`) counts warm leases held only by Browser/Computer sessions by time since their last interaction activity: interaction holders never expire by timestamp; once every Browser/Computer session on a box has been unused for the sandbox idle grace they are saved or released and the box drains (`opengeni_sandbox_idle_interaction_release_total{outcome}`, see [run-lifecycle.md](run-lifecycle.md)). Logical provision metrics deliberately classify expected lifecycle transitions separately from actual failures; correlation/provider/session identities and error text are not labels.
 - Product failures users hit (all labels are closed sets; no account, workspace, user, session, provider URL, or tool name is ever a label):
   - `opengeni_http_request_rejections_total{method,route,status,code,reason,component}` counts every API response with status >= 400. `code` is the public `ErrorEnvelope.code`; `reason` is `permission:<catalog permission>` when the refusal names a missing permission, else the typed `details.code`, else `control:<code>` for a Connected Machine control failure, else `unclassified`. The API `HTTP request completed` log line carries the same `rejectionCode`/`rejectionReason` plus a one-way `rejectionFingerprint` (`m_<10 hex>`) of the message with identifiers, quoted values, and numbers normalized away; `bun run scripts/resolve-rejection-fingerprint.ts m_...` maps it back to the source literal. Message text never reaches logs or metrics.
