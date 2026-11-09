@@ -1,0 +1,15 @@
+diff --git a/index.js b/index.js
+index d45e67d..d351661 100644
+--- a/index.js
++++ b/index.js
+@@ -1,6 +1,9 @@
+ 'use strict';
+ const strictUriEncode = require('strict-uri-encode');
+-const decodeComponent = require('decode-uri-component');
++// decode-uri-component 0.5.1 (the first release without its denial-of-service advisories) is
++// ESM-only; a bundler's CommonJS interop exposes its function as `default`.
++const decodeUriComponentModule = require('decode-uri-component');
++const decodeComponent = decodeUriComponentModule.default || decodeUriComponentModule;
+ const splitOnFirst = require('split-on-first');
+ const filterObject = require('filter-obj');
+ 
