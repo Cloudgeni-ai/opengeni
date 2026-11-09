@@ -6219,6 +6219,11 @@ export const sessionRealtimeEntries = pgTable(
     sourceUpdate: uniqueIndex("session_realtime_entries_source_update_uq")
       .on(table.realtimeId, table.sourceUpdateId)
       .where(sql`${table.sourceUpdateId} is not null`),
+    // Deleting a machine input (archive purge) sets this to null; that check
+    // has only source_update_id, which the unique index above does not lead.
+    sourceUpdateLookup: index("session_realtime_entries_source_update_idx")
+      .on(table.sourceUpdateId)
+      .where(sql`${table.sourceUpdateId} is not null`),
     // History deletion's ON DELETE SET NULL check has only history_item_id,
     // not a realtime_id. Avoid a full ledger scan for every archived item.
     historyItem: index("session_realtime_entries_history_item_idx")
@@ -9584,6 +9589,12 @@ export const sessionSystemUpdates = pgTable(
     deliveredTurn: index("session_system_updates_delivered_turn_idx")
       .on(table.workspaceId, table.deliveredTurnId)
       .where(sql`${table.deliveredTurnId} is not null`),
+    // Deleting a history item (archive purge, session deletion) checks the
+    // deferred session_system_updates_history_item_fk by delivered_history_item_id
+    // alone; without its own index that check scans every workspace's entries.
+    deliveredHistoryItem: index("session_system_updates_delivered_history_item_idx")
+      .on(table.deliveredHistoryItemId)
+      .where(sql`${table.deliveredHistoryItemId} is not null`),
     onePendingSteer: uniqueIndex("session_system_updates_one_pending_steer_idx")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.kind} = 'agent_steer_instruction' and ${table.state} = 'pending'`),
