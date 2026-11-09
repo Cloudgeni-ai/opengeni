@@ -17,6 +17,8 @@ const toolMcpServers = [
   { id: "api_openapi_grafana_prod", name: "Grafana Production", providerDomain: "grafana.com" },
   { id: "cap-linear", name: "Linear" },
   { id: "cap-slack", name: "Slack" },
+  // Its own logo wins over the catalog's.
+  { id: "cap-own", name: "Own", logoSrc: "/own.svg" },
 ];
 const catalogItem = (id: string, extra: Record<string, unknown>) => ({
   id,
@@ -47,6 +49,17 @@ const context = {
       runtime: { available: true, mcpServerId: "cap-linear" },
       logoAssetPath: "linear.png",
     }),
+    catalogItem("mcp:own", {
+      runtime: { available: true, mcpServerId: "cap-own" },
+      logoAssetPath: "catalog-own.svg",
+    }),
+    // Chosen earlier, no longer a connected app, still in the catalog.
+    catalogItem("mcp:retired", {
+      name: "Retired",
+      enabled: false,
+      runtime: { available: false, mcpServerId: "cap-retired" },
+      logoAssetPath: "retired.svg",
+    }),
   ],
 };
 mock.module("@opengeni/react/app/app-context", () => ({
@@ -72,7 +85,11 @@ afterEach(async () => {
   document.body.innerHTML = "";
 });
 
-async function render(mcpServerIds: string[], update = mock((_patch: unknown) => {})) {
+async function render(
+  mcpServerIds: string[],
+  update = mock((_patch: unknown) => {}),
+  options: { disabled?: boolean; existingChat?: boolean; inheritsChatSettings?: boolean } = {},
+) {
   const host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -97,8 +114,9 @@ async function render(mcpServerIds: string[], update = mock((_patch: unknown) =>
           defaultModelSelection={null}
           modelsLoading={false}
           modelsError={null}
-          existingChat={false}
-          inheritsChatSettings={false}
+          disabled={options.disabled}
+          existingChat={options.existingChat ?? false}
+          inheritsChatSettings={options.inheritsChatSettings ?? false}
         />
       </TooltipProvider>,
     ),
@@ -131,10 +149,9 @@ test("enabled connectors collapse into one control instead of a pill each", asyn
   expect(document.querySelector('button[aria-label^="Remove "]')).toBeNull();
   expect(document.querySelector('[aria-label="What the runs work with"]')).toBeNull();
   const button = connectorsButton()!;
-  expect(label(button)).toBe("Connectors8");
-  expect(button.getAttribute("aria-label")).toBe(
-    "Connectors: 8 on, Uploaded files, Knowledge library, PostHog, Gmail, Grafana Production, Linear, Slack, gone-server. Change",
-  );
+  expect(label(button)).toBe("Connectors9");
+  // A chosen app that is no longer connected is flagged on the control itself.
+  expect(button.getAttribute("aria-label")).toBe("Connectors: 9 on, 1 unavailable. Change");
   // At most three logos, real ones first.
   const stack = [...button.querySelectorAll("[data-logo]")].map((tile) =>
     tile.getAttribute("data-logo"),
@@ -143,7 +160,10 @@ test("enabled connectors collapse into one control instead of a pill each", asyn
 });
 
 test("the menu lists every connected app with its real logo and turns them on and off", async () => {
-  const update = await render(["cap-posthog", "gone-server"]);
+  const update = await render(["cap-posthog", "cap-retired", "gone-server"]);
+  expect(connectorsButton()!.getAttribute("aria-label")).toBe(
+    "Connectors: 3 on, 2 unavailable. Change",
+  );
   const menu = await openConnectors();
   const items = [...menu.querySelectorAll('[role="menuitemcheckbox"]')];
   expect(items.map((item) => [label(item), item.getAttribute("aria-checked")])).toEqual([
@@ -154,7 +174,10 @@ test("the menu lists every connected app with its real logo and turns them on an
     ["Grafana Production", "false"],
     ["Linear", "false"],
     ["Slack", "false"],
-    // A chosen app that is no longer connected stays visible, so it can be removed.
+    ["Own", "false"],
+    // Chosen apps that are no longer connected stay visible, by their catalog
+    // name where the catalog still knows them, so they can be removed.
+    ["RetiredUnavailable", "true"],
     ["gone-serverUnavailable", "true"],
   ]);
   const logo = (name: string) =>
@@ -165,18 +188,38 @@ test("the menu lists every connected app with its real logo and turns them on an
   expect(logo("Gmail")).toBe("/assets/gmail.svg");
   expect(logo("Grafana Production")).toBe("/assets/grafana.svg");
   expect(logo("Linear")).toBe("/assets/linear.png");
+  expect(logo("Own")).toBe("/own.svg");
+  expect(logo("Retired")).toBe("/assets/retired.svg");
+  expect(logo("gone-server")).toBe("");
 
   await act(async () => (items[3] as HTMLElement).click());
   expect(update).toHaveBeenLastCalledWith({
-    mcpServerIds: ["cap-posthog", "gone-server", "api_openapi_gmail_one"],
+    mcpServerIds: ["cap-posthog", "cap-retired", "gone-server", "api_openapi_gmail_one"],
   });
-  await act(async () => (items[7] as HTMLElement).click());
-  expect(update).toHaveBeenLastCalledWith({ mcpServerIds: ["cap-posthog"] });
+  await act(async () => (items[9] as HTMLElement).click());
+  expect(update).toHaveBeenLastCalledWith({ mcpServerIds: ["cap-posthog", "cap-retired"] });
 });
 
 test("with nothing on, the control still opens the list", async () => {
   await render([]);
   expect(connectorsButton()!.getAttribute("aria-label")).toBe("Connectors: none on. Change");
   const menu = await openConnectors();
-  expect(menu.querySelectorAll('[role="menuitemcheckbox"]').length).toBe(7);
+  expect(menu.querySelectorAll('[role="menuitemcheckbox"]').length).toBe(8);
+});
+
+test("disabled, existing-chat and chat-settings forms keep their rules", async () => {
+  await render(["cap-posthog"], undefined, { disabled: true });
+  expect(connectorsButton()!.disabled).toBe(true);
+  await act(async () => root?.unmount());
+
+  // Posting into an existing chat: no context row, connectors still chosen here.
+  await render(["cap-posthog"], undefined, { existingChat: true });
+  expect(document.querySelector('[aria-label="What the runs work with"]')).toBeNull();
+  expect(connectorsButton()).not.toBeNull();
+  await act(async () => root?.unmount());
+
+  // A reusable chat owns its tools: no Connectors control at all.
+  await render(["cap-posthog"], undefined, { inheritsChatSettings: true });
+  expect(connectorsButton()).toBeNull();
+  expect(document.body.textContent).toContain("Uses this chat's model, tools and machine.");
 });

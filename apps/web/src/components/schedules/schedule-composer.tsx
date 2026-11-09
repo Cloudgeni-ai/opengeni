@@ -14,6 +14,7 @@ import {
   GitBranchIcon,
   PlugIcon,
   RotateCcwIcon,
+  TriangleAlertIcon,
   XIcon,
 } from "lucide-react";
 
@@ -74,7 +75,19 @@ const BUILT_IN_SERVER_COPY = {
   },
 } as const;
 
-type ServerRow = { id: string; name: string; detail?: string | undefined };
+function builtInCopy(id: string) {
+  return Object.hasOwn(BUILT_IN_SERVER_COPY, id)
+    ? BUILT_IN_SERVER_COPY[id as keyof typeof BUILT_IN_SERVER_COPY]
+    : undefined;
+}
+
+type ServerRow = {
+  id: string;
+  name: string;
+  detail?: string | undefined;
+  /** Chosen for the automation, but no longer one of the workspace's connected apps. */
+  unavailable?: true | undefined;
+};
 
 /** A connector's real logo, its built-in glyph, or a monogram. */
 function ServerLogo({
@@ -86,15 +99,12 @@ function ServerLogo({
   logo: string | null;
   className?: string;
 }) {
-  const builtIn = BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY] as
-    | (typeof BUILT_IN_SERVER_COPY)[keyof typeof BUILT_IN_SERVER_COPY]
-    | undefined;
   return (
     <CapabilityLogo
       src={logo}
       name={server.name}
       size="sm"
-      fallback={builtIn?.icon}
+      fallback={builtInCopy(server.id)?.icon ?? (server.unavailable ? <PlugIcon /> : undefined)}
       className={cn("size-4 rounded-[4px] [&_img]:p-px [&_svg]:size-3", className)}
     />
   );
@@ -106,32 +116,31 @@ const STACK_SIZE = 3;
  * One control for the connected apps a run gets, like the chat composer's
  * Connectors: up to three logos and a count, so a long list stays one line.
  * Its menu lists every connected app to turn on or off, and keeps a chosen app
- * that is no longer connected visible so it can be removed.
+ * that is no longer connected visible so it can be removed; the chip flags it.
  */
 function ConnectorsMenu({
-  servers,
+  rows,
   selected,
   logos,
   onToggle,
   disabled,
 }: {
-  servers: ServerRow[];
+  rows: ServerRow[];
   selected: string[];
   logos: ReadonlyMap<string, string>;
   onToggle: (id: string, on: boolean) => void;
   disabled?: boolean | undefined;
 }) {
-  const known = new Set(servers.map((server) => server.id));
-  const missing: ServerRow[] = selected
-    .filter((id) => !known.has(id))
-    .map((id) => ({ id, name: id, detail: "Unavailable" }));
-  const rows = [...servers, ...missing];
   const on = rows.filter((server) => selected.includes(server.id));
+  const unavailable = on.filter((server) => server.unavailable).length;
   // Real logos first, so the stack doesn't open on monograms.
   const stack = [...on]
     .sort((a, b) => Number(logos.has(b.id)) - Number(logos.has(a.id)))
     .slice(0, STACK_SIZE);
-  const names = on.map((server) => server.name).join(", ");
+  // Shown on hover and read as the button's description, so the label stays short.
+  const names = on
+    .map((server) => (server.unavailable ? `${server.name} (unavailable)` : server.name))
+    .join(", ");
   return (
     <DropdownMenu>
       <Tooltip>
@@ -139,11 +148,9 @@ function ConnectorsMenu({
           <DropdownMenuTrigger asChild>
             <button
               type="button"
-              aria-label={
-                on.length
-                  ? `Connectors: ${on.length} on, ${names}. Change`
-                  : "Connectors: none on. Change"
-              }
+              aria-label={`Connectors: ${on.length ? `${on.length} on` : "none on"}${
+                unavailable ? `, ${unavailable} unavailable` : ""
+              }. Change`}
               disabled={disabled}
               className={cn(
                 "inline-flex h-7 max-w-full min-w-0 shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface pr-2 pl-1.5 text-xs text-fg transition-colors duration-[120ms] hover:border-border-strong data-[state=open]:border-border-strong disabled:pointer-events-none disabled:opacity-50 pointer-coarse:h-8",
@@ -167,6 +174,12 @@ function ConnectorsMenu({
               )}
               <span>Connectors</span>
               {on.length ? <span className="text-fg-muted tabular-nums">{on.length}</span> : null}
+              {unavailable ? (
+                <TriangleAlertIcon
+                  aria-hidden="true"
+                  className="size-3.5 shrink-0 text-status-waiting"
+                />
+              ) : null}
               <ChevronDownIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-subtle" />
             </button>
           </DropdownMenuTrigger>
@@ -382,15 +395,10 @@ export function ComposerField({
   // which capability they also need.
   const servers = context.toolMcpServers
     .filter((server) => server.id !== "opengeni")
-    .map((server) =>
-      server.id in BUILT_IN_SERVER_COPY
-        ? {
-            ...server,
-            name: BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY].name,
-            detail: BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY].needs,
-          }
-        : server,
-    );
+    .map((server) => {
+      const copy = builtInCopy(server.id);
+      return copy ? { ...server, name: copy.name, detail: copy.needs } : server;
+    });
   const selectedTools = draft.mcpServerIds ?? [];
   const toggleTool = (id: string, on: boolean) =>
     update({
@@ -398,13 +406,35 @@ export function ComposerField({
         ? [...selectedTools.filter((tool) => tool !== id), id]
         : selectedTools.filter((tool) => tool !== id),
     });
-  // The chat composer's logos: catalog entries the workspace shell already loaded.
+  // A chosen app that is no longer connected keeps its catalog name when the
+  // catalog still knows it, so it can be recognized and removed.
+  const known = new Set(servers.map((server) => server.id));
+  const missing = selectedTools.filter((id) => !known.has(id));
+  const rows: ServerRow[] = [
+    ...servers,
+    ...missing.map((id) => ({
+      id,
+      name:
+        context.workspaceCapabilityCatalog.find((item) => item.runtime?.mcpServerId === id)?.name ??
+        id,
+      detail: "Unavailable",
+      unavailable: true as const,
+    })),
+  ];
+  // The chat composer's logos: catalog entries the workspace shell already
+  // loaded, also for chosen apps that are no longer connected.
+  const missingKey = missing.join("\n");
   const logos = useMemo(
     () =>
-      connectorLogoSources(context.toolMcpServers, context.workspaceCapabilityCatalog, (path) =>
-        context.client.catalogAssetUrl(path),
+      connectorLogoSources(
+        [
+          ...context.toolMcpServers,
+          ...(missingKey ? missingKey.split("\n") : []).map((id) => ({ id, name: id })),
+        ],
+        context.workspaceCapabilityCatalog,
+        (path) => context.client.catalogAssetUrl(path),
       ),
-    [context.client, context.toolMcpServers, context.workspaceCapabilityCatalog],
+    [context.client, context.toolMcpServers, context.workspaceCapabilityCatalog, missingKey],
   );
 
   /* ----- model */
@@ -483,7 +513,7 @@ export function ComposerField({
       <div className="flex min-w-0 items-center gap-2 px-3 pb-3">
         {!inheritsChatSettings ? (
           <ConnectorsMenu
-            servers={servers}
+            rows={rows}
             selected={selectedTools}
             logos={logos}
             onToggle={toggleTool}
