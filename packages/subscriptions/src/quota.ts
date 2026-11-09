@@ -332,7 +332,7 @@ export function applyQuotaObservation(
 /**
  * The deadline of a quota exhaustion still running at `at`, held until every
  * window exhausted beside it with a known later reset has reset. A refusal
- * that came without a reset gets an adapter's fallback deadline (Codex: five
+ * that came without a reset gets an adapter's fallback deadline (a few
  * hours), and a refusal while the included windows are already spent is the
  * provider refusing the account's extra credits too; either way the account
  * serves again only once the last spent window resets. Its claim then names
