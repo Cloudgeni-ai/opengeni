@@ -1518,6 +1518,7 @@ export const englishMessages = {
     "Connection setup could not continue. Refresh its status before trying again.",
   "connectSetup.continue": "Continue",
   "connectSetup.copyAdminApprovalLink": "Copy approval link",
+  "connectSetup.copyMessageForIt": "Copy message for IT",
   "connectSetup.couldNotVerifyThisConnection":
     "Could not verify this connection. Check the key and server, then submit again. Nothing was connected.",
   "connectSetup.donTSeeYourOrganization":
@@ -1525,17 +1526,28 @@ export const englishMessages = {
   "connectSetup.enterConnectionDetails": "Enter connection details",
   "connectSetup.enterTheRequestedKey": "Enter the requested key",
   "connectSetup.microsoftAdminApprovalMaybe":
-    "Microsoft didn't grant access. If it asked for admin approval, send this link to your Microsoft 365 admin.",
+    "If Microsoft said an admin has to approve {product}, send your IT the message with the approval link. Otherwise, sign in again.",
   "connectSetup.microsoftAdminApprovalRequired":
-    "Send this link to your Microsoft 365 admin to approve access, then sign in again.",
+    "Your organization lets only an admin approve apps like this. Send your IT the message with the approval link. They approve it once for everyone, then you sign in again.",
+  "connectSetup.itMessageWithAppId":
+    "Hi! I'd like to connect {service} to {product}, but our organization only allows apps an admin has approved. Could you allow it? Its app (client) ID is {appId}.",
+  "connectSetup.itMessageWithLink":
+    "Hi! I'd like to connect {service} to {product}, but our organization requires an admin to approve the app first. Could you approve it with this link? You sign in with an admin account and can review what it asks for. It only has to be done once for everyone here.\n\n{link}",
+  "connectSetup.myWorkAccount": "my work account",
   "connectSetup.moreResourcesAreAvailableReview":
     "More resources are available. Review all pages before submitting a selection.",
   "connectSetup.noAccountPublicService": "No account (public service)",
   "connectSetup.nothingIsConnectedUntilThen":
     "Nothing is connected until then. You can close this and keep working.",
   "connectSetup.onlyYourWorkCanUse": "Only your work can use this connection.",
+  "connectSetup.openApprovalLinkAsAdmin": "Open approval link",
   "connectSetup.openProviderVerificationPageNew": "Open the sign-in page",
   "connectSetup.opensInNewTab": "(opens in a new tab)",
+  "connectSetup.organizationApprovalPossibleTitle": "Microsoft didn't give access",
+  "connectSetup.organizationApprovalRequiredTitle": "Your IT needs to approve {product} first",
+  "connectSetup.organizationApprovalUnfinished":
+    "If the sign-in page said an admin has to approve {product}, send your IT the message with the approval details. After they approve, sign in again.",
+  "connectSetup.organizationApprovalUnfinishedTitle": "Didn't get to finish signing in?",
   "connectSetup.personalConnection": "Personal connection",
   "connectSetup.readyToConnect": "Ready to connect",
   "connectSetup.sendTheApprovalLinkTo": "Send the admin approval link to your Microsoft 365 admin.",
@@ -1544,6 +1556,7 @@ export const englishMessages = {
   "connectSetup.setupCouldNotContinueTryAgain": "Setup couldn't continue. You can try again.",
   "connectSetup.setupExpired": "Setup expired",
   "connectSetup.setupOutcomeNeedsChecking": "Setup outcome needs checking",
+  "connectSetup.showMessageForIt": "Show the message",
   "connectSetup.signInWindowClosed": "Sign-in window closed. You can try connecting again.",
   "connectSetup.theIntegrationSourceChangedReview":
     "The integration source changed. Review the updated tools before adding them.",

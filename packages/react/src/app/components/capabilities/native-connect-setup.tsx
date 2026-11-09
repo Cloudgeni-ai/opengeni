@@ -332,6 +332,7 @@ export function NativeConnectSetup({
             <ConnectSetup
               className="og-connect"
               authorizeLabel={request.authorizeLabel}
+              serviceName={request.displayName ?? request.installationTarget?.displayName}
               controller={controller}
               onRetry={() =>
                 controller.begin(

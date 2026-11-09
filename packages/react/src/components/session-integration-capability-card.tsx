@@ -3,9 +3,11 @@ import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
 import { ConnectSetup } from "../connect-setup";
+import { organizationApprovalFor } from "../connect-setup-model";
 import { browserConnectWindowHost } from "../connect-window-host";
 import { connectionServicePresentation } from "../connection-service-presentation";
 import { useOpenGeniText } from "../messages/runtime";
+import { OrganizationApprovalHelp } from "../organization-approval-help";
 import { useIntegrationCapabilityConnect } from "./integration-capability-connect-flow";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 
@@ -125,11 +127,20 @@ function ScopedCard({
       ?.focus({ preventScroll: true });
   }, [connected]);
   const retrySignIn = flow.signInClosed || Boolean(error);
+  // After a sign-in the person never came back from (here or on an earlier
+  // visit), the card offers organization approval help above its sign-in.
+  const approval = flow.organizationApproval;
+  // The provider said an administrator must approve: messaging IT is the
+  // step, and signing in again becomes the help's own secondary action.
+  const blockedOnApproval = !!attempt && organizationApprovalFor(attempt) !== null;
   const setup =
-    availability.kind === "ready" && (attempt || busy || error) ? (
+    availability.kind === "ready" && (attempt || busy || error || approval) ? (
       <div ref={setupRef} tabIndex={-1} className="og-session-capability-step">
         {error ? <p role="alert">{error}</p> : null}
-        {flow.notice && flow.signInClosed ? <p role="status">{flow.notice}</p> : null}
+        {flow.notice && flow.signInClosed && !approval ? <p role="status">{flow.notice}</p> : null}
+        {approval ? (
+          <OrganizationApprovalHelp approval={approval} serviceName={presentation.name} />
+        ) : null}
         {/* While the sign-in window is open, the card says so and offers one way
             out, which ends the attempt; the sign-in controls return if the
             window closes or the provider moves setup elsewhere. */}
@@ -138,6 +149,8 @@ function ScopedCard({
             className="og-connect"
             controller={flow.controller}
             inChat
+            serviceName={presentation.name}
+            onRetry={blockedOnApproval ? flow.start : undefined}
             authorizeLabel={
               retrySignIn
                 ? t("connectSetup.trySigningInAgain")
@@ -182,9 +195,14 @@ function ScopedCard({
             </span>
           </div>
         ) : null}
-        {!busy && !waiting && (flow.restartable || (error && !attempt)) ? (
+        {!busy &&
+        !waiting &&
+        !blockedOnApproval &&
+        (flow.restartable || ((error || approval) && !attempt)) ? (
           <button type="button" className="og-session-capability-primary" onClick={flow.start}>
-            {t("sessionIntegrationCapabilityCard.tryAgain")}
+            {approval && !attempt
+              ? t("connectSetup.trySigningInAgain")
+              : t("sessionIntegrationCapabilityCard.tryAgain")}
           </button>
         ) : null}
       </div>
