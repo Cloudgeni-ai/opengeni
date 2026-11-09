@@ -3414,6 +3414,30 @@ export async function listSharedWorkspacesForAccount(
   );
 }
 
+/** Ids of the organization's shared workspaces, newest first; no projections. */
+export async function listOrganizationWorkspaceIds(
+  db: Database,
+  accountId: string,
+  limit = 200,
+): Promise<string[]> {
+  const rows = await withRlsContext(db, { accountId, workspaceId: null }, async (scopedDb) =>
+    scopedDb
+      .select({ id: schema.workspaces.id })
+      .from(schema.workspaces)
+      .where(
+        and(
+          eq(schema.workspaces.accountId, accountId),
+          sql`${schema.workspaces.id} in (
+            select workspace_id from list_organization_workspace_ids(${accountId}::uuid)
+          )`,
+        ),
+      )
+      .orderBy(desc(schema.workspaces.createdAt))
+      .limit(limit),
+  );
+  return rows.map((row) => row.id);
+}
+
 export async function countWorkspacesForAccount(db: Database, accountId: string): Promise<number> {
   const [{ count } = { count: 0 }] = await db
     .select({

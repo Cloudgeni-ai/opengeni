@@ -210,6 +210,57 @@ describe("session admission notice", () => {
     expect(container.querySelector("button")).toBeNull();
   });
 
+  const ownMachine = {
+    sandboxId: "new-machine",
+    machineName: "My machine",
+    ownerName: "Sam",
+    isOwner: true,
+    queuedTurnBlocked: false,
+  };
+
+  test("a paused owner reads one consistent line: it starts when the chat is resumed", async () => {
+    await render({ paused: true, machineAccess: ownMachine, onAllowMachine: async () => {} });
+    expect(container.textContent).toContain(
+      "Allow it for this chat. Your message starts when the chat is resumed.",
+    );
+    expect(container.textContent).not.toContain("right away");
+    expect(container.textContent).not.toContain("This chat is also paused");
+    expect([...container.querySelectorAll("button")].map((b) => b.textContent)).toEqual([
+      "Allow for this chat",
+    ]);
+  });
+
+  test("a paused owner without Allow here is told it starts once resumed, not by itself", async () => {
+    await render({ paused: true, machineAccess: ownMachine });
+    expect(container.textContent).toContain(
+      "You can allow it in the machine’s settings. Your message starts when the chat is resumed.",
+    );
+    expect(container.textContent).not.toContain("starts by itself");
+    expect(container.textContent).not.toContain("This chat is also paused");
+  });
+
+  test("in a shared chat, the owner learns Allow shows the workspace what runs on the machine", async () => {
+    const shared = { ...session(), tenancy: { visibility: "workspace" } } as unknown as Session;
+    await render({ session: shared, machineAccess: ownMachine, onAllowMachine: async () => {} });
+    expect(container.textContent).toContain(
+      "This chat is shared, so people in this workspace will see what the agent does on “My machine”.",
+    );
+    await act(async () => root!.unmount());
+    root = undefined;
+    container.remove();
+    await render({ machineAccess: ownMachine, onAllowMachine: async () => {} });
+    expect(container.textContent).not.toContain("This chat is shared");
+  });
+
+  test("someone else in a paused chat still sees the paused note", async () => {
+    await render({
+      paused: true,
+      session: session("personal_resource_grant_required"),
+      machineAccess: { ...ownMachine, isOwner: false },
+    });
+    expect(container.textContent).toContain("This chat is also paused");
+  });
+
   test("a failed Allow is announced without exposing server errors", async () => {
     await render({
       machineAccess: {

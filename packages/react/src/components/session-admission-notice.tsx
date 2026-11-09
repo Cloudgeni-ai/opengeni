@@ -370,6 +370,8 @@ export function SessionAdmissionNotice({
     : needsMachineAccess && machineAccess
       ? sessionAdmissionMachineAccessCopy(t, machineAccess, {
           canAllowHere: onAllowMachine !== undefined,
+          paused,
+          shared: session.tenancy?.visibility === "workspace",
         })
       : sessionAdmissionCopy(t, reason);
   const allowing = !machineChanged && needsMachineAccess && machineAccess?.isOwner === true;
@@ -466,7 +468,8 @@ export function SessionAdmissionNotice({
             </>
           )}
         </div>
-        {paused ? <p className="mt-2">{t("sessionAdmission.pausedNote")}</p> : null}
+        {/* The owner's own words already say it starts once resumed. */}
+        {paused && !allowing ? <p className="mt-2">{t("sessionAdmission.pausedNote")}</p> : null}
         {action !== null && !machineBlocked ? (
           <Button
             type="button"

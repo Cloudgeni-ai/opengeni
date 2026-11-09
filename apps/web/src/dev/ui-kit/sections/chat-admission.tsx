@@ -30,6 +30,22 @@ function blocked(reason: string, activeSandboxId = "laptop", sqlState = "OG002")
   } as unknown as Session;
 }
 
+/** The same chat, paused by someone. */
+function paused(session: Session): Session {
+  return {
+    ...session,
+    effectiveControl: { state: "paused", controlVersion: 5, controlEtag: "etag-kit-paused" },
+  } as unknown as Session;
+}
+
+/** The same chat, shared with the workspace. */
+function shared(session: Session): Session {
+  return {
+    ...session,
+    tenancy: { ...session.tenancy, visibility: "workspace" },
+  } as unknown as Session;
+}
+
 function access(overrides: Partial<SessionMachineAccess> = {}): SessionMachineAccess {
   return {
     sandboxId: "laptop",
@@ -62,6 +78,7 @@ const STATES: {
   machines?: MachineView[];
   picker?: boolean;
   allow?: boolean;
+  paused?: boolean;
 }[] = [
   {
     part: "run",
@@ -102,6 +119,29 @@ const STATES: {
     session: blocked("personal_resource_grant_required"),
     access: access({ queuedTurnNotApprovedHere: false, queuedTurnApprovedMachines: [] }),
     allow: true,
+  },
+  {
+    part: "machine-access-owner-paused",
+    label: "Your machine isn't allowed, and the chat is paused",
+    session: paused(blocked("personal_resource_grant_required")),
+    access: access({ queuedTurnNotApprovedHere: false, queuedTurnApprovedMachines: [] }),
+    allow: true,
+    paused: true,
+  },
+  {
+    part: "machine-access-owner-shared",
+    label: "Your machine isn't allowed, in a chat shared with the workspace",
+    session: shared(blocked("personal_resource_grant_required")),
+    access: access({ queuedTurnNotApprovedHere: false, queuedTurnApprovedMachines: [] }),
+    allow: true,
+  },
+  {
+    part: "machine-access-owner-shared-paused",
+    label: "Your machine isn't allowed, in a paused shared chat",
+    session: paused(shared(blocked("personal_resource_grant_required"))),
+    access: access({ queuedTurnNotApprovedHere: false, queuedTurnApprovedMachines: [] }),
+    allow: true,
+    paused: true,
   },
   {
     part: "machine-access-legacy",
@@ -237,7 +277,7 @@ export default function ChatAdmissionSection() {
                   }
                   onMoveToMachine={async () => true}
                   canControl
-                  paused={false}
+                  paused={state.paused === true}
                   busy={false}
                   onRecheck={async () => {}}
                   onAllowMachine={state.allow ? async () => {} : undefined}

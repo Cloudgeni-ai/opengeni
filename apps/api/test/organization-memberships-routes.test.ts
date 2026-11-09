@@ -1,14 +1,19 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ApiRouteDeps, ManagedEmailDeliveryResult, ManagedEmailMessage } from "@opengeni/core";
 import {
+  blockSessionWorkBeforeAttemptClaim,
   bootstrapWorkspace,
   claimOrganizationUserSetupDelivery,
   completeSelfServiceOrganizationSetup,
   createDb,
   createOrganizationInvitation,
+  createSession,
   ensureManagedAccessForUserWithOrganizationMemberships,
   ensureWorkspaceByExternalIdentity,
   getSelfServiceOrganizationOnboardingState,
+  getSession,
+  initializeSessionStartAtomically,
+  peekSessionWork,
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
@@ -629,8 +634,76 @@ describe("organization membership routes", () => {
       },
     );
     expect(suspendResponse.status).toBe(200);
-    expect((await suspendResponse.json()) as { status: string }).toMatchObject({
+    const suspended = (await suspendResponse.json()) as {
+      status: string;
+      authorizationRevision: number;
+    };
+    expect(suspended).toMatchObject({
       status: "suspended",
+    });
+
+    // A saved message waiting on that membership starts by itself once it is
+    // reactivated, with nobody pressing anything.
+    const [sharedWorkspace] = await shared.admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name) values (${accountId}, 'Reactivation') returning id`;
+    const workspaceId = sharedWorkspace!.id;
+    await shared.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspaceId}, ${accountId}) on conflict do nothing`;
+    const waiting = await createSession(client.db, {
+      accountId,
+      workspaceId,
+      subjectId: `user:${targetUserId}`,
+      initialMessage: "Saved work",
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+      resources: [],
+      metadata: {},
+    });
+    await initializeSessionStartAtomically(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: waiting.id,
+      reasoningEffortFallback: "medium",
+      createdEventPayload: {},
+    });
+    const peek = await peekSessionWork(client.db, workspaceId, waiting.id, true);
+    if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("fixture not runnable");
+    expect(
+      (
+        await blockSessionWorkBeforeAttemptClaim(client.db, workspaceId, {
+          accountId,
+          sessionId: waiting.id,
+          workflowId: `session-${waiting.id}`,
+          attemptId: crypto.randomUUID(),
+          fence: peek.admissionFence,
+          wakeRevision: peek.admissionWakeRevision!,
+          reason: "initiator_membership_required",
+          sqlState: "OG001",
+        })
+      ).action,
+    ).toBe("blocked");
+    const reactivateResponse = await app.request(
+      `http://x/v1/organizations/${accountId}/members/${accepted.membership.id}`,
+      {
+        method: "PATCH",
+        headers: {
+          cookie: "session=present",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          kind: "reactivate",
+          expectedAuthorizationRevision: suspended.authorizationRevision,
+          operationId: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(reactivateResponse.status).toBe(200);
+    expect((await getSession(client.db, workspaceId, waiting.id))?.admissionBlock).toBeNull();
+    expect(await peekSessionWork(client.db, workspaceId, waiting.id)).toMatchObject({
+      kind: "runnable",
     });
     for (const retentionDays of [29, 91]) {
       const rejectedRetention = await app.request(
