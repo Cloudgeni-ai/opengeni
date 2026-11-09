@@ -1071,6 +1071,7 @@
     "postcss-selector-parser@7.2.0": "patches/postcss-selector-parser@7.2.0.patch",
     "modal@0.9.0": "patches/modal@0.9.0.patch",
     "@openai/agents-extensions@0.14.3": "patches/@openai%2Fagents-extensions@0.14.3.patch",
+    "happy-dom@21.0.4": "patches/happy-dom@21.0.4.patch",
     "ts-proto@2.12.0": "patches/ts-proto@2.12.0.patch",
   },
   "overrides": {
