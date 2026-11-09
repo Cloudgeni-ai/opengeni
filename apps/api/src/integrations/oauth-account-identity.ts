@@ -112,12 +112,7 @@ export function decideOAuthAccountConnection(input: {
   const identity = verifiedIdentity(input.metadata, input.identityKeys);
   const sameAccountAs = (connection: ConnectionMetadata) =>
     !!identity &&
-    sameVerifiedAccount(
-      connection.metadata,
-      input.metadata,
-      input.identityKeys,
-      input.subjectKey,
-    );
+    sameVerifiedAccount(connection.metadata, input.metadata, input.identityKeys, input.subjectKey);
   // One account is the same provider account wherever it was signed in from:
   // the issuer names the account namespace, not the OAuth client. A deployment
   // that replaces its registered client (Google, for example) must still see a
