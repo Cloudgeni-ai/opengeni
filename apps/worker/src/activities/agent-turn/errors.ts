@@ -28,6 +28,9 @@ import {
   SandboxLeaseTransitionError,
   KnowledgeLearningScopeChangedError,
   nestedErrorRecords,
+  nestedPostgresMessage,
+  isPersonalMachineAccessRefusal,
+  type SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
@@ -758,6 +761,31 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
   });
 }
 
+const MEMBERSHIP_CLAIM_REFUSALS = new Set(["initiating human lacks target-workspace membership"]);
+
+/**
+ * Name the condition that blocked a claim, so the chat can say what fixes it
+ * and start the saved message by itself once it is fixed. A personal machine
+ * refused for lack of approval is machine access whatever SQLSTATE carried it.
+ */
+function preClaimBlockReason(
+  failure: SessionEventPersistenceError,
+):
+  | "initiator_membership_required"
+  | "personal_resource_grant_required"
+  | "database_claim_rejected" {
+  const sqlState = failure.details.sqlState;
+  if (sqlState === "OG001") return "initiator_membership_required";
+  if (sqlState === "OG002" || isPersonalMachineAccessRefusal(failure)) {
+    return "personal_resource_grant_required";
+  }
+  if (sqlState === "42501") {
+    const message = nestedPostgresMessage(failure);
+    if (message && MEMBERSHIP_CLAIM_REFUSALS.has(message)) return "initiator_membership_required";
+  }
+  return "database_claim_rejected";
+}
+
 /**
  * Convert the atomic claim transaction's failure into a small, stable
  * Temporal wire contract. The original error remains in activity diagnostics,
@@ -783,14 +811,7 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
     ...(persistenceFailure && rejectedClaim
       ? {
           sqlState: persistenceFailure.details.sqlState,
-          reason:
-            persistenceFailure.details.stage === "session_attempts.claim" &&
-            persistenceFailure.details.sqlState === "OG001"
-              ? ("initiator_membership_required" as const)
-              : persistenceFailure.details.stage === "session_attempts.claim" &&
-                  persistenceFailure.details.sqlState === "OG002"
-                ? ("personal_resource_grant_required" as const)
-                : ("database_claim_rejected" as const),
+          reason: preClaimBlockReason(persistenceFailure),
           retryPolicy: "explicit_recheck" as const,
         }
       : {}),

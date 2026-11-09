@@ -542,6 +542,8 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         db,
         settings,
         bus,
+        requestSessionWorkflowWakeDispatch: () =>
+          deps.workflowClient.requestSessionWorkflowWakeDispatch(),
         ensureSessionGroupReady: async (fleetCtx) => {
           const session = await requireSession(db, fleetCtx.workspaceId, fleetCtx.sessionId);
           return await ensureViewerSessionGroupReady(

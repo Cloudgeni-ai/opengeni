@@ -9,10 +9,12 @@ import { showPart } from "./chat-shared";
 /* ----------------------------------------------------------------------------
    A saved message that can't start: the notice above the composer that says
    why and offers the one way forward. The real notice renders against fixture
-   sessions and machine projections; moving and rechecking resolve at once.
+   sessions and machine projections; moving and allowing resolve at once. Most
+   blocks start the saved message by themselves once fixed, so they show no
+   button; only an unknown failure offers Try again.
    -------------------------------------------------------------------------- */
 
-function blocked(reason: string, activeSandboxId = "laptop"): Session {
+function blocked(reason: string, activeSandboxId = "laptop", sqlState = "OG002"): Session {
   return {
     id: "session-kit",
     workspaceId: "ws-kit",
@@ -21,7 +23,7 @@ function blocked(reason: string, activeSandboxId = "laptop"): Session {
     effectiveControl: { state: "active", controlVersion: 4, controlEtag: "etag-kit" },
     admissionBlock: {
       reason,
-      sqlState: "OG002",
+      sqlState,
       retryPolicy: "explicit_recheck",
       blockedAt: "2026-10-28T11:52:00Z",
     },
@@ -59,6 +61,7 @@ const STATES: {
   access: SessionMachineAccess | null;
   machines?: MachineView[];
   picker?: boolean;
+  allow?: boolean;
 }[] = [
   {
     part: "run",
@@ -89,8 +92,62 @@ const STATES: {
   },
   {
     part: "generic",
-    label: "Another resource isn't approved",
+    label: "Another resource isn't allowed",
     session: blocked("personal_resource_grant_required", "cloud"),
+    access: null,
+  },
+  {
+    part: "machine-access-owner-queued",
+    label: "Your machine isn't allowed for this chat (you can allow it)",
+    session: blocked("personal_resource_grant_required"),
+    access: access({ queuedTurnNotApprovedHere: false, queuedTurnApprovedMachines: [] }),
+    allow: true,
+  },
+  {
+    part: "machine-access-legacy",
+    label: "Your machine refused at claim (permission check)",
+    session: blocked("database_claim_rejected", "laptop", "42501"),
+    access: access({ queuedTurnNotApprovedHere: false, queuedTurnApprovedMachines: [] }),
+    allow: true,
+  },
+  {
+    part: "machine-access-member-queued",
+    label: "The owner's machine isn't allowed, seen by another member",
+    session: blocked("personal_resource_grant_required"),
+    access: access({
+      isOwner: false,
+      queuedTurnNotApprovedHere: false,
+      queuedTurnApprovedMachines: [],
+    }),
+  },
+  {
+    part: "needs-different-machine",
+    label: "Your message, on someone else's machine",
+    session: blocked("database_claim_rejected", "laptop", "42501"),
+    access: access({
+      isOwner: false,
+      queuedTurnBlocked: true,
+      queuedTurnNotApprovedHere: false,
+      queuedTurnApprovedMachines: [],
+    }),
+    picker: true,
+  },
+  {
+    part: "membership",
+    label: "The sender lost workspace access",
+    session: blocked("initiator_membership_required", "cloud", "OG001"),
+    access: null,
+  },
+  {
+    part: "permission",
+    label: "Another permission check",
+    session: blocked("database_claim_rejected", "cloud", "42501"),
+    access: null,
+  },
+  {
+    part: "unknown",
+    label: "Something else went wrong (Try again)",
+    session: blocked("database_claim_rejected", "cloud", "23505"),
     access: null,
   },
 ];
@@ -183,6 +240,7 @@ export default function ChatAdmissionSection() {
                   paused={false}
                   busy={false}
                   onRecheck={async () => {}}
+                  onAllowMachine={state.allow ? async () => {} : undefined}
                 />
               </div>
             </StateCell>
