@@ -3,25 +3,29 @@ import { MANAGED_AUTH_SIGN_IN_EMAIL_NOT_ALLOWED_CODE } from "@opengeni/contracts
 import {
   ManagedPasskeyCeremony,
   ManagedPasskeySignInRequest,
+  ManagedPasskeyStepUpResponse,
   ManagedPasskeySignInResponse,
   ManagedPasskeySignUpOptionsRequest,
   ManagedPasskeySignUpRequest,
   passkeyOnlyAccountEmail,
 } from "@opengeni/contracts/managed-sign-in-methods";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { getManagedSession, type ApiRouteDeps } from "@opengeni/core";
 import { nestedPostgresSqlState } from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
+import { ADMIN_STEP_UP_WINDOW_MS, recordAdminStepUp } from "../auth/admin-step-up";
 import { runManagedAuthProvider } from "../auth/managed-auth-attempt-context";
 import { managedAuthSessionCookieHeaders } from "../auth/managed-auth-session-adapter";
 import {
   consumeManagedPasskeyCeremony,
+  listManagedPasskeyCredentials,
   managedAuthRefusal,
   ManagedPasskeyError,
   managedPasskeyRelyingParty,
   managedPasskeysAvailable,
   startManagedPasskeyRegistration,
   startManagedPasskeySignIn,
+  startManagedPasskeyStepUp,
   verifyManagedPasskeyRegistration,
   verifyManagedPasskeySignIn,
 } from "../auth/managed-passkeys";
@@ -138,7 +142,7 @@ async function signInVerifiedPerson(
   const auth = deps.managedAuth!;
   const internal = (await auth.$context).internalAdapter;
   const address = trustedRequestSourceAddress(context, deps.settings);
-  let session: { token: string } | null;
+  let session: { id?: string; token: string } | null;
   let refusedCode: string | null = null;
   try {
     session = await runManagedAuthProvider("passkey", () =>
@@ -160,6 +164,10 @@ async function signInVerifiedPerson(
   }
   if (!session?.token) {
     return refusal(403, "PASSKEY_SIGN_IN_REFUSED", "This account can't sign in right now");
+  }
+  // Signing in with a passkey also counts as confirming it's them.
+  if (typeof session.id === "string") {
+    await recordAdminStepUp(deps, { authUserId, authSessionId: session.id });
   }
   for (const cookie of await managedAuthSessionCookieHeaders(
     auth,
@@ -219,6 +227,91 @@ export function registerManagedPasskeyRoutes(
       });
       const proven = await verifyManagedPasskeySignIn(deps.db, ceremony, request.response);
       return await signInVerifiedPerson(context, deps, proven.authUserId);
+    } catch (error) {
+      return passkeyRefusal(error);
+    }
+  });
+
+  // Admin step-up: the signed-in person confirms it's them with one of their
+  // own passkeys, in this browser session.
+  const signedInBrowserPerson = async (context: Context) => {
+    if (context.req.header("authorization") !== undefined) return null;
+    const session = await getManagedSession(context, deps.managedAuth!, {
+      db: deps.db,
+      sessionSetMode: deps.settings.managedAuthSessionSetMode,
+      sessionAdapter: deps.managedAuthSessionAdapter,
+    });
+    const sessionId = (session as { session?: { id?: unknown } } | null)?.session?.id;
+    return session?.user && typeof sessionId === "string"
+      ? { authUserId: session.user.id, authSessionId: sessionId }
+      : null;
+  };
+  const notSignedIn = () =>
+    refusal(403, "PASSKEY_STEP_UP_SIGNED_OUT", "Sign in to confirm it's you");
+
+  app.post(`${base}/step-up/options`, async (context) => {
+    const notJson = requireJson(context);
+    if (notJson) return notJson;
+    try {
+      const relyingParty = managedPasskeyRelyingParty(deps.settings, context.req.header("origin"));
+      const person = await signedInBrowserPerson(context);
+      if (!person) return notSignedIn();
+      if (
+        !(await admitManagedPasskeyAttempt(
+          context,
+          deps,
+          `step-up:${person.authUserId}`,
+          SIGN_IN_PER_MINUTE,
+        ))
+      ) {
+        return refusal(
+          429,
+          "PASSKEY_RATE_LIMITED",
+          "Too many passkey attempts; try again in a minute",
+        );
+      }
+      const allow = await listManagedPasskeyCredentials(deps.db, person.authUserId);
+      if (allow.length === 0) {
+        return refusal(409, "PASSKEY_NONE_REGISTERED", "Add a passkey to your account first");
+      }
+      return context.json(
+        ManagedPasskeyCeremony.parse(
+          await startManagedPasskeyStepUp(deps.managedAuth!, relyingParty, {
+            userId: person.authUserId,
+            allow,
+          }),
+        ),
+      );
+    } catch (error) {
+      return passkeyRefusal(error);
+    }
+  });
+
+  app.post(`${base}/step-up`, async (context) => {
+    const notJson = requireJson(context);
+    if (notJson) return notJson;
+    try {
+      const relyingParty = managedPasskeyRelyingParty(deps.settings, context.req.header("origin"));
+      const request = await body(context, ManagedPasskeySignInRequest);
+      const person = await signedInBrowserPerson(context);
+      if (!person) return notSignedIn();
+      const ceremony = await consumeManagedPasskeyCeremony(deps.managedAuth!, request.challengeId, {
+        kind: "step_up",
+        origin: relyingParty.origin,
+      });
+      const proven = await verifyManagedPasskeySignIn(deps.db, ceremony, request.response);
+      // The passkey, the ceremony and this browser session must all be the
+      // same person's.
+      if (ceremony.userId !== person.authUserId || proven.authUserId !== person.authUserId) {
+        return refusal(422, "PASSKEY_NOT_VERIFIED", "The passkey could not be verified");
+      }
+      await recordAdminStepUp(deps, person);
+      return context.json(
+        ManagedPasskeyStepUpResponse.parse({
+          confirmed: true,
+          expiresAt: new Date(Date.now() + ADMIN_STEP_UP_WINDOW_MS).toISOString(),
+        }),
+      );
     } catch (error) {
       return passkeyRefusal(error);
     }

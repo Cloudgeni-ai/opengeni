@@ -1498,6 +1498,18 @@ them, and readiness requires them from then on. A release that still has the
 - Removing a passkey signs the person out everywhere, as a password change
   does: sessions don't record which passkey opened them, so ending all of them
   is the only way to shut out a removed passkey.
+- `OPENGENI_ADMIN_PASSKEY_STEP_UP=required` (default `off`) makes owners and
+  admins confirm admin changes with a passkey used in the last ten minutes:
+  members, roles and invitations, billing and plans, API keys, shared
+  integrations and connections, and organization and workspace settings.
+  Signing in with a passkey counts. Otherwise the API refuses with
+  `ADMIN_PASSKEY_STEP_UP_REQUIRED` in the error details, and the console asks
+  for the passkey and sends the change again; someone without one is sent to
+  add one. An agent, the phone app or a personal API key acting for an admin
+  needs the person's recent passkey from a browser too. Normal members,
+  personal workspaces, reads and organization or workspace API keys are not
+  affected. It applies only where passkey sign-in is offered, so turn it on
+  once admins have passkeys.
 - Ceremonies are single use, expire after five minutes and are bound to the
   origin that started them. Requests for new ceremonies are rate limited per
   client address. Credentials are stored as public keys only; the signature

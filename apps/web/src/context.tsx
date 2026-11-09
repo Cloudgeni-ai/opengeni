@@ -49,6 +49,7 @@ import { PersonalSecurityProvider } from "@/lib/personal-security-context";
 import { Input } from "@opengeni/react/ui/input";
 import { Label } from "@opengeni/react/ui/label";
 import { Toaster } from "@opengeni/react/app/components/toaster";
+import { AdminStepUpDialog } from "@/components/admin-step-up-dialog";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import {
   clearOrganizationInvitationContinuation,
@@ -543,6 +544,7 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main data-window-frame className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
+      <AdminStepUpDialog />
       <div ref={mountApiUpdateNotice} className="shrink-0" />
       <SignInCallbackNotice
         userId={authSession?.user.id ?? null}

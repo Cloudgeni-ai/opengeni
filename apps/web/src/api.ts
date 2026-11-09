@@ -28,6 +28,7 @@ import {
 import { noteClientRequestFailure } from "@opengeni/react/app/lib/client-signals";
 import { signupAttribution, signupReturnPath } from "./lib/signup-attribution";
 import { askForPasskey, createPasskey, type PasskeyCeremony } from "./lib/passkeys";
+import { withAdminStepUp } from "./lib/admin-step-up";
 import { browserAccountBridgeBlockersSnapshot } from "@opengeni/react/app/lib/browser-account-bridge";
 import {
   decideVoiceDeployment,
@@ -163,24 +164,29 @@ export function createOpenGeniClient(
     baseUrl: apiBaseUrl,
     beginSharedRead,
     headers: () => ({ ...authHeaders(), ...userActivityHeaders(), ...desktopAppHeaders() }),
-    fetch: async (input, init) => {
-      const actorBound = activeAuthConfig?.mode === "managedSession" || managedActorEpoch !== null;
-      if (actorBound) {
-        if (createdAtActorRevision !== managedActorRevision) {
-          throw new DOMException("The browser account changed", "AbortError");
-        }
-      }
-      const response = await managedActorFetch(input, {
-        ...init,
-        // API requests need managed-session cookies. The SDK explicitly marks
-        // signed object-storage requests as credential-free; preserve that
-        // narrower policy instead of overriding it at the console boundary.
-        credentials: init?.credentials ?? "include",
-        signal: init?.signal,
-      });
-      handleApiContractResponse(response);
-      return response;
-    },
+    fetch: (input, init) =>
+      withAdminStepUp(
+        async () => {
+          const actorBound =
+            activeAuthConfig?.mode === "managedSession" || managedActorEpoch !== null;
+          if (actorBound) {
+            if (createdAtActorRevision !== managedActorRevision) {
+              throw new DOMException("The browser account changed", "AbortError");
+            }
+          }
+          const response = await managedActorFetch(input, {
+            ...init,
+            // API requests need managed-session cookies. The SDK explicitly marks
+            // signed object-storage requests as credential-free; preserve that
+            // narrower policy instead of overriding it at the console boundary.
+            credentials: init?.credentials ?? "include",
+            signal: init?.signal,
+          });
+          handleApiContractResponse(response);
+          return response;
+        },
+        { input, init },
+      ),
   }).withSessionResponse("chat");
 }
 
@@ -835,20 +841,25 @@ function authHeaders(): Record<string, string> {
 }
 
 export async function requestResponse(path: string, init?: RequestInit): Promise<Response> {
-  const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
-    ...init,
-    credentials: "include",
-    headers: {
-      "content-type": "application/json",
-      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
-      ...authHeaders(),
-      ...userActivityHeaders(),
-      ...desktopAppHeaders(),
-      ...init?.headers,
+  return await withAdminStepUp(
+    async () => {
+      const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
+        ...init,
+        credentials: "include",
+        headers: {
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+          ...authHeaders(),
+          ...userActivityHeaders(),
+          ...desktopAppHeaders(),
+          ...init?.headers,
+        },
+      });
+      handleApiContractResponse(response);
+      return response;
     },
-  });
-  handleApiContractResponse(response);
-  return response;
+    { input: path, init },
+  );
 }
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -1037,6 +1048,19 @@ export async function signInPasskey(): Promise<unknown> {
   });
   const response = await askForPasskey(ceremony);
   return await authRequest<unknown>("/passkey/sign-in", {
+    method: "POST",
+    body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
+  });
+}
+
+/** Confirms it's this signed-in person with one of their passkeys, for admin changes. */
+export async function confirmAdminWithPasskey(): Promise<void> {
+  const ceremony = await authRequest<PasskeyCeremony>("/passkey/step-up/options", {
+    method: "POST",
+    body: "{}",
+  });
+  const response = await askForPasskey(ceremony);
+  await authRequest<unknown>("/passkey/step-up", {
     method: "POST",
     body: JSON.stringify({ challengeId: ceremony.challengeId, response }),
   });

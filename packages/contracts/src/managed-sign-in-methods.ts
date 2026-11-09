@@ -84,6 +84,22 @@ export const ManagedPasskeySignInResponse = /* @__PURE__ */ defineSchema(() =>
     signedIn: primitives.boolean,
   }),
 );
+
+/**
+ * The error-details code of an admin change refused until the person confirms
+ * it's them with a passkey. Details also carry `passkeyRegistered` (false:
+ * they need to add one first) and `browserRequired` (true: an agent, app or
+ * key acting for them; the person confirms in the app in a browser).
+ */
+export const ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE = "ADMIN_PASSKEY_STEP_UP_REQUIRED";
+
+export const ManagedPasskeyStepUpResponse = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    confirmed: primitives.boolean,
+    /** When the confirmation stops counting, as an ISO timestamp. */
+    expiresAt: z.string(),
+  }),
+);
 export const ManagedSignInMethods = /* @__PURE__ */ defineSchema(() =>
   z.object({
     identityId: primitives.uuid,
