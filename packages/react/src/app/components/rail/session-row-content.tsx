@@ -9,13 +9,7 @@ import {
 import { Children, isValidElement, useId, type ReactNode } from "react";
 
 import { CreatorMonogram } from "../creator-monogram";
-import {
-  type CreatorNames,
-  type CreatorRef,
-  creatorAnnouncement,
-  creatorInitials,
-} from "../../lib/creator-initials";
-import { useCreatorNames } from "../../lib/creator-names";
+import { type CreatorRef, creatorAnnouncement, creatorInitials } from "../../lib/creator-initials";
 import { formatWaitingSince } from "../../lib/format";
 import { t } from "../../lib/console-text";
 import { cn } from "../../lib/utils";
@@ -131,7 +125,6 @@ export function sessionRowAccessibleName({
   statusLabel,
   spawnedLabel,
   creator,
-  creatorNames,
 }: {
   title: string;
   stateLabel: string;
@@ -139,10 +132,8 @@ export function sessionRowAccessibleName({
   statusLabel: string;
   spawnedLabel?: string | null | undefined;
   creator?: CreatorRef | null | undefined;
-  /** Current creator names; see `useCreatorNames`. */
-  creatorNames?: CreatorNames | undefined;
 }): string {
-  const spokenCreator = creatorAnnouncement(creator ?? null, creatorNames);
+  const spokenCreator = creatorAnnouncement(creator ?? null);
   return `Open ${title}. ${stateLabel}${pinned ? ". Pinned" : ""}. ${statusLabel}${
     spawnedLabel ? `. ${spawnedLabel}` : ""
   }${spokenCreator ? `. Created by ${spokenCreator}` : ""}`;
@@ -204,8 +195,7 @@ export function RailTrailingMetadata({
 }) {
   const hasStatusMarker = summary.kind !== "neutral";
   const hasRelativeTime = Boolean(relativeTime);
-  const creatorNames = useCreatorNames();
-  const hasMonogram = creator ? creatorInitials(creator, creatorNames) !== null : false;
+  const hasMonogram = creator ? creatorInitials(creator) !== null : false;
   // How long the longest-waiting session behind a "needs you" marker has been
   // blocked on a human. A collapsed parent with a child parked for ten hours
   // must say so, not hide it behind a dot.

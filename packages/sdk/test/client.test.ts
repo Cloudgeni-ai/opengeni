@@ -2499,7 +2499,9 @@ describe("OpenGeniClient", () => {
             pinned: [],
             sessions: [],
             nextCursor: null,
-            ...(request.url.includes("channelId=") ? { filtersApplied: true } : {}),
+            ...(request.url.includes("channelId=") || request.url.includes("createdBySubjectId=")
+              ? { filtersApplied: true }
+              : {}),
           })
         : jsonResponse([]),
     );

@@ -2,11 +2,11 @@ import { describe, expect, test } from "bun:test";
 
 import {
   creatorAnnouncement,
-  creatorDisplay,
-  creatorType,
   creatorHue,
   creatorInitials,
   creatorLabel,
+  creatorType,
+  machineCreatorDisplay,
   railRowCreator,
 } from "./creator-initials";
 import {
@@ -441,44 +441,30 @@ describe("creatorAnnouncement", () => {
 });
 
 describe("creatorLabel", () => {
-  test("prefers a trimmed label and falls back to a readable subject id", () => {
+  test("prefers a trimmed label and falls back to the subject id", () => {
     expect(creatorLabel({ kind: "subject", subjectId: "user:x", label: "  Bendik  " })).toBe(
       "Bendik",
     );
-    expect(creatorLabel({ kind: "subject", subjectId: "user:x", label: "   " })).toBe("x");
-    expect(creatorLabel({ kind: "subject", subjectId: "user:x" })).toBe("x");
+    expect(creatorLabel({ kind: "subject", subjectId: "user:x", label: "   " })).toBe("user:x");
+    expect(creatorLabel({ kind: "subject", subjectId: "user:x" })).toBe("user:x");
   });
 
-  test("never shows an opaque id: a person without any name is unknown", () => {
-    expect(
-      creatorLabel({ kind: "subject", subjectId: "user:5b0f9a7e-3c1d-4e2f-9a8b-7c6d5e4f3a2b" }),
-    ).toBe("Unknown person");
-  });
-
-  test("prefers a person's current workspace name over the frozen email", () => {
-    const names = new Map([["user:davlet", "Davlet Dzhakishev"]]);
-    const davlet = {
-      kind: "subject",
-      subjectId: "user:davlet",
-      label: "davlet@cloudgeni.ai",
-    } as const;
-    expect(creatorLabel(davlet)).toBe("davlet@cloudgeni.ai");
-    expect(creatorLabel(davlet, names)).toBe("Davlet Dzhakishev");
-    expect(creatorInitials(davlet, names)).toBe("DD");
-  });
-
-  test("names an API key by its friendly name with a kind hint, whichever kind it was frozen as", () => {
+  test("names an API key by its name with a kind hint, whichever kind it was frozen as", () => {
     const subjectId = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
     for (const kind of ["service", "subject"] as const) {
       const key = { kind, subjectId, label: "Codex operator 2026-09-11" };
       expect(creatorType(key)).toBe("api_key");
-      expect(creatorDisplay(key)).toEqual({ name: "Codex operator 2026-09-11", hint: "API key" });
+      expect(machineCreatorDisplay(key)).toEqual({
+        name: "Codex operator 2026-09-11",
+        hint: "API key",
+      });
       expect(creatorLabel(key)).toBe("Codex operator 2026-09-11 · API key");
-      // An API key is not a person: no initials chip, even for older subject-frozen rows.
+      // An API key is not a person: no initials chip, even on older subject-frozen rows.
       expect(creatorInitials(key)).toBeNull();
       expect(creatorAnnouncement(key)).toBeNull();
     }
     expect(creatorLabel({ kind: "service", subjectId })).toBe("Unnamed API key · API key");
+    expect(machineCreatorDisplay({ kind: "subject", subjectId: "user:x" })).toBeNull();
   });
 });
 

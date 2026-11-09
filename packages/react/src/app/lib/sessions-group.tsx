@@ -3,12 +3,7 @@
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
 import { t } from "./console-text";
-import {
-  creatorDisplay,
-  creatorIdentityKey,
-  type CreatorDisplay,
-  type CreatorNames,
-} from "./creator-initials";
+import { creatorIdentityKey, machineCreatorDisplay } from "./creator-initials";
 import { formatWaitingSince } from "./format";
 import { awaitsPerson } from "./needs-you";
 import { sessionInputWait } from "./session-rail";
@@ -502,8 +497,6 @@ export type SessionForest = {
   grouped: {
     group: string;
     label: string;
-    /** A subtle kind hint shown beside a creator group's name ("API key"). */
-    hint?: string | null | undefined;
     sessions: SessionTreeNode[];
   }[];
 };
@@ -567,9 +560,17 @@ export function sessionCreatorKey(session: Session): string {
   return creatorIdentityKey(session.createdBy);
 }
 
-export function sessionCreatorLabel(session: Session, names?: CreatorNames): string {
-  const { name, hint } = creatorDisplay(session.createdBy, names);
-  return hint ? `${name} · ${hint}` : name;
+export function sessionCreatorLabel(session: Session): string {
+  // API keys and services: a friendly name and kind, never a raw id.
+  const machine = machineCreatorDisplay(session.createdBy);
+  if (machine) return `${machine.name} · ${machine.hint}`;
+  const explicit = session.createdBy.label?.trim();
+  if (explicit) return explicit;
+  if (session.createdBy.subjectId === "unattributed-legacy") return "Unattributed";
+  if (session.createdBy.kind === "service") {
+    return `Service · ${session.createdBy.subjectId}`;
+  }
+  return session.createdBy.subjectId;
 }
 
 export type SessionCreatorOption = {
@@ -578,75 +579,61 @@ export type SessionCreatorOption = {
 };
 
 /**
- * One display name per loaded creator. Distinct creators whose names collide
- * are told apart by the label frozen with their sessions (an email, say) or a
- * number, never by a raw subject id.
+ * Loaded creator choices with identity-specific labels only when frozen display
+ * labels collide. A person's subject ID remains opaque; it is displayed, not
+ * parsed. API keys and services are told apart by number, never by a raw id.
  */
-export function sessionCreatorLabelMap(
-  sessions: Session[],
-  names?: CreatorNames,
-): ReadonlyMap<string, CreatorDisplay> {
-  const byKey = new Map<string, { display: CreatorDisplay; frozen: string | null }>();
+export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string, string> {
+  const byKey = new Map<
+    string,
+    { label: string; kind: Session["createdBy"]["kind"]; subjectId: string }
+  >();
   for (const session of sessions) {
     const key = sessionCreatorKey(session);
-    const frozen = session.createdBy.label?.trim() || null;
-    // Prefer a session that carries a frozen label: an API key's older
-    // subject-frozen sessions and newer service-frozen ones are one creator.
-    if (byKey.get(key)?.frozen && !frozen) continue;
-    byKey.set(key, { display: creatorDisplay(session.createdBy, names), frozen });
+    // One API key's older subject-frozen and newer service-frozen sessions are
+    // one creator; prefer a session that carries the key's name.
+    if (byKey.has(key) && !session.createdBy.label?.trim()) continue;
+    byKey.set(key, {
+      label: sessionCreatorLabel(session),
+      kind: session.createdBy.kind,
+      subjectId: session.createdBy.subjectId,
+    });
   }
 
-  const collisionKey = (display: CreatorDisplay) => `${display.name}\u0000${display.hint ?? ""}`;
-  const collisions = new Map<string, string[]>();
+  const sharedLabels = new Map<string, string[]>();
   for (const [key, creator] of [...byKey].sort(([left], [right]) => left.localeCompare(right))) {
-    const shared = collisions.get(collisionKey(creator.display)) ?? [];
-    shared.push(key);
-    collisions.set(collisionKey(creator.display), shared);
+    sharedLabels.set(creator.label, [...(sharedLabels.get(creator.label) ?? []), key]);
   }
 
   return new Map(
     [...byKey.entries()]
-      .map(([value, creator]): [string, CreatorDisplay] => {
-        const shared = collisions.get(collisionKey(creator.display)) ?? [value];
-        if (shared.length === 1) return [value, creator.display];
-        const frozen = creator.frozen;
-        const frozenIsDistinct =
-          frozen !== null &&
-          frozen !== creator.display.name &&
-          shared.filter((key) => byKey.get(key)?.frozen === frozen).length === 1;
-        return [
+      .map(([value, creator]) => {
+        const shared = sharedLabels.get(creator.label) ?? [value];
+        if (shared.length === 1) return { value, label: creator.label };
+        const machine = machineCreatorDisplay({ kind: creator.kind, subjectId: creator.subjectId });
+        return {
           value,
-          {
-            ...creator.display,
-            name: frozenIsDistinct
-              ? `${creator.display.name} (${frozen})`
-              : `${creator.display.name} (${shared.indexOf(value) + 1})`,
-          },
-        ];
+          label: machine
+            ? `${creator.label} (${shared.indexOf(value) + 1})`
+            : `${creator.label} · ${creator.kind === "service" ? "Service" : "Subject"} · ${creator.subjectId}`,
+        };
       })
       .sort(
-        ([leftValue, left], [rightValue, right]) =>
-          left.name.localeCompare(right.name) ||
-          (left.hint ?? "").localeCompare(right.hint ?? "") ||
-          leftValue.localeCompare(rightValue),
-      ),
+        (left, right) =>
+          left.label.localeCompare(right.label) || left.value.localeCompare(right.value),
+      )
+      .map((creator) => [creator.value, creator.label]),
   );
 }
 
-export function sessionCreatorOptions(
-  sessions: Session[],
-  names?: CreatorNames,
-): SessionCreatorOption[] {
-  return [...sessionCreatorLabelMap(sessions, names)].map(([value, display]) => ({
-    value,
-    label: display.hint ? `${display.name} · ${display.hint}` : display.name,
-  }));
+export function sessionCreatorOptions(sessions: Session[]): SessionCreatorOption[] {
+  return [...sessionCreatorLabelMap(sessions)].map(([value, label]) => ({ value, label }));
 }
 
 /** Drop a flat-search creator selection that is not valid for hierarchical browse roots. */
 export function normalizeSessionBrowseCreator(
   creator: string | null,
-  creatorLabels: ReadonlyMap<string, unknown>,
+  creatorLabels: ReadonlyMap<string, string>,
   hierarchical: boolean,
 ): string | null {
   if (!hierarchical || !creator || creatorLabels.has(creator)) return creator;
@@ -732,7 +719,7 @@ export function groupSessionForestForBrowse(
   groupBy: Exclude<SessionBrowseGroupBy, "activity">,
   options: {
     now?: Date | undefined;
-    creatorLabels?: ReadonlyMap<string, CreatorDisplay> | undefined;
+    creatorLabels?: ReadonlyMap<string, string> | undefined;
   } = {},
 ): SessionForest {
   const now = options.now ?? new Date();
@@ -783,11 +770,11 @@ export function groupSessionForestForBrowse(
 
   const creatorLabels =
     options.creatorLabels ?? sessionCreatorLabelMap(roots.map((node) => node.session));
-  const creators = new Map<string, { display: CreatorDisplay; sessions: SessionTreeNode[] }>();
+  const creators = new Map<string, { label: string; sessions: SessionTreeNode[] }>();
   for (const node of rest) {
     const key = sessionCreatorKey(node.session);
     const bucket = creators.get(key) ?? {
-      display: creatorLabels.get(key) ?? creatorDisplay(node.session.createdBy),
+      label: creatorLabels.get(key) ?? sessionCreatorLabel(node.session),
       sessions: [],
     };
     bucket.sessions.push(node);
@@ -796,16 +783,10 @@ export function groupSessionForestForBrowse(
   return {
     running,
     grouped: [...creators.entries()]
-      .sort(
-        ([leftKey, left], [rightKey, right]) =>
-          left.display.name.localeCompare(right.display.name) ||
-          (left.display.hint ?? "").localeCompare(right.display.hint ?? "") ||
-          leftKey.localeCompare(rightKey),
-      )
+      .sort(([, left], [, right]) => left.label.localeCompare(right.label))
       .map(([key, bucket]) => ({
         group: `creator:${key}`,
-        label: bucket.display.name,
-        hint: bucket.display.hint,
+        label: bucket.label,
         sessions: bucket.sessions.sort((left, right) =>
           compareSessionActivity(left.session, right.session),
         ),
@@ -819,7 +800,7 @@ export function groupSessionsForBrowse(
   groupBy: Exclude<SessionBrowseGroupBy, "activity">,
   options: {
     now?: Date | undefined;
-    creatorLabels?: ReadonlyMap<string, CreatorDisplay> | undefined;
+    creatorLabels?: ReadonlyMap<string, string> | undefined;
   } = {},
 ): SessionForest {
   return groupSessionForestForBrowse(buildRailForest(sessions, options.now), groupBy, options);

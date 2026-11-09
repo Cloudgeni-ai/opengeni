@@ -249,7 +249,6 @@ import {
   writeSessionBrowsePreferences,
 } from "../../lib/session-browse-preferences";
 import { railRowCreator } from "../../lib/creator-initials";
-import { useCreatorNames } from "../../lib/creator-names";
 import { formatWaitingSince } from "../../lib/format";
 import {
   sessionDescendantCountAria,
@@ -1408,11 +1407,7 @@ export function SessionList() {
       (session) => !session.parentSessionId || !loadedIds.has(session.parentSessionId),
     );
   }, [allSessions, hierarchyMode]);
-  const creatorNames = useCreatorNames();
-  const creatorLabels = useMemo(
-    () => sessionCreatorLabelMap(creatorSessions, creatorNames),
-    [creatorSessions, creatorNames],
-  );
+  const creatorLabels = useMemo(() => sessionCreatorLabelMap(creatorSessions), [creatorSessions]);
   const paginationBrowseFilter = useMemo<SessionPaginationBrowseFilter>(
     () => ({
       creator: null,
@@ -4243,8 +4238,6 @@ export function SessionList() {
                         <SessionGroup
                           key={bucket.group}
                           label={bucket.label}
-                          hint={bucket.hint}
-                          creatorHeading={browseGroupBy === "creator"}
                           hideHeading={browseGroupBy === "none"}
                           nodes={bucket.sessions}
                           visibleNodes={visibleNodesForGroup(
@@ -4599,13 +4592,6 @@ function SessionGroupPaginationControl(
 
 function SessionGroup(props: {
   label: string;
-  /** A subtle kind hint after the heading ("API key"); part of the group's name. */
-  hint?: string | null | undefined;
-  /**
-   * A creator's name heads the group: keep its own capitalization, since an
-   * uppercased name or email reads as shouting and loses its shape.
-   */
-  creatorHeading?: boolean | undefined;
   hideHeading?: boolean | undefined;
   /**
    * Stable DOM id suffix. Required for folder sections: labels are
@@ -4664,7 +4650,6 @@ function SessionGroup(props: {
     props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
   }`;
   const sectionExpanded = props.channelHeader ? Boolean(props.sectionExpanded) : true;
-  const groupName = props.hint ? `${props.label} · ${props.hint}` : props.label;
   const loadedSummary = summarizeRailNodes(props.nodes, props.localDeliveryAttention);
   const summary = props.completeCounts
     ? summarizeRailStatusCounts({
@@ -4721,7 +4706,7 @@ function SessionGroup(props: {
     </button>
   );
   return (
-    <div role="group" aria-label={groupName} className="mb-1.5 min-w-0">
+    <div role="group" aria-label={props.label} className="mb-1.5 min-w-0">
       {props.channelHeader ? (
         <div
           draggable={Boolean(props.project)}
@@ -4870,35 +4855,20 @@ function SessionGroup(props: {
         <p
           id={sectionId}
           tabIndex={-1}
-          title={props.creatorHeading && !props.hideHeading ? groupName : undefined}
           className={
             props.hideHeading
               ? "sr-only"
-              : props.creatorHeading
-                ? "flex min-w-0 items-baseline gap-1.5 px-1.5 pb-0.5 pt-2 text-xs font-normal text-fg-muted"
-                : "px-1.5 pb-0.5 pt-2 text-2xs font-normal uppercase tracking-wider text-fg-muted"
+              : "px-1.5 pb-0.5 pt-2 text-2xs font-normal uppercase tracking-wider text-fg-muted"
           }
         >
-          {props.creatorHeading ? (
-            <>
-              <span className="min-w-0 truncate">{props.label}</span>
-              {props.hint ? (
-                <span className="shrink-0 text-2xs text-fg-subtle">
-                  <span className="sr-only">, </span>
-                  {props.hint}
-                </span>
-              ) : null}
-            </>
-          ) : (
-            props.label
-          )}
+          {props.label}
         </p>
       )}
       {renderedNodes.length > 0 ? (
         <div
           id={`${sectionId}-sessions`}
           role="list"
-          aria-label={`${groupName} sessions`}
+          aria-label={`${props.label} sessions`}
           className="grid min-w-0 grid-cols-1 gap-px"
         >
           {renderedNodes.map((node) => (
@@ -5233,7 +5203,6 @@ function SessionRow(props: {
   const hasChildren = props.hasChildren;
   const focusEvents = useUiEventTarget("window");
   const creator = railRowCreator(props.session);
-  const creatorNames = useCreatorNames();
   const jumpKey = usePinnedJumpKey(props.session.id, props.depth, rail.isMobile);
   const pinnedParentTitles = useContext(PinnedParentTitles);
   const parentTitle =
@@ -5417,7 +5386,6 @@ function SessionRow(props: {
                     ? childCountAria.replace("descendant", "spawned")
                     : null,
                   creator,
-                  creatorNames,
                 })}
                 aria-describedby={hoverDescription ? hoverDescriptionId : undefined}
                 onFocus={props.onFocus}
