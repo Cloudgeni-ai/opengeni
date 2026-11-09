@@ -474,9 +474,9 @@ describe("admin passkey step-up", () => {
     const rt = runtime();
     const setup = runtime("off");
     const owner = await passwordPerson(rt);
-    const admin = await passwordPerson(rt);
+    const workspaceAdmin = await passwordPerson(rt);
     const organization = await createOrganization(setup, owner.cookie);
-    await join(setup, owner, admin, organization.id);
+    await join(setup, owner, workspaceAdmin, organization.id);
     const workspaceId = await sharedWorkspace(setup, owner.cookie, organization.id);
     const candidates = await call(
       setup,
@@ -487,7 +487,9 @@ describe("admin passkey step-up", () => {
     const { members } = (await candidates.json()) as {
       members: { organizationMembershipId: string; subjectId: string }[];
     };
-    const candidate = members.find((member) => member.subjectId === `user:${admin.userId}`)!;
+    const candidate = members.find(
+      (member) => member.subjectId === `user:${workspaceAdmin.userId}`,
+    )!;
     const added = await call(setup, "POST", `/v1/workspaces/${workspaceId}/members`, owner.cookie, {
       organizationMembershipId: candidate.organizationMembershipId,
       permissions: [...WORKSPACE_ADMIN_ROLE_PERMISSIONS],
@@ -497,7 +499,7 @@ describe("admin passkey step-up", () => {
       setup,
       "POST",
       `/v1/organizations/${organization.id}/personal-api-keys`,
-      admin.cookie,
+      workspaceAdmin.cookie,
       {
         name: "Connections only",
         access: {
@@ -525,7 +527,7 @@ describe("admin passkey step-up", () => {
       rt,
       "POST",
       `/v1/workspaces/${workspaceId}/connections`,
-      admin.cookie,
+      workspaceAdmin.cookie,
       JSON.parse(body),
     );
     expect(await stepUpCode(inBrowser)).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
