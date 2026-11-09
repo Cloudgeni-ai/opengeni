@@ -80,6 +80,8 @@ export type GitHubInstallationFix = "reinstall" | "configure" | "authorize" | "r
  */
 export function githubInstallationAttention(installation: GitHubInstallationBinding): {
   label: string;
+  /** The page's one-line summary, naming the installation. */
+  summary: string;
   problem: string;
   remedy: string | null;
   fix: GitHubInstallationFix;
@@ -99,6 +101,7 @@ export function githubInstallationAttention(installation: GitHubInstallationBind
     case "uninstalled":
       return {
         label: "Uninstalled on GitHub",
+        summary: `${account} was uninstalled on GitHub.`,
         problem: `The Opengeni app was removed from ${account} on GitHub.`,
         remedy: "Reinstall it, or remove it here.",
         fix: "reinstall",
@@ -107,6 +110,7 @@ export function githubInstallationAttention(installation: GitHubInstallationBind
     case "suspended":
       return {
         label: "Suspended on GitHub",
+        summary: `${account} is suspended on GitHub.`,
         problem: `The Opengeni app is suspended on ${account}.`,
         remedy: "Unsuspend it in GitHub's settings.",
         fix: "configure",
@@ -115,6 +119,7 @@ export function githubInstallationAttention(installation: GitHubInstallationBind
     case "no_repositories":
       return {
         label: "No repositories",
+        summary: `${account} shares no repositories.`,
         problem: `${account} shares no repositories with Opengeni.`,
         remedy: "Choose some on GitHub.",
         fix: "configure",
@@ -123,6 +128,7 @@ export function githubInstallationAttention(installation: GitHubInstallationBind
     case "github_unreachable":
       return {
         label: "Not checked",
+        summary: `Opengeni couldn't check ${account} on GitHub.`,
         problem: `GitHub didn't respond, so Opengeni couldn't check ${account}.`,
         remedy: null,
         fix: "recheck",
@@ -131,6 +137,7 @@ export function githubInstallationAttention(installation: GitHubInstallationBind
     case "account_changed":
       return {
         label: "Account changed",
+        summary: `${account} now belongs to another GitHub account.`,
         problem: "This installation now belongs to another GitHub account.",
         remedy: "Remove it, then install the app again.",
         fix: "remove",
@@ -139,6 +146,7 @@ export function githubInstallationAttention(installation: GitHubInstallationBind
     case "owner_unconfirmed":
       return {
         label: "Needs authorization",
+        summary: `${account} needs authorization.`,
         problem: organization
           ? `An owner of ${account} hasn't confirmed this link.`
           : `${account} hasn't confirmed this link.`,
@@ -366,15 +374,20 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     });
   }
 
-  function reconnect(repair?: Pick<NativeConnectRequest, "title" | "description">) {
+  function reconnect(
+    repair?: Pick<
+      NativeConnectRequest,
+      "title" | "description" | "authorizeLabel" | "reconnectAccountId"
+    >,
+  ) {
     if (status?.configured && canManage) {
       setConnectRequest({
         scope: { workspaceId, transport: connectTransport },
         providerId: "github-app",
         displayName: "GitHub App",
-        ...(repair
-          ? { ...repair, authorizeLabel: "Sign in to GitHub", logoUrl: GITHUB_LOGO_URL }
-          : {}),
+        // A repair names its installation, so Connect starts at that
+        // installation's fix instead of the account chooser.
+        ...(repair ? { ...repair, logoUrl: GITHUB_LOGO_URL } : {}),
         ownership: "workspace",
         returnUrl: window.location.href,
         idempotencyKey: crypto.randomUUID(),
@@ -544,6 +557,36 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const personalLogin = personalConnection
     ? String(personalConnection.metadata.githubLogin ?? "connected")
     : null;
+  // The page opens with what needs attention, naming the installation; with
+  // one, it offers that row's fix.
+  const attentionRows = installations.flatMap((installation, index) => {
+    const attention = githubInstallationAttention(installation);
+    return attention ? [{ attention, row: installationRows[index]! }] : [];
+  });
+  const attentionNotice: IntegrationViewModel["notice"] =
+    attentionRows.length === 0
+      ? undefined
+      : attentionRows.length === 1
+        ? {
+            tone: "waiting",
+            title: attentionRows[0]!.attention.summary,
+            ...(attentionRows[0]!.row.action
+              ? {
+                  action: {
+                    label: attentionRows[0]!.row.action.label,
+                    onClick: attentionRows[0]!.row.action.onClick,
+                    disabled: attentionRows[0]!.row.action.disabled,
+                  },
+                }
+              : {}),
+          }
+        : {
+            tone: "waiting",
+            title:
+              attentionRows.length <= 3
+                ? `${githubListText(attentionRows.map(({ row }) => row.title))} need attention.`
+                : `${attentionRows.length} installations need attention.`,
+          };
   // Unknown until the selection loads: a failed read is not "0 repos".
   const personalRepositoryCount = context.personalGitHubSelection?.repositories.length ?? null;
   const personalAllRepositories =
@@ -829,14 +872,16 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
             },
           },
         }
-      : status && !status.configured && status.setupMode === "platform"
-        ? {
-            notice: {
-              tone: "muted" as const,
-              title: "GitHub is temporarily unavailable for this Opengeni deployment.",
-            },
-          }
-        : {}),
+      : attentionNotice
+        ? { notice: attentionNotice }
+        : status && !status.configured && status.setupMode === "platform"
+          ? {
+              notice: {
+                tone: "muted" as const,
+                title: "GitHub is temporarily unavailable for this Opengeni deployment.",
+              },
+            }
+          : {}),
   };
 
   const dialogs = (
@@ -956,24 +1001,39 @@ function githubEmptyRepositoriesMessage(installations: GitHubAppInfo["installati
 /** Above this many repositories the list folds behind its count. */
 const GITHUB_REPOSITORY_LIST_FOLD_AT = 8;
 
-/** What the repair dialog says: which installation, what is wrong, what to do. */
+/** "a", "a and b", "a, b and c". */
+function githubListText(items: string[]): string {
+  return items.length <= 1
+    ? (items[0] ?? "")
+    : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/**
+ * The repair of one installation: which installation, what is wrong and what
+ * to do. It names the installation, so Connect skips the account chooser.
+ */
 function githubRepairDialog(
   installation: GitHubInstallationBinding,
   fix: "reinstall" | "authorize",
-): Pick<NativeConnectRequest, "title" | "description"> {
+): Pick<NativeConnectRequest, "title" | "description" | "authorizeLabel" | "reconnectAccountId"> {
   const account = installation.accountLogin ?? "this account";
+  const reconnectAccountId = `github-installation:${installation.installationId}`;
   if (fix === "reinstall") {
     return {
       title: `Reinstall on ${account}`,
-      description: `The Opengeni app was removed from ${account} on GitHub. Sign in, choose “Install on another GitHub account” and pick ${account}.`,
+      description: `The Opengeni app was removed from ${account} on GitHub. Install it on ${account} again.`,
+      authorizeLabel: "Reinstall on GitHub",
+      reconnectAccountId,
     };
   }
   return {
     title: `Authorize ${account}`,
     description:
       installation.accountType === "Organization"
-        ? `Opengeni needs an owner of ${account} to confirm access. Sign in to GitHub as an owner, then choose ${account}.`
-        : `Opengeni needs ${account} to confirm access. Sign in to GitHub as ${account}, then choose ${account}.`,
+        ? `Sign in to GitHub as an owner of ${account} to confirm this link.`
+        : `Sign in to GitHub as ${account} to confirm this link.`,
+    authorizeLabel: "Sign in to GitHub",
+    reconnectAccountId,
   };
 }
 

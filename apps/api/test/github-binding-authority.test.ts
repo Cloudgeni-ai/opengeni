@@ -398,6 +398,19 @@ describe("GitHub owner-authority binding routes", () => {
     expect(
       githubInstallationBindingIssue({ ...stored, repositoryIds: [] }, new Map(), 42, true),
     ).toBe("uninstalled");
+    // An app uninstalled on GitHub reads as uninstalled even when its owner
+    // proof is also missing: reinstalling is the fix.
+    expect(
+      githubInstallationBindingIssue(
+        { ...stored, authorityNonce: null, repositoryIds: [] },
+        new Map(),
+        42,
+        true,
+      ),
+    ).toBe("uninstalled");
+    expect(
+      githubInstallationBindingIssue({ ...stored, authorityNonce: null }, live(), 42, false),
+    ).toBe("owner_unconfirmed");
   });
 
   test("reports configured-but-unbound and non-active lifecycle states truthfully", () => {

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
+  bindAuthorizedGitHubInstallationRepositories,
   bootstrapWorkspace,
   createDb,
   createOrganizationApiKey,
@@ -241,3 +242,189 @@ for (const newInstallation of [false, true])
     expect(await forged.text()).not.toContain("Opengeni");
     expect(await listGitHubInstallationAccessForWorkspace(client.db, workspaceId)).toHaveLength(1);
   });
+
+test(`${providerId} repair starts at the named installation's fix, and a reinstall replaces it`, async () => {
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: randomUUID(),
+    accountName: "Repair fixture",
+    workspaceExternalSource: "test",
+    workspaceExternalId: randomUUID(),
+    workspaceName: "Fixture",
+    subjectId: `user:${randomUUID()}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  workspaces.push(grant.workspaceId);
+  const identity = await ensureExternalIdentity(client.db, {
+    accountId: grant.accountId,
+    externalId: "repair-owner",
+  });
+  const workspaceId = identity.personalWorkspaceId;
+  const token = randomBytes(24).toString("hex");
+  await createOrganizationApiKey(client.db, {
+    accountId: grant.accountId,
+    name: "Fixture",
+    prefix: "test",
+    keyHash: createHash("sha256").update(token).digest("hex"),
+    permissions: ["workspace:read", "github:manage", "github:use"],
+  });
+  const uninstalledId = Math.floor(Math.random() * 100_000_000) + 1;
+  const reinstalledId = uninstalledId + 1;
+  const owner = { accountId: uninstalledId + 1_000, accountLogin: "benyhh", accountType: "User" };
+  const checkedAt = new Date();
+  await bindAuthorizedGitHubInstallationRepositories(client.db, {
+    accountId: grant.accountId,
+    workspaceId,
+    installationId: uninstalledId,
+    githubAccountId: owner.accountId,
+    accountLogin: owner.accountLogin,
+    accountType: owner.accountType,
+    linkedBySubjectId: identity.subjectId,
+    githubActorId: owner.accountId,
+    githubActorLogin: owner.accountLogin,
+    authorityKind: "personal_owner",
+    authorityCheckedAt: checkedAt,
+    authorityExpiresAt: new Date(checkedAt.getTime() + 5 * 60_000),
+    authorityNonce: `repair-${randomUUID()}`,
+    repositoryIds: [uninstalledId + 2],
+    eventRouteSecret: null,
+  });
+  let discovery = 0;
+  const proofs: number[] = [];
+  const app = createApp({
+    githubStateSecret: "embedded-app-state",
+    db: client.db,
+    bus: {} as never,
+    workflowClient: {} as never,
+    managedAuth: null,
+    settings: testSettings({
+      productAccessMode: "managed",
+      integrationsEnabled: true,
+      publicBaseUrl: "https://opengeni.example.test",
+      environmentsEncryptionKey: randomBytes(32).toString("base64"),
+      integrationsStateSecret: "embedded-github-app-fixture",
+      sandboxBackend: "none",
+      githubAppId: "12345",
+      githubClientId: "fixture-client",
+      githubClientSecret: "fixture-secret",
+      githubAppSlug: "fixture-app",
+      githubAppPrivateKey: "fixture-private-key",
+    }),
+    githubAppApi: {
+      // GitHub no longer has the first installation: it was uninstalled.
+      getInstallation: async ({ installationId }: { installationId: number }) =>
+        installationId === uninstalledId
+          ? null
+          : { installationId, accountId: owner.accountId, suspended: false },
+      discoverInstallationBindingCandidates: async () => {
+        discovery++;
+        return [];
+      },
+      authorizeInstallationBinding: async ({ installationId }: { installationId: number }) => {
+        proofs.push(installationId);
+        return {
+          installation: { installationId, ...owner, suspended: false },
+          authorityKind: "personal_owner",
+          actorId: owner.accountId,
+          actorLogin: owner.accountLogin,
+          repositories: [
+            {
+              id: reinstalledId + 2,
+              installationId,
+              name: "repo",
+              fullName: "benyhh/repo",
+              private: true,
+              htmlUrl: "https://github.com/benyhh/repo",
+              cloneUrl: "https://github.com/benyhh/repo.git",
+              defaultBranch: "main",
+              accountLogin: owner.accountLogin,
+              accountType: owner.accountType,
+            },
+          ],
+        };
+      },
+    },
+  } as never);
+  const headers = {
+    authorization: `Bearer ${token}`,
+    "content-type": "application/json",
+    "x-opengeni-external-actor": encodeURIComponent(
+      JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+    ),
+  };
+  const base = `/v1/workspaces/${workspaceId}/connect/attempts`;
+  const returnUrl = "https://app.example.test/integrations/github";
+  const begin = (reconnectAccountId: string) =>
+    app.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId,
+        ownership: "workspace",
+        returnUrl,
+        idempotencyKey: randomUUID(),
+        reconnectAccountId,
+      }),
+    });
+  const stateOf = (url: string) =>
+    readSignedState(new URL(url).searchParams.get("state")!, "embedded-app-state") as Record<
+      string,
+      unknown
+    >;
+
+  // Uninstalled: straight to installing the app again, no account chooser.
+  const started = await begin(`github-installation:${uninstalledId}`);
+  expect({
+    status: started.status,
+    ...(started.status !== 200 ? { error: await started.clone().text() } : {}),
+  }).toEqual({ status: 200 });
+  const attempt = await started.json();
+  expect(attempt.account).toMatchObject({
+    id: `github-installation:${uninstalledId}`,
+    label: "benyhh",
+    status: "auth_needed",
+  });
+  expect(new URL(attempt.nextAction.url).pathname).toBe("/apps/fixture-app/installations/new");
+  expect(stateOf(attempt.nextAction.url)).toMatchObject({ phase: "install" });
+  const installed = await app.request(
+    `/v1/github/install/callback?${new URLSearchParams({
+      state: new URL(attempt.nextAction.url).searchParams.get("state")!,
+      installation_id: String(reinstalledId),
+      setup_action: "install",
+    })}`,
+  );
+  const ownerSignIn = installed.headers.get("location")!;
+  expect(new URL(ownerSignIn).pathname).toBe("/login/oauth/authorize");
+  expect(stateOf(ownerSignIn)).toMatchObject({ phase: "bind", installationId: reinstalledId });
+  const signedIn = await app.request(
+    `/v1/github/oauth/callback?${new URLSearchParams({
+      state: new URL(ownerSignIn).searchParams.get("state")!,
+      code: "fixture-code",
+    })}`,
+  );
+  expect(signedIn.headers.get("location")).toBe(returnUrl);
+  expect(await (await app.request(`${base}/${attempt.id}`, { headers })).json()).toMatchObject({
+    state: "complete",
+    account: { id: `github-installation:${reinstalledId}`, status: "connected" },
+  });
+  // The reinstall replaced the binding it repaired.
+  expect(
+    (await listGitHubInstallationAccessForWorkspace(client.db, workspaceId)).map(
+      (binding) => binding.installationId,
+    ),
+  ).toEqual([reinstalledId]);
+
+  // Installed: straight to that installation's owner sign-in.
+  const authorizing = await (await begin(`github-installation:${reinstalledId}`)).json();
+  expect(new URL(authorizing.nextAction.url).pathname).toBe("/login/oauth/authorize");
+  expect(stateOf(authorizing.nextAction.url)).toMatchObject({
+    phase: "bind",
+    installationId: reinstalledId,
+  });
+  expect(discovery).toBe(0);
+  expect(proofs).toEqual([reinstalledId]);
+
+  // Only a linked installation can be repaired.
+  expect((await begin(`github-installation:${uninstalledId}`)).status).toBe(409);
+  expect((await begin("github-installation:abc")).status).toBe(422);
+});

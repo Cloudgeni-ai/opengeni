@@ -686,6 +686,116 @@ test("a member sees what is wrong without the fix they cannot make", async () =>
     });
     expect(row.action).toBeUndefined();
     expect(row.menu).toBeUndefined();
+    // The summary still names it, without an action the member cannot take.
+    expect(rendered.model().notice).toEqual({
+      tone: "waiting",
+      title: "Cloudgeni-ai was uninstalled on GitHub.",
+    });
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("an app uninstalled on one account is named at the top, and Reinstall repairs that installation", async () => {
+  const context = appContext(
+    ["github:manage"],
+    mock(async () => ({})),
+  );
+  const healthy = context.githubStatus.installations[0]!;
+  context.githubStatus.installations = [
+    {
+      ...healthy,
+      installationId: 81,
+      githubAccountId: 82,
+      accountLogin: "benyhh",
+      accountType: "User",
+      lifecycle: "deleted",
+      issue: "uninstalled",
+      repositoryCount: 0,
+    },
+    healthy,
+  ];
+  const begun: unknown[][] = [];
+  const attempt = {
+    id: "attempt-repair",
+    workspaceId: WORKSPACE_ID,
+    providerId: "github-app",
+    ownership: "workspace",
+    revision: 1,
+    state: "requires_user_action",
+    nextAction: { type: "authorize", url: "https://github.com/apps/opengeni/installations/new" },
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "provider_setup",
+    expiresAt: new Date(Date.now() + 600_000).toISOString(),
+  };
+  const transport = {
+    catalog: async () => [],
+    accounts: async () => [],
+    pending: async () => [],
+    begin: async (...args: unknown[]) => {
+      begun.push(args);
+      return structuredClone(attempt);
+    },
+    recover: async () => structuredClone(attempt),
+    get: async () => structuredClone(attempt),
+    advance: async () => structuredClone(attempt),
+    cancel: async () => structuredClone(attempt),
+    disconnect: async () => {},
+  };
+  // Connect returns to the page it started from, which must be a web address.
+  (window as unknown as { happyDOM: { setURL: (url: string) => void } }).happyDOM.setURL(
+    "https://app.example.test/integrations/github",
+  );
+  const rendered = await renderAdapter({
+    ...context,
+    client: { ...context.client, connectTransport: () => transport },
+  });
+  try {
+    const model = rendered.model();
+    expect(installationRow(model, 81).attention?.label).toBe("Uninstalled on GitHub");
+    expect(installationRow(model, 71).attention).toBeUndefined();
+    expect(model.notice).toMatchObject({
+      tone: "waiting",
+      title: "benyhh was uninstalled on GitHub.",
+      action: { label: "Reinstall" },
+    });
+    await act(async () => {
+      model.notice!.action!.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    // The dialog names the fix, and Connect starts at this installation
+    // instead of the account chooser.
+    expect(document.body.textContent).toContain("Reinstall on benyhh");
+    expect(document.body.textContent).toContain(
+      "The Opengeni app was removed from benyhh on GitHub. Install it on benyhh again.",
+    );
+    expect(document.body.textContent).not.toContain("Choose an account");
+    expect(JSON.stringify(begun)).toContain('"reconnectAccountId":"github-installation:81"');
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("several installations that need attention are named together", async () => {
+  const context = appContext(
+    ["github:manage"],
+    mock(async () => ({})),
+  );
+  const healthy = context.githubStatus.installations[0]!;
+  context.githubStatus.installations = [
+    { ...healthy, accountLogin: "benyhh", lifecycle: "deleted", issue: "uninstalled" },
+    { ...healthy, installationId: 91, lifecycle: "suspended", issue: "suspended" },
+  ];
+  const rendered = await renderAdapter(context);
+  try {
+    expect(rendered.model().notice).toEqual({
+      tone: "waiting",
+      title: "benyhh and Cloudgeni-ai need attention.",
+    });
   } finally {
     await rendered.unmount();
   }

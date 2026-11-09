@@ -245,9 +245,9 @@ export function githubInstallationBindingLifecycle(
 /**
  * Why a binding is not active, named by its fix, so the integration page can
  * say what is wrong instead of a generic "Needs attention". Null exactly when
- * the lifecycle is active. A binding that lost its repositories and is also
- * gone or unreachable on GitHub reports the GitHub cause, which is the one to
- * fix first.
+ * the lifecycle is active. GitHub's own view wins: an installation removed,
+ * suspended or moved on GitHub reports that, even when its owner proof or
+ * repositories are also missing (an uninstall clears both).
  */
 export function githubInstallationBindingIssue(
   stored: Awaited<ReturnType<typeof listGitHubInstallationAccessForWorkspace>>[number],
@@ -261,21 +261,25 @@ export function githubInstallationBindingIssue(
   ) {
     return null;
   }
+  // What GitHub says comes first: an app removed or suspended there needs that
+  // fixed whatever the stored owner proof holds.
+  if (lifecycleVerified) {
+    const live = liveById.get(installationId);
+    if (!live) {
+      return "uninstalled";
+    }
+    if (live.suspended) {
+      return "suspended";
+    }
+    if (live.installationId !== installationId || stored.githubAccountId !== live.accountId) {
+      return "account_changed";
+    }
+  }
   if (!hasGitHubInstallationOwnerAuthority(stored)) {
     return "owner_unconfirmed";
   }
   if (!lifecycleVerified) {
     return "github_unreachable";
-  }
-  const live = liveById.get(installationId);
-  if (!live) {
-    return "uninstalled";
-  }
-  if (live.suspended) {
-    return "suspended";
-  }
-  if (live.installationId !== installationId || stored.githubAccountId !== live.accountId) {
-    return "account_changed";
   }
   // Owner proof and GitHub agree; the only gap left is the auditable
   // repository allowlist (hasAuditableGitHubInstallationAuthority).

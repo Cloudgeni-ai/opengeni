@@ -4,8 +4,10 @@ import { HTTPException } from "hono/http-exception";
 import type { ConnectAdvance, ConnectAttempt } from "@opengeni/contracts/connect";
 import {
   bindAuthorizedGitHubInstallationRepositories,
+  deleteGitHubInstallationBinding,
   finishConnectOperation,
   getConnectAttempt,
+  listGitHubInstallationAccessForWorkspace,
   type ConnectActorScope,
   type ConnectOperationAuthorization,
 } from "@opengeni/db";
@@ -27,6 +29,7 @@ import {
 import { githubConnectFailureHtml } from "../routes/github-browser-pages";
 import { connectOwnerStateFields } from "../connection-ownership";
 import { requestGitHubInstallationRepositorySync } from "../github-installation-sync";
+import { listWorkspaceGitHubInstallationBindings } from "../github-access";
 
 const stateSchema = z.object({
   kind: z.literal("github_app_connect"),
@@ -85,6 +88,48 @@ export function githubAppConnectNavigation(
           redirectUri: `${integrationBaseUrl(deps.settings.publicBaseUrl, requestUrl)}/v1/github/oauth/callback`,
         });
   return { authorizationUrl: url, expiresAt: new Date(Date.now() + lifetimeMs).toISOString() };
+}
+
+/** The Connect account id of a linked installation, as a completed attempt names it. */
+const repairAccountIdPattern = /^github-installation:([1-9][0-9]{0,15})$/u;
+
+/**
+ * Repair of one linked installation starts at its own fix instead of the
+ * account chooser: one uninstalled on GitHub goes straight to installing the
+ * app again; any other goes straight to its owner's sign-in for that
+ * installation.
+ */
+export async function githubAppRepairNavigation(
+  deps: ApiRouteDeps,
+  scope: GitHubConnectScope,
+  attemptId: string,
+  requestUrl: string,
+  reconnectAccountId: string,
+) {
+  const installationId = Number(repairAccountIdPattern.exec(reconnectAccountId)?.[1]);
+  if (!Number.isSafeInteger(installationId))
+    throw new HTTPException(422, { message: "Repair names a linked GitHub installation" });
+  const binding = (await listWorkspaceGitHubInstallationBindings(deps, scope.workspaceId)).find(
+    (candidate) => candidate.installationId === installationId,
+  );
+  if (!binding)
+    throw new HTTPException(409, {
+      message: "This GitHub installation is no longer linked to the workspace",
+    });
+  const navigation =
+    binding.issue === "uninstalled"
+      ? githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "install")
+      : githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "bind", installationId);
+  return {
+    ...navigation,
+    account: {
+      id: reconnectAccountId,
+      providerId: "github-app",
+      label: binding.accountLogin ?? `GitHub installation ${installationId}`,
+      ownership: "workspace" as const,
+      status: "auth_needed" as const,
+    },
+  };
 }
 
 export function prepareGitHubAppConnectAction(
@@ -336,6 +381,21 @@ export async function completeGitHubAppConnect(
               eventRouteSecret: eventRouteSecret(deps.settings),
             });
             if (!bound) throw new Error("GitHub binding proof already consumed");
+            // A repair that installed the app again replaces the binding it
+            // repaired: GitHub keeps one installation of an App per account.
+            const repaired = Number(repairAccountIdPattern.exec(current.account?.id ?? "")?.[1]);
+            if (Number.isSafeInteger(repaired) && repaired !== installationId) {
+              const previous = (
+                await listGitHubInstallationAccessForWorkspace(tx, state.workspaceId)
+              ).find((binding) => binding.installationId === repaired);
+              if (previous && previous.githubAccountId === proof.installation.accountId)
+                await deleteGitHubInstallationBinding(tx, {
+                  accountId: state.accountId,
+                  workspaceId: state.workspaceId,
+                  installationId: repaired,
+                  eventRouteSecret: eventRouteSecret(deps.settings),
+                });
+            }
             boundInstallationId = installationId;
             return {
               ...current,
