@@ -295,31 +295,18 @@ export function sessionAdmissionNeedsMachineAccess(
 export function sessionAdmissionMachineAccessCopy(
   t: OpenGeniText,
   access: Pick<SessionMachineAccess, "machineName" | "ownerName" | "isOwner">,
-  options: {
-    canAllowHere?: boolean;
-    /** Paused: allowing it starts nothing until the chat is resumed. */
-    paused?: boolean;
-    /** A chat the workspace can see: allowing it shares what runs on the machine. */
-    shared?: boolean;
-  } = {},
+  options: { canAllowHere?: boolean } = {},
 ): SessionAdmissionCopy {
   const machine = access.machineName;
   if (access.isOwner) {
     // Without the button here, the owner allows it from the machine's settings.
     const canAllowHere = options.canAllowHere ?? true;
-    const next = canAllowHere
-      ? options.paused
-        ? t("sessionAdmission.machineAccessOwnerPausedNext")
-        : t("sessionAdmission.machineAccessOwnerNext")
-      : options.paused
-        ? t("sessionAdmission.machineAccessOwnerSettingsPausedNext")
-        : t("sessionAdmission.machineAccessOwnerSettingsNext");
     return {
       title: t("sessionAdmission.machineAccessTitle"),
       body: t("sessionAdmission.machineAccessBody", { machine }),
-      next: options.shared
-        ? `${next} ${t("sessionAdmission.machineAccessSharedNote", { machine })}`
-        : next,
+      next: canAllowHere
+        ? t("sessionAdmission.machineAccessOwnerNext")
+        : t("sessionAdmission.machineAccessOwnerSettingsNext"),
       action: canAllowHere ? t("sessionAdmission.allowForThisChat") : null,
     };
   }
