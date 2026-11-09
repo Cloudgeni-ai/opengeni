@@ -106,7 +106,13 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
   app.use("/v1/auth/session-set", noStore);
   app.use("/v1/auth/session-set/*", noStore);
 
-  app.get("/v1/auth/get-session", async (context) => {
+  // `currentActorEpoch`: a caller with no tab state (the marketing site) reads
+  // the selected account the way a freshly loaded app tab does, which first
+  // reads the session-set projection and then presents its actor epoch.
+  const readSession = async (
+    context: Context,
+    options: { currentActorEpoch?: boolean } = {},
+  ): Promise<Response> => {
     if (deps.settings.managedAuthSessionSetMode === "legacy") {
       if (!deps.managedAuth) throw new HTTPException(404);
       if (deps.settings.allowedUserEmails !== undefined) {
@@ -114,7 +120,7 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
         context.header("cache-control", "no-store");
         return context.json(session ? safeBetterAuthSession(session) : null);
       }
-      return await deps.managedAuth.handler(context.req.raw);
+      return await deps.managedAuth.handler(getSessionRequest(context.req.raw));
     }
     context.header("cache-control", "no-store");
     const available = requireAvailable(deps);
@@ -130,7 +136,10 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
     const authority = getAuthority(context);
     try {
       if (authority) {
-        const expectedActorEpoch = context.req.header(MANAGED_AUTH_ACTOR_EPOCH_HEADER) ?? null;
+        let expectedActorEpoch = context.req.header(MANAGED_AUTH_ACTOR_EPOCH_HEADER) ?? null;
+        if (expectedActorEpoch === null && options.currentActorEpoch) {
+          expectedActorEpoch = (await snapshotFor(deps, authority))?.projection.actorEpoch ?? null;
+        }
         const ambient =
           deps.settings.managedAuthSessionSetMode === "dual" && expectedActorEpoch === null
             ? await available.adapter.resolveAmbientSession(context.req.raw.headers)
@@ -173,6 +182,40 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
       }
       throw error;
     }
+  };
+  app.get("/v1/auth/get-session", (context) => readSession(context));
+
+  // The marketing site's header asks whether the visitor is signed in, so it
+  // can show their avatar and "Open app". It resolves the person exactly like
+  // `get-session` on a fresh app load (every session-set mode, the same
+  // admission and actor fence) and projects
+  // only what a header shows: no email, ids, session data, or address. Any
+  // refusal reads as signed out. Credentialed CORS for this path is limited to
+  // `OPENGENI_LANDING_ORIGINS` in `app.ts`.
+  app.get(DISPLAY_IDENTITY_PATH, async (context) => {
+    let identity: DisplayIdentity = { signedIn: false };
+    let upstream: Response | null = null;
+    try {
+      upstream = await readSession(context, { currentActorEpoch: true });
+    } catch (error) {
+      if (!isSignedOutRefusal(error)) throw error;
+    }
+    if (upstream?.ok) {
+      identity = displayIdentityFrom(await upstream.json().catch(() => null));
+    }
+    // Keep only what the resolution itself set on the browser (a refreshed or
+    // selected session cookie); nothing else from the session read leaks out.
+    const cookies = upstream?.headers.getSetCookie() ?? [];
+    context.header(MANAGED_AUTH_ACTOR_EPOCH_HEADER, undefined);
+    context.header("x-opengeni-actor-state", undefined);
+    context.header("pragma", undefined);
+    context.header("cache-control", "private, no-store");
+    const response = context.json(identity);
+    const existing = new Set(response.headers.getSetCookie());
+    for (const cookie of cookies) {
+      if (!existing.has(cookie)) response.headers.append("set-cookie", cookie);
+    }
+    return response;
   });
 
   app.get("/v1/auth/session-set", async (context) => {
@@ -1264,4 +1307,46 @@ function setCookieHeaders(headers: Headers): string[] {
   if (getter) return getter.call(headers);
   const cookie = headers.get("set-cookie");
   return cookie ? [cookie] : [];
+}
+
+export const DISPLAY_IDENTITY_PATH = "/v1/auth/display-identity";
+
+type DisplayIdentity =
+  | { signedIn: false }
+  | { signedIn: true; name: string | null; image: string | null };
+
+function displayIdentityFrom(body: unknown): DisplayIdentity {
+  if (!body || typeof body !== "object") return { signedIn: false };
+  const user = (body as { user?: unknown }).user;
+  if (!user || typeof user !== "object") return { signedIn: false };
+  const { name, image } = user as { name?: unknown; image?: unknown };
+  return {
+    signedIn: true,
+    name: typeof name === "string" && name.trim() ? name.trim().slice(0, 200) : null,
+    image: displayImageUrl(image),
+  };
+}
+
+/** Better Auth routes by path, so a display-identity read asks it for get-session. */
+function getSessionRequest(request: Request): Request {
+  const url = new URL(request.url);
+  if (url.pathname === "/v1/auth/get-session") return request;
+  url.pathname = "/v1/auth/get-session";
+  url.search = "";
+  return new Request(url, { method: "GET", headers: request.headers });
+}
+
+/** Only an absolute https avatar URL is ever handed to another site. */
+function displayImageUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 2_048) return null;
+  try {
+    return new URL(value).protocol === "https:" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A session read that refused the visitor (no session, not admitted, actor changed). */
+function isSignedOutRefusal(error: unknown): boolean {
+  return error instanceof HTTPException && error.status < 500;
 }
