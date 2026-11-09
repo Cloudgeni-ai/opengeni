@@ -230,7 +230,7 @@ server's issuer and the verified identity are. A deployment that replaces its
 registered client (for example its Google client) therefore still recognises a
 login made with the earlier client as the same account: connecting again
 reuses it, and reconnecting it is not an account mismatch. Migration
-`1351_merge_duplicate_personal_logins_across_oauth_clients.sql` applies 1226's
+`1353_merge_duplicate_personal_logins_across_oauth_clients.sql` applies 1226's
 rules without the client, merging the Slack, Gmail, Google Calendar, Google
 Drive and Atlassian duplicates saved under different clients before this rule
 (the services whose verified identity 1226 reads). Of two working logins it
