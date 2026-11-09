@@ -1115,7 +1115,14 @@ async function completeMcpOAuthCallbackWithinDeadline(
       scopes,
     );
     const stableAccount = verification.providerIdentity
-      ? await stableAccountIdentity(observability, settings, state, token, client.clientId, deadline)
+      ? await stableAccountIdentity(
+          observability,
+          settings,
+          state,
+          token,
+          client.clientId,
+          deadline,
+        )
       : { identity: {}, ownedAddresses: [] };
     const credential = credentialBundle(token, state, client);
     const metadata = {

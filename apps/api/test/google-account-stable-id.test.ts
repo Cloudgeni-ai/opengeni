@@ -93,9 +93,10 @@ describe("Google logins are identified by Google's account ID", () => {
     expect(
       decide({ stored, signedIn: renamed, ownedAddresses: ["person@new.test", "person@old.test"] }),
     ).toEqual({ kind: "write" });
-    expect(
-      decide({ stored, signedIn: renamed, ownedAddresses: ["person@new.test"] }),
-    ).toEqual({ kind: "reject", reason: "account_mismatch" });
+    expect(decide({ stored, signedIn: renamed, ownedAddresses: ["person@new.test"] })).toEqual({
+      kind: "reject",
+      reason: "account_mismatch",
+    });
   });
 
   test("an owned address only counts with the account ID, so the login adopts it", () => {
@@ -111,9 +112,10 @@ describe("Google logins are identified by Google's account ID", () => {
 
   test("an owned address never overrides a recorded account ID", () => {
     const stored = login({ gmailEmail: "person@old.test", googleSubject: "2002" });
-    expect(
-      decide({ stored, signedIn: renamed, ownedAddresses: ["person@old.test"] }),
-    ).toEqual({ kind: "reject", reason: "account_mismatch" });
+    expect(decide({ stored, signedIn: renamed, ownedAddresses: ["person@old.test"] })).toEqual({
+      kind: "reject",
+      reason: "account_mismatch",
+    });
   });
 
   test("without the account ID this time, the email still decides as before", () => {
