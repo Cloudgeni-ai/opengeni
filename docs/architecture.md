@@ -1253,8 +1253,8 @@ Canonical: `packages/contracts/src/work-claims.ts`,
 ### 3.12 Usage allowances constrain debits, not authority
 
 Org admins set budgets; workspace admins split members. Counters permit
-overshoot, not reservations; shares may oversubscribe. Default-off
-`OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until consumers enforce.
+overshoot, not reservations; shares may oversubscribe.
+`OPENGENI_USAGE_ALLOWANCES_ENABLED=false` (default `true`) opts out of new policies.
 Canonical: [`usage-allowances.md`](usage-allowances.md).
 
 Read-only authorization and counter projections do not mint write capabilities:

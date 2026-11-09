@@ -9,10 +9,9 @@ image. Helm's `backup` settings schedule it without giving backup credentials to
 the application. This is database-only protection, not a snapshot of object files
 or host state; retain provider-native recovery where appropriate.
 
-Workspace/member allowances use rolling migrations and a default-off producer
-gate. Upgrade every API, control worker, and turn worker before enabling
-`OPENGENI_USAGE_ALLOWANCES_ENABLED`; disabling it does not disable enforcement
-of persisted policies. See [usage allowance rollout](usage-allowances.md#rollout-and-activation).
+Workspace/member allowances are on by default. `OPENGENI_USAGE_ALLOWANCES_ENABLED=false`
+refuses new budgets and limits but does not disable enforcement of persisted
+policies. See [usage allowance rollout](usage-allowances.md#rollout-and-activation).
 
 Per-task usage limits follow the same pattern: apply migrations 0773–0775, upgrade
 every API, worker, web, SDK/React and embedded consumer, then enable
