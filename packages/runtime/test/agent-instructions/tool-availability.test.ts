@@ -253,7 +253,7 @@ describe("modular prompt: tool-specific clauses", () => {
     );
     expect(composed).not.toContain("opengeni__goal_");
     // Goal-state guidance that names no tool remains.
-    expect(composed).toContain("an active goal continues on its own");
+    expect(composed).toContain("An active goal continues on its own");
     expect(composed).toContain("A `goal.completed` event records goal state");
   });
 
@@ -349,9 +349,9 @@ describe("modular prompt: tool-specific clauses", () => {
   // confirmed there, instead of described (staging session 12f7f50d).
   test("a blocking setting is offered as an in-chat app action while admin_action_call may exist", () => {
     const changed =
-      "show its setup card, make the change with `admin_actions_search` and `admin_action_call` when an app action makes it (the user confirms it in the chat unless the session has full access), or give the exact next step when neither applies";
+      "Show its setup card. If an app action makes the change, make it with `admin_actions_search` and `admin_action_call`; the user confirms it in the chat unless the session has full access. If neither applies, give the exact next step.";
     const legacy =
-      "show its setup card, or the exact next step when there is no card, and continue once it is fixed.";
+      "Show its setup card, or give the exact next step when there is no card. Continue once it is fixed.";
     expect(compose()).toContain(changed);
     expect(compose()).toContain("integration, permission, setting or secret");
     for (const tool of ["admin_actions_search", "admin_action_call"] as const) {
@@ -373,13 +373,13 @@ describe("modular prompt: tool-specific clauses", () => {
   test("absent wait_for_input keeps only tool-neutral waiting guidance and compaction", () => {
     const composed = compose({ unavailable: ["wait_for_input"] });
     expect(composed).toContain(
-      "## Waiting\n\nWhen monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling.\n\n## Compaction",
+      "## Waiting\n\nWhen monitoring needs timed checks, use the available recurring-monitoring or session-wait mechanism at a meaningful cadence. Do not poll by ritual.\n\n## Compaction",
     );
     expect(names(composed, "wait_for_input")).toBe(false);
     expect(composed).not.toContain("an out-of-turn wait is available");
     expect(composed).toContain("## Compaction");
     expect(composed).toContain(
-      "Keep the user informed while work is underway, then end the turn with a self-contained final response.",
+      "Keep the user informed while you work. End the turn with a self-contained final response.",
     );
     expect(composed).toContain("## Background commands");
     expect(composed).toContain(
@@ -408,11 +408,11 @@ describe("modular prompt: tool-specific clauses", () => {
       "## Waiting\n\nOutside a question or status turn, do not end with only a status reply",
     );
     expect(composed).toContain(
-      "an explicit user/task/Skill update cadence calls for an update. When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling.\n\n## Compaction",
+      "an explicit user, task or Skill cadence requires an update. When monitoring needs timed checks, use the available recurring-monitoring or session-wait mechanism at a meaningful cadence. Do not poll by ritual.\n\n## Compaction",
     );
     // The reply contract stays in the final-answer rule.
     expect(composed).toContain(
-      "a turn that ends with `wait_for_input` has none: its `reply` carries any answer",
+      "A turn that ends with `wait_for_input` has no final response: its `reply` carries any answer",
     );
     // Codemode's live-attempt rule renders with compute, in Background commands.
     expect(composed).toContain(

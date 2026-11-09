@@ -20,18 +20,21 @@ function newMessages(context: AgentPromptContext): string {
           ? "(a command or a timed recheck)"
           : "(a timed recheck)";
   return sentences(
-    "The user may send a new message while you are still working.",
-    "Decide whether it replaces the active request or adds to it.",
-    "If it replaces it, drop the previous work and focus on the new request.",
-    "If it adds to unfinished work, handle both together.",
-    "If it only asks a question or for status, answer it without starting or resuming other work in that turn unless the user asks.",
+    "The user can send a new message while you work.",
+    "Decide whether it replaces or adds to the active request.",
+    "If it replaces the request, drop the previous work and do the new request.",
+    "If it adds to unfinished work, do both.",
+    "If it only asks a question or for status, answer it.",
+    "Do not start or resume other work in that turn unless the user asks.",
     waitForInput &&
-      `If work you already started is still in flight ${inFlightExamples}, call \`wait_for_input\` when available with the answer in its \`reply\`, so its result resumes you${goals ? ", even when a goal is active" : ""}.`,
+      `If work you started is still in flight ${inFlightExamples}, call \`wait_for_input\` with the answer in its \`reply\`${goals ? ", even when a goal is active" : ""}. Then the result of that work resumes you.`,
     goals
-      ? "If nothing is in flight, the answer is your final response: an active goal continues on its own, and without one, offer to continue when work remains."
+      ? "If nothing is in flight, the answer is your final response. An active goal continues on its own; without a goal, offer to continue when work remains."
       : "If nothing is in flight, the answer is your final response; offer to continue when work remains.",
-    "Keep a status answer to one or two sentences about progress in the user's terms, without session, credential, or tool mechanics; name a blocker only when the user must act on it, and say what they need to do.",
-    'Treat "thanks", "nice", and similar replies as acknowledgement, not approval of a next step.',
+    "Keep a status answer to one or two sentences about progress, in the user's terms.",
+    "Leave out session, credential and tool mechanics.",
+    "Name a blocker only when the user must act on it, and say what they must do.",
+    'Treat "thanks", "nice" and similar replies as acknowledgement, not approval of a next step.',
   );
 }
 
@@ -41,13 +44,13 @@ function newMessages(context: AgentPromptContext): string {
  * `wait_for_input` tool description, so it is not repeated here.
  */
 const WAITING =
-  "Outside a question or status turn, do not end with only a status reply and leave an immediate continuation to rediscover the same wait: either keep advancing substantive work in this turn or, when further progress genuinely depends on work already in flight or a meaningful timed recheck, call `wait_for_input` when available before ending. A continuation that only confirms the same unchanged wait calls `wait_for_input` and ends without restating the status unless you found material new information or an explicit user/task/Skill update cadence calls for an update.";
+  "Outside a question or status turn, do not end with only a status reply that leaves the next continuation to rediscover the same wait. Either keep advancing substantive work in this turn, or call `wait_for_input` before you end when progress depends on work already in flight or a meaningful timed recheck. When a continuation only confirms the same unchanged wait, call `wait_for_input` and end. Do not restate the status unless you found material new information or an explicit user, task or Skill cadence requires an update.";
 
 /** Names automations and session waits, so it renders only where one exists. */
 const WAITING_MONITORING =
-  "When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling.";
+  "When monitoring needs timed checks, use the available recurring-monitoring or session-wait mechanism at a meaningful cadence. Do not poll by ritual.";
 
-const COMPACTION = `When earlier context is compacted, continue from the supplied summary and durable session history. Do not restart from scratch, redo completed work, or repeat progress updates already delivered; treat work spanning compaction as one logical chain. Summaries and assistant claims locate evidence; they do not prove current state. Reuse authoritative evidence only while relevant and valid for its requirement, scope, version, and state; recheck changed, stale, uncertain, or insufficient evidence. Preserve full reconciliation or comprehensive audits when requested by the goal, user, or applicable Skill, when uncertainty or recovery warrants them, or when required by risk or gates.`;
+const COMPACTION = `When earlier context is compacted, continue from the summary and the durable session history. Do not restart, redo completed work or repeat progress updates you already delivered. Treat work across compaction as one chain. Summaries and assistant claims locate evidence; they do not prove current state. Reuse authoritative evidence only while it is relevant and valid for its requirement, scope, version and state. Recheck evidence that is changed, stale, uncertain or insufficient. Keep full reconciliation or comprehensive audits when the goal, the user or an applicable Skill requests them, when uncertainty or recovery warrants them, or when risk or gates require them.`;
 
 /** The goal completion audit survives compaction; rendered only with goals. */
 const COMPACTION_GOAL_AUDITS =

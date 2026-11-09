@@ -481,7 +481,7 @@ describe("modular composer: text that needs attached compute", () => {
     "Sites and native documents",
     "or a sandbox path for a published artifact reference",
     "For a sandbox image, publish the file first",
-    "documents, Sites, and visuals",
+    "documents, Sites and visuals",
     "a Site reaches the model and workspace tools",
     "Audit reads do not acknowledge command completion.",
     "holding the inference and sandbox",
@@ -493,7 +493,7 @@ describe("modular composer: text that needs attached compute", () => {
     "## Visuals in chat",
     "Never substitute a storage URL",
     "# Session coordination",
-    "Decide the design before building it.",
+    "Decide the design before you build.",
     "# Images and video",
   ];
 
@@ -519,16 +519,16 @@ describe("modular composer: text that needs attached compute", () => {
         .composed.split("\n")
         .find((line) => line.startsWith("- Match verification"))!;
     expect(rule(allAgentCapabilities())).toContain(
-      "requested by the goal, user, or applicable Skill are substantive work",
+      "requested by the goal, user, or applicable Skill is required work",
     );
     expect(rule(allAgentCapabilities())).toContain(
-      "without dropping the full completion audit or required evidence.",
+      "Never drop the full completion audit or required evidence.",
     );
     const noGoals = rule({ ...allAgentCapabilities(), goals: false });
-    expect(noGoals).toContain("requested by the user or applicable Skill are substantive work");
-    expect(noGoals).toContain("without dropping required evidence.");
+    expect(noGoals).toContain("requested by the user or applicable Skill is required work");
+    expect(noGoals).toContain("Never drop required evidence.");
     const none = rule({ ...noneAgentCapabilities(), skills: false });
-    expect(none).toContain("requested by the user are substantive work");
+    expect(none).toContain("requested by the user is required work");
     expect(none).not.toMatch(/goal|Skill|completion audit/u);
   });
 });
