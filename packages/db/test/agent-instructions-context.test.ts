@@ -264,18 +264,18 @@ test("an edit becomes one history item before the turn that first sees it; retri
   expect(await f.deliver(third)).toContain("Answer in Spanish.");
   await f.settle(third);
 
-  // Unchanged instructions write nothing, and so does a revision that changed
-  // only the first message.
+  // Unchanged instructions write nothing new. An older First message (as an
+  // older release stores one) is part of the instructions: it joins them.
   const fourth = await f.claim();
-  expect(await f.deliver(fourth)).toContain("Answer in Spanish.");
+  expect(await f.deliver(fourth)).toContain("(revision 3)");
   await f.settle(fourth);
   await f.edit("Answer in Spanish.", "Hola");
   const fifth = await f.claim();
-  expect(await f.deliver(fifth)).toContain("(revision 3)");
+  expect(await f.deliver(fifth)).toContain("Answer in Spanish.\n\nHola");
   await f.settle(fifth);
   expect(
     (await f.delivered()).map((context) => context?.kind === "revision" && context.revision),
-  ).toEqual([2, 3]);
+  ).toEqual([2, 3, 4]);
 
   // Editing back to what the system prompt shows is still an edit: the newest
   // item replaces the earlier ones.
@@ -422,7 +422,7 @@ test("every attempt of a turn builds the prompt its first attempt recorded", asy
 
 test("a revision with unchanged instructions and no earlier item writes nothing", async () => {
   const f = await fixture({ agent: "Hi." });
-  await f.edit("Hi.", "Hello there");
+  await f.edit("Hi.", "Hi.");
   const turn = await f.claim();
   expect(await f.deliver(turn)).toBeNull();
   // The turn stays frozen without an item, even after a real edit.

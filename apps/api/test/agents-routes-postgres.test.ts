@@ -167,9 +167,10 @@ describe("agents through the API (real PostgreSQL)", () => {
       origin: "app",
       createdBySubjectId: "user:alice",
       revision: 1,
-      hasFirstMessage: true,
-      instructions: "Answer in short sentences.",
-      firstMessage: "Help me plan the next release.",
+      // An older client's First message joins the Instructions as its own paragraph.
+      hasFirstMessage: false,
+      instructions: "Answer in short sentences.\n\nHelp me plan the next release.",
+      firstMessage: "",
       revisionCreatedBySubjectId: "user:alice",
       memory: { enabled: false, collectionId: null, scope: "workspace" },
       slack: [],
@@ -180,7 +181,7 @@ describe("agents through the API (real PostgreSQL)", () => {
     expect(await shared.admin`select id from bot_templates where id = ${agent.id}`).toHaveLength(0);
 
     expect((await call(reader, "GET", `${base}/${agent.id}`)).json.agent).toMatchObject({
-      instructions: "Answer in short sentences.",
+      instructions: "Answer in short sentences.\n\nHelp me plan the next release.",
       viewer: { canEdit: false },
     });
     const listed = await call(reader, "GET", base);
@@ -212,7 +213,7 @@ describe("agents through the API (real PostgreSQL)", () => {
     expect(revised.json.agent).toMatchObject({
       revision: 2,
       instructions: "Answer in one sentence.",
-      firstMessage: "Help me plan the next release.",
+      firstMessage: "",
       version: 3,
     });
     const revisions = await call(alice, "GET", `${base}/${agent.id}/revisions?limit=1`);
@@ -222,7 +223,13 @@ describe("agents through the API (real PostgreSQL)", () => {
     expect(revisions.json.nextCursor).toBe("2");
     const older = await call(alice, "GET", `${base}/${agent.id}/revisions?cursor=2`);
     expect(older.json).toMatchObject({
-      revisions: [{ revision: 1, instructions: "Answer in short sentences." }],
+      revisions: [
+        {
+          revision: 1,
+          instructions: "Answer in short sentences.\n\nHelp me plan the next release.",
+          firstMessage: "",
+        },
+      ],
       nextCursor: null,
     });
 
@@ -281,7 +288,7 @@ describe("agents through the API (real PostgreSQL)", () => {
     expect(refused.json.error.message).toContain("member of the organization");
   }, 180_000);
 
-  test("bot templates are agents: First message, legacy row, and ids", async () => {
+  test("bot templates are agents: setup text as Instructions, legacy row, and ids", async () => {
     if (!shared) return;
     const workspace = await freshWorkspace("agents templates");
     await member(workspace, "user:alice");
@@ -295,11 +302,11 @@ describe("agents through the API (real PostgreSQL)", () => {
     });
     expect(saved.status).toBe(201);
     const id = saved.json.template.id as string;
-    // Same id, template text as First message, no Instructions.
+    // Same id, template text as its Instructions.
     expect((await call(alice, "GET", `${agents}/${id}`)).json.agent).toMatchObject({
       origin: "bot_template",
-      instructions: "",
-      firstMessage: "Ask how they deploy today.",
+      instructions: "Ask how they deploy today.",
+      firstMessage: "",
     });
     const [legacy] = await shared.admin<{ setup_instructions: string }[]>`
       select setup_instructions from bot_templates where id = ${id}`;
@@ -308,13 +315,13 @@ describe("agents through the API (real PostgreSQL)", () => {
     // A change through /agents keeps the legacy row in step.
     await call(alice, "PATCH", `${agents}/${id}`, {
       expectedVersion: 1,
-      firstMessage: "Ask how they deploy.",
+      instructions: "Ask how they deploy.",
     });
     const [synced] = await shared.admin<{ setup_instructions: string }[]>`
       select setup_instructions from bot_templates where id = ${id}`;
     expect(synced?.setup_instructions).toBe("Ask how they deploy.");
-    // Agents with a First message show as templates (it is their setup text);
-    // one with only Instructions would open unbound, so it is not listed.
+    // Only agents made as templates are listed: the old gallery opens them
+    // unbound, as composer text.
     const plain = await call(alice, "POST", agents, {
       name: "Plain agent",
       instructions: "Be brief.",
@@ -325,14 +332,11 @@ describe("agents through the API (real PostgreSQL)", () => {
         row.name,
         row.setupInstructions,
       ]),
-    ).toEqual([
-      ["SRE bot", "Ask how they deploy."],
-      ["Greeter", "Say hello."],
-    ]);
+    ).toEqual([["SRE bot", "Ask how they deploy."]]);
     // It is still reachable by id.
     expect(
       (await call(alice, "GET", `${templates}/${plain.json.agent.id}`)).json.template,
-    ).toMatchObject({ name: "Plain agent", setupInstructions: "" });
+    ).toMatchObject({ name: "Plain agent", setupInstructions: "Be brief." });
     expect((await call(alice, "DELETE", `${templates}/${id}`)).status).toBe(200);
     expect(await shared.admin`select id from agents where id = ${id}`).toHaveLength(0);
     expect(await shared.admin`select id from bot_templates where id = ${id}`).toHaveLength(0);

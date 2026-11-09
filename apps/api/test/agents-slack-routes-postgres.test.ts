@@ -360,9 +360,10 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
         ${firstMessage}, 'workspace', null, ${install.owner})`;
     const before = await call(install.admin, "GET", `${install.base}/${id}`);
     expect(before.status).toBe(200);
+    // Agents have one text: the template's First message reads as its Instructions.
     expect(before.json.agent).toMatchObject({
-      instructions: "",
-      firstMessage,
+      instructions: firstMessage,
+      firstMessage: "",
       description: "",
       avatar: null,
     });
@@ -378,7 +379,7 @@ describe("an agent's Slack availability (real PostgreSQL)", () => {
       { description: string; instructions: string; avatarKind: string }[]
     >`select description, instructions, jsonb_typeof(avatar) as "avatarKind"
       from slack_agents where id = ${id}`;
-    expect(legacy).toEqual({ description: "", instructions: "", avatarKind: "object" });
+    expect(legacy).toEqual({ description: "", instructions: firstMessage, avatarKind: "object" });
     const [template] = await shared!.admin<{ setup: string }[]>`
       select setup_instructions as setup from bot_templates where id = ${id}`;
     expect(template?.setup).toBe(firstMessage);

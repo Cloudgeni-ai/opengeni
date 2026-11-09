@@ -63,7 +63,7 @@ const { ComposerAgentChip } = await import("../src/app/components/agents/compose
 const { agentInitialsAvatarLite } = await import("../src/app/lib/agent-avatar");
 const { duplicateAgentNames, parseAgentFile, agentErrorCode, agentFile, agentFileName } =
   await import("../src/app/lib/agents");
-const { useComposerAgent, useAgentFirstMessage, AGENT_ONLY_ME_UNAVAILABLE } =
+const { useComposerAgent, AGENT_ONLY_ME_UNAVAILABLE } =
   await import("../src/app/lib/composer-agent");
 const { buildCreateSessionRequest } = await import("../src/app/lib/session-create");
 const { composerLaunchAgentId, parseComposerLaunchSearch } =
@@ -134,7 +134,7 @@ test("the header's initials match the contracts' for an agent without an icon", 
   }
 });
 
-test("a .bot.json file imports as an agent whose setup text is its First message", () => {
+test("a .bot.json file imports as an agent whose setup text is its Instructions", () => {
   const parsed = parseAgentFile(
     JSON.stringify({
       format: "opengeni.bot-template",
@@ -150,7 +150,7 @@ test("a .bot.json file imports as an agent whose setup text is its First message
     name: "Release manager",
     description: "Plans releases",
     avatar: null,
-    firstMessage: "Ask which repositories to watch.",
+    instructions: "Ask which repositories to watch.",
   });
   expect(parseAgentFile("not json")).toEqual({
     ok: false,
@@ -221,7 +221,6 @@ test("the form sends only what changed, at the version it opened", () => {
       description: agent.description,
       avatar: null,
       instructions: "New ",
-      firstMessage: "",
       memoryEnabled: true,
       visibility: "workspace",
     }),
@@ -296,7 +295,6 @@ test("the agent page shows its chats, what it follows, Memory and where it is av
   const agent = makeAgent({
     name: "Data team",
     instructions: "Answer metric questions from the dashboards.",
-    firstMessage: "Which dashboard?",
   });
   const client = fakeAgentsClient([agent], {
     chats: [
@@ -335,7 +333,6 @@ test("the agent page shows its chats, what it follows, Memory and where it is av
   for (const text of [
     "Weekly signups",
     "Answer metric questions from the dashboards.",
-    "Which dashboard?",
     "Remember across chats",
     "People in Platform",
     "Opengeni app",
@@ -344,6 +341,7 @@ test("the agent page shows its chats, what it follows, Memory and where it is av
   ]) {
     expect(container.textContent).toContain(text);
   }
+  expect(container.textContent).not.toContain("First message");
   expect(slot!.agent.id).toBe(agent.id);
   expect(container.querySelector("[data-agent-chat-source='slack']")).not.toBeNull();
   // Memory saves at the version the page read.
@@ -586,13 +584,12 @@ function ComposerAgentHarness({
   const state = useComposerAgent({
     workspaceId: WORKSPACE_ID,
     agentId,
-    message,
     canCreatePrivateChat,
     visibility,
     setVisibility,
     keepOnlyMe,
   });
-  useAgentFirstMessage(state, { message, setMessage, draftLoading });
+  void draftLoading;
   Object.assign(api, {
     state,
     message,
@@ -623,47 +620,28 @@ async function step(action: () => void) {
   await flush();
 }
 
-test("a chosen agent's First message fills the composer once the draft loads, and stays out of the saved draft", async () => {
-  const agent = makeAgent({ name: "Onboarding", firstMessage: "Set me up." });
+test("a chosen agent is selected and the composer stays as it is", async () => {
+  const agent = makeAgent({ name: "Onboarding" });
   const api = await harness(fakeAgentsClient([agent]), { agentId: agent.id, draftLoading: true });
   expect(api.state.loading).toBe(false);
   expect(api.state.agent?.id).toBe(agent.id);
   expect(api.state.selection).toMatchObject({ kind: "ready", name: "Onboarding" });
-  // The saved draft is still loading: nothing is put in yet.
-  expect(api.message).toBe("");
   await step(() => api.setDraftLoading(false));
-  expect(api.message).toBe("Set me up.");
-  // Untouched, it isn't saved: another tab or device never sees it without the agent.
-  expect(api.state.draftText).toBe("");
-  await step(() => api.setMessage("Set me up for the data team."));
-  expect(api.state.draftText).toBe("Set me up for the data team.");
-});
-
-test("switching agents replaces an untouched First message, Opengeni takes it out, and typed text stays", async () => {
-  const a = makeAgent({ name: "A", firstMessage: "A first" });
-  const b = makeAgent({ name: "B", firstMessage: "B first" });
-  const none = makeAgent({ name: "None", firstMessage: "" });
-  const api = await harness(fakeAgentsClient([a, b, none]), { agentId: a.id });
-  expect(api.message).toBe("A first");
-  await step(() => api.setAgentId(b.id));
-  expect(api.message).toBe("B first");
-  await step(() => api.setAgentId(none.id));
   expect(api.message).toBe("");
-  await step(() => api.setAgentId(b.id));
-  expect(api.message).toBe("B first");
-  await step(() => api.setAgentId(undefined));
-  expect(api.message).toBe("");
-  expect(api.state.selection).toBeNull();
-  // What the person typed is theirs: neither an agent nor Opengeni replaces it.
+  // What the person typed is theirs: choosing or leaving an agent keeps it.
   await step(() => api.setMessage("My own question"));
-  await step(() => api.setAgentId(a.id));
-  expect(api.message).toBe("My own question");
-  await step(() => api.setAgentId(undefined));
-  expect(api.message).toBe("My own question");
+  const other = makeAgent({ name: "Other" });
+  const two = await harness(fakeAgentsClient([agent, other]), { agentId: agent.id });
+  await step(() => two.setMessage("Typed"));
+  await step(() => two.setAgentId(other.id));
+  expect(two.message).toBe("Typed");
+  await step(() => two.setAgentId(undefined));
+  expect(two.message).toBe("Typed");
+  expect(two.state.selection).toBeNull();
 });
 
 test("Send waits while the agent loads, and an agent that can't be read blocks it with the reason", async () => {
-  const agent = makeAgent({ name: "Slow", firstMessage: "Hi" });
+  const agent = makeAgent({ name: "Slow" });
   const client = fakeAgentsClient([agent], { holdGetAgent: true });
   const api = await harness(client, { agentId: agent.id });
   expect(api.state.loading).toBe(true);
@@ -709,7 +687,7 @@ test("going back to Opengeni keeps the chat Only me while an Only me project nee
 });
 
 test("where Only me chats aren't available, an Only me agent says so and never starts a chat", async () => {
-  const mine = makeAgent({ name: "Notes", visibility: "private", firstMessage: "Hi" });
+  const mine = makeAgent({ name: "Notes", visibility: "private" });
   const api = await harness(fakeAgentsClient([mine]), {
     agentId: mine.id,
     canCreatePrivateChat: false,
@@ -767,8 +745,7 @@ test("the new-chat page starts chats through the agent hooks, never an ordinary 
   );
   for (const wiring of [
     "useComposerAgent({",
-    "useAgentFirstMessage(composerAgent, {",
-    "text: composerAgent.draftText,",
+    "text: message,",
     "agentError={composerAgent.blocker}",
     "workspaceUnavailable={composerAgent.onlyMe ? AGENT_ONLY_ME_CHAT : null}",
     // Send's one guard (its enabled state, the early-Send hold, the guard
@@ -778,7 +755,6 @@ test("the new-chat page starts chats through the agent hooks, never an ordinary 
     "getNewSessionSendBlocker({ ...sendState, voice: realtimeModel !== null })",
     'voiceSendBlocker === "agent"',
     "keepOnlyMe: selectedProjectOnlyMe,",
-    "const firstMessageSaved = !realtimeModel && composerAgent.draftText !== message;",
   ]) {
     expect(source).toContain(wiring);
   }
@@ -846,7 +822,6 @@ test("Export writes an .agent.json that Import reads back with its Instructions"
     description: "Plans releases",
     avatar: { kind: "image", artifactId: "f".repeat(32) } as never,
     instructions: "Check the open PRs first.",
-    firstMessage: "Which repositories?",
     memory: { enabled: true, collectionId: "c1", scope: "workspace", reviewFirst: false },
   });
   const file = agentFile(agent);
@@ -857,7 +832,6 @@ test("Export writes an .agent.json that Import reads back with its Instructions"
     description: "Plans releases",
     avatar: null,
     instructions: "Check the open PRs first.",
-    firstMessage: "Which repositories?",
     memoryEnabled: true,
     visibility: "workspace",
   });
@@ -870,9 +844,11 @@ test("Export writes an .agent.json that Import reads back with its Instructions"
     description: "Plans releases",
     avatar: null,
     instructions: "Check the open PRs first.",
-    firstMessage: "Which repositories?",
     memoryEnabled: true,
   });
+  // An older file's First message is still sent; the server joins it to the Instructions.
+  const older = parseAgentFile(JSON.stringify({ ...file, firstMessage: "Which repositories?" }));
+  expect(older.ok && older.request.firstMessage).toBe("Which repositories?");
   const onlyMe = parseAgentFile(JSON.stringify({ ...file, visibility: "private" }));
   expect(onlyMe.ok && onlyMe.request.visibility).toBe("private");
   expect(parseAgentFile(JSON.stringify({ ...file, visibility: "team" })).ok).toBe(false);

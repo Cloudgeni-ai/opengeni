@@ -10,6 +10,7 @@ import {
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import {
+  agentInstructionsSql,
   createAgent,
   createDb,
   deleteAgent,
@@ -29,6 +30,7 @@ import {
   withWorkspaceSessionActivityRls,
   type CreateAgentInput,
 } from "../src/index";
+import { agentInstructionsWithFirstMessage } from "@opengeni/contracts";
 
 let shared: RestrictedRuntimeTestDatabase;
 let app: ReturnType<typeof createDb>;
@@ -135,9 +137,17 @@ describe("agents data layer (restricted runtime role)", () => {
       }),
     );
     expect(await revisionCount(agent.id)).toBe(1);
+    // A First message joins the Instructions as its own paragraph.
+    expect(agent.content).toMatchObject({
+      instructions: "Be brief.\n\nPlan it.",
+      firstMessage: "",
+    });
+    const [stored] = await shared.admin<{ instructions: string; first_message: string }[]>`
+      select instructions, first_message from agent_revisions where agent_id = ${agent.id}`;
+    expect(stored).toEqual({ instructions: "Be brief.\n\nPlan it.", first_message: "" });
     const [template] = await shared.admin<{ setup_instructions: string }[]>`
       select setup_instructions from bot_templates where id = ${agent.id}`;
-    expect(template?.setup_instructions).toBe("Plan it.");
+    expect(template?.setup_instructions).toBe("Be brief.\n\nPlan it.");
 
     // A retried create with the same id finds the agent it made.
     const again = await createAgent(app.db, org.homeScope, {
@@ -151,14 +161,14 @@ describe("agents data layer (restricted runtime role)", () => {
       agentId: agent.id,
       expectedVersion: agent.version,
       actorSubjectId: "user:editor",
-      patch: { firstMessage: "Plan the release." },
+      patch: { instructions: "Plan the release." },
     });
     expect(updated).toMatchObject({
       kind: "updated",
       revised: true,
       agent: {
         currentRevision: 2,
-        content: { firstMessage: "Plan the release.", createdBySubjectId: "user:editor" },
+        content: { instructions: "Plan the release.", createdBySubjectId: "user:editor" },
       },
     });
     // Exactly one new revision: the template trigger did not add its own.
@@ -177,6 +187,95 @@ describe("agents data layer (restricted runtime role)", () => {
 
     expect(await deleteAgent(app.db, org.homeScope, agent.id)).toBe(true);
     expect(await shared.admin`select id from bot_templates where id = ${agent.id}`).toHaveLength(0);
+  }, 120_000);
+
+  test("an older First message joins the Instructions when read, and is stored that way on the next change", async () => {
+    const org = await organization();
+    const { agent } = await createAgent(app.db, org.homeScope, agentInput(org));
+    // As an older release stores it: a revision with a First message.
+    const olderRevision = async (instructions: string, firstMessage: string) => {
+      await shared.admin.begin(async (tx) => {
+        const [row] = await tx<{ revision: number }[]>`
+          update agents set current_revision = current_revision + 1
+          where id = ${agent.id} returning current_revision as revision`;
+        await tx`insert into agent_revisions (agent_id, account_id, workspace_id, revision, name,
+            instructions, first_message)
+          values (${agent.id}, ${org.accountId}, ${org.home}, ${row!.revision}, 'Release helper',
+            ${instructions}, ${firstMessage})`;
+      });
+    };
+    await olderRevision("Be brief.", "  Ask which release.  ");
+    const read = await getAgent(app.db, org.homeScope, agent.id);
+    expect(read?.content).toMatchObject({
+      instructions: "Be brief.\n\nAsk which release.",
+      firstMessage: "",
+    });
+    expect(read?.hasFirstMessage).toBe(false);
+    // Any change stores it joined, once.
+    const renamed = await updateAgent(app.db, org.homeScope, {
+      agentId: agent.id,
+      expectedVersion: read!.version,
+      actorSubjectId: org.owner,
+      patch: { name: "Release desk" },
+    });
+    expect(renamed).toMatchObject({ kind: "updated", revised: true });
+    const [stored] = await shared.admin<{ instructions: string; first_message: string }[]>`
+      select r.instructions, r.first_message from agents a
+      join agent_revisions r on r.agent_id = a.id and r.revision = a.current_revision
+      where a.id = ${agent.id}`;
+    expect(stored).toEqual({ instructions: "Be brief.\n\nAsk which release.", first_message: "" });
+    // Sent again by an older client, it isn't added twice.
+    const again = await updateAgent(app.db, org.homeScope, {
+      agentId: agent.id,
+      expectedVersion: null,
+      actorSubjectId: org.owner,
+      patch: { firstMessage: "Ask which release." },
+    });
+    expect(again).toMatchObject({ kind: "updated", revised: false });
+    // New Instructions replace a stored First message: they were written over the joined text.
+    await olderRevision("Be brief.", "Ask which release.");
+    const rewritten = await updateAgent(app.db, org.homeScope, {
+      agentId: agent.id,
+      expectedVersion: null,
+      actorSubjectId: org.owner,
+      patch: { instructions: "Be thorough." },
+    });
+    expect(rewritten).toMatchObject({
+      kind: "updated",
+      agent: { content: { instructions: "Be thorough.", firstMessage: "" } },
+    });
+    // Too long together: both are kept as sent, and readers still see them joined.
+    const long = "x".repeat(15_000);
+    const kept = await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, { name: "Long one", instructions: long, firstMessage: "y".repeat(15_000) }),
+    );
+    const [both] = await shared.admin<{ instructions: string; first_message: string }[]>`
+      select instructions, first_message from agent_revisions where agent_id = ${kept.agent.id}`;
+    expect(both?.instructions.length).toBe(15_000);
+    expect(both?.first_message.length).toBe(15_000);
+    expect(kept.agent.content?.instructions.length).toBe(30_002);
+    // The SQL form, for reads that never map an agent, reads the same.
+    const viaSql = async (instructions: string, firstMessage: string) => {
+      const rows = (await app.db.execute(
+        sql`select ${agentInstructionsSql("r")} as joined
+          from (values (${instructions}::text, ${firstMessage}::text)) as r(instructions, first_message)`,
+      )) as unknown as { rows?: { joined: string }[] } | { joined: string }[];
+      const list = Array.isArray(rows) ? rows : (rows.rows ?? []);
+      return list[0]?.joined;
+    };
+    for (const [instructions, firstMessage] of [
+      ["Be brief.", ""],
+      ["Be brief.", "  Ask which release.\n"],
+      ["", " Ask. "],
+      ["Be brief. Ask.", "Ask."],
+      ["Line one\n", "Line two"],
+    ] as const) {
+      expect(await viaSql(instructions, firstMessage)).toBe(
+        agentInstructionsWithFirstMessage(instructions, firstMessage),
+      );
+    }
   }, 120_000);
 
   test("Slack availability: one installation, the legacy row, names and projections", async () => {

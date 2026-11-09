@@ -18,8 +18,9 @@ import {
  * workspace (`workspace`). It is always available in the app; it can also be
  * made available in a connected Slack workspace.
  *
- * Every change to the Instructions or First message is a new revision that
- * records who made it. Ids are kept from the records agents replaced, so a
+ * Every change to the Instructions is a new revision that records who made
+ * it. Agents no longer have a First message: one sent by an older client
+ * joins the Instructions. Ids are kept from the records agents replaced, so a
  * bot template id and a Slack agent id are also agent ids.
  *
  * This module must not import `./index`.
@@ -28,11 +29,34 @@ import {
 export const AGENT_NAME_MAX_LENGTH = 120;
 export const AGENT_DESCRIPTION_MAX_LENGTH = 280;
 export const AGENT_INSTRUCTIONS_MAX_LENGTH = 20_000;
+/**
+ * Agents no longer have a First message: Instructions are the one text saying
+ * what an agent does. The field is still accepted from older clients and
+ * joins the Instructions (see {@link agentInstructionsWithFirstMessage}).
+ */
 export const AGENT_FIRST_MESSAGE_MAX_LENGTH = 20_000;
 /** Above this, the editor suggests moving facts into Memory. A hint, not a limit. */
 export const AGENT_INSTRUCTIONS_SOFT_LIMIT = 8_000;
 /** Agents one workspace keeps; creating another past this is refused. */
 export const AGENTS_PER_WORKSPACE_MAX = 500;
+
+/**
+ * An agent's Instructions with an older First message joined as its own
+ * paragraph, after them. Nothing is added when there is no First message or
+ * the Instructions already contain it, so joining twice changes nothing. The
+ * database's `agentInstructionsSql` reads stored revisions the same way.
+ */
+export function agentInstructionsWithFirstMessage(
+  instructions: string,
+  firstMessage: string,
+): string {
+  const first = firstMessage.trim();
+  if (first.length === 0) return instructions;
+  const base = instructions.trim();
+  if (base.length === 0) return first;
+  if (instructions.includes(first)) return instructions;
+  return `${base}\n\n${first}`;
+}
 
 /**
  * The avatar an agent without its own icon shows: the first letter or digit
@@ -178,9 +202,9 @@ export const AgentSummary = /* @__PURE__ */ defineSchema(() =>
     /** The chat it was made from, when it was made from one. */
     sourceSessionId: Uuid.nullable(),
     createdBySubjectId: z.string().nullable(),
-    /** The current revision of its Instructions and First message. */
+    /** The current revision of its Instructions. */
     revision: z.number().int().positive(),
-    /** Whether a First message is set; read it from the agent itself. */
+    /** Always false: agents no longer have a First message. Kept for older clients. */
     hasFirstMessage: z.boolean(),
     memory: AgentMemory,
     /** Slack workspaces it is available in. The app is always on. */
@@ -194,10 +218,12 @@ export const AgentSummary = /* @__PURE__ */ defineSchema(() =>
 );
 export type AgentSummary = z.infer<typeof AgentSummary>;
 
-/** One agent with its current Instructions and First message. */
+/** One agent with its current Instructions. */
 export const Agent = /* @__PURE__ */ defineSchema(() =>
   AgentSummary.extend({
+    /** What it does and how; any older First message is joined as its own paragraph. */
     instructions: z.string(),
+    /** Always empty: agents no longer have a First message. Kept for older clients. */
     firstMessage: z.string(),
     /** Who made the current revision, and when. */
     revisionCreatedBySubjectId: z.string().nullable(),
@@ -227,6 +253,7 @@ export const CreateAgentRequest = /* @__PURE__ */ defineSchema(() =>
       /** Only a person can keep an agent to themselves. */
       visibility: AgentVisibility.default("workspace"),
       instructions: AgentInstructions.default(""),
+      /** Older field: joins the Instructions as its own paragraph. */
       firstMessage: AgentFirstMessage.default(""),
       /** "Remember across chats". Creates its Memory collection when on. */
       memoryEnabled: z.boolean().default(false),
@@ -248,6 +275,7 @@ export const UpdateAgentRequest = /* @__PURE__ */ defineSchema(() =>
       avatar: SessionAvatar.nullable().optional(),
       visibility: AgentVisibility.optional(),
       instructions: AgentInstructions.optional(),
+      /** Older field: joins the Instructions as its own paragraph. */
       firstMessage: AgentFirstMessage.optional(),
       memoryEnabled: z.boolean().optional(),
     })

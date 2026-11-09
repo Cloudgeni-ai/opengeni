@@ -143,18 +143,22 @@ export function registerBotTemplateTools(input: {
     "bot_template_save",
     {
       description:
-        "Make an agent from this chat when the person asks to make this an agent or a template. Write its Instructions, which every chat with it follows, from what this chat established: its job, how it works, its standing rules and preferences, and the Skills, plugins, connections and machines it relies on. Put one-time setup (installs, schedules, event triggers, first questions) in the optional First message, which starts each new chat's composer. Leave out one-off tasks, history, personal details and secrets. Show the person your draft first unless they asked you to save it directly. It is shared like this chat. avatar takes the same shapes as in set_session_title.",
+        "Make an agent from this chat when the person asks to make this an agent or a template. Write its Instructions, which every chat with it follows, from what this chat established: its job, how it works, its standing rules and preferences, and the Skills, plugins, connections and machines it relies on. Leave out one-off tasks and one-time setup, history, personal details and secrets. Show the person your draft first unless they asked you to save it directly. It is shared like this chat. avatar takes the same shapes as in set_session_title.",
       inputSchema: {
         name: z4.string().min(1).max(AGENT_NAME_MAX_LENGTH),
         description: z4.string().max(AGENT_DESCRIPTION_MAX_LENGTH).optional(),
         avatar: AvatarInput,
         instructions: z4.string().max(AGENT_INSTRUCTIONS_MAX_LENGTH).optional(),
-        firstMessage: z4.string().max(AGENT_FIRST_MESSAGE_MAX_LENGTH).optional(),
+        firstMessage: z4
+          .string()
+          .max(AGENT_FIRST_MESSAGE_MAX_LENGTH)
+          .optional()
+          .describe("Older field; joins the instructions."),
         setupInstructions: z4
           .string()
           .max(AGENT_FIRST_MESSAGE_MAX_LENGTH)
           .optional()
-          .describe("Older name for firstMessage."),
+          .describe("Older field; joins the instructions."),
       },
     },
     async ({ name, description, avatar, instructions, firstMessage, setupInstructions }) => {
@@ -187,7 +191,7 @@ export function registerBotTemplateTools(input: {
       const request = parsed.data;
       if (!request.instructions && !request.firstMessage) {
         throw new HTTPException(422, {
-          message: "Give the agent Instructions, a First message, or both.",
+          message: "Give the agent Instructions.",
         });
       }
       const viewer = await agentViewerForGrant(deps.db, grant);

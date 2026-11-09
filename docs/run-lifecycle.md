@@ -1126,8 +1126,9 @@ unchanged.
   turn's first input, and the turn's metadata
   (`opengeniAgentInstructionsHistoryId`) freezes it, so retries replay the
   same bytes and a turn that saw no item keeps seeing none. Unchanged
-  Instructions, or a revision that changed only other fields such as the
-  first message, write nothing, and neither does an agent whose current
+  Instructions (an older First message counts as part of them; see
+  [agents](agents.md#one-text)), or a revision that changed only other
+  fields, write nothing, and neither does an agent whose current
   revision row cannot be read.
 - **Compaction.** Agent items are never retained. The newest revision the
   summarized history showed (developer items only) is folded into

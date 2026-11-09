@@ -17,11 +17,7 @@ import {
   visibilitySummary,
 } from "@opengeni/react/app/components/session/new-session-settings-menu";
 import { SessionHeader } from "@opengeni/react/app/components/rail/session-header";
-import {
-  AGENT_ONLY_ME_CHAT,
-  useAgentFirstMessage,
-  useComposerAgent,
-} from "@opengeni/react/app/lib/composer-agent";
+import { AGENT_ONLY_ME_CHAT, useComposerAgent } from "@opengeni/react/app/lib/composer-agent";
 import {
   AgentsTestHost,
   WORKSPACE_ID,
@@ -51,7 +47,6 @@ const releases = makeAgent({
   origin: "slack_agent",
   instructions:
     "You run our weekly release. Check the changelog, open PRs labelled release, and the staging dashboards. Post a short go/no-go summary with links. Never deploy yourself.",
-  firstMessage: "",
   memory: { enabled: true, collectionId: "c1", scope: "workspace", reviewFirst: false },
   slack: [
     {
@@ -73,9 +68,8 @@ const onboarding = makeAgent({
   description: "Sets up a new teammate's tools and answers first-week questions",
   avatar: { kind: "icon", icon: "bot", hue: 140 },
   origin: "bot_template",
-  instructions: "Help new teammates get set up. Be patient and concrete.",
-  firstMessage:
-    "Set me up: install the onboarding Skills, connect GitHub and Linear, and ask which team I'm joining.",
+  instructions:
+    "Help new teammates get set up. Be patient and concrete.\n\nSet me up: install the onboarding Skills, connect GitHub and Linear, and ask which team I'm joining.",
 });
 const notes = makeAgent({
   id: "aaaaaaaa-0000-4000-8000-000000000003",
@@ -230,8 +224,8 @@ function Header({ agentChat }: { agentChat: boolean }) {
 
 /**
  * The new-chat composer's agent part, wired as the new-chat page wires it:
- * the same hooks for loading the agent, its First message and who can see
- * the chat. `data-draft-text` is what the saved draft would keep.
+ * the same hooks for loading the agent and who can see the chat.
+ * `data-draft-text` is what the saved draft would keep.
  */
 function Composer({ initialAgentId }: { initialAgentId?: string | undefined }) {
   const [agentId, setAgentId] = useState<string | undefined>(initialAgentId);
@@ -240,12 +234,10 @@ function Composer({ initialAgentId }: { initialAgentId?: string | undefined }) {
   const composerAgent = useComposerAgent({
     workspaceId: WORKSPACE_ID,
     agentId,
-    message,
     canCreatePrivateChat: privateChats,
     visibility,
     setVisibility,
   });
-  useAgentFirstMessage(composerAgent, { message, setMessage, draftLoading: false });
   // The new-chat page's Send guard, with everything but the agent ready.
   const sendBlocker = getNewSessionSendBlocker({
     created: false,
@@ -294,7 +286,7 @@ function Composer({ initialAgentId }: { initialAgentId?: string | undefined }) {
   return (
     <main
       className="mx-auto w-full max-w-3xl px-4 pt-16"
-      data-draft-text={composerAgent.draftText}
+      data-draft-text={message}
       data-can-send={String(canSend)}
     >
       <h1 className="mb-6 text-center text-2xl font-semibold tracking-tight">
