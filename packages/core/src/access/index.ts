@@ -265,10 +265,22 @@ const workspaceExternalPersonProofs = new WeakSet<DelegatedHumanAuthorization>()
 const nativeAppContexts = new WeakSet<AccessContext>();
 /** The verified Better Auth session id behind a canonical managed-cookie context. */
 const managedCookieSessionIds = new WeakMap<AccessContext, string>();
+/**
+ * For an agent or personal key acting as a person: that person's own live
+ * access before the key's narrowing. Describes who they are, never what this
+ * request may do.
+ */
+const delegatedHumanLiveContexts = new WeakMap<AccessContext, AccessContext>();
 
 export type ManagedPersonForAccessContext = {
   /** The person's Better Auth user id (the subject without its `user:` prefix). */
   authUserId: string;
+  /**
+   * The person's own organization and workspace grants (their membership
+   * roles), not narrowed by an agent's or key's access setting: who they are,
+   * never what this request may do.
+   */
+  personAccess: Pick<AccessContext, "accountGrants" | "workspaceGrants">;
   /**
    * How the person is present: signed in in this browser session (with its
    * id), through an approved native app, or through an agent or personal API
@@ -291,17 +303,21 @@ export function managedPersonForAccessContext(
 ): ManagedPersonForAccessContext | null {
   if (context.mode !== "managed" || !context.subjectId.startsWith("user:")) return null;
   const authUserId = context.subjectId.slice("user:".length);
-  if (nativeAppContexts.has(context)) return { authUserId, via: { kind: "native_app" } };
+  if (nativeAppContexts.has(context))
+    return { authUserId, personAccess: context, via: { kind: "native_app" } };
   const authSessionId = managedCookieSessionIds.get(context);
   if (canonicalManagedCookieContexts.has(context) && authSessionId)
-    return { authUserId, via: { kind: "browser_session", authSessionId } };
+    return { authUserId, personAccess: context, via: { kind: "browser_session", authSessionId } };
   const delegated = delegatedHumanContexts.get(context);
+  const live = delegatedHumanLiveContexts.get(context);
   if (
     delegated &&
+    live &&
+    live.subjectId === context.subjectId &&
     !workspaceExternalPersonProofs.has(delegated) &&
     delegated.subjectId === context.subjectId
   )
-    return { authUserId, via: { kind: "acting_for_person" } };
+    return { authUserId, personAccess: live, via: { kind: "acting_for_person" } };
   return null;
 }
 const delegatedHumanProfileSchema = z.object({
@@ -2401,6 +2417,7 @@ async function resolveDelegatedHumanAccessContext(
   Object.freeze(context);
   delegatedHumanContexts.set(context, proof);
   delegatedHumanProfiles.set(context, Object.freeze(profile));
+  delegatedHumanLiveContexts.set(context, live);
   return context;
 }
 

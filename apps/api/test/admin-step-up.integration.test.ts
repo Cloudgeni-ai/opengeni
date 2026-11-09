@@ -10,9 +10,11 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { organizationAccessPresetPermissions } from "@opengeni/contracts";
+import { WORKSPACE_ADMIN_ROLE_PERMISSIONS } from "@opengeni/contracts/api-key-delegation";
 import { stampDelegatedHumanAuthorization, type ManagedEmailTransport } from "@opengeni/core";
 import { createManagedAuth, hashManagedAuthPassword } from "../src/auth/managed-auth";
 import { createApp } from "../src/app";
+import { matchAdminRoute } from "../src/auth/admin-step-up";
 import { createBetterAuthSessionAdapter } from "../src/auth/managed-auth-session-adapter";
 import {
   createSoftwarePasskey,
@@ -185,6 +187,49 @@ async function stepUpCode(response: Response): Promise<unknown> {
   if (response.status !== 403) return null;
   return ((await response.json()) as { error: { details?: { code?: unknown } } }).error.details
     ?.code;
+}
+
+/** Invite a person to the organization and have them accept. */
+async function join(
+  rt: Runtime,
+  owner: { cookie: string },
+  person: { userId: string; cookie: string },
+  organizationId: string,
+) {
+  const invited = await call(
+    rt,
+    "POST",
+    `/v1/organizations/${organizationId}/invitations`,
+    owner.cookie,
+    {
+      email: `${person.userId}@example.test`,
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      operationId: crypto.randomUUID(),
+    },
+  );
+  expect(invited.status).toBeLessThan(300);
+  const { id } = (await invited.json()) as { id: string };
+  const listed = await call(rt, "GET", "/v1/organization-invitations", person.cookie);
+  const page = (await listed.json()) as { invitations: { id: string; revision: number }[] };
+  const invitation = page.invitations.find((item) => item.id === id)!;
+  const accepted = await call(
+    rt,
+    "POST",
+    `/v1/organization-invitations/${invitation.id}/accept`,
+    person.cookie,
+    { expectedRevision: invitation.revision, operationId: crypto.randomUUID() },
+  );
+  expect(accepted.status).toBe(200);
+}
+
+async function sharedWorkspace(rt: Runtime, cookie: string, organizationId: string) {
+  const made = await call(rt, "POST", "/v1/workspaces", cookie, {
+    accountId: organizationId,
+    name: "Shared",
+  });
+  expect(made.status, await made.clone().text()).toBeLessThan(300);
+  const workspace = (await made.json()) as { id?: string; workspace?: { id: string } };
+  return (workspace.workspace?.id ?? workspace.id)!;
 }
 
 describe("admin passkey step-up", () => {
@@ -404,13 +449,8 @@ describe("admin passkey step-up", () => {
     const owner = await passwordPerson(rt);
     const organization = await createOrganization(setup, owner.cookie);
     // A shared workspace (the one made with the organization is the owner's own).
-    const made = await call(setup, "POST", "/v1/workspaces", owner.cookie, {
-      accountId: organization.id,
-      name: "Shared",
-    });
-    expect(made.status, await made.clone().text()).toBeLessThan(300);
-    const workspace = (await made.json()) as { id?: string; workspace?: { id: string } };
-    const connections = `/v1/workspaces/${workspace.workspace?.id ?? workspace.id}/connections`;
+    const workspaceId = await sharedWorkspace(setup, owner.cookie, organization.id);
+    const connections = `/v1/workspaces/${workspaceId}/connections`;
     const create = (target: Runtime, ownership?: "personal") =>
       call(target, "POST", connections, owner.cookie, {
         providerDomain: "step-up.example.test",
@@ -429,4 +469,80 @@ describe("admin passkey step-up", () => {
     const personal = await create(rt, "personal");
     expect(await stepUpCode(personal)).not.toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
   }, 120_000);
+
+  test("a workspace admin's narrowly scoped personal key is still the admin", async () => {
+    const rt = runtime();
+    const setup = runtime("off");
+    const owner = await passwordPerson(rt);
+    const admin = await passwordPerson(rt);
+    const organization = await createOrganization(setup, owner.cookie);
+    await join(setup, owner, admin, organization.id);
+    const workspaceId = await sharedWorkspace(setup, owner.cookie, organization.id);
+    const candidates = await call(
+      setup,
+      "GET",
+      `/v1/workspaces/${workspaceId}/member-candidates`,
+      owner.cookie,
+    );
+    const { members } = (await candidates.json()) as {
+      members: { organizationMembershipId: string; subjectId: string }[];
+    };
+    const candidate = members.find((member) => member.subjectId === `user:${admin.userId}`)!;
+    const added = await call(setup, "POST", `/v1/workspaces/${workspaceId}/members`, owner.cookie, {
+      organizationMembershipId: candidate.organizationMembershipId,
+      permissions: [...WORKSPACE_ADMIN_ROLE_PERMISSIONS],
+    });
+    expect(added.status, await added.clone().text()).toBeLessThan(300);
+    const key = await call(
+      setup,
+      "POST",
+      `/v1/organizations/${organization.id}/personal-api-keys`,
+      admin.cookie,
+      {
+        name: "Connections only",
+        access: {
+          preset: "custom",
+          permissions: ["workspace:read", "connections:read", "connections:write"],
+          workspaceScope: { kind: "all" },
+        },
+      },
+    );
+    expect(key.status, await key.clone().text()).toBe(201);
+    const { token } = (await key.json()) as { token: string };
+    const body = JSON.stringify({
+      providerDomain: "step-up.example.test",
+      kind: "api_key",
+      credential: { headers: { "X-Api-Key": "fixture-key" } },
+    });
+    const viaKey = await rt.app.request(`/v1/workspaces/${workspaceId}/connections`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body,
+    });
+    expect(await stepUpCode(viaKey)).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
+    // In their browser too.
+    const inBrowser = await call(
+      rt,
+      "POST",
+      `/v1/workspaces/${workspaceId}/connections`,
+      admin.cookie,
+      JSON.parse(body),
+    );
+    expect(await stepUpCode(inBrowser)).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
+  }, 120_000);
+
+  test("no admin route is answered before the guard runs", () => {
+    const { app } = runtime();
+    const routes = app.routes as { method: string; path: string; handler: { name?: string } }[];
+    const guardAt = routes.findIndex((entry) => entry.handler.name === "adminStepUpMiddleware");
+    expect(guardAt).toBeGreaterThan(-1);
+    const sample = (path: string) =>
+      path.replace(/:[A-Za-z]+(?:\{[^}]*\})?/gu, "5d0f3c1e-2b7a-4c8e-9f61-3a4b5c6d7e8f");
+    const early = routes
+      .slice(0, guardAt)
+      .filter((entry) => entry.method !== "ALL" && !entry.path.endsWith("*"))
+      .filter((entry) => matchAdminRoute(entry.method, sample(entry.path)) !== null)
+      .map((entry) => `${entry.method} ${entry.path}`);
+    expect(early).toEqual([]);
+  });
 });

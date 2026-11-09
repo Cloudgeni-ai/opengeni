@@ -71,10 +71,14 @@ export const ADMIN_ROUTES: readonly AdminRoute[] = [
   route("workspace", `${WS}/(?:.+/)?allowance(?:/.*)?`),
   route(
     "workspace",
-    `${WS}/(?:connections|connections/oauth/start|integrations/oauth/start|connect/attempts|connections/(?:slack-bot|1password)/install)`,
+    `${WS}/(?:connections|connections/oauth/start|integrations/oauth/start|connect/attempts|connections/(?:slack-bot|1password|fiken)/install|connections/fiken/oauth/start)`,
     { shared: "created" },
   ),
-  route("workspace", `${WS}/connections/${CONNECTION}(?:/.*)?`, { shared: "existing" }),
+  // An existing connection, also under a provider's own routes
+  // (connections/atlassian/<id>/source, connections/google-drive/<id>/lifecycle).
+  route("workspace", `${WS}/connections/(?:[^/]+/)?${CONNECTION}(?:/.*)?`, {
+    shared: "existing",
+  }),
   route("billing", "/v1/billing/(?:checkout|portal|alerts|subscription/.+|auto-top-up(?:/.*)?)"),
 ];
 
@@ -171,7 +175,13 @@ async function hasPasskey(deps: Pick<ApiRouteDeps, "db">, authUserId: string): P
   return found?.present === true;
 }
 
-type StepUpPerson = { authUserId: string; authSessionId: string | null };
+type PersonAccess = Pick<AccessContext, "accountGrants" | "workspaceGrants">;
+type StepUpPerson = {
+  authUserId: string;
+  authSessionId: string | null;
+  /** Their own membership grants, not an agent's or key's narrowed copy. */
+  access: PersonAccess;
+};
 
 /**
  * The person behind this request, from how access resolution authenticated
@@ -186,14 +196,17 @@ function stepUpPerson(context: AccessContext): StepUpPerson | null {
   return {
     authUserId: person.authUserId,
     authSessionId: person.via.kind === "browser_session" ? person.via.authSessionId : null,
+    access: person.personAccess,
   };
 }
 
+/** The body as JSON, whatever its content type (routes parse it regardless). */
 async function jsonBody(c: Context): Promise<Record<string, unknown> | null> {
-  if (!c.req.header("content-type")?.toLowerCase().includes("json")) return null;
   try {
     // A copy: the route reads the body itself.
-    const body = (await c.req.raw.clone().json()) as unknown;
+    const text = await c.req.raw.clone().text();
+    if (!text) return null;
+    const body = JSON.parse(text) as unknown;
     return body && typeof body === "object" && !Array.isArray(body)
       ? (body as Record<string, unknown>)
       : null;
@@ -231,18 +244,23 @@ async function changesSharedConnection(
   workspaceId: string,
   connectionId: string,
 ): Promise<boolean> {
-  const existing = await getConnectionMetadata(
-    deps.db,
-    workspaceId,
-    connectionId,
-    context.subjectId,
-  ).catch(() => null);
-  return existing !== null && existing.subjectId === null;
+  try {
+    const existing = await getConnectionMetadata(
+      deps.db,
+      workspaceId,
+      connectionId,
+      context.subjectId,
+    );
+    return existing !== null && existing.subjectId === null;
+  } catch {
+    // Can't tell: ask, rather than let a failed lookup skip the check.
+    return true;
+  }
 }
 
 /** An owner or admin of this organization (by role, or a literal admin grant). */
-function organizationAdmin(context: AccessContext, accountId: string | undefined): boolean {
-  const grant = context.accountGrants.find((candidate) => candidate.accountId === accountId);
+function organizationAdmin(access: PersonAccess, accountId: string | undefined): boolean {
+  const grant = access.accountGrants.find((candidate) => candidate.accountId === accountId);
   if (!grant) return false;
   return (
     grant.role === "owner" ||
@@ -255,37 +273,44 @@ function organizationAdmin(context: AccessContext, accountId: string | undefined
 /**
  * Whether the person administers what this request changes: an owner or
  * admin of its organization, or an admin of its shared workspace. A personal
- * workspace is the person's own, never an admin setting.
+ * workspace is the person's own, never an admin setting. Decided from the
+ * person's own membership, so a narrowly scoped key of theirs counts too.
  */
 async function administers(
   c: Context,
   deps: ApiRouteDeps,
   context: AccessContext,
+  person: StepUpPerson,
   matched: NonNullable<ReturnType<typeof matchAdminRoute>>,
 ): Promise<boolean> {
+  const access = person.access;
   if (matched.route.scope === "billing") {
     const accountIds = await billingAccountIds(c, context);
-    return accountIds.some((accountId) => organizationAdmin(context, accountId));
+    return accountIds.some((accountId) => organizationAdmin(access, accountId));
   }
   if (matched.workspaceId) {
     const workspaceId = matched.workspaceId;
-    const grant = context.workspaceGrants.find(
-      (candidate) => candidate.workspaceId === workspaceId,
-    );
+    const grant = access.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
+    const workspaceAdmin =
+      grant !== undefined &&
+      hasPermission(grant.permissions, "workspace:admin", grant.permissionMode);
     // Its organization: the grant's, or (an organization admin may hold no
     // grant of their own here) one the person administers.
     const accountIds = grant
       ? [grant.accountId]
-      : context.accountGrants
-          .filter((candidate) => organizationAdmin(context, candidate.accountId))
+      : access.accountGrants
+          .filter((candidate) => organizationAdmin(access, candidate.accountId))
           .map((candidate) => candidate.accountId);
     let workspace: Awaited<ReturnType<typeof getWorkspace>> = null;
-    for (const accountId of accountIds) {
-      workspace = await withAccountRls(deps.db, accountId, (tx) =>
-        getWorkspace(tx, workspaceId),
-      ).catch(() => null);
-      if (workspace?.accountId === accountId) break;
-      workspace = null;
+    try {
+      for (const accountId of accountIds) {
+        workspace = await withAccountRls(deps.db, accountId, (tx) => getWorkspace(tx, workspaceId));
+        if (workspace?.accountId === accountId) break;
+        workspace = null;
+      }
+    } catch {
+      // Can't tell: an admin is asked rather than let a failed lookup skip it.
+      return workspaceAdmin || accountIds.some((id) => organizationAdmin(access, id));
     }
     if (!workspace || workspace.kind === "personal") return false;
     if (matched.route.shared === "created" && !createsSharedConnection(await jsonBody(c)))
@@ -298,11 +323,9 @@ async function administers(
       )
     )
       return false;
-    if (grant && hasPermission(grant.permissions, "workspace:admin", grant.permissionMode))
-      return true;
-    return organizationAdmin(context, workspace.accountId);
+    return workspaceAdmin || organizationAdmin(access, workspace.accountId);
   }
-  return organizationAdmin(context, matched.organizationId);
+  return organizationAdmin(access, matched.organizationId);
 }
 
 /**
@@ -310,7 +333,7 @@ async function administers(
  * ADMIN_PASSKEY_STEP_UP_REQUIRED and whether they have a passkey to use.
  */
 export function adminStepUpGuard(deps: ApiRouteDeps): MiddlewareHandler {
-  return async (c, next) => {
+  return async function adminStepUpMiddleware(c, next) {
     if (!adminStepUpEnforced(deps)) return await next();
     // The decoded path Hono routes on, so an escaped path can't route to an
     // admin handler without matching here.
@@ -324,7 +347,7 @@ export function adminStepUpGuard(deps: ApiRouteDeps): MiddlewareHandler {
       return await next();
     }
     const person = stepUpPerson(context);
-    if (!person || !(await administers(c, deps, context, matched))) return await next();
+    if (!person || !(await administers(c, deps, context, person, matched))) return await next();
     if (await hasRecentAdminStepUp(deps, person)) return await next();
     const passkeyRegistered = await hasPasskey(deps, person.authUserId);
     throw new ApiHttpError(403, {
