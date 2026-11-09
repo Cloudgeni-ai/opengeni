@@ -8,9 +8,13 @@ const organizationId = "33333333-3333-4333-8333-333333333333";
 const reference = "386126c7-51c0-448e-9c5a-56fbec012f9f";
 
 function apiError(status: number, message: string): OpenGeniApiError {
-  return new OpenGeniApiError(status, JSON.stringify({ error: { message, requestId: reference } }), {
-    mutation: true,
-  });
+  return new OpenGeniApiError(
+    status,
+    JSON.stringify({ error: { message, requestId: reference } }),
+    {
+      mutation: true,
+    },
+  );
 }
 
 let saveFailure: unknown = null;
@@ -49,9 +53,8 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-const { PersonalWorkspaceLimitSection, personalLimitErrorText } = await import(
-  "./personal-workspace-limit-section"
-);
+const { PersonalWorkspaceLimitSection, personalLimitErrorText } =
+  await import("./personal-workspace-limit-section");
 
 async function setLimitAndSave(): Promise<string> {
   const container = document.createElement("div");
@@ -67,9 +70,12 @@ async function setLimitAndSave(): Promise<string> {
     Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")!.set!.call(input, "10");
     // Call React's own change handler, as the other settings tests do.
     const propsKey = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
-    (input as unknown as Record<string, { onChange: (event: { target: HTMLInputElement }) => void }>)[
-      propsKey
-    ]!.onChange({ target: input });
+    (
+      input as unknown as Record<
+        string,
+        { onChange: (event: { target: HTMLInputElement }) => void }
+      >
+    )[propsKey]!.onChange({ target: input });
   });
   const button = [...container.querySelectorAll("button")].find(
     (candidate) => candidate.textContent === "Set limit",
@@ -101,7 +107,9 @@ describe("Personal workspaces monthly limit", () => {
     expect(personalLimitErrorText(apiError(403, "missing permission: account:admin"))).toBe(
       "Only organization owners and admins can change this limit.",
     );
-    const conflict = personalLimitErrorText(apiError(409, "Allowance version or operation conflicts"));
+    const conflict = personalLimitErrorText(
+      apiError(409, "Allowance version or operation conflicts"),
+    );
     expect(conflict).not.toMatch(/^API \d{3}/u);
     const failure = personalLimitErrorText(apiError(500, "boom"));
     expect(failure).not.toMatch(/API 500/u);
