@@ -449,6 +449,8 @@ export type TranscriptUnrecordedMark = {
   source: RecordingTrack["source"] | null;
   startMilliseconds: number;
   endMilliseconds: number;
+  /** Every other audio track recorded for all of this one track's stretch. */
+  othersRecorded: boolean;
 };
 
 type Stretch = { start: number; end: number };
@@ -513,9 +515,13 @@ export function transcriptUnrecordedMarks(
     source: null,
     startMilliseconds: stretch.start,
     endMilliseconds: stretch.end,
+    othersRecorded: false,
   }));
   if (audio.length > 1) {
     for (const { track, stretches } of audio) {
+      const others = audio
+        .filter((entry) => entry.track !== track)
+        .flatMap((entry) => entry.stretches);
       for (const stretch of withoutStretches(stretches, silent)) {
         marks.push({
           key: `${track.trackNumber}:${stretch.start}`,
@@ -523,6 +529,9 @@ export function transcriptUnrecordedMarks(
           source: track.source,
           startMilliseconds: stretch.start,
           endMilliseconds: stretch.end,
+          othersRecorded: others.every(
+            (other) => other.end <= stretch.start || other.start >= stretch.end,
+          ),
         });
       }
     }
@@ -597,13 +606,18 @@ export function unrecordedMarkText(
   const from = formatClock(mark.startMilliseconds);
   const to = formatClock(mark.endMilliseconds);
   if (mark.source === "microphone") {
-    return speakerName
+    const line = speakerName
       ? msg("meetings.transcript.nameSMicrophoneWasnTRecordingFromTo", {
           name: speakerName,
           from,
           to,
         })
       : msg("meetings.transcript.theMicrophoneWasnTRecordingFromTo", { from, to });
+    if (!mark.othersRecorded) return line;
+    const others = speakerName
+      ? msg("meetings.transcript.everyoneElseWasStillRecorded")
+      : msg("meetings.transcript.otherPeopleWereStillRecorded");
+    return `${line} ${others}`;
   }
   if (mark.source === "system" || mark.source === "browser_tab") {
     return msg("meetings.transcript.otherPeopleWerenTRecordedFromTo", { from, to });

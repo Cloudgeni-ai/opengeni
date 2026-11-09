@@ -3144,6 +3144,8 @@ export const englishMessages = {
   "meetings.transcript.couldnTSaveTheCorrection": "Couldn't save the correction",
   "meetings.transcript.couldnTSaveThisName": "Couldn't save this name.",
   "meetings.transcript.couldnTTurnDownThis": "Couldn't turn down this name",
+  /** Follows a microphone's line when every other track kept recording. */
+  "meetings.transcript.everyoneElseWasStillRecorded": "Everyone else was still recorded.",
   "meetings.transcript.fixWhatTheTranscriptGot": "Fix what the transcript got wrong.",
   "meetings.transcript.forExampleMajaBerg": "For example, Maja Berg",
   "meetings.transcript.forgetDisplaynameSVoice": "Forget {displayName}'s voice",
@@ -3161,13 +3163,15 @@ export const englishMessages = {
    * that microphone.
    */
   "meetings.transcript.nameSMicrophoneWasnTRecordingFromTo":
-    "{name}'s microphone wasn't recording from {from} to {to}. Everyone else was still recorded.",
+    "{name}'s microphone wasn't recording from {from} to {to}.",
   "meetings.transcript.nameSuggestedFromTheirVoice":
     "{name}, suggested from their voice. Confirm or correct",
-  "meetings.transcript.nothingWasRecordedFromTo": "Nothing was recorded from {from} to {to}",
+  "meetings.transcript.nothingWasRecordedFromTo": "Nothing was recorded from {from} to {to}.",
   "meetings.transcript.noLeaveUnnamed": "No, leave unnamed",
   "meetings.transcript.otherPeopleWerenTRecordedFromTo":
-    "Other people weren't recorded from {from} to {to}",
+    "Other people weren't recorded from {from} to {to}.",
+  /** Follows an unnamed microphone's line when every other track kept recording. */
+  "meetings.transcript.otherPeopleWereStillRecorded": "Other people were still recorded.",
   "meetings.transcript.orPickWhoItIs": "Or pick who it is",
   "meetings.transcript.playFromFormatclock": "Play from {formatClock}",
   "meetings.transcript.rememberDisplaynameSVoice": "Remember {displayName}'s voice…",
@@ -3183,7 +3187,7 @@ export const englishMessages = {
   "meetings.transcript.suggestedBecauseTheVoiceSounds": "Sounds like them ({suggestionMatch})",
   "meetings.transcript.suggestedBecauseTheVoiceSounds2": "Sounds like them",
   "meetings.transcript.theMicrophoneWasnTRecordingFromTo":
-    "The microphone wasn't recording from {from} to {to}. Other people were still recorded.",
+    "The microphone wasn't recording from {from} to {to}.",
   "meetings.transcript.theNameIsAddedTo": "Anyone in the workspace can pick this name later.",
   "meetings.transcript.transcript": "Transcript",
   "meetings.transcript.usedToSuggestNamesIn": "Remembered voice",

@@ -531,7 +531,21 @@ describe("transcript turns", () => {
     expect(unrecordedMarkText(marks[1]!)).toBe(
       "The microphone wasn't recording from 17:39 to 45:35. Other people were still recorded.",
     );
-    expect(unrecordedMarkText(marks[0]!)).toBe("Other people weren't recorded from 0:20 to 1:35");
+    expect(unrecordedMarkText(marks[0]!)).toBe("Other people weren't recorded from 0:20 to 1:35.");
+    // With a third track also missing part of the microphone's stretch, not
+    // everyone else was recorded, so the line doesn't claim it.
+    const tab: RecordingTrack = {
+      ...tracks[1]!,
+      trackNumber: 2,
+      source: "browser_tab",
+      unrecorded: [{ startMilliseconds: 2_000_000, endMilliseconds: 2_100_000 }],
+    };
+    const three = transcriptUnrecordedMarks([microphone, shared, tab], hour);
+    const microphoneMark = three.find((mark) => mark.trackNumber === 0)!;
+    expect(microphoneMark.othersRecorded).toBe(false);
+    expect(unrecordedMarkText(microphoneMark, undefined, "Ingrid Solberg")).toBe(
+      "Ingrid Solberg's microphone wasn't recording from 17:39 to 45:35.",
+    );
   });
 
   test("when every track is silent at once, or the meeting has one, nothing was recorded", () => {
@@ -550,13 +564,13 @@ describe("transcript turns", () => {
         endMilliseconds: 370_000,
       }),
     ]);
-    expect(unrecordedMarkText(both[0]!)).toBe("Nothing was recorded from 5:01 to 6:10");
+    expect(unrecordedMarkText(both[0]!)).toBe("Nothing was recorded from 5:01 to 6:10.");
     const alone = transcriptUnrecordedMarks(
       [{ ...tracks[0]!, unrecorded: [{ startMilliseconds: 40_000, endMilliseconds: 50_000 }] }],
       60_000,
     );
     expect(alone.map((mark) => [mark.trackNumber, unrecordedMarkText(mark)])).toEqual([
-      [null, "Nothing was recorded from 0:40 to 0:50"],
+      [null, "Nothing was recorded from 0:40 to 0:50."],
     ]);
     // One voice talking on both sides of the drop reads as two turns, with the line between.
     const turns = groupTranscriptTurns(

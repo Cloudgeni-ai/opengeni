@@ -955,7 +955,7 @@ describe("Meeting page", () => {
       const lines = items.filter((item) => item.hasAttribute("data-unrecorded"));
       expect(lines.map((line) => line.textContent)).toEqual([
         "Ingrid Solberg's microphone wasn't recording from 0:46 to 1:08. Everyone else was still recorded.",
-        "Other people weren't recorded from 2:28 to 2:32",
+        "Other people weren't recorded from 2:28 to 2:32.",
       ]);
       // Each sits where its stretch starts: after the turn at 0:38, before
       // the one at 0:47; the one running to the end closes the transcript,
