@@ -606,18 +606,15 @@ export function unrecordedMarkText(
   const from = formatClock(mark.startMilliseconds);
   const to = formatClock(mark.endMilliseconds);
   if (mark.source === "microphone") {
-    const line = speakerName
-      ? msg("meetings.transcript.nameSMicrophoneWasnTRecordingFromTo", {
-          name: speakerName,
-          from,
-          to,
-        })
+    if (speakerName) {
+      const values = { name: speakerName, from, to };
+      return mark.othersRecorded
+        ? msg("meetings.transcript.nameSMicrophoneWasnTRecordingFromToEveryoneElse", values)
+        : msg("meetings.transcript.nameSMicrophoneWasnTRecordingFromTo", values);
+    }
+    return mark.othersRecorded
+      ? msg("meetings.transcript.theMicrophoneWasnTRecordingFromToOtherPeople", { from, to })
       : msg("meetings.transcript.theMicrophoneWasnTRecordingFromTo", { from, to });
-    if (!mark.othersRecorded) return line;
-    const others = speakerName
-      ? msg("meetings.transcript.everyoneElseWasStillRecorded")
-      : msg("meetings.transcript.otherPeopleWereStillRecorded");
-    return `${line} ${others}`;
   }
   if (mark.source === "system" || mark.source === "browser_tab") {
     return msg("meetings.transcript.otherPeopleWerenTRecordedFromTo", { from, to });
