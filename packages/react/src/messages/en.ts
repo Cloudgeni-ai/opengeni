@@ -2898,7 +2898,8 @@ export const englishMessages = {
   "meetings.recorderPanel.paused": "Paused",
   "meetings.recorderPanel.pausedComputerAudio":
     "Paused. Computer audio stopped, so after you resume only {track} will be recorded.",
-  "meetings.recorderPanel.pausedLostReasons": "Paused. {reasons}.",
+  "meetings.recorderPanel.pausedLostReasons":
+    "Paused. {reasons}. Until one is back, nothing will be recorded when you resume.",
   "meetings.recorderPanel.pausedMicrophoneOff":
     "Paused. Microphone access is off, so after you resume only {track} will be recorded.",
   "meetings.recorderPanel.pausedMicrophoneWaiting":
