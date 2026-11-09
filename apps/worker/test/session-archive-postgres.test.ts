@@ -308,7 +308,10 @@ describe("idle-session archive worker", () => {
       "system.update.pending",
       "turn.completed",
     ];
-    const encoded = toPostgresLosslessJson({ text: "nul \u0000 and lone \ud800", big: 2 ** 60 });
+    const encoded = toPostgresLosslessJson({
+      text: "nul \u0000, lone \ud800, \u2028 and \u2029 separators, \r return",
+      big: 2 ** 60,
+    });
     await shared.admin.begin(async (sql) => {
       await sql`set local session_replication_role = replica`;
       // More events than one bundle page (200) or one old transcript page (500).

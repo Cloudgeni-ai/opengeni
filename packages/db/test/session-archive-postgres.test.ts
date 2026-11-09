@@ -728,7 +728,7 @@ describe("idle-session archive export reads", () => {
     });
     await shared.admin.begin(async (sql) => {
       await sql`set local session_replication_role = replica`;
-      // 1,250 events across the bundle's 200-row pages and the old transcript's
+      // 3,000 events across the bundle's 200-row pages and the old transcript's
       // 500-event pages, with times across a daylight-saving change, whole
       // seconds, and microseconds the millisecond Date truncates.
       await sql`insert into session_events (account_id, workspace_id, session_id, sequence, type,
@@ -749,7 +749,7 @@ describe("idle-session archive export reads", () => {
           case when n % 2 = 0 then 'current' end
         from (select max(sequence) as last from session_events
           where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
-          generate_series(1, 1250) n`;
+          generate_series(1, 3000) n`;
     });
 
     for (const timeZone of [
