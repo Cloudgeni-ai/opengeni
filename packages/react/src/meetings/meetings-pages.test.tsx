@@ -924,6 +924,51 @@ describe("Meeting page", () => {
     }
   });
 
+  test("the transcript says where a track recorded nothing, between the turns around it", async () => {
+    const fixture = createMeetingsFixture();
+    const getRecording: typeof fixture.client.getRecording = async (workspaceId, id) => {
+      const recording = await fixture.client.getRecording(workspaceId, id);
+      return {
+        ...recording,
+        tracks: recording.tracks.map((track) => ({
+          ...track,
+          unrecorded:
+            track.source === "microphone"
+              ? [{ startMilliseconds: 46_000, endMilliseconds: 68_000 }]
+              : [{ startMilliseconds: 148_000, endMilliseconds: null }],
+        })),
+      };
+    };
+    const view = await render(
+      <MeetingDetailPage
+        workspaceId={fixture.workspaceId}
+        recordingId={fixture.readyId}
+        viewerSubjectId={fixture.viewerSubjectId}
+        recordings={{ ...fixture.client, getRecording }}
+        onBack={() => {}}
+      />,
+    );
+    try {
+      await waitForText(view.container, "4 speakers");
+      await openTab(view.container, "Transcript");
+      const items = [...view.container.querySelectorAll("ol > li")];
+      const lines = items.filter((item) => item.hasAttribute("data-unrecorded"));
+      expect(lines.map((line) => line.textContent)).toEqual([
+        "No microphone audio from 0:46 to 1:08",
+        "No shared audio from 2:28 to the end",
+      ]);
+      // Each sits where its stretch starts: after the turn at 0:38, before
+      // the one at 0:47; the one running to the end closes the transcript.
+      const before = items[items.indexOf(lines[0]!) - 1]!;
+      const after = items[items.indexOf(lines[0]!) + 1]!;
+      expect(before.textContent).toContain("0:38");
+      expect(after.textContent).toContain("0:47");
+      expect(items.at(-1)).toBe(lines[1]);
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("opens on the Summary an agent wrote, and the notepad saves as you type", async () => {
     const fixture = createMeetingsFixture();
     const opened: string[] = [];
@@ -1814,6 +1859,7 @@ describe("Transcription model picker", () => {
       chunkCount,
       totalBytes: 1_000,
       durationMilliseconds,
+      unrecorded: [],
       playable: true,
       video: null,
       live: null,

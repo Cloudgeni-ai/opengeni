@@ -14,6 +14,7 @@ import {
   formatClock,
   formatDuration,
   groupTranscriptTurns,
+  interleaveUnrecordedMarks,
   languageName,
   meetingHereStatus,
   meetingPhase,
@@ -28,6 +29,8 @@ import {
   transcriptErrorText,
   transcriptFixModel,
   transcriptNeedsCredits,
+  transcriptUnrecordedMarks,
+  unrecordedMarkText,
 } from "../src/recordings-model";
 import { createOpenGeniText } from "../src/messages/runtime";
 
@@ -107,6 +110,7 @@ const tracks: RecordingTrack[] = [
     chunkCount: 1,
     totalBytes: 1,
     durationMilliseconds: 1,
+    unrecorded: [],
     playable: true,
     video: null,
     live: null,
@@ -119,6 +123,7 @@ const tracks: RecordingTrack[] = [
     chunkCount: 1,
     totalBytes: 1,
     durationMilliseconds: 1,
+    unrecorded: [],
     playable: true,
     video: null,
     live: null,
@@ -466,6 +471,44 @@ describe("transcript turns", () => {
     expect(activeSegmentIndex(segments, 4_500)).toBe(0);
     expect(activeSegmentIndex(segments, 7_000)).toBe(5);
     expect(activeSegmentIndex([segment(0, 1_000, 2_000, "a")], 500)).toBe(null);
+  });
+
+  test("a track's stretches without audio sit where they start, in words a reader knows", () => {
+    const microphone: RecordingTrack = {
+      ...tracks[0]!,
+      unrecorded: [{ startMilliseconds: 1_059_000, endMilliseconds: null }],
+    };
+    const shared: RecordingTrack = {
+      ...tracks[1]!,
+      unrecorded: [{ startMilliseconds: 20_000, endMilliseconds: 95_000 }],
+    };
+    // A server from before tracks said where they have no audio.
+    const older = { ...tracks[0]!, unrecorded: undefined } as unknown as RecordingTrack;
+    const marks = transcriptUnrecordedMarks([microphone, shared, older]);
+    expect(marks.map((mark) => [mark.trackNumber, mark.startMilliseconds])).toEqual([
+      [1, 20_000],
+      [0, 1_059_000],
+    ]);
+    const turns = groupTranscriptTurns([
+      segment(0, 0, 4_000, "a"),
+      segment(1, 30_000, 34_000, "b"),
+      segment(2, 1_100_000, 1_104_000, "b"),
+    ]);
+    const order = interleaveUnrecordedMarks(turns, marks).map((item) =>
+      item.kind === "turn" ? item.turn.key : item.mark.key,
+    );
+    expect(order).toEqual([0, "1:20000", 1, "0:1059000", 2]);
+    // With no turn after it, a mark ends the transcript.
+    expect(interleaveUnrecordedMarks(turns.slice(0, 1), marks).at(-1)).toMatchObject({
+      kind: "unrecorded",
+    });
+    expect(marks.map((mark) => unrecordedMarkText(mark))).toEqual([
+      "No shared audio from 0:20 to 1:35",
+      "No microphone audio from 17:39 to the end",
+    ]);
+    expect(unrecordedMarkText({ ...marks[0]!, source: "upload", endMilliseconds: null })).toBe(
+      "No audio from 0:20 to the end",
+    );
   });
 });
 

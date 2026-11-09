@@ -26205,6 +26205,8 @@
         "$.source": "ref(RecordingTrackSource)!",
         "$.totalBytes": "integer!",
         "$.trackNumber": "integer!",
+        "$.unrecorded": "array!",
+        "$.unrecorded[]": "ref(RecordingUnrecordedStretch)",
         "$.video": "object! null",
         "$.video.frameCount": "integer!",
         "$.video.height": "integer!",
@@ -26389,6 +26391,16 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"region_restricted\\\"\",\"\\\"unpriced\\\"\"]"
+      }
+    },
+    "RecordingUnrecordedStretch": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.endMilliseconds": "integer! null",
+        "$.startMilliseconds": "integer!"
       }
     },
     "RecordingVoiceprintConsent": {
@@ -41002,6 +41014,7 @@
       "groupLiveTurns": "value",
       "groupTranscriptTurns": "value",
       "ImportRecordingAudioInput": "type",
+      "interleaveUnrecordedMarks": "value",
       "languageName": "value",
       "LiveTranscriptLine": "type",
       "LiveTranscriptTurn": "type",
@@ -41023,8 +41036,12 @@
       "transcribingText": "value",
       "transcriptErrorText": "value",
       "transcriptFixModel": "value",
+      "TranscriptItem": "type",
       "transcriptNeedsCredits": "value",
       "TranscriptTurn": "type",
+      "TranscriptUnrecordedMark": "type",
+      "transcriptUnrecordedMarks": "value",
+      "unrecordedMarkText": "value",
       "useLiveTranscript": "value",
       "UseLiveTranscriptOptions": "type",
       "UseLiveTranscriptResult": "type",

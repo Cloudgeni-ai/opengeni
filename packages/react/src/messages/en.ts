@@ -3157,6 +3157,17 @@ export const englishMessages = {
   "meetings.transcript.nameSuggestedFromTheirVoice":
     "{name}, suggested from their voice. Confirm or correct",
   "meetings.transcript.noLeaveUnnamed": "No, leave unnamed",
+  /**
+   * A quiet line in a meeting transcript where one track recorded nothing:
+   * its microphone was unplugged or turned off, tab sharing ended, or it
+   * joined late. {from} and {to} are times in the recording, like 17:39.
+   */
+  "meetings.transcript.noAudioFromTo": "No audio from {from} to {to}",
+  "meetings.transcript.noAudioFromToTheEnd": "No audio from {from} to the end",
+  "meetings.transcript.noMicrophoneAudioFromTo": "No microphone audio from {from} to {to}",
+  "meetings.transcript.noMicrophoneAudioFromToTheEnd": "No microphone audio from {from} to the end",
+  "meetings.transcript.noSharedAudioFromTo": "No shared audio from {from} to {to}",
+  "meetings.transcript.noSharedAudioFromToTheEnd": "No shared audio from {from} to the end",
   "meetings.transcript.orPickWhoItIs": "Or pick who it is",
   "meetings.transcript.playFromFormatclock": "Play from {formatClock}",
   "meetings.transcript.rememberDisplaynameSVoice": "Remember {displayName}'s voice…",

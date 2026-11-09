@@ -49,6 +49,7 @@ export {
   formatDuration,
   groupLiveTurns,
   groupTranscriptTurns,
+  interleaveUnrecordedMarks,
   languageName,
   meetingHereStatus,
   meetingPhase,
@@ -65,6 +66,8 @@ export {
   transcriptErrorText,
   transcriptFixModel,
   transcriptNeedsCredits,
+  transcriptUnrecordedMarks,
+  unrecordedMarkText,
   versionSummary,
   withoutLiveMicrophoneEchoes,
 } from "./recordings-model";
@@ -73,5 +76,7 @@ export type {
   LiveTranscriptTurn,
   MeetingHereStatus,
   MeetingPhase,
+  TranscriptItem,
   TranscriptTurn,
+  TranscriptUnrecordedMark,
 } from "./recordings-model";

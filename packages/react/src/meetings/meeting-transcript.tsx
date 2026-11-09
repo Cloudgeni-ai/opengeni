@@ -20,11 +20,13 @@ import {
   AudioLinesIcon,
   CheckIcon,
   ChevronDownIcon,
+  MicOffIcon,
   MoreHorizontalIcon,
   PencilIcon,
   UserIcon,
   UserPlusIcon,
   UsersIcon,
+  VolumeXIcon,
   XIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -55,10 +57,14 @@ import { cn } from "../app/lib/utils";
 import {
   formatClock,
   groupTranscriptTurns,
+  interleaveUnrecordedMarks,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
+  transcriptUnrecordedMarks,
+  unrecordedMarkText,
   type TranscriptTurn,
+  type TranscriptUnrecordedMark,
 } from "../recordings";
 import { MeetingsOverlayScope } from "./overlay-scope";
 
@@ -554,6 +560,27 @@ function EditTurnDialog({
   );
 }
 
+/**
+ * A quiet line where one track recorded nothing (its microphone was
+ * unplugged, tab sharing ended), so a missing voice reads as missing audio
+ * rather than as a transcript that skipped what was said.
+ */
+function UnrecordedLine({ mark }: { mark: TranscriptUnrecordedMark }) {
+  const msg = useOpenGeniText();
+  const Icon = mark.source === "microphone" ? MicOffIcon : VolumeXIcon;
+  return (
+    // As wide as a turn (72ch of the transcript's type), so its rules end where the bubbles can.
+    <li data-unrecorded="" className="flex max-w-[72ch] min-w-0 items-center gap-3">
+      <span aria-hidden="true" className="h-px min-w-4 flex-1 bg-border" />
+      <span className="flex min-w-0 items-center gap-1.5 text-xs leading-4 text-fg-muted tabular-nums">
+        <Icon aria-hidden="true" className="size-3.5 shrink-0" />
+        <span className="text-pretty">{unrecordedMarkText(mark, msg)}</span>
+      </span>
+      <span aria-hidden="true" className="h-px min-w-4 flex-1 bg-border" />
+    </li>
+  );
+}
+
 function MeetingTranscriptContent({
   segments,
   speakers,
@@ -575,6 +602,10 @@ function MeetingTranscriptContent({
 }) {
   const msg = useOpenGeniText();
   const turns = useMemo(() => groupTranscriptTurns(segments), [segments]);
+  const items = useMemo(
+    () => interleaveUnrecordedMarks(turns, transcriptUnrecordedMarks(tracks)),
+    [turns, tracks],
+  );
   const slots = useMemo(() => speakerColorSlots(segments), [segments]);
   const labels = useMemo(() => [...slots.keys()], [slots]);
   const [naming, setNaming] = useState<string | null>(null);
@@ -609,7 +640,11 @@ function MeetingTranscriptContent({
   return (
     <>
       <ol ref={listRef} className="grid gap-6" aria-label={msg("meetings.transcript.transcript")}>
-        {turns.map((turn) => {
+        {items.map((item) => {
+          if (item.kind === "unrecorded") {
+            return <UnrecordedLine key={`unrecorded-${item.mark.key}`} mark={item.mark} />;
+          }
+          const turn = item.turn;
           const name = nameOf(turn.speakerLabel);
           const unnamed = turn.speakerLabel ? !speakerIsNamed(turn.speakerLabel, speakers) : false;
           const suggested = speakerIsSuggested(turn.speakerLabel, speakers);

@@ -144,6 +144,16 @@ Chunk start times are milliseconds from the recording's start. A new capture
 session on the same track (after a reload, say) simply continues the chunk
 numbering; the worker places each session at its own start time.
 
+A track's `unrecorded` lists the stretches of the recording it has no audio
+for, worked out from those start times when the recording is finalized:
+before its first chunk, between capture sessions (a microphone unplugged
+and plugged back in), and after its last chunk while another track went on
+(tab sharing ended), with `endMilliseconds: null` for one that runs to the
+end. Stretches under two seconds are left out. Meetings finalized before this
+existed get theirs when they are next transcribed. The transcript shows each
+as a line where it starts ("No microphone audio from 17:39 to the end"), so a
+missing voice doesn't read as words the model missed.
+
 ## Embedding
 
 Products do not need to implement the capture contract by hand.

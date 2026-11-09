@@ -202,6 +202,9 @@ export default function PageMeetingsSection() {
   // ?upload=elsewhere: the meeting in progress has no live preview, so its
   // audio is only on the device that recorded it.
   const elsewhereAudio = initial.get("upload") === "elsewhere";
+  // ?gaps=on: the ready meeting's microphone was unplugged for a while, and
+  // tab sharing ended before the meeting did.
+  const gaps = initial.get("gaps") === "on";
   const fixture = useMemo(() => {
     const base = createMeetingsFixture({
       state: data,
@@ -210,7 +213,7 @@ export default function PageMeetingsSection() {
       creditsOnly,
       subscription,
     });
-    if (!failure && !elsewhereAudio) return base;
+    if (!failure && !elsewhereAudio && !gaps) return base;
     const getRecording: typeof base.client.getRecording = async (workspaceId, id) => {
       const recording = await base.client.getRecording(workspaceId, id);
       if (elsewhereAudio && id === LIVE_RECORDING_ID) {
@@ -220,12 +223,24 @@ export default function PageMeetingsSection() {
           tracks: recording.tracks.map((track) => ({ ...track, live: null })),
         };
       }
+      if (gaps && id === base.readyId) {
+        return {
+          ...recording,
+          tracks: recording.tracks.map((track) => ({
+            ...track,
+            unrecorded:
+              track.source === "microphone"
+                ? [{ startMilliseconds: 46_000, endMilliseconds: 68_000 }]
+                : [{ startMilliseconds: 148_000, endMilliseconds: null }],
+          })),
+        };
+      }
       return failure && recording.transcript && id === FAILED_RECORDING_ID
         ? { ...recording, transcript: { ...recording.transcript, errorCode: failure } }
         : recording;
     };
     return { ...base, client: { ...base.client, getRecording } };
-  }, [data, pinned, failure, otherWorkspaces, creditsOnly, subscription, elsewhereAudio]);
+  }, [data, pinned, failure, otherWorkspaces, creditsOnly, subscription, elsewhereAudio, gaps]);
   const store = useMemo(() => createMeetingRecorderStore(), []);
   const [startedAt] = useState(() => Date.now() - 754_000);
   // ?audio=desktop previews the desktop app, which records other apps' audio.

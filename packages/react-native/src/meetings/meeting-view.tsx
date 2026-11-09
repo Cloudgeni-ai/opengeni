@@ -9,6 +9,7 @@ import {
   formatClock,
   formatDuration,
   groupTranscriptTurns,
+  interleaveUnrecordedMarks,
   meetingHereStatus,
   meetingPhase,
   meetingTitle,
@@ -16,6 +17,8 @@ import {
   speakerIsNamed,
   transcribingText,
   transcriptErrorText,
+  transcriptUnrecordedMarks,
+  unrecordedMarkText,
   useRecording,
   useRecordingModels,
   useRecordingPeople,
@@ -23,6 +26,7 @@ import {
   versionSummary,
   type RecordingsClientOverride,
   type TranscriptTurn,
+  type TranscriptUnrecordedMark,
 } from "@opengeni/react/recordings";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -487,15 +491,20 @@ export function useMeetingView({
                   </Text>
                 ) : (
                   <View style={{ marginTop: 8 }}>
-                    {turns.map((turn) => (
-                      <Turn
-                        key={turn.key}
-                        turn={turn}
-                        speakers={transcript.speakers}
-                        tracks={tracks}
-                        onSpeaker={(label) => setSheet({ kind: "speaker", label })}
-                      />
-                    ))}
+                    {interleaveUnrecordedMarks(turns, transcriptUnrecordedMarks(tracks)).map(
+                      (item) =>
+                        item.kind === "unrecorded" ? (
+                          <UnrecordedLine key={`unrecorded-${item.mark.key}`} mark={item.mark} />
+                        ) : (
+                          <Turn
+                            key={item.turn.key}
+                            turn={item.turn}
+                            speakers={transcript.speakers}
+                            tracks={tracks}
+                            onSpeaker={(label) => setSheet({ kind: "speaker", label })}
+                          />
+                        ),
+                    )}
                   </View>
                 )}
               </>
@@ -671,6 +680,39 @@ function TranscriptFacts(props: {
           })}
         </View>
       ) : null}
+    </View>
+  );
+}
+
+/** A quiet line where one track recorded nothing, as on the web. */
+function UnrecordedLine({ mark }: { mark: TranscriptUnrecordedMark }) {
+  const msg = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  const rule = { flex: 1, minWidth: 16, height: 1, backgroundColor: c.border } as const;
+  return (
+    <View accessible style={{ marginTop: 18, flexDirection: "row", alignItems: "center", gap: 10 }}>
+      <View style={rule} />
+      <View style={{ flexShrink: 1, flexDirection: "row", alignItems: "center", gap: 6 }}>
+        <Icon
+          name={mark.source === "microphone" ? "mic-off" : "volume-x"}
+          size={13}
+          color={c["fg-muted"]}
+        />
+        <Text
+          style={{
+            ...fontStyle(theme),
+            flexShrink: 1,
+            fontSize: 12,
+            lineHeight: 16,
+            color: c["fg-muted"],
+            fontVariant: ["tabular-nums"],
+          }}
+        >
+          {unrecordedMarkText(mark, msg)}
+        </Text>
+      </View>
+      <View style={rule} />
     </View>
   );
 }

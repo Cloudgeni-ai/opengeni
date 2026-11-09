@@ -432,6 +432,87 @@ export function groupTranscriptTurns(
   return turns;
 }
 
+/** Where one track of a meeting has no audio, as the transcript marks it. */
+export type TranscriptUnrecordedMark = {
+  key: string;
+  trackNumber: number;
+  source: RecordingTrack["source"];
+  startMilliseconds: number;
+  /** Null when the stretch runs to the end of the recording. */
+  endMilliseconds: number | null;
+};
+
+/** Every audio track's stretches without audio, in order on the recording's timeline. */
+export function transcriptUnrecordedMarks(
+  tracks: readonly RecordingTrack[],
+): TranscriptUnrecordedMark[] {
+  return tracks
+    .filter((track) => track.kind === "audio")
+    .flatMap((track) =>
+      // A server from before tracks said where they have no audio sends none.
+      (track.unrecorded ?? []).map((stretch) => ({
+        key: `${track.trackNumber}:${stretch.startMilliseconds}`,
+        trackNumber: track.trackNumber,
+        source: track.source,
+        startMilliseconds: stretch.startMilliseconds,
+        endMilliseconds: stretch.endMilliseconds,
+      })),
+    )
+    .sort(
+      (left, right) =>
+        left.startMilliseconds - right.startMilliseconds || left.trackNumber - right.trackNumber,
+    );
+}
+
+export type TranscriptItem =
+  | { kind: "turn"; turn: TranscriptTurn }
+  | { kind: "unrecorded"; mark: TranscriptUnrecordedMark };
+
+/**
+ * The transcript in reading order: each mark goes before the first turn that
+ * starts where its stretch does or later, and after the last turn when none does.
+ */
+export function interleaveUnrecordedMarks(
+  turns: readonly TranscriptTurn[],
+  marks: readonly TranscriptUnrecordedMark[],
+): TranscriptItem[] {
+  const items: TranscriptItem[] = [];
+  let next = 0;
+  for (const turn of turns) {
+    while (next < marks.length && marks[next]!.startMilliseconds <= turn.startMilliseconds) {
+      items.push({ kind: "unrecorded", mark: marks[next]! });
+      next += 1;
+    }
+    items.push({ kind: "turn", turn });
+  }
+  for (; next < marks.length; next += 1) items.push({ kind: "unrecorded", mark: marks[next]! });
+  return items;
+}
+
+/** "No microphone audio from 17:39 to the end", in `msg`'s language. */
+export function unrecordedMarkText(
+  mark: TranscriptUnrecordedMark,
+  msg: OpenGeniText = defaultText,
+): string {
+  const from = formatClock(mark.startMilliseconds);
+  const to = mark.endMilliseconds === null ? null : formatClock(mark.endMilliseconds);
+  switch (mark.source) {
+    case "microphone":
+      return to === null
+        ? msg("meetings.transcript.noMicrophoneAudioFromToTheEnd", { from })
+        : msg("meetings.transcript.noMicrophoneAudioFromTo", { from, to });
+    case "system":
+    case "browser_tab":
+      return to === null
+        ? msg("meetings.transcript.noSharedAudioFromToTheEnd", { from })
+        : msg("meetings.transcript.noSharedAudioFromTo", { from, to });
+    default:
+      return to === null
+        ? msg("meetings.transcript.noAudioFromToTheEnd", { from })
+        : msg("meetings.transcript.noAudioFromTo", { from, to });
+  }
+}
+
 /** The segment playing at `milliseconds`, or the last one that started before it. */
 export function activeSegmentIndex(
   segments: readonly RecordingTranscriptSegment[],
