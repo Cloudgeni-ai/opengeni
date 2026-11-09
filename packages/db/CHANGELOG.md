@@ -1,5 +1,21 @@
 # @opengeni/db
 
+## 6.13.0
+
+### Patch Changes
+
+- b15212e: A message that couldn't start because of access now starts by itself once that is fixed. When its machine is allowed for the chat, the sender's workspace access is restored, or the chat moves to a machine it may use, the saved message is released and started exactly once. A paused, cancelled or edited chat is left alone, and a claim that raced the change is re-read instead of parked. The "Recheck access" button is gone. The notice says what is blocking the message and offers the one action that fixes it: the machine's owner gets "Allow for this chat", others learn who can allow it, and lost membership names a workspace admin. Only an unknown failure offers "Try again". A claim refused because a personal machine isn't approved now reads as "Machine access needed", not as a generic permission check. `useSessionStart` adds `allowMachine`, `needsMachineAccess` and `refresh`, and `@opengeni/react` exports `allowMachineForChat`, `sessionAdmissionNeedsMachineAccess` and `sessionAdmissionMachineAccessCopy`.
+- Updated dependencies [1c7aa2a]
+- Updated dependencies [67905a7]
+  - @opengeni/contracts@6.13.0
+  - @opengeni/config@6.13.0
+  - @opengeni/codemode@6.13.0
+  - @opengeni/codex@6.13.0
+  - @opengeni/observability@6.13.0
+  - @opengeni/network@6.13.0
+  - @opengeni/subscriptions@6.13.0
+  - @opengeni/xai-subscription@6.13.0
+
 ## 6.12.0
 
 ### Minor Changes
