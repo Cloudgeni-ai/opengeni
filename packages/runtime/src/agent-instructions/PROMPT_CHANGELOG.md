@@ -1,5 +1,17 @@
 # Modular prompt changelog
 
+A new first-party tool, `github_repository_attach`, lets the agent ask to
+attach a repository the workspace GitHub App offers to its own chat. It is
+registered only for a chat's own signed attempt with `github:use`, so other
+sessions keep their bytes. Its description is 249 bytes and its two argument
+descriptions are 49 and 65 bytes; no prompt module changes.
+
+```text
++ Ask to attach a repository the workspace GitHub App offers to this chat. A person approves it in the chat; once approved it joins this chat's repositories from the next turn, with this chat's GitHub App access. Find it with github_repositories_list.
++ repository: owner/name, as listed by github_repositories_list
++ ref: Branch to check out; defaults to the repository's default branch.
+```
+
 In a managed sandbox with a repository mounted as the person, the
 repositories module adds one sentence (144 bytes): force-pushing or deleting a
 non-default branch follows the person's GitHub settings, while the default

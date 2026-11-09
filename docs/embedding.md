@@ -587,6 +587,10 @@ recording a `session.resources.removed` event. Matching ignores letter case
 and a trailing `.git`. Removing a repository that is not attached is a no-op,
 so a retry completes a partial removal.
 
+When a person approves an agent's `github_repository_attach` call, the
+repository is added to the session and a `session.resources.added` event
+records it (see [An agent asking for a repository](github-app.md#an-agent-asking-for-a-repository)).
+
 Access through Opengeni ends on the next call: the personal Git broker, the
 GitHub tools and every new Git credential mint check the session's current
 repositories each time, including for a running turn, a child or a goal

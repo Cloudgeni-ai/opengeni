@@ -36,6 +36,7 @@ export {
 export * from "./scheduled-task-blockers";
 export * from "./session-target";
 export * from "./session-resource-removal";
+export * from "./session-repository-attach";
 import { admitRequestedRepositories } from "./session-resource-removal";
 export * from "./github-gateway";
 import { isGitHubGatewayApprovalId } from "./github-gateway";
