@@ -563,7 +563,8 @@ export function interleaveUnrecordedMarks(
 
 /**
  * The person a track's audio is, when the transcript hears exactly one
- * voice on it and someone named it ("Ingrid Solberg"); otherwise null.
+ * voice on it and someone named it ("Ingrid Solberg"); otherwise null. A
+ * name only suggested from the voice doesn't count until someone confirms it.
  */
 export function trackSpeakerName(
   trackNumber: number,
@@ -578,8 +579,9 @@ export function trackSpeakerName(
   }
   const [label, ...others] = [...labels];
   if (!label || others.length > 0 || !speakerIsNamed(label, speakers)) return null;
-  const name = speakers.find((speaker) => speaker.label === label)?.name.trim();
-  return name || null;
+  const speaker = speakers.find((candidate) => candidate.label === label);
+  if (!speaker || speaker.source === "suggested") return null;
+  return speaker.name.trim() || null;
 }
 
 /**

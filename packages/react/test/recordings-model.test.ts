@@ -520,6 +520,10 @@ describe("transcript turns", () => {
     ];
     expect(trackSpeakerName(0, segments, speakers)).toBe("Ingrid Solberg");
     expect(trackSpeakerName(0, segments, [])).toBeNull();
+    // A name only suggested from the voice waits until someone confirms it.
+    expect(
+      trackSpeakerName(0, segments, [{ ...speakers[0]!, source: "suggested" as const }]),
+    ).toBeNull();
     expect(trackSpeakerName(1, segments, speakers)).toBeNull();
     expect(unrecordedMarkText(marks[1]!, undefined, "Ingrid Solberg")).toBe(
       "Ingrid Solberg's microphone wasn't recording from 17:39 to 45:35. Everyone else was still recorded.",
