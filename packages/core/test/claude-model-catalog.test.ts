@@ -398,6 +398,7 @@ test("Claude Fable 5.2 is a full native model on API keys and subscriptions", ()
     defaultEffort: "high",
     contextWindowTokens: 1_000_000,
     maxOutputTokens: 128_000,
+    autoCompactTokenLimit: 300_000,
     prefixBoundThinking: true,
     progressUpdates: true,
   });
@@ -412,6 +413,7 @@ test("Claude Fable 5.2 is a full native model on API keys and subscriptions", ()
     const model = configuredModels(settings).find((row) => row.id === id);
     expect(model?.label).toBe("Claude Fable 5.2");
     expect(model?.contextWindowTokens).toBe(1_000_000);
+    expect(model?.autoCompactTokenLimit).toBe(300_000);
     expect(model?.capabilities.reasoning).toMatchObject({
       runnable: true,
       defaultEffort: "high",

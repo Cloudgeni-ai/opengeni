@@ -5068,8 +5068,9 @@ function opperCapabilities(input: {
  * `opperModels` (database mode).
  */
 /**
- * Default automatic-compaction threshold for Claude Opus 5.5 on every route.
- * Workspaces can still choose another threshold per model.
+ * Default automatic-compaction threshold for Claude Opus 5.5 on every route,
+ * also used for Claude Fable 5.2. Workspaces can still choose another
+ * threshold per model.
  */
 export const OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT = 300_000;
 
@@ -13755,7 +13756,7 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
         : {}),
       ...(id === "claude-haiku-5-5"
         ? { autoCompactTokenLimit: 95_000 }
-        : id === "claude-opus-5-5"
+        : id === "claude-opus-5-5" || id === "claude-fable-5-2"
           ? { autoCompactTokenLimit: OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT }
           : {}),
     },
