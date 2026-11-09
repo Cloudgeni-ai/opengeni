@@ -19422,6 +19422,7 @@
     },
     "GoogleDriveTargetScope": {
       "io": [
+        "input",
         "output"
       ],
       "shape": {
@@ -27290,7 +27291,20 @@
         "input"
       ],
       "shape": {
-        "$": "unknown"
+        "$": "object",
+        "$.destination": "ref(ConnectorDocumentDestinationSelection)?",
+        "$.expectedVersion": "integer?",
+        "$.idempotencyKey": "string!",
+        "$.readPolicy": "enum?=[\"\\\"allow\\\"\",\"\\\"ask\\\"\",\"\\\"block\\\"\"]",
+        "$.sources": "array!",
+        "$.sources[]": "object",
+        "$.sources[].driveId": "string! null",
+        "$.sources[].id": "string!",
+        "$.sources[].mimeType": "string!",
+        "$.sources[].name": "string!",
+        "$.syncCadence": "enum?=[\"\\\"daily\\\"\",\"\\\"hourly\\\"\",\"\\\"manual\\\"\"]",
+        "$.syncEnabled": "boolean?",
+        "$.targetScope": "ref(GoogleDriveTargetScope)?"
       }
     },
     "SaveNewSessionDraftRequest": {
