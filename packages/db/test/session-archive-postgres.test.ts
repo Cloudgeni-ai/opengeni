@@ -724,7 +724,7 @@ describe("idle-session archive export reads", () => {
     // Stored the way the lossless codec stores what PostgreSQL text cannot hold.
     const encoded = toPostgresLosslessJson({
       text: "nul \u0000, lone \ud800 and \u2028 survive",
-      nested: { big: 12345678901234567890, list: [1.5, -0, "x"], __proto__x: true },
+      nested: { big: 2 ** 64, list: [1.5, -0, "x"], __proto__x: true },
     });
     await shared.admin.begin(async (sql) => {
       await sql`set local session_replication_role = replica`;
