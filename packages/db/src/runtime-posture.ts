@@ -3774,8 +3774,16 @@ export async function inspectRuntimeDatabasePosture(
                 AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
               ORDER BY acl.privilege_type
             ) AS extra_privileges,
+            -- Same answer as has_any_column_privilege(current_user, c.oid, privilege):
+            -- the table-level privilege, or that privilege on a live user column.
+            -- A column without its own ACL grants nothing beyond the table, so only
+            -- columns with an ACL need a check. has_any_column_privilege reads every
+            -- column through the catalog cache, which on a fresh connection loads
+            -- thousands of pg_attribute rows one by one on each readiness probe.
             ARRAY(SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
-              WHERE has_any_column_privilege(current_user, c.oid, privilege)) as column_privileges
+              WHERE has_table_privilege(current_user, c.oid, privilege)
+                OR EXISTS (SELECT 1 FROM unnest(column_acls.attnums) attnum
+                  WHERE has_column_privilege(current_user, c.oid, attnum, privilege))) as column_privileges
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
           left join (
@@ -3784,6 +3792,12 @@ export async function inspectRuntimeDatabasePosture(
               bool_or(polname = 'editable_artifact_materializer_owner') as artifact_materializer_policy
             from pg_policy group by polrelid
           ) policies on policies.polrelid = c.oid
+          left join (
+            select attrelid, array_agg(attnum) as attnums
+            from pg_attribute
+            where attnum > 0 and not attisdropped and attacl is not null
+            group by attrelid
+          ) column_acls on column_acls.attrelid = c.oid
           where n.nspname in (${targetSchema}, 'opengeni_private')
             and c.relkind in ('r', 'p')
           order by c.relname
@@ -6920,7 +6934,18 @@ export function runtimeDatabaseReadyCheck(
   db: Database,
   options: RuntimeDatabasePostureOptions,
 ): () => Promise<void> {
-  return async () => {
-    await assertRuntimeDatabasePosture(db, options);
+  let inFlight: Promise<void> | undefined;
+  return () => {
+    // The HTTP timeout cannot cancel a driver query. Concurrent probes share
+    // the outstanding inspection, as the worker readiness check does, so slow
+    // database answers cannot pile up one pooled connection per probe. The
+    // next probe after it settles always runs a fresh inspection.
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      await assertRuntimeDatabasePosture(db, options);
+    })().finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
   };
 }
