@@ -1,4 +1,5 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
+import type { ProviderAccountRefusal } from "@opengeni/observability";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
 import { findPersonalMachineAccessRequiredError } from "./machine-access";
@@ -34,6 +35,7 @@ import {
   AnthropicProviderRejection,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
+  classifyProviderAccountRefusalError,
   compactionProviderRejection,
   describeCompactionProviderRejection,
   type CompactionProviderRejection,
@@ -1444,11 +1446,13 @@ export function compactionFailureTurnEventPayload(
   providerRejection?: CompactionProviderRejection;
   providerMessage?: string;
   quotaScope?: ProviderQuotaScope;
+  providerAccountRefusal?: ProviderAccountRefusal;
 } {
   const rejection = compactionProviderRejection(error);
   // The same closed marker as a `provider_quota_exhausted` turn failure, so
   // clients can name the exhausted limit and offer another model here too.
   const quota = rejection ? null : classifyProviderQuotaExhaustionError(error);
+  const accountRefusal = rejection ? null : chatModelProviderAccountRefusal(error);
   const providerMessage = compactionFailureProviderMessage(error);
   return {
     error: overrides.error ?? compactionFailureReasonFromError(error),
@@ -1459,7 +1463,36 @@ export function compactionFailureTurnEventPayload(
     ...(rejection ? { providerRejection: rejection } : {}),
     ...(providerMessage ? { providerMessage } : {}),
     ...(quota ? { quotaScope: quota.scope } : {}),
+    ...(accountRefusal ? { providerAccountRefusal: accountRefusal } : {}),
   };
+}
+
+/**
+ * The chat model provider's own account refused the request (see
+ * `classifyProviderAccountRefusal`). A function tool's provider and the
+ * subscription transports, which own their account semantics, never count.
+ * Operational attribution only: it changes no retry, copy or recovery.
+ */
+function chatModelProviderAccountRefusal(error: unknown): ProviderAccountRefusal | null {
+  if (
+    isCodexTransportError(error) ||
+    isXaiSubscriptionTransportError(error) ||
+    isClaudeSubscriptionTransportError(error) ||
+    isFunctionToolProviderFailure(error)
+  ) {
+    return null;
+  }
+  return classifyProviderAccountRefusalError(error);
+}
+
+/** Mark a terminal failure with the closed provider-account refusal, if any. */
+function withProviderAccountRefusal(
+  error: unknown,
+  failure: ReturnType<typeof baseAgentRunFailurePayload>,
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  if (failure.retryable === true) return failure;
+  const refusal = chatModelProviderAccountRefusal(error);
+  return refusal ? { ...failure, providerAccountRefusal: refusal } : failure;
 }
 
 export function isCompactionSummaryFailure(error: unknown): boolean {
@@ -2146,11 +2179,14 @@ export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
-  return withProviderCondition(
+  return withProviderAccountRefusal(
     error,
-    withSandboxProviderAttribution(
+    withProviderCondition(
       error,
-      withProviderWebPageExplained(classifyAgentRunFailurePayload(error, options)),
+      withSandboxProviderAttribution(
+        error,
+        withProviderWebPageExplained(classifyAgentRunFailurePayload(error, options)),
+      ),
     ),
   );
 }
@@ -2431,6 +2467,8 @@ function baseAgentRunFailurePayload(
   materializationDiagnostic?: MaterializationVerificationDiagnostic;
   requestSize?: AnthropicRequestSize;
   quotaScope?: ProviderQuotaScope;
+  /** Closed provider-account refusal for operational attribution; never changes retries or copy. */
+  providerAccountRefusal?: ProviderAccountRefusal;
   /** Closed Codex plan key on `codex_plan_entitlement` / `codex_request_rejected`. */
   planType?: string | null;
   /** Product model id a `codex_plan_entitlement` or model-provider recovery failure refers to. */

@@ -523,15 +523,27 @@ labels from older workers also remain in platform alerts during rolling updates.
 
 Turn attribution uses the accepted execution policy's upstream payer identity
 and the typed failure committed by the winning settlement. It never infers
-ownership from a model name or error text. Only known provider quota, rate,
-billing, plan and capacity refusals are excluded. Generic provider-unavailable
+ownership from a model name or from the failure's display text. Only known
+provider quota, rate, billing, plan and capacity refusals (including a failed
+compaction request's closed `quotaScope`) and the closed
+`providerAccountRefusal` marker are excluded. That marker is set from the
+provider's own response when the customer's provider account refused to serve:
+`byok_capacity_restricted` for an OpenRouter account restricted to its own
+provider keys with no key eligible for the request (a 404 whose body carries
+OpenRouter's restriction wording, since OpenRouter sends no structured code),
+and `customer_verification_required` for a Vercel AI Gateway 403 with that
+structured type. Vercel AI Gateway credit and budget refusals (402) are already
+exhausted quota. Other 404s, including other "No endpoints found" refusals, stay
+platform failures. Generic provider-unavailable
 turn failures remain unclassified because they can also represent our transport
 or stream handling. Invalid tool
 names, malformed requests, internal lease errors, persistence failures and
 unknown errors remain platform failures even on a customer's connection.
 Transport-call attribution uses reserved connected-provider identities and
-provider HTTP responses (401/402/403/429/5xx); statusless failures remain
-unclassified. It does not change retries, billing, history or session outcomes.
+provider HTTP responses (401/402/403/429/5xx, and a 404 whose bounded body clone
+carries the same account refusal); statusless failures remain unclassified. A
+404 call is counted once its body clone is classified, off the request path. It
+does not change retries, copy, billing, history or session outcomes.
 
 The canonical turn-failure, model-call-failure and first-byte-availability alerts
 exclude `failure_origin="customer_provider"` from both sides of their ratios

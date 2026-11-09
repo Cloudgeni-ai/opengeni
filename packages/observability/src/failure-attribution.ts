@@ -16,6 +16,25 @@ const CUSTOMER_CAPACITY_REASONS = new Set([
   "model_not_allowed",
   "compaction_provider_locked",
 ]);
+/**
+ * Closed provider-account refusals read from the provider's own response:
+ * the customer's provider account itself, not our request, refused to serve.
+ * `byok_capacity_restricted`: an OpenRouter account restricted to its own
+ * provider keys has no key eligible for the request (HTTP 404).
+ * `customer_verification_required`: Vercel AI Gateway requires the account to
+ * add a payment method (HTTP 403 with that structured type).
+ */
+export const PROVIDER_ACCOUNT_REFUSALS = [
+  "byok_capacity_restricted",
+  "customer_verification_required",
+] as const;
+export type ProviderAccountRefusal = (typeof PROVIDER_ACCOUNT_REFUSALS)[number];
+export function isProviderAccountRefusal(value: unknown): value is ProviderAccountRefusal {
+  return (
+    typeof value === "string" && (PROVIDER_ACCOUNT_REFUSALS as readonly string[]).includes(value)
+  );
+}
+const PROVIDER_QUOTA_SCOPES = new Set(["daily", "monthly", "credits", "quota"]);
 
 /** Unknown errors, malformed requests and internal lease failures remain platform failures. */
 export function failureOrigin(input: {
@@ -24,11 +43,24 @@ export function failureOrigin(input: {
   code?: unknown;
   waitReason?: unknown;
   refusal?: unknown;
+  /** Typed marker set only from the provider's own response (see PROVIDER_ACCOUNT_REFUSALS). */
+  providerAccountRefusal?: unknown;
+  /** Closed exhausted-quota marker; counts on a failed compaction request. */
+  quotaScope?: unknown;
   httpStatus?: number;
 }): FailureOrigin {
   if (input.outcome !== "failed") return "none";
   if (!input.customerManaged) return "platform";
   if (typeof input.code === "string" && CUSTOMER_PROVIDER_CODES.has(input.code))
+    return "customer_provider";
+  if (isProviderAccountRefusal(input.providerAccountRefusal)) return "customer_provider";
+  // A compaction request refused for the same exhausted provider quota as an
+  // ordinary `provider_quota_exhausted` turn carries the same closed marker.
+  if (
+    input.code === "context_compaction_failed" &&
+    typeof input.quotaScope === "string" &&
+    PROVIDER_QUOTA_SCOPES.has(input.quotaScope)
+  )
     return "customer_provider";
   if (
     input.code === "subscription_capacity_unavailable" &&

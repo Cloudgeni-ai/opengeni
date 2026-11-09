@@ -1,8 +1,13 @@
 import { settledTurnFailureOrigin } from "../src/activities/agent-turn/failure-attribution";
 import { expect, test } from "bun:test";
+import { APIError } from "openai";
 import { failureOrigin, createObservability } from "@opengeni/observability";
+import { CompactionProviderResponseError } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing/settings";
-import { agentRunFailurePayload } from "../src/activities/agent-turn/errors";
+import {
+  agentRunFailurePayload,
+  compactionFailureTurnEventPayload,
+} from "../src/activities/agent-turn/errors";
 import { runtimeMetricsHooksForObservability } from "../src/observability-metrics";
 
 test("production quota payload excludes customer quota but keeps deployment quota and uncertain transport", () => {
@@ -67,4 +72,144 @@ test("settlement uses frozen payer rather than external metering and actual term
       ]),
     ).toBe("platform");
   }
+});
+
+// The production OpenRouter refusal for an account restricted to its own provider keys.
+const BYOK_MESSAGE =
+  "No endpoints found that can be served by your own provider keys. This workspace is restricted to BYOK capacity and has no provider key eligible for this request. Add provider keys at https://openrouter.ai/workspaces/default/byok";
+const openRouter404 = (message: string) =>
+  APIError.generate(404, { error: { message, code: 404 } }, undefined, new Headers());
+const customerBilling = { upstreamPayer: "organization", metering: "external" } as const;
+const deploymentBilling = { upstreamPayer: "deployment", metering: "external" } as const;
+
+test("an OpenRouter BYOK-only restriction is a customer-provider failure; other 404s and request faults stay platform", () => {
+  const restricted = agentRunFailurePayload(openRouter404(BYOK_MESSAGE));
+  // Copy, code and retry decision are unchanged; only the closed marker is added.
+  expect(restricted.error).toContain("No endpoints found that can be served");
+  expect(restricted.code).toBeUndefined();
+  expect(restricted.retryable).not.toBe(true);
+  expect(restricted.providerAccountRefusal).toBe("byok_capacity_restricted");
+  const failed = (payload: unknown) => [{ type: "turn.failed", payload }];
+  expect(settledTurnFailureOrigin(customerBilling, "failed", failed(restricted))).toBe(
+    "customer_provider",
+  );
+  expect(settledTurnFailureOrigin(deploymentBilling, "failed", failed(restricted))).toBe(
+    "platform",
+  );
+  for (const error of [
+    openRouter404("No endpoints found for some/model."),
+    openRouter404("No endpoints found that support tool use."),
+    APIError.generate(
+      400,
+      { error: { message: "Invalid schema for function 'x'", code: "invalid_request_error" } },
+      undefined,
+      new Headers(),
+    ),
+    new Error("Connection error."),
+  ]) {
+    const payload = agentRunFailurePayload(error);
+    expect(payload.providerAccountRefusal).toBeUndefined();
+    expect(settledTurnFailureOrigin(customerBilling, "failed", failed(payload))).toBe("platform");
+  }
+  // A forged or unknown marker value is not evidence.
+  expect(
+    settledTurnFailureOrigin(
+      customerBilling,
+      "failed",
+      failed({ providerAccountRefusal: "anything_else" }),
+    ),
+  ).toBe("platform");
+});
+
+test("the matching compaction failure is attributed the same way, and so is a compaction quota refusal", () => {
+  const compaction = compactionFailureTurnEventPayload(
+    new CompactionProviderResponseError({ httpStatus: 404 }, openRouter404(BYOK_MESSAGE)),
+  );
+  expect(compaction.code).toBe("context_compaction_failed");
+  expect(compaction.providerAccountRefusal).toBe("byok_capacity_restricted");
+  const failed = (payload: unknown) => [{ type: "turn.failed", payload }];
+  expect(settledTurnFailureOrigin(customerBilling, "failed", failed(compaction))).toBe(
+    "customer_provider",
+  );
+  expect(settledTurnFailureOrigin(deploymentBilling, "failed", failed(compaction))).toBe(
+    "platform",
+  );
+  const generic = compactionFailureTurnEventPayload(
+    new CompactionProviderResponseError({ httpStatus: 404 }, openRouter404("Not Found")),
+  );
+  expect(generic.providerAccountRefusal).toBeUndefined();
+  expect(settledTurnFailureOrigin(customerBilling, "failed", failed(generic))).toBe("platform");
+  const quota = compactionFailureTurnEventPayload(
+    new CompactionProviderResponseError(
+      { httpStatus: 402 },
+      APIError.generate(
+        402,
+        { error: { message: "Insufficient funds.", type: "insufficient_funds" } },
+        undefined,
+        new Headers(),
+      ),
+    ),
+  );
+  expect(quota.quotaScope).toBe("credits");
+  expect(settledTurnFailureOrigin(customerBilling, "failed", failed(quota))).toBe(
+    "customer_provider",
+  );
+  expect(settledTurnFailureOrigin(deploymentBilling, "failed", failed(quota))).toBe("platform");
+});
+
+test("Vercel AI Gateway credit and budget refusals on a customer's gateway are customer-provider failures", () => {
+  for (const type of ["insufficient_funds", "quota_for_entity_exceeded"]) {
+    const payload = agentRunFailurePayload(
+      APIError.generate(402, { error: { message: "Refused.", type } }, undefined, new Headers()),
+    );
+    expect(payload.code).toBe("provider_quota_exhausted");
+    const events = [{ type: "turn.failed", payload }];
+    expect(settledTurnFailureOrigin(customerBilling, "failed", events)).toBe("customer_provider");
+    expect(settledTurnFailureOrigin(deploymentBilling, "failed", events)).toBe("platform");
+  }
+  const verification = agentRunFailurePayload(
+    APIError.generate(
+      403,
+      { error: { message: "Add a payment method.", type: "customer_verification_required" } },
+      undefined,
+      new Headers(),
+    ),
+  );
+  expect(verification.providerAccountRefusal).toBe("customer_verification_required");
+});
+
+test("model-call metrics exclude a customer's BYOK restriction only on customer providers", async () => {
+  const obs = createObservability(testSettings(), { component: "worker" });
+  const hooks = runtimeMetricsHooksForObservability(obs);
+  hooks.onModelCall!({
+    provider: "organization-openrouter",
+    outcome: "failed",
+    httpStatus: 404,
+    providerAccountRefusal: "byok_capacity_restricted",
+    durationSeconds: 1,
+  });
+  hooks.onModelCall!({
+    provider: "openrouter",
+    outcome: "failed",
+    httpStatus: 404,
+    providerAccountRefusal: "byok_capacity_restricted",
+    durationSeconds: 1,
+  });
+  hooks.onModelCall!({
+    provider: "workspace-gateway",
+    outcome: "failed",
+    httpStatus: 404,
+    durationSeconds: 1,
+  });
+  const lines = (await obs.prometheusMetrics())
+    .split("\n")
+    .filter((line) => line.startsWith("opengeni_model_calls_total{"));
+  expect(lines).toHaveLength(3);
+  const origin = (provider: string) =>
+    /failure_origin="([a-z_]+)"/.exec(
+      lines.find((line) => line.includes(`provider="${provider}"`)) ?? "",
+    )?.[1];
+  expect(origin("organization-openrouter")).toBe("customer_provider");
+  expect(origin("openrouter")).toBe("platform");
+  expect(origin("workspace-gateway")).toBe("platform");
 });

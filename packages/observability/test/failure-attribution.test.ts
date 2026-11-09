@@ -2,6 +2,60 @@ import { describe, expect, test } from "bun:test";
 import { failureOrigin, isCustomerManagedMetricProvider } from "../src/failure-attribution";
 
 describe("failure ownership", () => {
+  test("closed provider-account refusals count only on customer-managed providers", () => {
+    for (const providerAccountRefusal of [
+      "byok_capacity_restricted",
+      "customer_verification_required",
+    ]) {
+      expect(
+        failureOrigin({ customerManaged: true, outcome: "failed", providerAccountRefusal }),
+      ).toBe("customer_provider");
+      expect(
+        failureOrigin({ customerManaged: false, outcome: "failed", providerAccountRefusal }),
+      ).toBe("platform");
+      expect(
+        failureOrigin({ customerManaged: true, outcome: "completed", providerAccountRefusal }),
+      ).toBe("none");
+    }
+    for (const providerAccountRefusal of ["", "not_found", 404, null, {}]) {
+      expect(
+        failureOrigin({
+          customerManaged: true,
+          outcome: "failed",
+          httpStatus: 404,
+          providerAccountRefusal,
+        }),
+      ).toBe("platform");
+    }
+  });
+  test("a compaction request refused for exhausted provider quota is customer-provider; other compaction failures are not", () => {
+    expect(
+      failureOrigin({
+        customerManaged: true,
+        outcome: "failed",
+        code: "context_compaction_failed",
+        quotaScope: "credits",
+      }),
+    ).toBe("customer_provider");
+    for (const quotaScope of [undefined, "", "weekly"]) {
+      expect(
+        failureOrigin({
+          customerManaged: true,
+          outcome: "failed",
+          code: "context_compaction_failed",
+          quotaScope,
+        }),
+      ).toBe("platform");
+    }
+    expect(
+      failureOrigin({
+        customerManaged: false,
+        outcome: "failed",
+        code: "context_compaction_failed",
+        quotaScope: "daily",
+      }),
+    ).toBe("platform");
+  });
   test("the same exhausted quota counts against deployment health only when deployment funded", () => {
     expect(
       failureOrigin({

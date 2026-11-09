@@ -1,4 +1,5 @@
 import { APIError } from "openai";
+import type { ProviderAccountRefusal } from "@opengeni/observability";
 
 /**
  * Provider quota exhaustion versus ordinary rate limiting.
@@ -429,4 +430,103 @@ export function withoutQuotaExhaustedRetries(inner: typeof fetch): typeof fetch 
     if (response.url) Object.defineProperty(vetoed, "url", { value: response.url });
     return vetoed;
   }) as typeof fetch;
+}
+
+// OpenRouter's refusal when an account restricted to its own provider keys
+// (BYOK) has no key eligible for the request. OpenRouter sends no structured
+// code beyond the numeric 404, so its own wording is the only evidence; both
+// phrases are specific to that account restriction. Other "No endpoints found"
+// 404s (model retired, no endpoint supports the requested parameters or tools,
+// data-policy filters) are not matched.
+const BYOK_CAPACITY_RESTRICTED_TEXT =
+  /\bno endpoints found that can be served by your own provider keys\b|\brestricted to byok capacity\b/;
+// Vercel AI Gateway's structured type for an account that must add a payment
+// method before it can be served.
+const CUSTOMER_VERIFICATION_REQUIRED_TYPE = "customer_verification_required";
+
+/**
+ * Decide whether a provider refusal comes from the customer's own provider
+ * account rather than from our request. Only exact provider evidence counts:
+ * the HTTP status together with a structured type, or a phrase specific to
+ * the account restriction where the provider sends no structured signal.
+ * Operational attribution only; it never changes retries or copy.
+ */
+export function classifyProviderAccountRefusal(evidence: {
+  status: number | null;
+  texts: readonly string[];
+}): ProviderAccountRefusal | null {
+  const fields = evidence.texts
+    .slice(0, MAX_FIELDS)
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .map((value) => value.slice(0, MAX_FIELD_CHARS).toLowerCase());
+  const explicitStatus =
+    evidence.status !== null && Number.isInteger(evidence.status) ? evidence.status : null;
+  // SDK wrappers sometimes keep only the "404 ..." message prefix.
+  const prefixedStatus = fields
+    .map((value) => /^\s*(4\d\d)\b/.exec(value)?.[1])
+    .find((value) => value !== undefined);
+  const status = explicitStatus ?? (prefixedStatus ? Number(prefixedStatus) : null);
+  if (status === 404 && fields.some((value) => BYOK_CAPACITY_RESTRICTED_TEXT.test(value))) {
+    return "byok_capacity_restricted";
+  }
+  if (
+    status === 403 &&
+    fields.some((value) => value.trim() === CUSTOMER_VERIFICATION_REQUIRED_TYPE)
+  ) {
+    return "customer_verification_required";
+  }
+  return null;
+}
+
+/** Provider-authored strings on a thrown error, plus a captured compaction provider message. */
+function accountRefusalTexts(error: unknown): string[] {
+  const texts: string[] = [];
+  errorTexts(error, texts, new WeakSet());
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    const providerMessage = (current as { providerMessage?: unknown }).providerMessage;
+    if (typeof providerMessage === "string" && providerMessage.length > 0) {
+      texts.push(providerMessage);
+    }
+    current = (current as Record<string, unknown>).cause;
+  }
+  return texts;
+}
+
+/** Classify a thrown provider error (an SDK `APIError` or any wrapper whose cause chain reaches one). */
+export function classifyProviderAccountRefusalError(error: unknown): ProviderAccountRefusal | null {
+  try {
+    return classifyProviderAccountRefusal({
+      status: errorHttpStatus(error),
+      texts: accountRefusalTexts(error),
+    });
+  } catch {
+    // A hostile getter is not provider evidence.
+    return null;
+  }
+}
+
+/**
+ * Classify a raw provider HTTP response from a bounded clone; the original
+ * body stays unread. Only 403 and 404 can carry an account refusal.
+ */
+export async function classifyProviderAccountRefusalResponse(
+  response: Response,
+): Promise<ProviderAccountRefusal | null> {
+  if (response.status !== 403 && response.status !== 404) return null;
+  const text = await boundedCloneText(response, MAX_RESPONSE_BODY_BYTES);
+  if (text === null) return null;
+  let json: unknown;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = undefined;
+  }
+  const sdkError = APIError.generate(
+    response.status,
+    json as object | undefined,
+    json ? undefined : text,
+    response.headers,
+  );
+  return classifyProviderAccountRefusalError(sdkError);
 }

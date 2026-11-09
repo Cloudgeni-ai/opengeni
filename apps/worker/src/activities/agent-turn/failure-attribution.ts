@@ -10,7 +10,13 @@ export function settledTurnFailureOrigin(
   const value = events.find((event) => event.type === "turn.failed")?.payload;
   const payload =
     value !== null && typeof value === "object"
-      ? (value as { code?: unknown; waitReason?: unknown; refusal?: unknown })
+      ? (value as {
+          code?: unknown;
+          waitReason?: unknown;
+          refusal?: unknown;
+          providerAccountRefusal?: unknown;
+          quotaScope?: unknown;
+        })
       : undefined;
   return failureOrigin({
     // External metering also covers deployment-owned free/anonymous routes.
@@ -20,5 +26,7 @@ export function settledTurnFailureOrigin(
     code: payload?.code,
     waitReason: payload?.waitReason,
     refusal: payload?.refusal,
+    providerAccountRefusal: payload?.providerAccountRefusal,
+    quotaScope: payload?.quotaScope,
   });
 }

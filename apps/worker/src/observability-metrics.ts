@@ -228,7 +228,7 @@ export function runtimeMetricsHooksForObservability(
   observability: Observability,
 ): RuntimeMetricsHooks {
   return {
-    onModelCall: ({ provider, outcome, durationSeconds, httpStatus }) => {
+    onModelCall: ({ provider, outcome, durationSeconds, httpStatus, providerAccountRefusal }) => {
       completedOperationSpan(observability, "worker.model.call", durationSeconds, {
         provider,
         outcome,
@@ -243,6 +243,7 @@ export function runtimeMetricsHooksForObservability(
             customerManaged: isCustomerManagedMetricProvider(provider),
             outcome,
             ...(httpStatus !== undefined ? { httpStatus } : {}),
+            ...(providerAccountRefusal ? { providerAccountRefusal } : {}),
           }),
         },
       });
