@@ -128,6 +128,12 @@ describe("verdict", () => {
       kind: "failed",
       runs: [retryable, final],
     });
+    // Also while another run's retry is still going: the batch fails either way.
+    const retrying = run({ id: 2, status: "queued", conclusion: null, attempt: 2 });
+    expect(verdict(batch([1, 2], { runs: [retrying, final] }), NOW, DEFAULT_SETTINGS)).toEqual({
+      kind: "failed",
+      runs: [final],
+    });
   });
 
   test("a run GitHub cancelled is retried instead of bisected, up to three attempts", () => {

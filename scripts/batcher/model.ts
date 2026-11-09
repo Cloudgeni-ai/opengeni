@@ -287,12 +287,14 @@ export function verdict(batch: Batch, now: number, settings: Settings): Verdict 
     return now - batch.createdAt > settings.startTimeoutMs
       ? { kind: "missing" }
       : { kind: "running" };
+  // A run GitHub will not run again fails the batch as it is, also while
+  // another run's retry is still going; asking again every pass would hold
+  // the queue forever.
+  if (batch.runs.some((run) => run.final))
+    return { kind: "failed", runs: batch.runs.filter(failedRun) };
   if (batch.runs.some((run) => run.status !== "completed")) return { kind: "running" };
   const failed = batch.runs.filter((run) => !PASSING.has(run.conclusion ?? ""));
   if (!failed.length) return { kind: "passed" };
-  // A run GitHub will not run again fails the batch as it is; asking again
-  // every pass would hold the queue forever.
-  if (failed.some((run) => run.final)) return { kind: "failed", runs: failed };
   // Bisecting a batch GitHub cancelled would test every half again for a
   // failure none of its PRs caused.
   if (failed.every((run) => run.conclusion === "cancelled" && run.attempt < CANCELLED_RUN_ATTEMPTS))
@@ -608,11 +610,14 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         if (manifest.aheadOfBisection !== true) blame = blamed(blame, result.runs);
         halvesFirst = manifest.aheadOfBisection === true;
         if (numbers.length === 1) {
+          const final = result.runs.find((r) => r.final);
           const run = result.runs.find((r) => r.workflow === CI_WORKFLOW) ?? result.runs[0]!;
           actions.push({
             kind: "eject",
             number: numbers[0]!,
-            reason: `it failed CI on top of main, also after a retry: ${run.url}`,
+            reason: final
+              ? `it failed CI on top of main, and GitHub will not run it again: ${final.url}`
+              : `it failed CI on top of main, also after a retry: ${run.url}`,
           });
           pulls = pulls.filter((p) => p.number !== numbers[0]);
           pending = manifest.pending;

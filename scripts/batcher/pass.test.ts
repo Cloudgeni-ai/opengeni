@@ -848,8 +848,47 @@ describe("a batcher pass", () => {
     gh.finishCi(half.sha, "failure", 1, []);
     await run(gh, options());
     expect(gh.comments.at(-1)).toMatchObject({ number: 1 });
+    expect(gh.comments.at(-1)!.body).toContain("GitHub will not run it again");
     expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
     expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+  });
+
+  test("a run GitHub will not run again fails its batch at once, also when another run was retried", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.addPull(2);
+    await run(gh, options());
+    const first = gh.batch();
+    gh.finishCi(first.sha, "failure", 1, ["Typecheck and unit tests"]);
+    const posture = {
+      id: 43,
+      workflow: ".github/workflows/runtime-posture-compatibility.yml",
+      status: "completed",
+      conclusion: "failure",
+      attempt: 1,
+      url: "https://github.com/o/r/actions/runs/43",
+    };
+    gh.runsBySha.get(first.sha)!.push(posture);
+    gh.failedJobNames.set(43, []);
+    gh.rerunRefusals.set(43, "all");
+    await run(gh, options());
+    expect(gh.log).toContain("rerun 42");
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+  });
+
+  test("other errors from a rerun still stop the pass", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    await run(gh, options());
+    gh.finishCi(gh.batch().sha, "failure", 1, []);
+    gh.rerunFailedJobs = async () => {
+      throw new GitHubError(
+        403,
+        "actions/runs/42/rerun-failed-jobs",
+        '{"message":"Resource not accessible by integration"}',
+      );
+    };
+    await expect(run(gh, options())).rejects.toThrow("Resource not accessible");
   });
 
   test("a bisected group failing in another job, or in jobs GitHub cannot list, is retried", async () => {
