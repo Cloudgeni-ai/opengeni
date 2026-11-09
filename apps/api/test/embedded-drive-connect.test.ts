@@ -282,7 +282,7 @@ test("Drive callback requires an authenticated read and binds one exact personal
       ].sort(),
     );
     expect(authorize.searchParams.get("access_type")).toBe("offline");
-    expect(authorize.searchParams.get("prompt")).toBe("consent");
+    expect(authorize.searchParams.get("prompt")).toBe("consent select_account");
     expect(authorize.searchParams.get("code_challenge_method")).toBe("S256");
     return { attempt: ready, state: authorize.searchParams.get("state")! };
   };
