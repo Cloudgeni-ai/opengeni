@@ -7,7 +7,9 @@ import {
   deleteGitHubInstallationBinding,
   finishConnectOperation,
   getConnectAttempt,
+  listConnectorActionPolicies,
   listGitHubInstallationAccessForWorkspace,
+  upsertConnectorActionPolicies,
   type ConnectActorScope,
   type ConnectOperationAuthorization,
 } from "@opengeni/db";
@@ -29,7 +31,7 @@ import {
 import { githubConnectFailureHtml } from "../routes/github-browser-pages";
 import { connectOwnerStateFields } from "../connection-ownership";
 import { requestGitHubInstallationRepositorySync } from "../github-installation-sync";
-import { listWorkspaceGitHubInstallationBindings } from "../github-access";
+import { readGitHubInstallationForRepair } from "../github-access";
 
 const stateSchema = z.object({
   kind: z.literal("github_app_connect"),
@@ -109,23 +111,26 @@ export async function githubAppRepairNavigation(
   const installationId = Number(repairAccountIdPattern.exec(reconnectAccountId)?.[1]);
   if (!Number.isSafeInteger(installationId))
     throw new HTTPException(422, { message: "Repair names a linked GitHub installation" });
-  const binding = (await listWorkspaceGitHubInstallationBindings(deps, scope.workspaceId)).find(
-    (candidate) => candidate.installationId === installationId,
-  );
-  if (!binding)
+  const repair = await readGitHubInstallationForRepair(deps, scope.workspaceId, installationId);
+  if (!repair)
     throw new HTTPException(409, {
       message: "This GitHub installation is no longer linked to the workspace",
     });
+  // Gone on GitHub: install the app again. Unknown (GitHub didn't answer):
+  // the account chooser covers both a reinstall and an owner sign-in.
+  // Otherwise: that installation's owner sign-in.
   const navigation =
-    binding.issue === "uninstalled"
+    repair.live === null
       ? githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "install")
-      : githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "bind", installationId);
+      : repair.live === undefined
+        ? githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "discover")
+        : githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "bind", installationId);
   return {
     ...navigation,
     account: {
       id: reconnectAccountId,
       providerId: "github-app",
-      label: binding.accountLogin ?? `GitHub installation ${installationId}`,
+      label: repair.stored.accountLogin ?? `GitHub installation ${installationId}`,
       ownership: "workspace" as const,
       status: "auth_needed" as const,
     },
@@ -388,13 +393,35 @@ export async function completeGitHubAppConnect(
               const previous = (
                 await listGitHubInstallationAccessForWorkspace(tx, state.workspaceId)
               ).find((binding) => binding.installationId === repaired);
-              if (previous && previous.githubAccountId === proof.installation.accountId)
+              if (previous && previous.githubAccountId === proof.installation.accountId) {
+                // The approvals chosen for it carry over to the new installation.
+                const policies = await listConnectorActionPolicies(tx, {
+                  accountId: state.accountId,
+                  workspaceId: state.workspaceId,
+                  connectionIds: [`github-app:${repaired}`],
+                });
+                for (let offset = 0; offset < policies.length; offset += 128)
+                  await upsertConnectorActionPolicies(
+                    tx,
+                    policies.slice(offset, offset + 128).map((policy) => ({
+                      accountId: state.accountId,
+                      workspaceId: state.workspaceId,
+                      subjectId: state.subjectId,
+                      connectionId: `github-app:${installationId}`,
+                      serverId: policy.serverId,
+                      toolName: policy.toolName,
+                      actionName: policy.actionName,
+                      policy: policy.policy,
+                    })),
+                  );
                 await deleteGitHubInstallationBinding(tx, {
                   accountId: state.accountId,
                   workspaceId: state.workspaceId,
                   installationId: repaired,
                   eventRouteSecret: eventRouteSecret(deps.settings),
+                  audit: { subjectId: state.subjectId, source: "app", principalKind: null },
                 });
+              }
             }
             boundInstallationId = installationId;
             return {

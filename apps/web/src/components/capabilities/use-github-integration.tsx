@@ -101,7 +101,7 @@ export function githubInstallationAttention(installation: GitHubInstallationBind
     case "uninstalled":
       return {
         label: "Uninstalled on GitHub",
-        summary: `${account} was uninstalled on GitHub.`,
+        summary: `The Opengeni app was uninstalled from ${account} on GitHub.`,
         problem: `The Opengeni app was removed from ${account} on GitHub.`,
         remedy: "Reinstall it, or remove it here.",
         fix: "reinstall",
@@ -110,7 +110,7 @@ export function githubInstallationAttention(installation: GitHubInstallationBind
     case "suspended":
       return {
         label: "Suspended on GitHub",
-        summary: `${account} is suspended on GitHub.`,
+        summary: `The Opengeni app is suspended on ${account}.`,
         problem: `The Opengeni app is suspended on ${account}.`,
         remedy: "Unsuspend it in GitHub's settings.",
         fix: "configure",
@@ -119,7 +119,7 @@ export function githubInstallationAttention(installation: GitHubInstallationBind
     case "no_repositories":
       return {
         label: "No repositories",
-        summary: `${account} shares no repositories.`,
+        summary: `${account} shares no repositories with Opengeni.`,
         problem: `${account} shares no repositories with Opengeni.`,
         remedy: "Choose some on GitHub.",
         fix: "configure",
@@ -129,7 +129,7 @@ export function githubInstallationAttention(installation: GitHubInstallationBind
       return {
         label: "Not checked",
         summary: `Opengeni couldn't check ${account} on GitHub.`,
-        problem: `GitHub didn't respond, so Opengeni couldn't check ${account}.`,
+        problem: `Opengeni couldn't check ${account} on GitHub.`,
         remedy: null,
         fix: "recheck",
         actionLabel: "Check again",
@@ -137,7 +137,7 @@ export function githubInstallationAttention(installation: GitHubInstallationBind
     case "account_changed":
       return {
         label: "Account changed",
-        summary: `${account} now belongs to another GitHub account.`,
+        summary: `The installation on ${account} moved to another GitHub account.`,
         problem: "This installation now belongs to another GitHub account.",
         remedy: "Remove it, then install the app again.",
         fix: "remove",
@@ -517,7 +517,14 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
                   userInitiated: true,
                 });
               else if (fix.fix === "remove") remove();
-              else reconnect(githubRepairDialog(installation, fix.fix));
+              // A server that names no issue can't start a repair at one
+              // installation; it gets the account chooser.
+              else
+                reconnect(
+                  installation.issue === undefined
+                    ? undefined
+                    : githubRepairDialog(installation, fix.fix),
+                );
             },
           }
         : configurable
@@ -557,8 +564,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const personalLogin = personalConnection
     ? String(personalConnection.metadata.githubLogin ?? "connected")
     : null;
-  // The page opens with what needs attention, naming the installation; with
-  // one, it offers that row's fix.
+  // The page opens with what needs attention, naming the installation. The
+  // row keeps the one fix, so the summary has no action of its own.
   const attentionRows = installations.flatMap((installation, index) => {
     const attention = githubInstallationAttention(installation);
     return attention ? [{ attention, row: installationRows[index]! }] : [];
@@ -566,27 +573,15 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const attentionNotice: IntegrationViewModel["notice"] =
     attentionRows.length === 0
       ? undefined
-      : attentionRows.length === 1
-        ? {
-            tone: "waiting",
-            title: attentionRows[0]!.attention.summary,
-            ...(attentionRows[0]!.row.action
-              ? {
-                  action: {
-                    label: attentionRows[0]!.row.action.label,
-                    onClick: attentionRows[0]!.row.action.onClick,
-                    disabled: attentionRows[0]!.row.action.disabled,
-                  },
-                }
-              : {}),
-          }
-        : {
-            tone: "waiting",
-            title:
-              attentionRows.length <= 3
+      : {
+          tone: "waiting",
+          title:
+            attentionRows.length === 1
+              ? attentionRows[0]!.attention.summary
+              : attentionRows.length <= 3
                 ? `${githubListText(attentionRows.map(({ row }) => row.title))} need attention.`
                 : `${attentionRows.length} installations need attention.`,
-          };
+        };
   // Unknown until the selection loads: a failed read is not "0 repos".
   const personalRepositoryCount = context.personalGitHubSelection?.repositories.length ?? null;
   const personalAllRepositories =
@@ -1021,7 +1016,7 @@ function githubRepairDialog(
   if (fix === "reinstall") {
     return {
       title: `Reinstall on ${account}`,
-      description: `The Opengeni app was removed from ${account} on GitHub. Install it on ${account} again.`,
+      description: "The Opengeni app was removed on GitHub. Install it again.",
       authorizeLabel: "Reinstall on GitHub",
       reconnectAccountId,
     };

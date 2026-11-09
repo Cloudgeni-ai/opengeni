@@ -208,6 +208,38 @@ async function readWorkspaceGitHubInstallations(
   return { installations, liveById, lifecycleVerified };
 }
 
+/**
+ * One linked installation, for its repair: the stored binding and GitHub's
+ * live view of it. `live` is null when GitHub no longer has the installation
+ * and undefined when GitHub could not be asked. Null when it is not linked.
+ */
+export async function readGitHubInstallationForRepair(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  installationId: number,
+): Promise<{
+  stored: GitHubInstallationAccess;
+  live: LiveGitHubInstallation | null | undefined;
+} | null> {
+  const stored = (await listGitHubInstallationAccessForWorkspace(deps.db, workspaceId)).find(
+    (installation) => installation.installationId === installationId,
+  );
+  if (!stored) {
+    return null;
+  }
+  let live: LiveGitHubInstallation | null | undefined;
+  try {
+    live = deps.githubAppApi?.getInstallation
+      ? await deps.githubAppApi.getInstallation({ installationId })
+      : deps.githubAppApi
+        ? undefined
+        : await getGitHubAppInstallationSummary(deps.settings, installationId);
+  } catch {
+    live = undefined;
+  }
+  return { stored, live };
+}
+
 export function githubBindingStatus(
   configured: boolean,
   installations: GitHubInstallationBinding[],
@@ -271,7 +303,12 @@ export function githubInstallationBindingIssue(
     if (live.suspended) {
       return "suspended";
     }
-    if (live.installationId !== installationId || stored.githubAccountId !== live.accountId) {
+    // A binding stored without an account id (no owner proof yet) is
+    // unconfirmed, not moved.
+    if (
+      live.installationId !== installationId ||
+      (stored.githubAccountId !== null && stored.githubAccountId !== live.accountId)
+    ) {
       return "account_changed";
     }
   }

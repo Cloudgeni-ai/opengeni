@@ -689,32 +689,15 @@ test("a member sees what is wrong without the fix they cannot make", async () =>
     // The summary still names it, without an action the member cannot take.
     expect(rendered.model().notice).toEqual({
       tone: "waiting",
-      title: "Cloudgeni-ai was uninstalled on GitHub.",
+      title: "The Opengeni app was uninstalled from Cloudgeni-ai on GitHub.",
     });
   } finally {
     await rendered.unmount();
   }
 });
 
-test("an app uninstalled on one account is named at the top, and Reinstall repairs that installation", async () => {
-  const context = appContext(
-    ["github:manage"],
-    mock(async () => ({})),
-  );
-  const healthy = context.githubStatus.installations[0]!;
-  context.githubStatus.installations = [
-    {
-      ...healthy,
-      installationId: 81,
-      githubAccountId: 82,
-      accountLogin: "benyhh",
-      accountType: "User",
-      lifecycle: "deleted",
-      issue: "uninstalled",
-      repositoryCount: 0,
-    },
-    healthy,
-  ];
+/** A Connect transport that records each begin, for the repair dialog. */
+function connectRecorder() {
   const begun: unknown[][] = [];
   const attempt = {
     id: "attempt-repair",
@@ -747,6 +730,29 @@ test("an app uninstalled on one account is named at the top, and Reinstall repai
   (window as unknown as { happyDOM: { setURL: (url: string) => void } }).happyDOM.setURL(
     "https://app.example.test/integrations/github",
   );
+  return { begun, transport };
+}
+
+test("an app uninstalled on one account is named at the top, and Reinstall repairs that installation", async () => {
+  const context = appContext(
+    ["github:manage"],
+    mock(async () => ({})),
+  );
+  const healthy = context.githubStatus.installations[0]!;
+  context.githubStatus.installations = [
+    {
+      ...healthy,
+      installationId: 81,
+      githubAccountId: 82,
+      accountLogin: "benyhh",
+      accountType: "User",
+      lifecycle: "deleted",
+      issue: "uninstalled",
+      repositoryCount: 0,
+    },
+    healthy,
+  ];
+  const { begun, transport } = connectRecorder();
   const rendered = await renderAdapter({
     ...context,
     client: { ...context.client, connectTransport: () => transport },
@@ -755,13 +761,14 @@ test("an app uninstalled on one account is named at the top, and Reinstall repai
     const model = rendered.model();
     expect(installationRow(model, 81).attention?.label).toBe("Uninstalled on GitHub");
     expect(installationRow(model, 71).attention).toBeUndefined();
-    expect(model.notice).toMatchObject({
+    // The summary names it; the row keeps the one fix.
+    expect(model.notice).toEqual({
       tone: "waiting",
-      title: "benyhh was uninstalled on GitHub.",
-      action: { label: "Reinstall" },
+      title: "The Opengeni app was uninstalled from benyhh on GitHub.",
     });
+    expect(installationRow(model, 81).action?.label).toBe("Reinstall");
     await act(async () => {
-      model.notice!.action!.onClick();
+      installationRow(model, 81).action!.onClick();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     await act(async () => {
@@ -771,10 +778,38 @@ test("an app uninstalled on one account is named at the top, and Reinstall repai
     // instead of the account chooser.
     expect(document.body.textContent).toContain("Reinstall on benyhh");
     expect(document.body.textContent).toContain(
-      "The Opengeni app was removed from benyhh on GitHub. Install it on benyhh again.",
+      "The Opengeni app was removed on GitHub. Install it again.",
     );
     expect(document.body.textContent).not.toContain("Choose an account");
     expect(JSON.stringify(begun)).toContain('"reconnectAccountId":"github-installation:81"');
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("against a server that names no issue, Reinstall falls back to the account chooser", async () => {
+  const context = appContext(
+    ["github:manage"],
+    mock(async () => ({})),
+  );
+  context.githubStatus.installations = [
+    { ...context.githubStatus.installations[0]!, lifecycle: "deleted" },
+  ];
+  const { begun, transport } = connectRecorder();
+  const rendered = await renderAdapter({
+    ...context,
+    client: { ...context.client, connectTransport: () => transport },
+  });
+  try {
+    await act(async () => {
+      installationRow(rendered.model(), 71).action!.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(begun).toHaveLength(1);
+    expect(JSON.stringify(begun)).not.toContain("reconnectAccountId");
   } finally {
     await rendered.unmount();
   }
