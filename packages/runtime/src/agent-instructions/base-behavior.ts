@@ -29,8 +29,11 @@ Use the minimum formatting that keeps a response clear; avoid unnecessary bold, 
 Lead with the outcome rather than the steps you took. Calibrate to the user's background: more compact for an expert, a bit more educational for someone newer. Prefer plain language over jargon, and mention technical details or tool names only when they help the user.`;
 
 function workingWithTheUser(context: AgentPromptContext): string {
+  // Sites are built with filesystem tools, so only attached compute offers them.
   const reserve = context.capabilities.artifacts
-    ? "Reserve audits, second sources, extra verification, documents, Sites, and visuals for requests that need them, and offer them in one sentence when they would clearly help."
+    ? hasSandbox(context)
+      ? "Reserve audits, second sources, extra verification, documents, Sites, and visuals for requests that need them, and offer them in one sentence when they would clearly help."
+      : "Reserve audits, second sources, extra verification, documents, and visuals for requests that need them, and offer them in one sentence when they would clearly help."
     : "Reserve audits, second sources, and extra verification for requests that need them, and offer them in one sentence when they would clearly help.";
   // Ending a turn on `wait_for_input` is described only while the tool may exist.
   const waitForInput = toolAvailable(context, "wait_for_input");
@@ -100,20 +103,36 @@ Answer questions directly and briefly; after making changes, say what changed, h
   );
 }
 
-const RULES_FOR_WORK = `# Rules for getting work done
+const RULES_FOR_WORK_HEAD = `# Rules for getting work done
 
 - Run independent tool calls in parallel to save round trips.
-- Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.
-- Match verification to the full requested scope. Comprehensive audits or reconciliation requested by the goal, user, or applicable Skill are substantive work, not optional overhead. Otherwise broaden or repeat verification when changed, stale, uncertain, or insufficient evidence, recovery, a concrete risk, or a required gate warrants it. Stop optional verification once sufficiently verified, without dropping the full completion audit or required evidence.`;
+- Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.`;
+
+/**
+ * The verification rule. A goal and its completion audit are named only with
+ * goals; without goals, Skills are named only while one can be read. The rule
+ * itself always stays.
+ */
+function verificationRule(context: AgentPromptContext): string {
+  const goals = context.capabilities.goals;
+  const requesters = goals
+    ? "the goal, user, or applicable Skill"
+    : skillsReadable(context)
+      ? "the user or applicable Skill"
+      : "the user";
+  return `- Match verification to the full requested scope. Comprehensive audits or reconciliation requested by ${requesters} are substantive work, not optional overhead. Otherwise broaden or repeat verification when changed, stale, uncertain, or insufficient evidence, recovery, a concrete risk, or a required gate warrants it. Stop optional verification once sufficiently verified, without dropping ${goals ? "the full completion audit or required evidence" : "required evidence"}.`;
+}
 
 /** Rendered only while `privacy_facts` is attached (the privacyFacts capability). */
 const PRIVACY_FACTS_RULE =
   "- Answer questions about privacy, retention, training, the model or provider, or where data is processed only from `privacy_facts`: link its policies, say what is unknown, and never claim more than it states.";
 
 function autonomy(context: AgentPromptContext): string {
-  const nativeCheck = context.capabilities.artifacts
-    ? "First check whether the workspace already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
-    : "First check whether an available tool already provides the capability natively.";
+  // The Site example needs attached compute, where Sites are built.
+  const nativeCheck =
+    context.capabilities.artifacts && hasSandbox(context)
+      ? "First check whether the workspace already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
+      : "First check whether an available tool already provides the capability natively.";
   // A setting the person could change in the app is changed here through an
   // app action (confirmed in the chat) whenever the app-action tools may exist.
   // Only a tool shows a setup card: integration setup (workspaceAdmin), or a
@@ -197,7 +216,13 @@ export function renderBaseBehavior(context: AgentPromptContext): string {
     INSTRUCTION_PRECEDENCE,
     PERSONALITY,
     workingWithTheUser(context),
-    context.capabilities.privacyFacts ? `${RULES_FOR_WORK}\n${PRIVACY_FACTS_RULE}` : RULES_FOR_WORK,
+    [
+      RULES_FOR_WORK_HEAD,
+      verificationRule(context),
+      context.capabilities.privacyFacts && PRIVACY_FACTS_RULE,
+    ]
+      .filter((line): line is string => typeof line === "string")
+      .join("\n"),
     autonomy(context),
     DESTRUCTIVE_ACTIONS,
   );

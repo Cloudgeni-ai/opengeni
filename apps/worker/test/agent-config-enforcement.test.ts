@@ -1977,7 +1977,7 @@ const INVENTORY = {
     "## Progress updates": 747,
     "## Final answer": 434,
     "### Formatting rules": 127,
-    "# Rules for getting work done": 682,
+    "# Rules for getting work done": 626,
     "## Autonomy and persistence": 3047,
     "# Destructive Actions": 547,
     "# Runtime mechanics": 20,
