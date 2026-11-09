@@ -2,42 +2,38 @@
 
 A configured session without a sandbox or Connected Machine no longer gets
 text it cannot act on: editing files in the sandbox, publishing new files,
-workspace file links, building Sites, sandbox paths, background-command
-acknowledgement and sandbox CLI lists. The verification rule names a goal and
-its completion audit only with goals, and an applicable Skill only with goals
-or a readable Skill, and is unchanged whenever goals are on. Every session
-with a sandbox or Connected Machine keeps its bytes. Measured with the Sonnet 5.5
-tokenizer: "none" without compute 2,772 → 2,754 system tokens; "all" without
-compute 8,963 → 8,581; "all" with a managed sandbox 10,405 (unchanged).
+workspace file links, sandbox paths, background-command acknowledgement and
+sandbox CLI lists. Site guidance stays, because the Site tools create a Site
+from inline HTML without compute. Without compute, the document rule instead
+says to export a native document when the user asks for a Word, Excel, PDF or
+PowerPoint file and the export tool lists that format. The verification rule
+names a goal and its completion audit only with goals, and an applicable Skill
+only with goals or a readable Skill. It is unchanged whenever goals are on, so
+a session with goals and a sandbox or Connected Machine keeps its bytes; a
+session with compute but without goals gets the goal-free verification rule.
+Measured with the Sonnet 5.5 tokenizer: "none" without compute 2,772 → 2,754
+system tokens; "all" without compute 8,963 → 8,702; "all" with a managed sandbox
+10,405 (unchanged).
 
 ```text
 - … Read the documents Skill and create the native document artifact before authoring it; do not write a sandbox Markdown report first or treat publishing a file as native document creation. A Word, Excel, PDF or PowerPoint file the user sends to be changed is edited in the sandbox … unless the artifact export tool lists that format. Then give …
-+ … Read the documents Skill and create the native document artifact before authoring it. Then give …   (no compute)
++ … Read the documents Skill and create the native document artifact before authoring it. When the user asks for a Word, Excel, PDF or PowerPoint file, export the native document if the artifact export tool lists that format. Then give …   (no compute)
 - … A sandbox path, a raw file ID, or an assertion that a report exists is not completed report delivery.
 + … A raw file ID or an assertion that a report exists is not completed report delivery.   (no compute)
 - Do not silently fall back to a sandbox link, invent an artifact reference, or claim success. Ordinary in-chat answers, brief progress updates, internal worker findings, source-code navigation, and explicitly requested local-file workflows do not become report deliverables merely because they contain Markdown or a file link.
 + Do not invent an artifact reference or claim success. Ordinary in-chat answers, brief progress updates, and internal worker findings do not become report deliverables merely because they contain Markdown.   (no compute)
 - Publish files you deliberately deliver so they are retained and discoverable in Artifacts; do not publish every temporary file.   (no compute)
 - Source-code navigation may still use workspace file links.   (no compute)
-- Inline HTML stays in chat unless explicitly saved as a Site.
-+ Inline HTML stays in chat.   (no compute)
-- For building, publishing, or embedding a saved Site, read the sites Skill when available.   (no compute)
-- Sites and native documents keep their tool-returned canonical links.
-+ Native documents keep their tool-returned canonical links.   (no compute)
 - Never substitute a storage URL or a sandbox path for a published artifact reference.
 + Never substitute a storage URL for a published artifact reference.   (no compute)
 - For a sandbox image, publish the file first; a sandbox path is not an inline image source.   (no compute; also "A sandbox path is not an inline image source." without sandbox_file_publish)
-- Reserve audits, second sources, extra verification, documents, Sites, and visuals …
-+ Reserve audits, second sources, extra verification, documents, and visuals …   (no compute)
-- First check whether the workspace already provides the capability natively (for example, a Site …).
-+ First check whether an available tool already provides the capability natively.   (no compute)
 - Audit reads do not acknowledge command completion.   (no compute)
 - … rather than looping while holding the inference and sandbox.
 + … rather than looping while holding the inference.   (no compute)
 - `generate_image` is a runtime tool; integration catalogs and sandbox CLI lists do not enumerate it.
 + `generate_image` is a runtime tool; integration catalogs do not enumerate it.   (no compute)
 - Comprehensive audits or reconciliation requested by the goal, user, or applicable Skill … without dropping the full completion audit or required evidence.
-+ Comprehensive audits or reconciliation requested by the user or applicable Skill … without dropping required evidence.   (no goals; "by the user" without a readable Skill)
++ Comprehensive audits or reconciliation requested by the user or applicable Skill … without dropping required evidence.   (no goals, with or without compute; "by the user" without a readable Skill)
 ```
 
 A new first-party tool, `github_repository_attach`, lets the agent ask to
@@ -1312,7 +1308,7 @@ unchanged.
   Integration setup drops "(see Session coordination)".
 - `workspaceAdmin` off: the rig `rig_propose_change`/`rig_get` sentences are
   omitted.
-- No sandbox or Connected Machine: the documents, Sites, file-publishing,
+- No sandbox or Connected Machine: the documents, file-publishing,
   sandbox-path, command-acknowledgement and CLI-list clauses listed at the top
   of this file are omitted or use their no-compute wording.
 - `goals` off: the verification rule names "the user or applicable Skill"

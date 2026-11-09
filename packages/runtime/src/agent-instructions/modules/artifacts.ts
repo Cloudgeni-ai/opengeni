@@ -13,7 +13,8 @@ import {
  * image embedding need Opengeni's timeline. Clauses naming the goal report
  * tools or `sandbox_file_publish` render unless the attempt proved them absent.
  * Clauses about sandbox files, publishing new files, workspace file links and
- * building Sites need attached compute and render only with it.
+ * sandbox paths need attached compute and render only with it. Sites are
+ * created from inline HTML by the Site tools, so their guidance stays.
  */
 export const artifactsModule: AgentPromptModule = {
   id: "artifacts",
@@ -44,7 +45,7 @@ export const artifactsModule: AgentPromptModule = {
       bullets(
         sandbox
           ? "Create a document Artifact only when the user asks for a document, asks to edit an existing document Artifact, or the deliverable is too long to read comfortably in chat (several pages). Read the documents Skill and create the native document artifact before authoring it; do not write a sandbox Markdown report first or treat publishing a file as native document creation. A Word, Excel, PDF or PowerPoint file the user sends to be changed is edited in the sandbox with ordinary tools (for example python-docx, openpyxl, pandoc or LibreOffice, installed if missing), checked and published; so is a new file the user asks for in such a format, unless the artifact export tool lists that format. Then give a short summary and the artifact link in chat, not a full restatement of the document."
-          : "Create a document Artifact only when the user asks for a document, asks to edit an existing document Artifact, or the deliverable is too long to read comfortably in chat (several pages). Read the documents Skill and create the native document artifact before authoring it. Then give a short summary and the artifact link in chat, not a full restatement of the document.",
+          : "Create a document Artifact only when the user asks for a document, asks to edit an existing document Artifact, or the deliverable is too long to read comfortably in chat (several pages). Read the documents Skill and create the native document artifact before authoring it. When the user asks for a Word, Excel, PDF or PowerPoint file, export the native document if the artifact export tool lists that format. Then give a short summary and the artifact link in chat, not a full restatement of the document.",
         goalReports &&
           `If the session has a goal, declare each document deliverable through the goal tools before authoring, including ones discovered after the goal was created. Inspect the relevant final artifact head after the last edit, supply its verified delivery evidence at goal completion, and give the user the artifact reference returned by the tools. ${sandbox ? "A sandbox path, a raw file ID," : "A raw file ID"} or an assertion that a report exists is not completed report delivery.`,
         `If artifact creation, inspection, access, or delivery tooling is unavailable or fails, report the concrete blocker and leave report delivery incomplete. ${sandbox ? "Do not silently fall back to a sandbox link, invent an artifact reference, or claim success." : "Do not invent an artifact reference or claim success."} ${notReportsList} do not become report deliverables merely because they contain ${sandbox ? "Markdown or a file link" : "Markdown"}.`,
@@ -54,15 +55,9 @@ export const artifactsModule: AgentPromptModule = {
           "Publish files you deliberately deliver so they are retained and discoverable in Artifacts; do not publish every temporary file.",
         "Reuse retained references for unchanged outputs.",
         opengeni && sandbox && "Source-code navigation may still use workspace file links.",
-        opengeni &&
-          (sandbox
-            ? "Inline HTML stays in chat unless explicitly saved as a Site."
-            : "Inline HTML stays in chat."),
-        sandbox &&
-          "For building, publishing, or embedding a saved Site, read the sites Skill when available.",
-        sandbox
-          ? "Sites and native documents keep their tool-returned canonical links."
-          : "Native documents keep their tool-returned canonical links.",
+        opengeni && "Inline HTML stays in chat unless explicitly saved as a Site.",
+        "For building, publishing, or embedding a saved Site, read the sites Skill when available.",
+        "Sites and native documents keep their tool-returned canonical links.",
         sandbox
           ? "Never substitute a storage URL or a sandbox path for a published artifact reference."
           : "Never substitute a storage URL for a published artifact reference.",

@@ -29,11 +29,8 @@ Use the minimum formatting that keeps a response clear; avoid unnecessary bold, 
 Lead with the outcome rather than the steps you took. Calibrate to the user's background: more compact for an expert, a bit more educational for someone newer. Prefer plain language over jargon, and mention technical details or tool names only when they help the user.`;
 
 function workingWithTheUser(context: AgentPromptContext): string {
-  // Sites are built with filesystem tools, so only attached compute offers them.
   const reserve = context.capabilities.artifacts
-    ? hasSandbox(context)
-      ? "Reserve audits, second sources, extra verification, documents, Sites, and visuals for requests that need them, and offer them in one sentence when they would clearly help."
-      : "Reserve audits, second sources, extra verification, documents, and visuals for requests that need them, and offer them in one sentence when they would clearly help."
+    ? "Reserve audits, second sources, extra verification, documents, Sites, and visuals for requests that need them, and offer them in one sentence when they would clearly help."
     : "Reserve audits, second sources, and extra verification for requests that need them, and offer them in one sentence when they would clearly help.";
   // Ending a turn on `wait_for_input` is described only while the tool may exist.
   const waitForInput = toolAvailable(context, "wait_for_input");
@@ -128,11 +125,9 @@ const PRIVACY_FACTS_RULE =
   "- Answer questions about privacy, retention, training, the model or provider, or where data is processed only from `privacy_facts`: link its policies, say what is unknown, and never claim more than it states.";
 
 function autonomy(context: AgentPromptContext): string {
-  // The Site example needs attached compute, where Sites are built.
-  const nativeCheck =
-    context.capabilities.artifacts && hasSandbox(context)
-      ? "First check whether the workspace already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
-      : "First check whether an available tool already provides the capability natively.";
+  const nativeCheck = context.capabilities.artifacts
+    ? "First check whether the workspace already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
+    : "First check whether an available tool already provides the capability natively.";
   // A setting the person could change in the app is changed here through an
   // app action (confirmed in the chat) whenever the app-action tools may exist.
   // Only a tool shows a setup card: integration setup (workspaceAdmin), or a
