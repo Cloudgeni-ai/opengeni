@@ -91,9 +91,9 @@ describe("production web handler", () => {
     for (const response of responses) {
       expect(response.headers.get("x-content-type-options")).toBe("nosniff");
       expect(response.headers.get("referrer-policy")).toBe("strict-origin-when-cross-origin");
-      // Embedding is supported, so the shell never forbids framing.
-      expect(response.headers.get("x-frame-options")).toBeNull();
-      expect(response.headers.get("content-security-policy")).toBeNull();
+      // Only the console itself may frame its pages; no script policy is set.
+      expect(response.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+      expect(response.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
     }
 
     // The setup page keeps its stricter policy so the bearer never leaks.
@@ -109,7 +109,43 @@ describe("production web handler", () => {
     expect(shared.headers.get("referrer-policy")).toBe("no-referrer");
     expect(shared.headers.get("x-robots-tag")).toBe("noindex, nofollow");
     expect(shared.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(shared.headers.get("x-frame-options")).toBe("SAMEORIGIN");
     expect(await shared.text()).toContain("Opengeni");
+  });
+
+  test("lets Office on the web frame only the Excel add-in pages", async () => {
+    const root = await fixture();
+    await mkdir(join(root, "office/assets"), { recursive: true });
+    await Bun.write(join(root, "office/index.html"), "<!doctype html><title>pane</title>");
+    await Bun.write(join(root, "office/auth-callback.html"), "<!doctype html><title>cb</title>");
+    await Bun.write(join(root, "office/assets/pane-abc.js"), "export {};\n");
+    const handler = createWebHandler(root);
+    for (const path of [
+      "/office/",
+      "/office/auth-callback.html",
+      "/office/assets/pane-abc.js",
+      "/office/manifest.xml",
+    ]) {
+      const response = await handler(new Request(`https://example.test${path}`));
+      expect(response.status).toBe(200);
+      const policy = response.headers.get("content-security-policy") ?? "";
+      expect(policy.startsWith("frame-ancestors 'self' ")).toBe(true);
+      for (const host of [
+        "https://*.officeapps.live.com",
+        "https://*.office.com",
+        "https://*.cloud.microsoft",
+        "https://*.sharepoint.com",
+      ]) {
+        expect(policy.split(" ")).toContain(host);
+      }
+      // X-Frame-Options cannot allow Microsoft's hosts, so it is not sent here.
+      expect(response.headers.get("x-frame-options")).toBeNull();
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    }
+    // A console route that merely starts with "office" keeps the strict policy.
+    const lookalike = await handler(new Request("https://example.test/officers"));
+    expect(lookalike.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
+    expect(lookalike.headers.get("x-frame-options")).toBe("SAMEORIGIN");
   });
 
   test("does not turn missing assets or path traversal into the SPA shell", async () => {
