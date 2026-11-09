@@ -182,6 +182,45 @@ describe("Teams app package", () => {
     ).toBeUndefined();
   });
 
+  test("uses the short name as the full name unless a full name is set", () => {
+    expect(buildTeamsAppManifest(options).name).toEqual({ short: "Opengeni", full: "Opengeni" });
+    expect(buildTeamsAppManifest({ ...options, appName: "Example" }).name).toEqual({
+      short: "Example",
+      full: "Example",
+    });
+    expect(buildTeamsAppManifest({ ...options, appFullName: "Opengeni for Teams" }).name).toEqual({
+      short: "Opengeni",
+      full: "Opengeni for Teams",
+    });
+    expect(
+      buildTeamsAppManifest({ ...options, appFullName: "x".repeat(100) }).name.full,
+    ).toHaveLength(100);
+    for (const appFullName of ["", "  ", "x".repeat(101)])
+      expect(() => buildTeamsAppManifest({ ...options, appFullName })).toThrow("appFullName");
+
+    const env = {
+      OPENGENI_TEAMS_APP_ID: options.appId,
+      OPENGENI_TEAMS_BOT_CLIENT_ID: options.botId,
+      OPENGENI_PUBLIC_BASE_URL: options.publicBaseUrl,
+      OPENGENI_TEAMS_WEBSITE_URL: options.websiteUrl,
+      OPENGENI_TEAMS_PRIVACY_URL: options.privacyUrl,
+      OPENGENI_TEAMS_TERMS_URL: options.termsOfUseUrl,
+    };
+    for (const OPENGENI_TEAMS_APP_FULL_NAME of [undefined, "", "  "])
+      expect(
+        teamsManifestOptionsFromEnv({ ...env, OPENGENI_TEAMS_APP_FULL_NAME }).appFullName,
+      ).toBeUndefined();
+    expect(
+      buildTeamsAppManifest(
+        teamsManifestOptionsFromEnv({
+          ...env,
+          OPENGENI_TEAMS_APP_NAME: "Opengeni",
+          OPENGENI_TEAMS_APP_FULL_NAME: " Opengeni for Teams ",
+        }),
+      ).name,
+    ).toEqual({ short: "Opengeni", full: "Opengeni for Teams" });
+  });
+
   test("describes the app, its AI, its requirements and its limits within Store limits", () => {
     for (const variant of [
       options,

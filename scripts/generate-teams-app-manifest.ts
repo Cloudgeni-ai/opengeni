@@ -10,7 +10,13 @@ export type TeamsManifestOptions = {
   privacyUrl: string;
   termsOfUseUrl: string;
   version?: string;
+  /** Teams' display name (`name.short`), shown in chat. */
   appName?: string;
+  /**
+   * The full app name (`name.full`), for example the Store listing name.
+   * Defaults to `appName`.
+   */
+  appFullName?: string | undefined;
   groupChats?: boolean;
   /** Team scope: mention Opengeni in an approved channel. */
   channels?: boolean;
@@ -67,6 +73,9 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
   const appName = options.appName ?? "Opengeni";
   if (!appName.trim() || appName.length > 30)
     throw new Error("appName must contain 1–30 characters");
+  const appFullName = options.appFullName ?? appName;
+  if (!appFullName.trim() || appFullName.length > 100)
+    throw new Error("appFullName must contain 1–100 characters");
   const version = options.version ?? "1.0.0";
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
     throw new Error("version must be three numeric components");
@@ -156,7 +165,7 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
       privacyUrl: httpsUrl(options.privacyUrl, "privacyUrl").href,
       termsOfUseUrl: httpsUrl(options.termsOfUseUrl, "termsOfUseUrl").href,
     },
-    name: { short: appName, full: appName },
+    name: { short: appName, full: appFullName },
     description,
     icons: { color: "color.png", outline: "outline.png" },
     accentColor: "#111111",
@@ -205,6 +214,8 @@ export function teamsManifestOptionsFromEnv(
     termsOfUseUrl: required("OPENGENI_TEAMS_TERMS_URL"),
     version: env.OPENGENI_TEAMS_APP_VERSION,
     appName: env.OPENGENI_TEAMS_APP_NAME,
+    // Unset or empty uses the short name.
+    appFullName: env.OPENGENI_TEAMS_APP_FULL_NAME?.trim() || undefined,
     developerName: env.OPENGENI_TEAMS_DEVELOPER_NAME?.trim() || undefined,
     // Unset or empty uses Opengeni's partner ID; only "none" leaves it out.
     mpnId: (() => {
