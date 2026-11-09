@@ -17,7 +17,10 @@ import { testSettings } from "@opengeni/testing/settings";
 import type { Hono } from "hono";
 
 import { createApp } from "../src/app";
-import { OAUTH_BROWSER_BINDING_COOKIE } from "../src/integrations/oauth-browser-binding";
+import {
+  OAUTH_BROWSER_BINDING_COOKIE,
+  OAUTH_BROWSER_BINDING_SECURE_COOKIE,
+} from "../src/integrations/oauth-browser-binding";
 
 // CASA 3.2.2: an integration OAuth state is bound to the browser, or the
 // signed-in person, that started it. These cases start from a real managed
@@ -192,7 +195,7 @@ async function startOneDrive(
 }
 
 function bindingValue(setCookie: string | null): string {
-  const match = new RegExp(`${OAUTH_BROWSER_BINDING_COOKIE}=([^;]+)`).exec(setCookie ?? "");
+  const match = new RegExp(`${OAUTH_BROWSER_BINDING_SECURE_COOKIE}=([^;]+)`).exec(setCookie ?? "");
   if (!match) throw new Error(`no binding cookie in ${setCookie}`);
   return match[1]!;
 }
@@ -280,10 +283,11 @@ describe("integration OAuth is bound to the browser that started it", () => {
     const provider = microsoftFixture();
     const app = buildApp(provider.fetch);
     const started = await startOneDrive(app, human);
-    expect(started.setCookie).toContain(`${OAUTH_BROWSER_BINDING_COOKIE}=`);
+    expect(started.setCookie).toContain(`${OAUTH_BROWSER_BINDING_SECURE_COOKIE}=`);
     expect(started.setCookie).toContain("HttpOnly");
     expect(started.setCookie).toContain("SameSite=Lax");
-    expect(started.setCookie).toContain("Path=/v1");
+    // Host-only on https, so a sibling subdomain cannot plant a binding.
+    expect(started.setCookie).toContain("Path=/;");
     expect(started.setCookie).toContain("Secure");
     const binding = bindingValue(started.setCookie);
 
@@ -296,14 +300,22 @@ describe("integration OAuth is bound to the browser that started it", () => {
     const other = await finish(
       app,
       started.state,
-      `${OAUTH_BROWSER_BINDING_COOKIE}=${"A".repeat(43)}`,
+      `${OAUTH_BROWSER_BINDING_SECURE_COOKIE}=${"A".repeat(43)}`,
     );
     expect(other.searchParams.get("reason")).toBe("browser_mismatch");
+    // The starter's value under the plain name, which any sibling subdomain
+    // could set, is not the host-only binding.
+    const tossed = await finish(app, started.state, `${OAUTH_BROWSER_BINDING_COOKIE}=${binding}`);
+    expect(tossed.searchParams.get("reason")).toBe("browser_mismatch");
     expect(provider.tokenRequests).toHaveLength(0);
     expect(await connectionCount(human)).toBe(0);
 
     // The refused attempts consumed nothing: the starter's browser finishes.
-    const owner = await finish(app, started.state, `${OAUTH_BROWSER_BINDING_COOKIE}=${binding}`);
+    const owner = await finish(
+      app,
+      started.state,
+      `${OAUTH_BROWSER_BINDING_SECURE_COOKIE}=${binding}`,
+    );
     expect(owner.searchParams.get("integration_oauth")).toBe("success");
     expect(provider.tokenRequests).toHaveLength(1);
     expect(await connectionCount(human)).toBe(1);
@@ -319,10 +331,14 @@ describe("integration OAuth is bound to the browser that started it", () => {
       app,
       human,
       {},
-      `${human.cookie}; ${OAUTH_BROWSER_BINDING_COOKIE}=${binding}`,
+      `${human.cookie}; ${OAUTH_BROWSER_BINDING_SECURE_COOKIE}=${binding}`,
     );
     expect(bindingValue(second.setCookie)).toBe(binding);
-    const finished = await finish(app, first.state, `${OAUTH_BROWSER_BINDING_COOKIE}=${binding}`);
+    const finished = await finish(
+      app,
+      first.state,
+      `${OAUTH_BROWSER_BINDING_SECURE_COOKIE}=${binding}`,
+    );
     expect(finished.searchParams.get("integration_oauth")).toBe("success");
   });
 
@@ -391,7 +407,7 @@ describe("integration OAuth is bound to the browser that started it", () => {
       expect(as.tokenRequests).toHaveLength(0);
       expect(await connectionCount(human)).toBe(0);
 
-      const accepted = await callback(`${OAUTH_BROWSER_BINDING_COOKIE}=${binding}`);
+      const accepted = await callback(`${OAUTH_BROWSER_BINDING_SECURE_COOKIE}=${binding}`);
       const acceptedLocation = new URL(accepted.headers.get("location")!, PUBLIC_BASE_URL);
       expect(acceptedLocation.searchParams.get("integration_oauth")).toBe("success");
       expect(as.tokenRequests).toHaveLength(1);
@@ -403,7 +419,7 @@ describe("integration OAuth is bound to the browser that started it", () => {
   });
 });
 
-describe("connect return URLs stay on this deployment for browser sessions", () => {
+describe("connect return URLs stay on this deployment for signed-in people", () => {
   async function begin(human: ManagedHuman, returnUrl: string) {
     return await buildApp(microsoftFixture().fetch).request(
       `${PUBLIC_BASE_URL}/v1/workspaces/${human.personalWorkspaceId}/connect/attempts`,
@@ -427,10 +443,12 @@ describe("connect return URLs stay on this deployment for browser sessions", () 
       "https://evil.example/landing",
       "https://app.example.test.evil.example/landing",
       "http://app.example.test/landing",
+      "https://app.example.test@evil.example/landing",
+      "https://app.example.test:8443/landing",
     ]) {
       const response = await begin(human, returnUrl);
       expect(response.status, returnUrl).toBe(400);
-      expect(await response.text()).toContain("own origin");
+      expect(await response.text()).toMatch(/own origin|invalid return URL/);
     }
   });
 

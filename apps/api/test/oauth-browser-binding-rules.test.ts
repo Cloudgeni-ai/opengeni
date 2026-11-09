@@ -3,7 +3,10 @@ import { describe, expect, test } from "bun:test";
 import { OPENGENI_DESKTOP_APP_HEADER } from "@opengeni/contracts";
 import { Hono } from "hono";
 
-import { trustedConnectReturnOrigin } from "../src/integrations/connect-return-url";
+import {
+  requireConnectReturnUrl,
+  trustedConnectReturnOrigin,
+} from "../src/integrations/connect-return-url";
 import {
   OAUTH_BROWSER_BINDING_COOKIE,
   oauthBrowserBindingDigest,
@@ -48,7 +51,10 @@ describe("how an OAuth start proves its callback", () => {
       { subjectId: person, canonicalManagedHumanSession: true },
     );
     expect(binding.browserProof).toBe("cookie");
-    const value = /opengeni_oauth_binding=([^;]+)/.exec(setCookie ?? "")![1]!;
+    // https deployments get the host-only cookie.
+    const value = /__Host-opengeni_oauth_binding=([^;]+)/.exec(setCookie ?? "")![1]!;
+    expect(setCookie).toContain("Path=/;");
+    expect(setCookie).toContain("Secure");
     expect(binding.browserBinding).toBe(oauthBrowserBindingDigest(value));
     // The state carries only the digest, never the cookie itself.
     expect(binding.browserBinding).not.toContain(value);
@@ -158,18 +164,16 @@ describe("this deployment's own connect return origins", () => {
     betterAuthTrustedOrigins: "https://alias.example.test",
     corsAllowOriginRegex: String.raw`https://console[.]example[.]test`,
     localAllowedOrigins: undefined,
-    sitesDomain: "sites.example.test",
   } as never;
   const trusted = (url: string) =>
     trustedConnectReturnOrigin(origins, new URL(url), "https://api.example.test/v1/x");
 
-  test("own, trusted, cookie-CORS and Sites origins are trusted", () => {
+  test("own, trusted and cookie-CORS origins are trusted", () => {
     for (const url of [
       "https://api.example.test/connect/finished",
       "https://app.example.test/workspaces/w",
       "https://alias.example.test/",
       "https://console.example.test/a",
-      "https://my-site.sites.example.test/page",
     ])
       expect(trusted(url), url).toBe(true);
   });
@@ -181,7 +185,42 @@ describe("this deployment's own connect return origins", () => {
       "http://app.example.test/",
       "http://my-site.sites.example.test/",
       "https://evilsites.example.test/",
+      // Anyone can publish a Site, so Sites are not this deployment's pages.
+      "https://my-site.sites.example.test/page",
+      "https://console.example.test.evil.example/",
+      "https://evil.example/https://console.example.test",
+      "https://app.example.test:8443/",
+      "https://app.example.test@evil.example/",
     ])
       expect(trusted(url), url).toBe(false);
+  });
+});
+
+describe("who the connect return rule applies to", () => {
+  const origins = { publicBaseUrl: "https://app.example.test" } as never;
+  async function status(
+    headers: Record<string, string>,
+    canonicalManagedHumanSession: boolean,
+    returnUrl: string,
+  ): Promise<number> {
+    const app = new Hono().post("/v1/connect", (c) => {
+      requireConnectReturnUrl(c, origins, { canonicalManagedHumanSession }, new URL(returnUrl));
+      return c.body(null, 204);
+    });
+    return (await app.request("https://app.example.test/v1/connect", { method: "POST", headers }))
+      .status;
+  }
+
+  test("a signed-in person returns only to this deployment, by cookie or native app bearer", async () => {
+    for (const headers of [{ cookie: "session=x" }, { authorization: "Bearer ogapp_native" }]) {
+      expect(await status(headers, true, "https://evil.example/")).toBe(400);
+      expect(await status(headers, true, "https://app.example.test/back")).toBe(204);
+    }
+  });
+
+  test("host credentials keep returning their users to the host's own pages", async () => {
+    expect(
+      await status({ authorization: "Bearer og_host_key" }, false, "https://host.example/back"),
+    ).toBe(204);
   });
 });

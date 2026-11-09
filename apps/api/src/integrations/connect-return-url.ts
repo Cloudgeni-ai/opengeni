@@ -14,13 +14,13 @@ type ReturnOriginSettings = Pick<
   | "betterAuthTrustedOrigins"
   | "corsAllowOriginRegex"
   | "localAllowedOrigins"
-  | "sitesDomain"
 >;
 
 /**
  * Whether a connect return URL lands on one of this deployment's own browser
  * origins: the API and web base URLs, trusted auth origins, the cookie-CORS
- * allowlist, local-mode origins, and published Sites.
+ * allowlist and local-mode origins. Published Sites are not trusted: anyone can
+ * publish one, so they would turn a callback into a redirect to their page.
  */
 export function trustedConnectReturnOrigin(
   settings: ReturnOriginSettings,
@@ -42,25 +42,17 @@ export function trustedConnectReturnOrigin(
   }
   if (own.has(origin)) return true;
   try {
-    if (allowedCorsOrigin(settings.corsAllowOriginRegex, origin)) return true;
+    return allowedCorsOrigin(settings.corsAllowOriginRegex, origin);
   } catch {
     // A malformed operator pattern trusts nothing extra.
+    return false;
   }
-  const sites = settings.sitesDomain
-    ?.trim()
-    .toLowerCase()
-    .replace(/^\.+|\.+$/g, "");
-  return Boolean(
-    sites &&
-    target.protocol === "https:" &&
-    (target.hostname === sites || target.hostname.endsWith(`.${sites}`)),
-  );
 }
 
 /**
  * The open-redirect rule for connect return URLs (CASA 5.1.2). A person signed
- * in through the Opengeni browser session returns only to this deployment's
- * own origins. Host products authenticate with their own keys or delegated
+ * in to Opengeni (browser session or native app credential) returns only to
+ * this deployment's own origins. Host products authenticate with their own keys or delegated
  * tokens and return their users to their own pages, which Opengeni has no
  * registry of, so for them the authenticated host credential is the authority.
  */
@@ -70,9 +62,11 @@ export function requireConnectReturnUrl(
   authorization: Pick<AccessGrantAuthorization, "canonicalManagedHumanSession">,
   target: URL,
 ): void {
-  const browserSession =
-    authorization.canonicalManagedHumanSession && !c.req.header("authorization");
-  if (!browserSession || trustedConnectReturnOrigin(settings, target, c.req.url)) return;
+  if (
+    !authorization.canonicalManagedHumanSession ||
+    trustedConnectReturnOrigin(settings, target, c.req.url)
+  )
+    return;
   throw new HTTPException(400, {
     message: "returnUrl must be on this Opengeni deployment's own origin",
   });

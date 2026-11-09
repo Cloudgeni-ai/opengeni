@@ -45,6 +45,11 @@ export type OAuthCallbackBrowser = {
 };
 
 export const OAUTH_BROWSER_BINDING_COOKIE = "opengeni_oauth_binding";
+/**
+ * On https the cookie is host-only (`__Host-`, Path=/), so a page on a sibling
+ * subdomain cannot plant its own binding value in someone else's browser.
+ */
+export const OAUTH_BROWSER_BINDING_SECURE_COOKIE = `__Host-${OAUTH_BROWSER_BINDING_COOKIE}`;
 export const OAUTH_BROWSER_MISMATCH_MESSAGE =
   "This connection was started in another browser or by another person";
 /** Longer than a state's ten minutes, so a slow consent page never outlives it. */
@@ -55,8 +60,12 @@ export function oauthBrowserBindingDigest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function bindingCookieValues(c: Context): string[] {
-  const prefix = `${OAUTH_BROWSER_BINDING_COOKIE}=`;
+function bindingCookieName(secure: boolean): string {
+  return secure ? OAUTH_BROWSER_BINDING_SECURE_COOKIE : OAUTH_BROWSER_BINDING_COOKIE;
+}
+
+function bindingCookieValues(c: Context, secure: boolean): string[] {
+  const prefix = `${bindingCookieName(secure)}=`;
   return (c.req.header("cookie") ?? "")
     .split(";")
     .map((part) => part.trim())
@@ -96,12 +105,13 @@ export function oauthBrowserBindingForStart(
   const browserCookieSession =
     !c.req.header("authorization") && !c.req.header(OPENGENI_DESKTOP_APP_HEADER);
   if (!browserCookieSession) return { browserProof: "session" };
-  const value = bindingCookieValues(c)[0] ?? randomBytes(32).toString("base64url");
-  setCookie(c, OAUTH_BROWSER_BINDING_COOKIE, value, {
+  const secure = secureRequest(c, settings);
+  const value = bindingCookieValues(c, secure)[0] ?? randomBytes(32).toString("base64url");
+  setCookie(c, bindingCookieName(secure), value, {
     httpOnly: true,
     sameSite: "Lax",
-    secure: secureRequest(c, settings),
-    path: "/v1",
+    secure,
+    path: secure ? "/" : "/v1",
     maxAge: OAUTH_BROWSER_BINDING_MAX_AGE_SECONDS,
   });
   return { browserProof: "cookie", browserBinding: oauthBrowserBindingDigest(value) };
@@ -113,7 +123,9 @@ export async function oauthCallbackBrowser(
   deps: AccessDeps,
 ): Promise<OAuthCallbackBrowser> {
   return {
-    bindingDigests: bindingCookieValues(c).map(oauthBrowserBindingDigest),
+    bindingDigests: bindingCookieValues(c, secureRequest(c, deps.settings)).map(
+      oauthBrowserBindingDigest,
+    ),
     signedInSubjectId: await managedHumanSubjectForRequest(c, deps),
   };
 }

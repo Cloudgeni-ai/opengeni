@@ -145,15 +145,20 @@ Integration Definition OAuth therefore sign a `browserProof` into their state
 (`apps/api/src/integrations/oauth-browser-binding.ts`):
 
 - `cookie`: a start from a signed-in browser sets a random HttpOnly,
-  SameSite=Lax `opengeni_oauth_binding` cookie on `/v1` and signs only its
-  SHA-256. The callback must arrive in a browser holding that cookie. One
+  SameSite=Lax binding cookie (`__Host-opengeni_oauth_binding` on https, so a
+  sibling subdomain cannot plant one; `opengeni_oauth_binding` on `/v1` over
+  plain http) and signs only its SHA-256. The callback must arrive in a browser holding that cookie. One
   browser reuses one value, so parallel connections all finish.
 - `session`: the desktop app's consent finishes in the person's own browser,
   and a native app credential arrives as a bearer, so neither can carry the
   cookie. That callback browser must be signed in to Opengeni as the starter.
 - `none`: API keys, services and host products (delegated tokens and external
   user continuations) authenticate with credentials issued to the host's
-  server, which decides which of its users finishes the consent.
+  server, which decides which of its users finishes the consent. Someone who
+  holds their own workspace API key therefore can still send its consent link
+  to another person; that workspace-owned case is a product decision.
+  Personal-only connectors such as Gmail need a signed-in person, so they never
+  take this lane.
 
 A refused callback reports `browser_mismatch` at `state_verify` before any
 attempt is claimed, nonce consumed or code exchanged, so the starter can still
@@ -161,10 +166,11 @@ finish, and it returns to Opengeni's own integrations page rather than the
 attempt's external `returnUrl`. A state minted before the proof existed is
 honoured for its ten-minute life during a rolling deploy.
 
-Connect attempts started from the Opengeni browser session may return only to
-this deployment's own origins: the public and web base URLs,
-`OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS`, the cookie-CORS allowlist, local-mode
-origins and published Sites. Host products return their users to their own
+Connect attempts started by a signed-in person (browser session or native app
+credential) may return only to this deployment's own origins: the public and
+web base URLs, `OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS`, the cookie-CORS
+allowlist and local-mode origins. Published Sites are not trusted, because
+anyone can publish one. Host products return their users to their own
 pages; Opengeni keeps no registry of those, so their authenticated host
 credential remains the authority for that destination.
 
