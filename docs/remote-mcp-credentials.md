@@ -239,17 +239,20 @@ works; a login a Slack agent depends on is also left in place.
 
 Google accounts also have a stable account ID. Gmail, Google Calendar and
 Google Drive sign-ins record Google's OpenID subject as `metadata.googleSubject`
-beside the verified email, read from Google's tokeninfo for the new access
-token (accepted only when the token's audience is this deployment's client; no
-extra scope, so the consent screen is unchanged). When both logins have it, the
-ID alone decides: an account whose address changed (a renamed Workspace user or
-domain) reconnects its existing login, and an address now held by another
-Google account is a different account. If the read fails, the email decides as
-before. A login saved before the ID was recorded is matched by its email, or,
-for Gmail, by its recorded address being one of the signed-in account's
-accepted send-as addresses (its primary address or a verified alias); saving
-that sign-in records the ID on it. Nothing is backfilled: older logins adopt the
-ID the next time they are signed in to.
+beside the verified email. They ask for `openid` as well as the service's
+scopes, and the ID is read from Google's tokeninfo for the new access token,
+accepted only when the token's audience is this deployment's client. When both
+logins have it, the ID alone decides: an account whose address changed (a
+renamed Workspace user or domain) reconnects its existing login, and an address
+now held by another Google account is a different account. Reconnecting names
+the account to Google by its ID (`login_hint`) once it is recorded. If the read
+fails, the email decides as before, and a reconnect keeps the ID the login
+already had. A login saved before the ID was recorded is matched by its email,
+and reconnecting it records the ID; connecting again when that reuses the
+login writes nothing. Nothing is backfilled, and no other signal (such as a
+send-as address, which proves only that someone once verified it) stands in for
+the ID, so a login whose address changed before it recorded the ID is removed
+and added again.
 
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit

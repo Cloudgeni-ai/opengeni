@@ -58,27 +58,21 @@ const text = (value: unknown) => (typeof value === "string" && value ? value : n
  * Whether a stored login is the account that just signed in (which has a
  * verified identity). A stable account ID (see stableAccountSubjectKeyFor)
  * decides alone once both have one, so a changed email is still the same
- * account and a reused email is not. Otherwise the identity tuple decides, and
- * a login recorded before its account ID also matches when the one address it
- * recorded is an address the signed-in account proved it owns; saving the
- * sign-in then records the account ID on it.
+ * account and a reused email is not. Otherwise the identity tuple decides: a
+ * login saved before its account ID was recorded is matched by its email, and
+ * reconnecting it records the ID.
  */
 function sameVerifiedAccount(
   stored: Record<string, unknown>,
   incoming: Record<string, unknown>,
   keys: readonly string[] | undefined,
   subjectKey: string | undefined,
-  ownedAddresses: readonly string[],
 ): boolean {
   const storedSubject = subjectKey ? text(stored[subjectKey]) : null;
   const incomingSubject = subjectKey ? text(incoming[subjectKey]) : null;
   if (storedSubject && incomingSubject) return storedSubject === incomingSubject;
   const expected = verifiedIdentity(stored, keys);
-  if (!expected) return false;
-  if (expected === verifiedIdentity(incoming, keys)) return true;
-  if (storedSubject || !incomingSubject || keys?.length !== 1) return false;
-  const address = text(stored[keys[0]!]);
-  return !!address && ownedAddresses.includes(address.toLowerCase());
+  return !!expected && expected === verifiedIdentity(incoming, keys);
 }
 
 /** Call under the shared owner/resource transaction lock. Unknown identity is
@@ -104,9 +98,6 @@ export function decideOAuthAccountConnection(input: {
   identityKeys?: readonly string[] | undefined;
   /** The metadata key of the service's stable account ID, when it has one. */
   subjectKey?: string | undefined;
-  /** Addresses the signed-in account proved it owns (Gmail's accepted send-as
-   * addresses), lower-cased; lets a login recorded before its account ID adopt it. */
-  ownedAddresses?: readonly string[] | undefined;
   requestedConnectionId?: string | undefined;
 }):
   | { kind: "write" }
@@ -126,7 +117,6 @@ export function decideOAuthAccountConnection(input: {
       input.metadata,
       input.identityKeys,
       input.subjectKey,
-      input.ownedAddresses ?? [],
     );
   // One account is the same provider account wherever it was signed in from:
   // the issuer names the account namespace, not the OAuth client. A deployment

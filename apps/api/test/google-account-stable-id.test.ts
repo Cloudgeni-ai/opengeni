@@ -8,7 +8,6 @@ import {
   OFFICIAL_DRIVE_MCP_URL,
   OFFICIAL_GMAIL_MCP_URL,
   OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
-  gmailAcceptedSendAsAddresses,
   googleSubjectFromTokenInfo,
   stableAccountSubjectKeyFor,
 } from "../src/integrations/oauth-profiles";
@@ -18,7 +17,6 @@ const base = {
   authorizationServerIssuer: "https://accounts.google.com",
   clientId: "client",
 };
-const keys = ["gmailEmail"];
 
 function login(
   metadata: Record<string, unknown>,
@@ -41,7 +39,6 @@ function decide(input: {
   stored: ConnectionMetadata;
   signedIn: Record<string, unknown>;
   reconnect?: boolean;
-  ownedAddresses?: string[];
 }) {
   return decideOAuthAccountConnection({
     accounts: [input.stored],
@@ -49,15 +46,15 @@ function decide(input: {
     providerDomain: "gmailmcp.googleapis.com",
     mcpUrl: OFFICIAL_GMAIL_MCP_URL,
     metadata: { ...base, ...input.signedIn },
-    identityKeys: keys,
+    identityKeys: ["gmailEmail"],
     subjectKey: stableAccountSubjectKeyFor(OFFICIAL_GMAIL_MCP_URL),
-    ownedAddresses: input.ownedAddresses,
     grantedScopes: ["read"],
     ...(input.reconnect === false ? {} : { requestedConnectionId: "existing" }),
   });
 }
 
 const renamed = { gmailEmail: "person@new.test", googleSubject: "1001" };
+const mismatch = { kind: "reject", reason: "account_mismatch" };
 
 describe("Google logins are identified by Google's account ID", () => {
   test("Gmail, Calendar and Drive record it; other services don't", () => {
@@ -77,59 +74,27 @@ describe("Google logins are identified by Google's account ID", () => {
 
   test("an email now on another Google account is a different account", () => {
     const stored = login({ gmailEmail: "person@new.test", googleSubject: "2002" });
-    expect(decide({ stored, signedIn: renamed })).toEqual({
-      kind: "reject",
-      reason: "account_mismatch",
-    });
+    expect(decide({ stored, signedIn: renamed })).toEqual(mismatch);
   });
 
-  test("a login saved before the account ID adopts it when the email matches", () => {
-    const stored = login({ gmailEmail: "person@new.test" });
-    expect(decide({ stored, signedIn: renamed })).toEqual({ kind: "write" });
+  test("a login saved before the account ID adopts it only when the email matches", () => {
+    expect(decide({ stored: login({ gmailEmail: "person@new.test" }), signedIn: renamed })).toEqual(
+      { kind: "write" },
+    );
+    expect(decide({ stored: login({ gmailEmail: "person@old.test" }), signedIn: renamed })).toEqual(
+      mismatch,
+    );
   });
 
-  test("a login saved before the account ID adopts it when its address is one the account owns", () => {
-    const stored = login({ gmailEmail: "Person@Old.test" });
-    expect(
-      decide({ stored, signedIn: renamed, ownedAddresses: ["person@new.test", "person@old.test"] }),
-    ).toEqual({ kind: "write" });
-    expect(decide({ stored, signedIn: renamed, ownedAddresses: ["person@new.test"] })).toEqual({
-      kind: "reject",
-      reason: "account_mismatch",
-    });
-  });
-
-  test("an owned address only counts with the account ID, so the login adopts it", () => {
-    const stored = login({ gmailEmail: "person@old.test" });
-    expect(
-      decide({
-        stored,
-        signedIn: { gmailEmail: "person@new.test" },
-        ownedAddresses: ["person@old.test"],
-      }),
-    ).toEqual({ kind: "reject", reason: "account_mismatch" });
-  });
-
-  test("an owned address never overrides a recorded account ID", () => {
-    const stored = login({ gmailEmail: "person@old.test", googleSubject: "2002" });
-    expect(decide({ stored, signedIn: renamed, ownedAddresses: ["person@old.test"] })).toEqual({
-      kind: "reject",
-      reason: "account_mismatch",
-    });
-  });
-
-  test("without the account ID this time, the email still decides as before", () => {
+  test("without the account ID this time, the email decides as before", () => {
     const stored = login({ gmailEmail: "person@new.test", googleSubject: "1001" });
     expect(decide({ stored, signedIn: { gmailEmail: "person@new.test" } })).toEqual({
       kind: "write",
     });
-    expect(decide({ stored, signedIn: { gmailEmail: "person@other.test" } })).toEqual({
-      kind: "reject",
-      reason: "account_mismatch",
-    });
+    expect(decide({ stored, signedIn: { gmailEmail: "person@other.test" } })).toEqual(mismatch);
   });
 
-  test("adding the renamed account again points at the existing login", () => {
+  test("adding the renamed account again points at its existing login", () => {
     const needsReauth = login({ gmailEmail: "person@old.test", googleSubject: "1001" });
     expect(decide({ stored: needsReauth, signedIn: renamed, reconnect: false })).toEqual({
       kind: "reject",
@@ -143,6 +108,34 @@ describe("Google logins are identified by Google's account ID", () => {
       kind: "reuse",
       connection: active,
     });
+  });
+
+  test("adding another account that took over an address saves a separate login", () => {
+    const other = login({ gmailEmail: "person@new.test", googleSubject: "2002" });
+    expect(decide({ stored: other, signedIn: renamed, reconnect: false })).toEqual({
+      kind: "write",
+    });
+  });
+
+  test("reviving a removed login refuses while the same account has a live one", () => {
+    const live = login(
+      { gmailEmail: "person@old.test", googleSubject: "1001" },
+      { id: "live", status: "active" },
+    );
+    const removed = login({ gmailEmail: "person@new.test" }, { status: "revoked" });
+    expect(
+      decideOAuthAccountConnection({
+        accounts: [removed, live],
+        ownerSubjectId: "owner",
+        providerDomain: "gmailmcp.googleapis.com",
+        mcpUrl: OFFICIAL_GMAIL_MCP_URL,
+        metadata: { ...base, ...renamed },
+        identityKeys: ["gmailEmail"],
+        subjectKey: "googleSubject",
+        grantedScopes: ["read"],
+        requestedConnectionId: "existing",
+      }),
+    ).toEqual({ kind: "reject", reason: "account_already_connected" });
   });
 });
 
@@ -160,93 +153,50 @@ describe("reading Google's account ID", () => {
         "Google account verification failed",
       );
   });
-
-  test("only the primary and accepted send-as addresses are owned", () => {
-    expect(
-      gmailAcceptedSendAsAddresses({
-        sendAs: [
-          { sendAsEmail: "Person@New.test", isPrimary: true },
-          { sendAsEmail: "person@old.test", verificationStatus: "accepted" },
-          { sendAsEmail: "someone@else.test", verificationStatus: "pending" },
-          { sendAsEmail: "not-an-address", verificationStatus: "accepted" },
-          "junk",
-        ],
-      }),
-    ).toEqual(["person@new.test", "person@old.test"]);
-    expect(gmailAcceptedSendAsAddresses({})).toEqual([]);
-  });
 });
 
 describe("the callback's account ID read", () => {
   const settings = testSettings({});
   const deadline = { signal: new AbortController().signal, remainingMs: () => 30_000 };
-  const token = { accessToken: "new-access", tokenType: "Bearer" };
+  const token = { accessToken: "new-access" };
   let spy: ReturnType<typeof spyOn> | undefined;
   afterEach(() => spy?.mockRestore());
+  const read = (mcpUrl: string) =>
+    stableAccountIdentity(undefined, settings, { mcpUrl }, token, "client", deadline);
 
-  test("reads the account ID with the token in the body, and Gmail's owned addresses", async () => {
+  test("reads the account ID with the token in the body, never the URL", async () => {
     const seen: string[] = [];
     spy = spyOn(network, "pinnedFetch").mockImplementation(async (input, init) => {
-      const url = String(input);
-      seen.push(url);
-      if (url === "https://oauth2.googleapis.com/tokeninfo") {
-        expect(init?.method).toBe("POST");
-        expect(new URLSearchParams(String(init?.body)).get("access_token")).toBe("new-access");
-        return Response.json({ sub: "1001", aud: "client", scope: "gmail.readonly" });
-      }
-      if (url === "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs") {
-        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer new-access");
-        return Response.json({
-          sendAs: [{ sendAsEmail: "person@old.test", verificationStatus: "accepted" }],
-        });
-      }
-      throw new Error(`Unexpected destination: ${url}`);
+      seen.push(String(input));
+      expect(init?.method).toBe("POST");
+      expect(new URLSearchParams(String(init?.body)).get("access_token")).toBe("new-access");
+      return Response.json({ sub: "1001", aud: "client" });
     });
-    expect(
-      await stableAccountIdentity(
-        undefined,
-        settings,
-        { mcpUrl: OFFICIAL_GMAIL_MCP_URL },
-        token,
-        "client",
-        deadline,
-      ),
-    ).toEqual({ identity: { googleSubject: "1001" }, ownedAddresses: ["person@old.test"] });
-    expect(seen.every((url) => !url.includes("new-access"))).toBe(true);
+    for (const url of [
+      OFFICIAL_GMAIL_MCP_URL,
+      OFFICIAL_GOOGLE_CALENDAR_MCP_URL,
+      OFFICIAL_DRIVE_MCP_URL,
+    ])
+      expect(await read(url)).toEqual({ googleSubject: "1001" });
+    expect(new Set(seen)).toEqual(new Set(["https://oauth2.googleapis.com/tokeninfo"]));
   });
 
-  test("Calendar reads only the account ID; failures leave both unknown", async () => {
-    const seen: string[] = [];
-    spy = spyOn(network, "pinnedFetch").mockImplementation(async (input) => {
-      seen.push(String(input));
-      return new Response(null, { status: 503 });
-    });
-    expect(
-      await stableAccountIdentity(
-        undefined,
-        settings,
-        { mcpUrl: OFFICIAL_GOOGLE_CALENDAR_MCP_URL },
-        token,
-        "client",
-        deadline,
-      ),
-    ).toEqual({ identity: {}, ownedAddresses: [] });
-    expect(seen).toEqual(["https://oauth2.googleapis.com/tokeninfo"]);
+  test("a failed or unproven read leaves it unknown", async () => {
+    for (const answer of [
+      () => new Response(null, { status: 503 }),
+      () => Response.json({ aud: "client" }),
+      () => Response.json({ sub: "1001", aud: "someone-else" }),
+    ]) {
+      spy?.mockRestore();
+      spy = spyOn(network, "pinnedFetch").mockImplementation(async () => answer());
+      expect(await read(OFFICIAL_GMAIL_MCP_URL)).toEqual({});
+    }
   });
 
   test("services without an account ID make no request", async () => {
     spy = spyOn(network, "pinnedFetch").mockImplementation(async () => {
       throw new Error("must not be called");
     });
-    expect(
-      await stableAccountIdentity(
-        undefined,
-        settings,
-        { mcpUrl: "https://mcp.notion.com/mcp" },
-        token,
-        "client",
-        deadline,
-      ),
-    ).toEqual({ identity: {}, ownedAddresses: [] });
+    expect(await read("https://mcp.notion.com/mcp")).toEqual({});
   });
 });
