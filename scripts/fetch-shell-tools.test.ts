@@ -96,9 +96,14 @@ describe("pinned shell tools manifest", () => {
   test("the committed Linux jq is the pinned static musl build of the pinned release", async () => {
     const script = await readFile(join(root, "scripts/build-static-jq.sh"), "utf8");
     expect(script).toContain(`JQ_VERSION=${SHELL_TOOLS_VERSIONS.jq.version}\n`);
-    // The source jq publishes, pinned as in jq's sha256sum.txt.
+    // The inputs that decide the bytes: jq's source, pinned as in jq's
+    // sha256sum.txt, and the zig toolchain, pinned as in ziglang.org's index.
     expect(script).toContain(
       "JQ_SOURCE_SHA256=71b8d6e8f5fe81f6c6d0d110e3892251f6ce76ed095abd315e26e6e1193af3af",
+    );
+    expect(script).toContain("ZIG_VERSION=0.16.0\n");
+    expect(script).toContain(
+      "ZIG_SHA256=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00",
     );
     const machines = { x86_64: 62, aarch64: 183 } as const;
     for (const [arch, target] of Object.entries(MANAGED_SHELL_TOOLS_TARGETS)) {
@@ -137,9 +142,7 @@ describe("pinned shell tools manifest", () => {
       .flatMap((asset) => ("url" in asset ? [`${asset.sha256} ${asset.url}`] : []))
       .sort();
     const vendored = [
-      ...new Set(
-        linux.flatMap((asset) => ("path" in asset ? [`${dirname(asset.path)}/`] : [])),
-      ),
+      ...new Set(linux.flatMap((asset) => ("path" in asset ? [`${dirname(asset.path)}/`] : []))),
     ];
     expect(vendored).toEqual(["agent/vendor/jq/"]);
     for (const path of [

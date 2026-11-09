@@ -28,7 +28,10 @@ import {
 } from "../packages/runtime/src/sandbox/shell-tools-manifest";
 
 const REPOSITORY = resolve(import.meta.dir, "..");
-const NOTICES = join(REPOSITORY, "packages/runtime/src/sandbox/shell-tools-THIRD-PARTY-NOTICES.txt");
+const NOTICES = join(
+  REPOSITORY,
+  "packages/runtime/src/sandbox/shell-tools-THIRD-PARTY-NOTICES.txt",
+);
 
 function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
