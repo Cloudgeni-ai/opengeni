@@ -3,7 +3,6 @@ import { createReadStream } from "node:fs";
 import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createInterface } from "node:readline";
 import { ApplicationFailure } from "@temporalio/activity";
 import { reviveRestoredArchivedSessions, stopArchivedSessionWork } from "@opengeni/core";
 import {
@@ -167,18 +166,30 @@ async function writeBundleAndTranscript(
         sessionId: scope.sessionId,
       }),
     );
-    const input = createReadStream(staged, { encoding: "utf8" });
-    const lines = createInterface({ input, crlfDelay: Infinity });
-    try {
-      for await (const line of lines) await write(line);
-    } finally {
-      lines.close();
-      input.destroy();
-    }
+    for await (const line of stagedLines(staged)) await write(line);
     await write(JSON.stringify({ end: true, events }));
   });
   await rm(staged, { force: true });
   return { bundle, transcript: { spool, events } };
+}
+
+/**
+ * The lines of a staged file, split only at "\n". Line readers also split at
+ * "\r" and Unicode line separators, which JSON leaves inside its strings.
+ */
+async function* stagedLines(path: string): AsyncGenerator<string> {
+  let partial: string[] = [];
+  for await (const chunk of createReadStream(path, { encoding: "utf8" }) as AsyncIterable<string>) {
+    let start = 0;
+    for (let end = chunk.indexOf("\n"); end !== -1; end = chunk.indexOf("\n", start)) {
+      partial.push(chunk.slice(start, end));
+      yield partial.join("");
+      partial = [];
+      start = end + 1;
+    }
+    if (start < chunk.length) partial.push(chunk.slice(start));
+  }
+  if (partial.length > 0) yield partial.join("");
 }
 
 export type ArchiveSessionOutcome = "archived" | "skipped" | "failed";
