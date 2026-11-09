@@ -25,18 +25,19 @@ access and do not rewrite existing session/usage visibility policies.
 
 ## Rollout and activation
 
-`OPENGENI_USAGE_ALLOWANCES_ENABLED` defaults to `false`. It gates creation
-and changes of allowance configuration, grants, and non-null member rules,
-not reading or enforcing policies already persisted.
-While disabled, those producer writes return HTTP 409. Authorized
-exact-version clear and `rule: null` recovery writes remain available; neither
-operation bypasses its normal authority or version checks.
+`OPENGENI_USAGE_ALLOWANCES_ENABLED` defaults to `true`. It gates creation
+and changes of allowance configuration, grants, non-null member rules and the
+per-person Personal workspace limit, not reading or enforcing policies already
+persisted. Setting it to `false` is an operator opt-out: those producer writes
+then return HTTP 409. Authorized exact-version clear and `rule: null` recovery
+writes remain available; neither operation bypasses its normal authority or
+version checks.
 
-1. Apply migrations 0552–0554 together and provision the matching database roles.
-2. Upgrade **every API, control-worker, and turn-worker consumer** to the
-   allowance-aware release before allowing producers to write new policies.
-3. Enable `OPENGENI_USAGE_ALLOWANCES_ENABLED` for the API producers, then
-   configure plans through organization-authorized backend/admin flows.
+It started as a rollout gate (apply migrations 0552–0554, upgrade every API,
+control worker and turn worker, then enable producers). That precondition now
+always holds: a release only runs on a database that has applied the whole
+0000–0977 migration baseline, which includes 0552–0554, so no
+pre-allowance consumer can still be running beside it.
 
 The flag is not a budget-enforcement kill switch. Setting it back to false
 must not make persisted policies invisible or let older consumers execute
@@ -162,8 +163,9 @@ await og.updateOrganizationPrivacySettings(organizationId, {
 It sits with the organization's other Personal workspace choices, so the same
 owners, admins and administration-capable organization keys change it; agents
 never do, even with full access.
-Setting a limit takes `OPENGENI_USAGE_ALLOWANCES_ENABLED`, like a workspace
-budget; removing one never does.
+Like a workspace budget, a deployment that sets
+`OPENGENI_USAGE_ALLOWANCES_ENABLED=false` refuses new limits; removing one
+always works.
 
 - It applies to a Personal workspace with no budget of its own, and acts as
   that workspace's monthly budget: reads (`/usage`, `/usage/me`) report it as

@@ -176,7 +176,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     documentEmbeddingRateMicrosPerMillionBytes: 0,
     entitlementsMode: "none",
     usageLimitsMode: "none",
-    usageAllowancesEnabled: false,
+    usageAllowancesEnabled: true,
     sessionUsageLimitsEnabled: false,
     staticEntitlementsJson: "{}",
     staticUsageLimitsJson: "{}",
