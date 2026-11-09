@@ -1066,6 +1066,22 @@ function SessionsIndexRouteContent({
     models: modelCatalog.models,
     headsUpDismissed: ownSubscriptionHeadsUp.dismissed || !workspace?.accountId,
   });
+  const ownSubscriptionNoticeView = ownSubscriptionNotice ? (
+    <div className="mt-6">
+      <OwnSubscriptionPlanNotice
+        plan={ownSubscriptionNotice.plan}
+        workspaceId={workspaceId}
+        canUpgrade={hasAccountPermission(
+          context.accessContext,
+          workspace?.accountId ?? "",
+          "billing:manage",
+        )}
+        {...(ownSubscriptionNotice.dismissible
+          ? { onDismiss: ownSubscriptionHeadsUp.dismiss }
+          : {})}
+      />
+    </div>
+  ) : null;
   // The signup answer picks the starters, and with them the heading and placeholder.
   const starterSet = signupStarterSet(
     context.authSession?.user.email,
@@ -2009,21 +2025,9 @@ function SessionsIndexRouteContent({
               {...(refusedCreate ? { onDismiss: () => setCreateCreditRefusal(null) } : {})}
             />
           </div>
-        ) : ownSubscriptionNotice ? (
-          <div className="mt-6">
-            <OwnSubscriptionPlanNotice
-              plan={ownSubscriptionNotice.plan}
-              workspaceId={workspaceId}
-              canUpgrade={hasAccountPermission(
-                context.accessContext,
-                workspace?.accountId ?? "",
-                "billing:manage",
-              )}
-              {...(ownSubscriptionNotice.dismissible
-                ? { onDismiss: ownSubscriptionHeadsUp.dismiss }
-                : {})}
-            />
-          </div>
+        ) : ownSubscriptionNotice && !ownSubscriptionNotice.dismissible ? (
+          // The chosen model waits for a plan: said before Send.
+          ownSubscriptionNoticeView
         ) : modelUsesCredits(selectedPolicyRow?.catalog) &&
           hasAccountPermission(
             context.accessContext,
@@ -2047,6 +2051,8 @@ function SessionsIndexRouteContent({
             </Suspense>
           </div>
         ) : null}
+        {/* The one-time heads-up is a reminder: below anything about the chosen model. */}
+        {!creditGap && ownSubscriptionNotice?.dismissible ? ownSubscriptionNoticeView : null}
 
         <div ref={composerRegionRef} className="mt-8 [&_textarea]:min-h-[calc(2lh+1rem)]">
           <ConsoleComposer

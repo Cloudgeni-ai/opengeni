@@ -4,6 +4,7 @@ import { signDelegatedAccessToken } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   createDb,
+  getOrganizationPlanBalance,
   readSubscriptionPlanCatalog,
   upsertOrganizationPlan,
   type DbClient,
@@ -115,9 +116,25 @@ test("Free names the cheapest catalog plan that includes own subscriptions, with
   expect(await ownSubscriptionPlanNeeded(client.db, settings, free.accountId)).toEqual(expected);
   // The catalog says so before anything is connected, for connect steps.
   expect((await modelCatalog(free)).ownSubscriptionPlan).toEqual(expected);
-  // A lapsed Pro payment doesn't include them either.
-  const pastDue = await organizationOn("pro", "past_due");
-  expect(await ownSubscriptionPlanNeeded(client.db, settings, pastDue.accountId)).toEqual(expected);
+  // A lapsed Pro or Max payment doesn't include them, but upgrading isn't the
+  // fix there: no plan is named, and Send still says why.
+  for (const key of ["pro", "max"]) {
+    const pastDue = await organizationOn(key, "past_due");
+    expect(await ownSubscriptionPlanNeeded(client.db, settings, pastDue.accountId)).toBe(null);
+  }
+  // An organization without a plan row is refused at Send too, so it hears it.
+  const unenrolled = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test:own-subscription-plan",
+    accountExternalId: crypto.randomUUID(),
+    accountName: "No plan",
+    workspaceExternalSource: "test:own-subscription-plan",
+    workspaceExternalId: crypto.randomUUID(),
+    workspaceName: "No plan",
+    subjectId: `user:${crypto.randomUUID()}`,
+  });
+  const unenrolledAccount = unenrolled.workspaceGrants[0]!.accountId;
+  expect(await getOrganizationPlanBalance(client.db, unenrolledAccount)).toBe(null);
+  expect(await ownSubscriptionPlanNeeded(client.db, settings, unenrolledAccount)).toEqual(expected);
 }, 180_000);
 
 test("Pro and above, legacy terms, and deployments without paid plans need nothing", async () => {

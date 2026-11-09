@@ -148,3 +148,29 @@ test("the connect step says it in one sentence", async () => {
   const container = await render(<OwnSubscriptionPlanNote plan={PRO} />);
   expect(container.textContent).toBe("Using your own subscription needs Pro ($20/month).");
 });
+
+test("the heads-up stays dismissed for its organization once that organization is known", async () => {
+  const { useDismissedNotice } = await import("../agents/agent-notices");
+  window.localStorage.setItem("opengeni.notice.ownSubscriptionPlan.org-1", "dismissed");
+  let latest: { dismissed: boolean; dismiss: () => void } | undefined;
+  function Probe({ id }: { id: string }) {
+    latest = useDismissedNotice(`ownSubscriptionPlan.${id}`);
+    return null;
+  }
+  try {
+    await render(<Probe id="unknown" />);
+    expect(latest!.dismissed).toBe(false);
+    // The page knew its organization only later: read again for that key.
+    await act(async () => root!.render(<Probe id="org-1" />));
+    expect(latest!.dismissed).toBe(true);
+    await act(async () => root!.render(<Probe id="org-2" />));
+    expect(latest!.dismissed).toBe(false);
+    await act(async () => latest!.dismiss());
+    expect(latest!.dismissed).toBe(true);
+    expect(window.localStorage.getItem("opengeni.notice.ownSubscriptionPlan.org-2")).toBe(
+      "dismissed",
+    );
+  } finally {
+    window.localStorage.clear();
+  }
+});

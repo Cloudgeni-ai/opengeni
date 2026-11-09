@@ -1,6 +1,7 @@
 import type { Settings } from "@opengeni/config";
 import {
   ownSubscriptionUpgradePlan,
+  planIncludesOwnSubscriptions,
   type OwnSubscriptionPlanV1,
   type WorkspaceModelCatalogResponse,
 } from "@opengeni/contracts";
@@ -11,7 +12,7 @@ import {
   type WorkspaceModelSelection,
 } from "@opengeni/core";
 import {
-  getOrganizationPlanStanding,
+  getOrganizationPlanBalance,
   readSubscriptionPlanCatalog,
   type Database,
 } from "@opengeni/db";
@@ -22,8 +23,11 @@ import { selfServicePlan } from "./billing-subscriptions";
  * Claude, SuperGrok) run: the cheapest self-service catalog plan that
  * includes them, with its catalog name and price. Null when they already run
  * (a plan that includes them, legacy terms, or no paid plans on this
- * deployment) or when the catalog sells no such plan. The same plan reads as
- * admission (`ownSubscriptionPlanAllows`), so the hint and the refusal agree.
+ * deployment), when the organization is already on such a plan whose payment
+ * lapsed (upgrading isn't the fix there; Send still says why), or when the
+ * catalog sells no such plan. It reads the plan as admission
+ * (`ownSubscriptionPlanAllows`) does, so the hint never names a plan for a
+ * subscription that runs.
  */
 export async function ownSubscriptionPlanNeeded(
   db: Database,
@@ -31,8 +35,20 @@ export async function ownSubscriptionPlanNeeded(
   accountId: string,
 ): Promise<OwnSubscriptionPlanV1 | null> {
   if (!ownSubscriptionPlanRequired(settings, accountId)) return null;
-  if (planAllowsOwnSubscriptions(await getOrganizationPlanStanding(db, accountId))) return null;
-  const { plans } = await readSubscriptionPlanCatalog(db);
+  // The organization's plan and the catalog in one round: the catalog prices
+  // the current plan and names the one to upgrade to.
+  const [current, { plans }] = await Promise.all([
+    getOrganizationPlanBalance(db, accountId),
+    readSubscriptionPlanCatalog(db),
+  ]);
+  const standing = {
+    plan: current,
+    monthlyPriceMicros: current
+      ? (plans.find((entry) => entry.key === current.key)?.monthlyPriceMicros ?? null)
+      : null,
+  };
+  if (planAllowsOwnSubscriptions(standing)) return null;
+  if (current && planIncludesOwnSubscriptions({ key: current.key, ...standing })) return null;
   const plan = ownSubscriptionUpgradePlan(
     plans.map((entry) => ({ ...entry, selfService: selfServicePlan(entry) })),
   );

@@ -407,8 +407,11 @@ hear it before Send, `GET /v1/workspaces/:id/model-catalog` returns
 doesn't include them. The plan named is the cheapest self-service plan with a
 price that does (`ownSubscriptionUpgradePlan` in
 `@opengeni/contracts/billing-origin`), read from the runtime catalog. Both
-fields are absent when plans are off, the account is legacy or unenrolled, the
-plan already includes them, or the catalog can't be read. Connect pages and
+fields are absent when plans are off, the account is legacy, the plan already
+includes them (also while its payment has lapsed: upgrading isn't the fix, and
+Send still says why), the catalog sells no such plan, or the catalog can't be
+read. An organization without a plan row is named the plan, as admission
+refuses it too. Connect pages and
 onboarding then say "Using your own subscription needs Pro ($20/month).", the
 picker labels those models "Needs Pro" and keeps them selectable, and the new
 chat page shows a notice before Send when one is chosen. That notice has one

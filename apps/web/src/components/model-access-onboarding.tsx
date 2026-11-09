@@ -921,8 +921,9 @@ function useOwnSubscriptionPlan(
   useEffect(() => {
     if (!client) return;
     const abort = new AbortController();
-    client
-      .getWorkspaceModelCatalog(workspaceId, { signal: abort.signal })
+    // Any failure, even a client without the read, only leaves the hint out.
+    Promise.resolve()
+      .then(() => client.getWorkspaceModelCatalog(workspaceId, { signal: abort.signal }))
       .then((catalog) => {
         if (!abort.signal.aborted) setPlan(catalog.ownSubscriptionPlan ?? null);
       })
