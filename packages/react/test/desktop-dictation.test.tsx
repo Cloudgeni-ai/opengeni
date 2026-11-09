@@ -14,6 +14,7 @@ import {
   DesktopDictationSettings as DictationSettingsView,
   acceleratorFromKey,
   desktopShortcutLabel,
+  dictationWorkspace,
 } from "../src/desktop-dictation";
 import { registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 import {
@@ -148,6 +149,10 @@ async function mountHost(
     chunks?: Uint8Array[];
     elapsedMilliseconds?: number;
     capability?: ClientVoiceInputConfig;
+    workspaceId?: string | null;
+    workspaceName?: string;
+    blocked?: string;
+    onOpenSettings?: () => void;
   } = {},
 ) {
   const { platform, recorders } = fakePlatform(server, {
@@ -157,7 +162,10 @@ async function mountHost(
   mounted = await renderComponent(
     <DesktopDictationHost
       client={oneShotClient}
-      workspaceId="ws-1"
+      workspaceId={options.workspaceId === undefined ? "ws-1" : options.workspaceId}
+      workspaceName={options.workspaceName}
+      blocked={options.blocked}
+      onOpenSettings={options.onOpenSettings}
       capability={options.capability ?? resumableCapability}
       enabled={options.enabled ?? true}
       recordings={server.client}
@@ -343,7 +351,7 @@ describe("DesktopDictationHost", () => {
     expect(app.last("d1")).toMatchObject({ phase: "failed", retryable: false });
   });
 
-  test("a shortcut's own model hears it where the workspace offers that model", async () => {
+  test("a shortcut's own model hears it, and one the workspace doesn't offer fails", async () => {
     const app = fakeApp();
     const server = new FakeServer();
     const english = { providerId: "openai", model: "gpt-4o-transcribe" } as const;
@@ -352,6 +360,7 @@ describe("DesktopDictationHost", () => {
         ...resumableCapability,
         models: [{ ...english, providerName: "OpenAI", name: "gpt-4o-transcribe" }],
       },
+      workspaceName: "Acme",
     });
     await app.send({
       kind: "start",
@@ -364,7 +373,7 @@ describe("DesktopDictationHost", () => {
     expect(recorders[0]?.options.transcription).toEqual({ ...english, language: "en" });
     await app.send({ kind: "stop", dictationId: "d1" });
     await waitFor(() => app.phases("d1").includes("done"));
-    // A model this workspace doesn't offer: its voice input model hears it instead.
+    // A model this workspace doesn't offer: never another model in its place.
     await app.send({
       kind: "start",
       dictationId: "d2",
@@ -372,8 +381,52 @@ describe("DesktopDictationHost", () => {
       language: "nb",
       model: { providerId: "elevenlabs", model: "scribe_v2" },
     });
-    await waitFor(() => app.phases("d2").includes("recording"));
-    expect(recorders[1]?.options.transcription).toEqual({ language: "nb" });
+    await waitFor(() => app.phases("d2").includes("failed"));
+    expect(app.last("d2")).toMatchObject({
+      phase: "failed",
+      message: "Acme doesn't offer this shortcut's model. Choose another in Settings.",
+      retryable: false,
+    });
+    // Without a way to show the settings, the app offers none.
+    expect(app.last("d2")).not.toHaveProperty("fix");
+    expect(recorders).toHaveLength(1);
+  });
+
+  test("a host told why it can't record answers every press with that and Open settings", async () => {
+    const app = fakeApp();
+    const server = new FakeServer();
+    let opened = 0;
+    const { recorders } = await mountHost(app, server, {
+      workspaceId: null,
+      blocked: "You're no longer in Acme. Choose a workspace in Settings.",
+      onOpenSettings: () => {
+        opened += 1;
+      },
+    });
+    expect(app.listening).toBe(true);
+    await app.send({ kind: "start", dictationId: "d1", profileId: "default", language: null });
+    await waitFor(() => app.phases("d1").includes("failed"));
+    expect(app.last("d1")).toEqual({
+      dictationId: "d1",
+      phase: "failed",
+      message: "You're no longer in Acme. Choose a workspace in Settings.",
+      retryable: false,
+      fix: "settings",
+    });
+    expect(recorders).toHaveLength(0);
+    await app.send({ kind: "settings" });
+    expect(opened).toBe(1);
+  });
+
+  test("voice input off in the dictation workspace names it", async () => {
+    const app = fakeApp();
+    const server = new FakeServer();
+    await mountHost(app, server, { enabled: false, workspaceName: "Acme" });
+    await app.send({ kind: "start", dictationId: "d1", profileId: "default", language: null });
+    await waitFor(() => app.phases("d1").includes("failed"));
+    expect(app.last("d1")).toMatchObject({
+      message: "Voice input is off in Acme. Choose another workspace in Settings.",
+    });
   });
 
   test("hands the app each dictation's speech with its text, with the vocabulary it heard", async () => {
@@ -545,6 +598,138 @@ describe("DesktopDictationSettings", () => {
     expect(mounted.container.querySelector("[aria-label=Model]")).toBeNull();
   });
 
+  const workspaces = {
+    choices: [
+      { id: "ws-me", name: "Ada", organization: "Acme", personal: true },
+      { id: "ws-acme", name: "Acme", organization: "Acme" },
+      { id: "ws-quiet", name: "Quiet", organization: "Acme", voiceInputOff: true },
+      { id: "ws-engine", name: "Engine", organization: "Babbage" },
+    ],
+    defaultWorkspaceId: "ws-me",
+  };
+  const shown = (text: string) => () => mounted?.container.textContent?.includes(text) ?? false;
+
+  test("dictations go to the default workspace until one is saved", async () => {
+    const app = fakeApp({ settings: { enabled: true, workspace: null } });
+    mounted = await renderComponent(
+      <DictationSettingsView dictation={app.dictation} workspaces={workspaces} />,
+    );
+    await waitFor(shown("Language"));
+    const picker = mounted.container.querySelector("[aria-label=Workspace]");
+    // The closed control names the organization, which only the menu's headings show.
+    expect(picker?.textContent).toBe("Ada · Private · Acme");
+    expect(mounted.container.textContent).toContain(
+      "Shortcut dictations go to this workspace and are billed to it, even when another one is open.",
+    );
+    expect(app.updates).toEqual([]);
+  });
+
+  test("a saved workspace that is no longer the person's is named, and isn't replaced", async () => {
+    const app = fakeApp({
+      settings: { enabled: true, workspace: { id: "ws-gone", name: "Analytical Engine" } },
+    });
+    mounted = await renderComponent(
+      <DictationSettingsView dictation={app.dictation} workspaces={workspaces} />,
+    );
+    await waitFor(shown("Language"));
+    const picker = mounted.container.querySelector("[aria-label=Workspace]");
+    expect(picker?.textContent).toContain("Choose a workspace");
+    expect(picker?.getAttribute("aria-invalid")).toBe("true");
+    expect(mounted.container.textContent).toContain(
+      "You're no longer in Analytical Engine. Choose a workspace to keep dictating.",
+    );
+    expect(app.updates).toEqual([]);
+  });
+
+  test("a saved workspace with voice input off says so", async () => {
+    const app = fakeApp({
+      settings: { enabled: true, workspace: { id: "ws-quiet", name: "Quiet" } },
+    });
+    mounted = await renderComponent(
+      <DictationSettingsView dictation={app.dictation} workspaces={workspaces} />,
+    );
+    await waitFor(shown("Language"));
+    expect(mounted.container.textContent).toContain(
+      "Voice input is off in Quiet. Choose another workspace.",
+    );
+  });
+
+  test("models are the dictation workspace's, and one it doesn't offer is flagged", async () => {
+    const azure = { providerId: "azure-speech", model: "MAI-Transcribe-2" } as const;
+    const app = fakeApp({
+      settings: {
+        enabled: true,
+        workspace: { id: "ws-acme", name: "Acme" },
+        profiles: [
+          { ...SETTINGS.profiles[0]!, id: "nb", name: "Norwegian", language: "nb", model: azure },
+          {
+            id: "en",
+            name: "English",
+            shortcut: { kind: "accelerator", accelerator: "Control+Shift+E" },
+            language: "en",
+          },
+        ],
+      },
+    });
+    const models = [
+      { providerId: "openai", model: "gpt-4o-transcribe", providerName: "OpenAI", name: "GPT" },
+    ];
+    mounted = await renderComponent(
+      <DictationSettingsView dictation={app.dictation} workspaces={workspaces} models={models} />,
+    );
+    await waitFor(shown("Add shortcut"));
+    const pickers = [...mounted.container.querySelectorAll("[aria-label=Model]")];
+    expect(pickers.map((picker) => picker.textContent)).toEqual([
+      "MAI-Transcribe-2",
+      "Default for Acme",
+    ]);
+    expect(pickers[0]?.getAttribute("aria-invalid")).toBe("true");
+    expect(mounted.container.textContent).toContain(
+      "Acme doesn't offer this model. Choose another.",
+    );
+    // While the models are read, the rows stay and wait rather than flag anything.
+    await mounted.unmount();
+    mounted = await renderComponent(
+      <DictationSettingsView dictation={app.dictation} workspaces={workspaces} modelsLoading />,
+    );
+    await waitFor(shown("Add shortcut"));
+    expect(mounted.container.querySelectorAll("[aria-label=Model]")).toHaveLength(2);
+    expect(mounted.container.textContent).not.toContain("doesn't offer this model");
+    // A model picked with its name keeps showing that name once it isn't offered.
+    await mounted.unmount();
+    const named = fakeApp({
+      settings: {
+        enabled: true,
+        workspace: { id: "ws-acme", name: "Acme" },
+        profiles: [{ ...SETTINGS.profiles[0]!, model: { ...azure, name: "Azure Speech · MAI" } }],
+      },
+    });
+    mounted = await renderComponent(
+      <DictationSettingsView dictation={named.dictation} workspaces={workspaces} models={models} />,
+    );
+    await waitFor(shown("Language"));
+    expect(mounted.container.querySelector("[aria-label=Model]")?.textContent).toBe(
+      "Azure Speech · MAI",
+    );
+  });
+
+  test("with one workspace, or an app that doesn't keep one, there is nothing to pick", async () => {
+    const one = { choices: [workspaces.choices[0]!], defaultWorkspaceId: "ws-me" };
+    const app = fakeApp({ settings: { enabled: true, workspace: null } });
+    mounted = await renderComponent(
+      <DictationSettingsView dictation={app.dictation} workspaces={one} />,
+    );
+    await waitFor(shown("Language"));
+    expect(mounted.container.querySelector("[aria-label=Workspace]")).toBeNull();
+    await mounted.unmount();
+    const older = fakeApp({ settings: { enabled: true } });
+    mounted = await renderComponent(
+      <DictationSettingsView dictation={older.dictation} workspaces={workspaces} />,
+    );
+    await waitFor(shown("Language"));
+    expect(mounted.container.querySelector("[aria-label=Workspace]")).toBeNull();
+  });
+
   test("shows recent dictations to copy again", async () => {
     const app = fakeApp({ settings: { enabled: true } });
     app.history.push({
@@ -693,5 +878,52 @@ describe("desktop shortcuts", () => {
       "Control+Shift+Space",
     );
     expect(acceleratorFromKey(key("KeyD", { shiftKey: true }), "macos")).toBeNull();
+  });
+});
+
+describe("dictationWorkspace", () => {
+  const mine = [
+    { id: "ws-me", name: "Ada", organization: "Acme Inc.", personal: true },
+    { id: "ws-acme", name: "Acme", organization: "Acme Inc." },
+  ];
+
+  test("is the saved workspace while it is the person's, and never another in its place", () => {
+    expect(
+      dictationWorkspace({ workspace: { id: "ws-acme", name: "Old" } }, mine, "ws-me"),
+    ).toEqual({ workspaceId: "ws-acme", name: "Acme", personal: false, saved: true, gone: false });
+    expect(
+      dictationWorkspace({ workspace: { id: "ws-gone", name: "Gone" } }, mine, "ws-me"),
+    ).toEqual({ workspaceId: null, name: "Gone", personal: false, saved: true, gone: true });
+  });
+
+  test("with none saved, is the default workspace, or the first when that isn't theirs", () => {
+    expect(dictationWorkspace({ workspace: null }, mine, "ws-me")).toEqual({
+      workspaceId: "ws-me",
+      name: "Ada",
+      personal: true,
+      saved: false,
+      gone: false,
+    });
+    expect(dictationWorkspace({}, mine, "ws-other").workspaceId).toBe("ws-me");
+    expect(dictationWorkspace(null, [], null)).toEqual({
+      workspaceId: null,
+      name: null,
+      personal: false,
+      saved: false,
+      gone: false,
+    });
+  });
+
+  test("names the organization when another of the person's workspaces has the same name", () => {
+    const two = [
+      ...mine,
+      { id: "ws-babbage-me", name: "Ada", organization: "Babbage & Co.", personal: true },
+    ];
+    expect(
+      dictationWorkspace({ workspace: { id: "ws-babbage-me", name: "Ada" } }, two, null),
+    ).toMatchObject({ name: "Ada (Babbage & Co.)", personal: true });
+    expect(dictationWorkspace({ workspace: { id: "ws-acme", name: "Acme" } }, two, null).name).toBe(
+      "Acme",
+    );
   });
 });

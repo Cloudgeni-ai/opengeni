@@ -67,10 +67,17 @@ export {
   preserveSlackLinkForManagedAuth,
   type SlackLinkPreparePhase,
 } from "@opengeni/react/app/app-state";
+import { desktopCapability } from "@opengeni/react/app/lib/desktop";
 
 const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
     default: module.AnalyticsManager,
+  })),
+);
+// Only the desktop app has a dictation shortcut, so other pages never load it.
+const DesktopDictationRoot = lazy(() =>
+  import("@/components/desktop/dictation-host").then((module) => ({
+    default: module.DesktopDictationRoot,
   })),
 );
 
@@ -479,6 +486,13 @@ export function RootRouteComponent() {
       <SiteToolConsentProvider>
         <Outlet />
       </SiteToolConsentProvider>
+      {/* The dictation shortcut works in every app, so it records here, above
+      the workspace pages: switching workspace never stops a dictation. */}
+      {desktopCapability("dictation") ? (
+        <Suspense fallback={null}>
+          <DesktopDictationRoot />
+        </Suspense>
+      ) : null}
       <CreditRequiredGate
         creditRequired={creditRequired}
         setCreditRequired={setCreditRequired}

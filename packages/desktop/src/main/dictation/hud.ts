@@ -209,6 +209,7 @@ export class DictationHud implements DictationHudView {
       retry: words.retry,
       allow: words.allow,
       open: words.open,
+      settings: words.settings ?? ENGLISH_DICTATION_WORDS.settings,
     };
     const measured = (await pageAnswer(
       window.webContents.executeJavaScript(
