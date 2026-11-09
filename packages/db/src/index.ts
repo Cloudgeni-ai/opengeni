@@ -111,6 +111,7 @@ import {
 } from "./disconnect-audit";
 export {
   getConnectionMetadata,
+  getConnectionMetadataByIds,
   getProviderConnectionHomeWorkspace,
   listConnectionsMetadata,
   type ConnectionMetadataWithVerification,

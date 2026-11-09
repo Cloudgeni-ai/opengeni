@@ -6,6 +6,7 @@ import {
   type PersonalWorkspaceExtensionMcpServer,
 } from "./personal-workspace-connectors";
 import { personalWorkspaceOwnerOriginConnections } from "./personal-connection-delegations";
+import type { ConnectionAccountReads } from "./connection-account-reads";
 import {
   integrationMentionMatcher,
   integrationNamesAgree,
@@ -1736,6 +1737,11 @@ export async function settingsWithEnabledCapabilityMcpServers(
     oneReadAtATime?: boolean;
     /** The workspace's organization, when the caller knows it (skips a lookup). */
     accountId?: string;
+    /**
+     * One connection-account resolution's shared reads, when `db` is that
+     * resolution's transaction (see `ConnectionAccountReads`).
+     */
+    connectionAccountReads?: ConnectionAccountReads;
   },
 ): Promise<Settings> {
   const readApiIntegrations = () =>
@@ -1782,11 +1788,11 @@ export async function settingsWithEnabledCapabilityMcpServers(
         ? options.codexApps.accountId
         : undefined) ??
       (await rlsContextForWorkspace(db, workspaceId)).accountId;
-    const origins = await personalWorkspaceOwnerOriginConnections(db, {
-      accountId,
-      workspaceId,
-      subjectId: extensionSubject,
-    });
+    const origins = await personalWorkspaceOwnerOriginConnections(
+      db,
+      { accountId, workspaceId, subjectId: extensionSubject },
+      options?.connectionAccountReads,
+    );
     if (origins.length > 0) {
       enabled = [
         ...enabled,
