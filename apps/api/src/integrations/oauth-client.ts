@@ -3153,7 +3153,8 @@ export async function stableAccountIdentity(
         { method: "GET", headers: { accept: "application/json" } },
         "Google signing keys",
       );
-      const { payload } = await jwtVerify(idToken, createLocalJWKSet(jwks as JSONWebKeySet), {
+      const keys = jwks as unknown as JSONWebKeySet;
+      const { payload } = await jwtVerify(idToken, createLocalJWKSet(keys), {
         issuer: GOOGLE_ID_TOKEN_ISSUERS,
         audience: clientId,
         algorithms: ID_TOKEN_ALGORITHMS,
