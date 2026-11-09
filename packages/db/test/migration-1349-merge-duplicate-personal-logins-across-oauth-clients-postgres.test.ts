@@ -76,7 +76,13 @@ type Person = { accountId: string; subjectId: string };
 async function login(
   person: Person,
   workspaceId: string,
-  input: { clientId: string; email: string; scopes: string[]; issuer?: string },
+  input: {
+    clientId: string;
+    email: string;
+    scopes: string[];
+    issuer?: string;
+    lastRefreshAt?: string;
+  },
 ) {
   const metadata = {
     mcpUrl: GMAIL,
@@ -90,12 +96,31 @@ async function login(
     await tx`select set_config('opengeni.subject_id', ${person.subjectId}, true)`;
     const [row] = await tx<{ id: string; authorityId: string }[]>`
       insert into connections (account_id, workspace_id, subject_id, provider_domain, kind,
-        credential_encrypted, granted_scopes, metadata)
+        credential_encrypted, granted_scopes, metadata, last_refresh_at)
       values (${person.accountId}, ${workspaceId}, ${person.subjectId}, 'example.test', 'oauth2',
-        'ciphertext', ${tx.json(input.scopes)}, ${tx.json(metadata)})
+        'ciphertext', ${tx.json(input.scopes)}, ${tx.json(metadata)},
+        ${input.lastRefreshAt ?? null})
       returning id, authority_id as "authorityId"`;
     return row!;
   });
+}
+
+/** A new organization with one person and their Personal workspace. */
+async function organization(name: string) {
+  const [account] = await owned!.admin<{ id: string }[]>`
+    insert into managed_accounts (name) values (${name}) returning id`;
+  const accountId = account!.id;
+  const personal = await workspace(accountId, `${name} personal`);
+  const person = await member(accountId, personal);
+  return { accountId, personal, person };
+}
+
+async function member(accountId: string, personalWorkspaceId: string): Promise<Person> {
+  const subjectId = `user:${crypto.randomUUID()}`;
+  await owned!.admin`
+    insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+    values (${accountId}, ${subjectId}, 'active', ${personalWorkspaceId})`;
+  return { accountId, subjectId };
 }
 
 async function status(connectionId: string) {
@@ -224,5 +249,42 @@ describe("1349 merges duplicate personal logins made with different OAuth client
 
     // The owner role is left under FORCE ROW LEVEL SECURITY again.
     expect((await forced()).every((row) => row.forced)).toBe(true);
+  }, 180_000);
+
+  test("the login whose client refreshed most recently is kept, never one on a retired client", async () => {
+    if (!owned || !ownerSql) return;
+    const { accountId, personal, person } = await organization("client liveness");
+    const me = "me@example.test";
+    // Made first, with a client the deployment has since retired: it last
+    // refreshed before the replacement and has not refreshed since.
+    const retired = await login(person, personal, {
+      clientId: "retired-client",
+      email: me,
+      scopes: ["read", "send"],
+      lastRefreshAt: "2026-10-01T00:00:00Z",
+    });
+    // The same mailbox, connected again with the current client and refreshing.
+    const current = await login(person, personal, {
+      clientId: "current-client",
+      email: me,
+      scopes: ["read", "send"],
+      lastRefreshAt: "2026-11-08T00:00:00Z",
+    });
+    // Another person in the organization with the same mailbox address is
+    // someone else's login and is never merged with these.
+    const theirPersonal = await workspace(accountId, "other personal");
+    const someoneElse = await member(accountId, theirPersonal);
+    const theirs = await login(someoneElse, theirPersonal, {
+      clientId: "current-client",
+      email: me,
+      scopes: ["read"],
+      lastRefreshAt: "2026-11-09T00:00:00Z",
+    });
+
+    await runMerge();
+
+    expect(await status(current.id)).toEqual({ status: "active", mergedInto: null });
+    expect(await status(retired.id)).toEqual({ status: "revoked", mergedInto: current.id });
+    expect(await status(theirs.id)).toEqual({ status: "active", mergedInto: null });
   }, 180_000);
 });

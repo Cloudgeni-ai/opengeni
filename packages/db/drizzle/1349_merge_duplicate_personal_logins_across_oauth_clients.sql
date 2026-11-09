@@ -19,9 +19,10 @@
 -- be the same account as another. The kept login keeps its own credential
 -- and client.
 --
--- In each group one login is kept: a working one first, then the one with
--- the most granted scopes, then one that something else depends on, then the
--- oldest. Another login merges into it only when the kept login has every
+-- In each group one login is kept: a working one first, then the one that
+-- refreshed most recently (it refreshes with its own client, so this proves
+-- that client still works), then the one with the most granted scopes, then
+-- one that something else depends on, then the oldest. Another login merges into it only when the kept login has every
 -- scope that one has, so nothing it could do is lost. Then its tool choices
 -- join the kept login's (strictest wins), the kept login is turned on
 -- wherever the merged one was, schedule pins and connectors and chat servers
@@ -71,7 +72,7 @@ WITH login AS (
   SELECT connection.id, connection.account_id, connection.workspace_id,
          connection.owner_organization_membership_id, connection.authority_id,
          connection.status, connection.granted_scopes, connection.created_at,
-         connection.provider_domain,
+         connection.last_refresh_at, connection.provider_domain,
          connection.metadata ->> 'mcpUrl' AS mcp_url,
          connection.metadata ->> 'authorizationServerIssuer' AS issuer,
          -- The verified identity tuple each service's verification records
@@ -146,7 +147,11 @@ WITH login AS (
            PARTITION BY duplicated.account_id, duplicated.owner_organization_membership_id,
                         duplicated.provider_domain, duplicated.mcp_url, duplicated.issuer,
                         duplicated.identity
+           -- A login refreshes with the OAuth client it was made with, so the
+           -- one that refreshed most recently proves its client still works;
+           -- an older client may since have been retired.
            ORDER BY (duplicated.status = 'active') DESC,
+                    duplicated.last_refresh_at DESC NULLS LAST,
                     jsonb_array_length(duplicated.granted_scopes) DESC,
                     duplicated.depended_on DESC,
                     duplicated.created_at, duplicated.id) AS rank

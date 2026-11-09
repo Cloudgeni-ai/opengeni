@@ -291,7 +291,7 @@ test("Drive callback requires an authenticated read and binds one exact personal
     );
     if (!reconnectAccountId) expect(authorize.searchParams.has("login_hint")).toBe(false);
     expect(authorize.searchParams.get("code_challenge_method")).toBe("S256");
-    return { attempt: ready, state: authorize.searchParams.get("state")! };
+    return { attempt: ready, state: authorize.searchParams.get("state")!, authorize };
   };
   try {
     const catalog = await (await app.request(`${base}/catalog`, { headers })).json();
@@ -479,6 +479,9 @@ test("Drive callback requires an authenticated read and binds one exact personal
 
     readRejected = true;
     const reconnect = await begin(completed.account.id);
+    // Reconnecting the verified account asks Google for that same account.
+    expect(reconnect.authorize.searchParams.get("login_hint")).toBe("anna@example.test");
+    expect(reconnect.authorize.searchParams.get("prompt")).toBe("consent");
     await callback(reconnect.state);
     expect(await read(reconnect.attempt.id)).toMatchObject({
       state: "failed",
