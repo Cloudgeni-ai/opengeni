@@ -3366,6 +3366,7 @@ export const englishMessages = {
   "modelPolicy.geographyUs": "US",
   "modelPolicy.models": "Models",
   "modelPolicy.needsCredits": "Not covered by your credits",
+  "modelPolicy.needsPlan": "Needs {plan}",
   "modelPolicy.notEntitled": "Not entitled",
   "modelPolicy.opengeniCredits": "{product} credits",
   "modelPolicy.opengeniCreditsAutomaticManagedRoute": "{product} credits · automatic managed route",

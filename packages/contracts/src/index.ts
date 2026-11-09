@@ -23419,12 +23419,32 @@ export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() 
 );
 export type ModelAvailabilityV1 = z.infer<typeof ModelAvailabilityV1>;
 
+/**
+ * The plan an organization needs before its own subscriptions (Codex, Claude,
+ * SuperGrok) run, read from the plan catalog: its key, name and monthly price
+ * in USD micros (null when custom-priced).
+ */
+export const OwnSubscriptionPlanV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    key: primitives.nonEmptyString,
+    label: primitives.nonEmptyString,
+    monthlyPriceMicros: z.number().int().nonnegative().nullable(),
+  }),
+);
+export type OwnSubscriptionPlanV1 = z.infer<typeof OwnSubscriptionPlanV1>;
+
 export const WorkspaceModelCatalogModel =
   /* @__PURE__ */ defineModelContractSchema(() =>
     ClientModel.extend({
       credentialReadiness: ModelCredentialReadinessV1,
       /** Current funding status, without exposing the organization's balance. */
       creditFunding: z.enum(["promotional", "general", "unavailable"]).optional(),
+      /**
+       * Set on the person's own subscription models while the organization's
+       * plan doesn't include them: the plan they need. Sends with the model
+       * are refused until then; omitted when it can run.
+       */
+      requiredPlan: OwnSubscriptionPlanV1.optional(),
       /**
        * Exact verdict of the policy the workspace runs with (its own lists
        * within its organization's, and its credit switch), without exposing
@@ -23477,6 +23497,12 @@ export const WorkspaceModelCatalogResponse =
        * credits.
        */
       creditsSelection: DefaultModelSelection.nullable().optional(),
+      /**
+       * Present while the organization's plan doesn't include its own
+       * subscriptions: the plan that does. Connecting one still works; using
+       * it waits for that plan. Omitted when they can run or no plan is sold.
+       */
+      ownSubscriptionPlan: OwnSubscriptionPlanV1.optional(),
     }),
   );
 export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;

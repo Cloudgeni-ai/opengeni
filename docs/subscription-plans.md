@@ -399,6 +399,24 @@ charges cannot spend it or hide debt. The existing billing routes return this sh
 snapshot, and the SDK re-exports `BillingPlanBalance`, `SubscriptionPlan`, and
 `SubscriptionPlanCatalog` alongside `BillingBalance`.
 
+Own subscriptions (Codex, Claude, SuperGrok) need a plan that includes them
+(`planIncludesOwnSubscriptions`); Send is refused otherwise. So that people
+hear it before Send, `GET /v1/workspaces/:id/model-catalog` returns
+`ownSubscriptionPlan: { key, label, monthlyPriceMicros }` and the same
+`requiredPlan` on each own-subscription model while the organization's plan
+doesn't include them. The plan named is the cheapest self-service plan with a
+price that does (`ownSubscriptionUpgradePlan` in
+`@opengeni/contracts/billing-origin`), read from the runtime catalog. Both
+fields are absent when plans are off, the account is legacy or unenrolled, the
+plan already includes them, or the catalog can't be read. Connect pages and
+onboarding then say "Using your own subscription needs Pro ($20/month).", the
+picker labels those models "Needs Pro" and keeps them selectable, and the new
+chat page shows a notice before Send when one is chosen. That notice has one
+action: "Upgrade to Pro" for people who manage billing, otherwise "Ask an
+organization owner to upgrade to Pro." When one is connected but not chosen,
+the same notice shows once and can be dismissed for that organization on that
+device.
+
 New endpoints use the existing selected-organization permissions and require
 Stripe billing plus the deployment switch:
 

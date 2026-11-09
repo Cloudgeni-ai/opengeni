@@ -4712,6 +4712,12 @@ export type WorkspaceModelCatalogModel = ClientModel & {
   credentialReadiness: ModelCredentialReadinessV1;
   creditFunding?: "promotional" | "general" | "unavailable" | undefined;
   /**
+   * Set on the person's own subscription models while the organization's plan
+   * doesn't include them: the plan they need. Absent when the model can run,
+   * and from older servers.
+   */
+  requiredPlan?: OwnSubscriptionPlan | undefined;
+  /**
    * Exact verdict of the policy the workspace runs with (its own lists within
    * its organization's, and its credit switch), without exposing provider
    * identity.
@@ -4724,6 +4730,17 @@ export type WorkspaceModelCatalogModel = ClientModel & {
    */
   organizationAllowed?: boolean | undefined;
   availability: ModelAvailabilityV1;
+};
+
+/**
+ * The plan an organization needs before its own subscriptions run, from the
+ * plan catalog: its key, name and monthly USD price in micros (null when
+ * custom-priced).
+ */
+export type OwnSubscriptionPlan = {
+  key: string;
+  label: string;
+  monthlyPriceMicros: number | null;
 };
 
 /** Why a new chat or scheduled task without an explicit model gets its default. */
@@ -4749,6 +4766,12 @@ export type WorkspaceModelCatalogResponse = {
    * Opengeni credit balance. Null when the deployment does not bill credits.
    */
   creditsSelection?: DefaultModelSelection | null | undefined;
+  /**
+   * Present while the organization's plan doesn't include its own
+   * subscriptions: the plan that does. Absent when they can run, and from
+   * older servers.
+   */
+  ownSubscriptionPlan?: OwnSubscriptionPlan | undefined;
 };
 
 export type WorkspaceGatewayCustomModel = {

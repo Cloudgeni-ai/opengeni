@@ -110,6 +110,11 @@ import { Button } from "../../ui/button";
 import { sessionDisplayTitle } from "../lib/session-rename";
 import { Notice } from "../../ui/notice";
 import { CreditRefusalNotice } from "../components/credits/credit-refusal-notice";
+import {
+  OwnSubscriptionPlanNotice,
+  ownSubscriptionPlanNotice,
+} from "../components/credits/own-subscription-plan-notice";
+import { useDismissedNotice } from "../components/agents/agent-notices";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import {
   pickerPolicyRunnable,
@@ -1051,6 +1056,16 @@ function SessionsIndexRouteContent({
       draft.visibility === "private" &&
       tenancyCapabilities?.canCreatePrivate !== true);
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
+  // Own subscriptions the organization's plan doesn't include: the chosen
+  // model says so before Send, and anyone with one connected hears it once.
+  const ownSubscriptionHeadsUp = useDismissedNotice(
+    `ownSubscriptionPlan.${workspace?.accountId ?? "unknown"}`,
+  );
+  const ownSubscriptionNotice = ownSubscriptionPlanNotice({
+    selected: selectedPolicyRow?.catalog,
+    models: modelCatalog.models,
+    headsUpDismissed: ownSubscriptionHeadsUp.dismissed || !workspace?.accountId,
+  });
   // The signup answer picks the starters, and with them the heading and placeholder.
   const starterSet = signupStarterSet(
     context.authSession?.user.email,
@@ -1992,6 +2007,21 @@ function SessionsIndexRouteContent({
               onChooseModel={busy ? undefined : chooseCoveredModel}
               {...(canTopUpCredits ? { onAddCredits: openCreditTopup } : {})}
               {...(refusedCreate ? { onDismiss: () => setCreateCreditRefusal(null) } : {})}
+            />
+          </div>
+        ) : ownSubscriptionNotice ? (
+          <div className="mt-6">
+            <OwnSubscriptionPlanNotice
+              plan={ownSubscriptionNotice.plan}
+              workspaceId={workspaceId}
+              canUpgrade={hasAccountPermission(
+                context.accessContext,
+                workspace?.accountId ?? "",
+                "billing:manage",
+              )}
+              {...(ownSubscriptionNotice.dismissible
+                ? { onDismiss: ownSubscriptionHeadsUp.dismiss }
+                : {})}
             />
           </div>
         ) : modelUsesCredits(selectedPolicyRow?.catalog) &&

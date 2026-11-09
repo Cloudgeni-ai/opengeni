@@ -1520,6 +1520,47 @@ describe("Codex account page", () => {
 });
 
 describe("Connect Codex", () => {
+  test("says which plan using a subscription needs, from the catalog, before signing in", async () => {
+    const pro = { key: "pro", label: "Pro", monthlyPriceMicros: 20_000_000 };
+    const NOTE = "Using your own subscription needs Pro ($20/month).";
+    client.getWorkspaceModelCatalog.mockImplementation(
+      async () => ({ models: [], ownSubscriptionPlan: pro }) as never,
+    );
+    asOrganizationAdmin();
+    const view = await render();
+    try {
+      for (const step of ["connect-org:codex", "connect-org:supergrok", "connect:codex"] as const) {
+        await act(async () => navigateTo({ view: step }));
+        await flush();
+        expect(
+          [...view.container.querySelectorAll('[data-testid="own-subscription-plan-note"]')].map(
+            (note) => note.textContent,
+          ),
+        ).toEqual([NOTE]);
+      }
+      // API keys pay per token: nothing about plans.
+      await act(async () => navigateTo({ view: "connect-org:openrouter" }));
+      await flush();
+      expect(view.container.textContent).not.toContain(NOTE);
+    } finally {
+      client.getWorkspaceModelCatalog.mockImplementation(async () => ({ models: [] }));
+      await cleanup(view);
+    }
+  });
+
+  test("says nothing about plans when the organization's plan includes subscriptions", async () => {
+    asOrganizationAdmin();
+    const view = await render();
+    try {
+      await act(async () => navigateTo({ view: "connect-org:codex" }));
+      await flush();
+      expect(view.container.querySelector("h1")?.textContent).toBe("Connect Codex");
+      expect(view.container.querySelector('[data-testid="own-subscription-plan-note"]')).toBe(null);
+    } finally {
+      await cleanup(view);
+    }
+  });
+
   test("picked automatically, a new account joins the organization's without asking", async () => {
     accounts = {
       ...accounts,
