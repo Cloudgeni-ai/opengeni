@@ -1249,6 +1249,15 @@ ingress:
   mcpOAuthIngress:
     enabled: true
     annotations: {}
+  # Paths whose URL carries a credential (password-reset and email-verification
+  # tokens, OAuth codes and state on provider callbacks) get their own Ingress
+  # with ingress-nginx access logs and request tracing off. It copies the
+  # primary Ingress annotations, so an auth gate or body-size limit still
+  # applies; this map adds to them. Rendered only for hosts whose own routes
+  # already send those paths to the same service.
+  credentialUrlIngress:
+    enabled: true
+    annotations: {}
   # During a web rollout old and new web pods serve side by side and every
   # request is balanced separately, so a page from one build can ask a pod of
   # the other build for a hashed asset it does not have. This extra Ingress
