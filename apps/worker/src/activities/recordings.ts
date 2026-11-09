@@ -2485,6 +2485,8 @@ export function createRecordingActivities(
     const due = await listUncompactedRecordingTracks(db, {
       keptSuffix: KEPT_AUDIO_SUFFIX,
     });
+    // Null while the inventory's runtime grant is withheld (1240, 1283).
+    if (due === null) return result;
     result.found = due.length;
     for (const item of due) {
       if (Date.now() >= deadline) break;
