@@ -472,10 +472,12 @@ export async function ensureRunAllowed(
   // §7.5 P3 — host-entitlements DELEGATION (the worker half of the same seam the
   // API edge exposes). For a non-codex turn, when the host binds `entitlements`, its
   // `admitRun` decision REPLACES the local credit-balance read below: a host that owns
-  // its ledger/meter is the funding authority. A deny throws the SAME Error the local
-  // read throws, so the mid-stream budget-valve at :727 wraps it in a
-  // `BudgetExhaustedError` and pauses identically — the valve never learns whether the
-  // deny came from the local ledger or the host meter.
+  // its ledger/meter is the funding authority. A deny throws an Error like the local
+  // read does, so the mid-stream budget valve (`ensureRunAllowedBetweenModelCalls`)
+  // wraps it in a `BudgetExhaustedError` and pauses identically — the valve never
+  // learns whether the deny came from the local ledger or the host meter. The host's
+  // reason is free text, so it stays a plain Error (shown only as the generic turn
+  // failure); the local fixed refusals throw `TurnAdmissionRefusedError`.
   //
   // This is an admission READ only; it records NO usage (metering stays the sole,
   // idempotency-keyed writer at recordModelUsageAndDebitCredits), so a PULL host meter

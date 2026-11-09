@@ -36,7 +36,8 @@ function zeroBalance() {
 }
 
 // The same conversion the Temporal SDK applies to a thrown non-Temporal error
-// (`ensureApplicationFailure`): the class name becomes the failure type.
+// (`ensureApplicationFailure` in @temporalio/common, not exported by the
+// worker's direct Temporal dependencies): the class name becomes the type.
 function asRunAgentTurnFailure(error: Error): ActivityFailure {
   return new ActivityFailure(
     "Activity task failed",
@@ -46,7 +47,7 @@ function asRunAgentTurnFailure(error: Error): ActivityFailure {
     "worker-1",
     ApplicationFailure.create({
       message: error.message,
-      type: error.constructor.name ?? error.name,
+      type: error.constructor.name,
       nonRetryable: false,
     }),
   );
@@ -114,6 +115,46 @@ describe("fixed turn admission refusals", () => {
     } finally {
       balance.mockRestore();
     }
+  });
+
+  test("a reached monthly token limit throws the named refusal", async () => {
+    const allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
+    const usage = spyOn(opengeniDb, "sumUsageQuantity").mockResolvedValue(100);
+    try {
+      const error = await refusal(
+        ensureRunAllowed(
+          testSettings({
+            usageLimitsMode: "static",
+            staticUsageLimitsJson: JSON.stringify({ maxMonthlyTokensPerWorkspace: 100 }),
+          }),
+          db,
+          ACCOUNT,
+          WORKSPACE,
+          false,
+          undefined,
+          false,
+          true,
+        ),
+      );
+      expect(error).toBeInstanceOf(TurnAdmissionRefusedError);
+      expect((error as Error).message).toBe("monthly token limit reached (100)");
+    } finally {
+      usage.mockRestore();
+      allowance.mockRestore();
+    }
+  });
+
+  test("a host entitlements deny keeps its free-text reason behind the generic failure", async () => {
+    const error = await refusal(
+      ensureRunAllowed(billedSettings(), db, ACCOUNT, WORKSPACE, false, {
+        admitRun: async () => ({ allowed: false, reason: "host ledger detail" }),
+      } as never),
+    );
+    expect(error).not.toBeInstanceOf(TurnAdmissionRefusedError);
+    expect((error as Error).name).toBe("Error");
+    expect(workflowFailureMessage(asRunAgentTurnFailure(error as Error))).toBe(
+      "Activity task failed",
+    );
   });
 
   test("between model calls the refusal still becomes a budget stop", async () => {
