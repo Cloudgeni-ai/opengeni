@@ -1788,6 +1788,19 @@ Browser and desktop controller requests also admit the configured
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_WEB_BASE_URL` origins directly; this
 does not grant those origins credentialed cross-origin responses.
 
+A marketing site on another origin of the same site (for example `opengeni.ai`
+beside `app.opengeni.ai`) can show a signed-in visitor as signed in through
+`GET /v1/auth/display-identity`. It resolves the visitor like
+`GET /v1/auth/get-session` on a freshly loaded app tab and returns only `{"signedIn": false}` or
+`{"signedIn": true, "name": ..., "image": ...}`, never an email, id or session
+data, with `Cache-Control: private, no-store` and `Vary: Origin`. List the
+site's exact origins in `OPENGENI_LANDING_ORIGINS` (comma-separated, no
+wildcards; empty by default, which disables it). Those origins get credentialed
+CORS for that one GET path only; the regex above is unchanged and every other
+path answers them like any unlisted origin. The session cookie must reach the
+API on that request, so the marketing site must be same-site with the API (a
+host-only `SameSite=Lax` cookie is sent on same-site fetches).
+
 The unauthenticated local access mode (`OPENGENI_PRODUCT_ACCESS_MODE=local`)
 never answers with wildcard CORS, whatever `OPENGENI_ENVIRONMENT` is: a request
 without credentials acts as the local user, so any site could otherwise read
