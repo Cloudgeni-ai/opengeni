@@ -2918,19 +2918,45 @@ export function recordTurnStartupMilestone(
     backend: string;
     outcome: TurnStartupOutcome;
     durationSeconds: number;
+    /**
+     * Seconds from the start of the turn attempt that reached the milestone.
+     * Ignored for the queue milestone.
+     */
+    sinceAttemptStartSeconds?: number | null;
   },
 ): void {
+  const labels = {
+    milestone: input.milestone,
+    provider: input.provider,
+    backend: input.backend,
+    outcome: input.outcome,
+  };
   observability.observeHistogram({
     name: "opengeni_turn_startup_milestone_duration_seconds",
     help: "Cumulative seconds from durable turn queueing to a bounded startup milestone.",
     buckets: TURN_STARTUP_MILESTONE_BUCKETS,
-    labels: {
-      milestone: input.milestone,
-      provider: input.provider,
-      backend: input.backend,
-      outcome: input.outcome,
-    },
+    labels,
     value: Math.max(0, input.durationSeconds),
+  });
+  if (
+    input.milestone === "queue" ||
+    input.sinceAttemptStartSeconds === null ||
+    input.sinceAttemptStartSeconds === undefined ||
+    !Number.isFinite(input.sinceAttemptStartSeconds)
+  ) {
+    return;
+  }
+  // Same milestone measured from the start of the attempt that reached it
+  // rather than from acceptance. It excludes time a prompt spent queued behind
+  // an earlier turn in its session, a subscription capacity wait or a gap
+  // before a recovery attempt, so it reflects only this attempt's claim,
+  // preparation and provider latency.
+  observability.observeHistogram({
+    name: "opengeni_turn_startup_since_attempt_start_seconds",
+    help: "Seconds from the start of the turn attempt that reached a startup milestone; excludes time queued behind an earlier turn, capacity waits and recovery gaps.",
+    buckets: TURN_STARTUP_MILESTONE_BUCKETS,
+    labels,
+    value: Math.max(0, input.sinceAttemptStartSeconds),
   });
 }
 

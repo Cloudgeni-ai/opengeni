@@ -284,7 +284,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "End-to-end startup milestones p50 / p95 / p99",
-      "description": "Successful cumulative latency measured from the durable turn queue timestamp. first_byte is a real end-to-end TTFB sample, not a sum of independently distributed phase percentiles. Attempts that terminate before a byte are tracked by the separate availability panel.",
+      "description": "Successful cumulative latency measured from the durable turn queue timestamp, including time behind an earlier turn in the same chat. The attempt-start p95 lines measure the same milestones from the start of the attempt that reached them, excluding queue, capacity and recovery waits; the latency alerts use those. first_byte is a real end-to-end TTFB sample, not a sum of independently distributed phase percentiles. Attempts that terminate before a byte are tracked by the separate availability panel.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "options": {
@@ -312,6 +312,13 @@
           "legendFormat": "{{milestone}} p99",
           "editorMode": "code",
           "range": true
+        },
+        {
+          "refId": "D",
+          "expr": "histogram_quantile(0.95, sum by (le, milestone) (rate(opengeni_turn_startup_since_attempt_start_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",provider=~\"$provider\",backend=~\"$backend\",outcome=\"completed\"}[$__rate_interval])))",
+          "legendFormat": "{{milestone}} p95 from attempt start",
+          "editorMode": "code",
+          "range": true
         }
       ],
       "gridPos": { "x": 0, "y": 20, "w": 16, "h": 10 }
@@ -320,7 +327,7 @@
       "id": 8,
       "type": "stat",
       "title": "Startup SLO misses",
-      "description": "Successful turns above the default queue (5s), provider-dispatch (60s), and first-byte (120s) latency SLOs over the selected range. Pre-byte failures and timeouts are availability misses in the panel below, not latency samples.",
+      "description": "Successful turns above the default provider-dispatch (60s) and first-byte (120s) latency SLOs over the selected range, measured from the start of the attempt that reached them. Queue >5s counts acceptance-to-start time, including time behind an earlier turn in the same chat, and is informational. Pre-byte failures and timeouts are availability misses in the panel below, not latency samples.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
@@ -345,20 +352,20 @@
         {
           "refId": "A",
           "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"queue\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"queue\",outcome=\"completed\",le=\"5\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
-          "legendFormat": "queue >5s",
+          "legendFormat": "queue >5s (incl. behind active turn)",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "B",
-          "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"provider_dispatch\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"provider_dispatch\",outcome=\"completed\",le=\"60\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
+          "expr": "sum(increase(opengeni_turn_startup_since_attempt_start_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"provider_dispatch\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_since_attempt_start_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"provider_dispatch\",outcome=\"completed\",le=\"60\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
           "legendFormat": "dispatch >60s",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "C",
-          "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"first_byte\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"first_byte\",outcome=\"completed\",le=\"120\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
+          "expr": "sum(increase(opengeni_turn_startup_since_attempt_start_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"first_byte\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_since_attempt_start_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"first_byte\",outcome=\"completed\",le=\"120\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
           "legendFormat": "first byte >120s",
           "editorMode": "code",
           "range": true

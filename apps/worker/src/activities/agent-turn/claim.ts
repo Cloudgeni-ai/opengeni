@@ -701,6 +701,10 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         backend: sandboxState.startupMilestoneBackend ?? turn.sandboxBackend,
         outcome: receipt.outcome,
         durationSeconds: receipt.durationMs / 1_000,
+        // The receipt is returned right after the checkpoint commits, so this
+        // attempt's own monotonic clock measures claim, preparation and (for
+        // first_byte) provider latency, without queue, capacity or recovery waits.
+        sinceAttemptStartSeconds: (performance.now() - activityStarted) / 1_000,
       });
     }
   };

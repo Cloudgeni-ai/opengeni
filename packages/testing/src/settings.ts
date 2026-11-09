@@ -321,6 +321,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     experimentOutputCost: true,
     supergrokSubscriptionEnabled: false,
     claudeSubscriptionEnabled: false,
+    claudeCodeApiKeyEnabled: false,
     supergrokResponseStreamIdleTimeoutMs: 300_000,
     modelStreamIdleTimeoutMs: 300_000,
     modelStreamProgressTimeoutMs: 600_000,

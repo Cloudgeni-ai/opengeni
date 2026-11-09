@@ -1007,22 +1007,22 @@
       "domain": "jira.com",
       "mcpUrl": "https://mcp.atlassian.com/v1/mcp/authv2",
       "file": "jira-com-a6bbd6ecb3a6.svg",
-      "sourceUrl": "https://integrations.sh/logo/jira.com",
-      "sha256": "163aa411d5f626ac91c25a963ba8f31e554813bd7626866cbed06d4fb8218ca1",
+      "sourceUrl": "https://cdn.simpleicons.org/atlassian",
+      "sha256": "5b2b712e8a9bb65fc7207f8273f586c325507f3f7c79b2a04e31da1dedd5f3b4",
       "contentType": "image/svg+xml",
-      "sizeBytes": 3894,
-      "fetchedAt": "2026-08-17T12:23:25.826Z"
+      "sizeBytes": 393,
+      "fetchedAt": "2026-11-09T07:38:37.528Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:jira-com-e526db80ea55",
       "domain": "jira.com",
       "mcpUrl": "https://mcp.atlassian.com/v2/mcp?tools=all",
       "file": "jira-com-e526db80ea55.svg",
-      "sourceUrl": "https://integrations.sh/logo/jira.com",
-      "sha256": "163aa411d5f626ac91c25a963ba8f31e554813bd7626866cbed06d4fb8218ca1",
+      "sourceUrl": "https://cdn.simpleicons.org/atlassian",
+      "sha256": "5b2b712e8a9bb65fc7207f8273f586c325507f3f7c79b2a04e31da1dedd5f3b4",
       "contentType": "image/svg+xml",
-      "sizeBytes": 3894,
-      "fetchedAt": "2026-08-17T12:23:25.826Z"
+      "sizeBytes": 393,
+      "fetchedAt": "2026-11-09T07:38:37.516Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:kaggle-com-096ac18291b1",
@@ -1243,6 +1243,17 @@
       "contentType": "image/png",
       "sizeBytes": 3455,
       "fetchedAt": "2026-11-02T12:26:46.437Z"
+    },
+    {
+      "capabilityId": "mcp:integrations-sh:mobbin-com-129bbdbf4d25",
+      "domain": "mobbin.com",
+      "mcpUrl": "https://api.mobbin.com/mcp",
+      "file": "mobbin-com-129bbdbf4d25.jpg",
+      "sourceUrl": "https://integrations.sh/logo/mobbin.com",
+      "sha256": "ffbab66d5436b6b4de6b3cd4605884cb3db4d71b7f88a5431fbd45badf21203e",
+      "contentType": "image/jpeg",
+      "sizeBytes": 839,
+      "fetchedAt": "2026-11-09T07:38:37.597Z"
     },
     {
       "capabilityId": "mcp:integrations-sh:mollie-com-6595d51a4c3d",

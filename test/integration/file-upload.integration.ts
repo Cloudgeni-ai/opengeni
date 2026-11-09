@@ -741,6 +741,7 @@ describe("file upload crash, concurrency, RLS, and object cleanup", () => {
         maintainBrowserStateArtifacts: async () => ({}),
         recoverVideoGenerationWorkflows: async () => ({}),
         reconcileRecentModelCallFacts: async () => ({}),
+        recordRecentTurnTimingProfiles: async () => ({}),
       },
     });
     const run = worker.run();

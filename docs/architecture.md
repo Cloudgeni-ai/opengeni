@@ -2389,11 +2389,13 @@ skip it. No hooks replay, provider creation, or manifest changes.
 Wiring: `apps/worker/src/sandbox-routing.ts` and
 `apps/worker/src/activities/agent-turn/sandbox-runtime.ts`.
 
-Bundled shell tools: every placement's shell has `rg` and `jq` from official
-release builds pinned by SHA-256 in
-`packages/runtime/src/sandbox/shell-tools-manifest.ts` (licence notices beside
-it). Their directory is appended to the end of PATH, so a system copy always
-wins, and nothing is downloaded when a command runs. The machine agent embeds
+Bundled shell tools: every placement's shell has `rg` and `jq` pinned by
+SHA-256 in `packages/runtime/src/sandbox/shell-tools-manifest.ts` (licence
+notices beside it): official release builds, except the Linux jq, a static musl
+build of the official jq source that `scripts/build-static-jq.sh` reproduces
+and `agent/vendor/jq/` holds, because jq's own Linux builds link glibc. Their
+directory is appended to the end of PATH, so a system copy always wins, and
+nothing is downloaded when a command runs. The machine agent embeds
 its own target's build (`agent/crates/opengeni-agent/src/shell_tools.rs`) and
 extends each command's PATH, covering compute sandboxes, selfhosted task
 containers, Connected Machines and run_on targets. For other managed backends
@@ -3450,6 +3452,7 @@ release gate. See [merge batcher](merge-batcher.md) and [main CI](main-ci.md).
 | Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`main-ci.md`](main-ci.md) |
 | Merge batcher and batch CI | `scripts/batcher/`, `.github/workflows/merge-batcher.yml`, `.github/workflows/ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
 | Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`application-observability.md`](application-observability.md), [`deployment.md`](deployment.md) Observability |
+| Per-turn timing profiles (where a turn's time went) | `packages/db/src/turn-timing-profile.ts`, `packages/db/src/turn-timing-profile-store.ts`, `apps/worker/src/activities/turn-timing-profiles.ts` | [`turn-timing-profiles.md`](turn-timing-profiles.md) |
 
 ---
 

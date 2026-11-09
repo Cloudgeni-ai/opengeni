@@ -14,6 +14,10 @@ classes still collapse and unknown codes/messages are omitted. Caller-supplied
 `errorMessage`, provider bodies, SQL and customer content remain excluded;
 protected diagnostics below are the separate cause-investigation boundary.
 
+Where each finished turn's wall time went (queue, startup, model inference,
+provider and network time, tools, sandbox, waits and gaps) is stored per turn
+in SQL and exported as metrics; see [turn timing profiles](turn-timing-profiles.md).
+
 ### Temporal SDK logs
 
 The worker process installs the Temporal Runtime with

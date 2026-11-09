@@ -9,7 +9,7 @@ import {
   isWorkspaceAgentActivityPaused,
   listOutstandingSessionSystemUpdates,
   mutateWorkspaceControlInTransaction,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
 } from "../src/index";
 
@@ -184,9 +184,9 @@ test("Pause refuses a buffered or concurrent occurrence too, so none waits unset
     const [current] = await shared.admin`select revision from workspace_inference_controls
       where workspace_id = ${target.workspaceId!}`;
     const expectedRevision = Number(current?.revision ?? 0);
-    return withWorkspaceRls(client.db, target.workspaceId!, (db) =>
+    return withWorkspaceSessionActivityRls(client.db, target.workspaceId!, (db) =>
       db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as typeof db, {
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: target.accountId,
           workspaceId: target.workspaceId!,
           actor: { type: "human", subjectId: target.subjectId },

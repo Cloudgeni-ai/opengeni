@@ -203,6 +203,10 @@ archived by a person qualifies when all of these hold for the idle period:
    Each step resumes at the table the previous step left unfinished, and the
    purge is recorded complete only after one pass over every table finds
    nothing left.
+   Every foreign key into these tables has an index led by its key columns,
+   so the check each deleted row fires is an index seek rather than a scan of
+   the referencing table across all workspaces (enforced by
+   `packages/db/test/session-archive-postgres.test.ts`).
 
 What stays in PostgreSQL: the session row, turns, attempts, goals and every
 readable timeline event, so the web app, `session_events` and the SDK read an

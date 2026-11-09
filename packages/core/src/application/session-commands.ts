@@ -59,7 +59,6 @@ import {
   steerQueuedTurnInTransaction,
   workspaceControlRequestLockTimeoutMs,
   withEffectiveComposerDraftPolicy,
-  withWorkspaceRls,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectRls,
   withWorkspaceSubjectSessionActivityRls,
@@ -417,6 +416,19 @@ async function publishWorkspaceControlEvent(
     throw new Error(`Committed workspace control event disappeared: ${eventId}`);
   }
   await publishDurableWorkspaceControlEvent(deps.bus, workspaceId, event);
+}
+
+/** Live fanout of the session events a control mutation appended. */
+function sessionEventFanout(
+  deps: { db: Database; bus: EventBus },
+  workspaceId: string,
+  affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }>,
+) {
+  return affectedSessionEvents.map((affected) => ({
+    kind: "session_event_fanout" as const,
+    run: async () =>
+      await publishSessionEventIds(deps, workspaceId, affected.sessionId, affected.eventIds),
+  }));
 }
 
 export async function sendAgentSessionMessage(
@@ -994,11 +1006,7 @@ function scheduleHumanControlPostCommit(
   action: "pause" | "resume" | "cancel",
 ): void {
   scheduleSessionCommandPostCommit(deps, "human_control", [
-    ...result.affectedSessionEvents.map((affected) => ({
-      kind: "session_event_fanout" as const,
-      run: async () =>
-        await publishSessionEventIds(deps, workspaceId, affected.sessionId, affected.eventIds),
-    })),
+    ...sessionEventFanout(deps, workspaceId, result.affectedSessionEvents),
     ...(result.workspaceControlEventId
       ? [
           {
@@ -1292,9 +1300,9 @@ export async function controlHumanWorkspace(
   context: Omit<HumanSessionCommandContext, "sessionId">,
   input: WorkspaceInferenceControlRequest,
 ): Promise<WorkspaceInferenceControlResponse> {
-  const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
+  const result = await withWorkspaceSessionActivityRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
-      mutateWorkspaceControlInTransaction(tx as unknown as Database, {
+      mutateWorkspaceControlInTransaction(tx as unknown as typeof scoped, {
         accountId: context.accountId,
         workspaceId: context.workspaceId,
         actor: { type: "human", subjectId: context.subjectId },
@@ -1314,6 +1322,7 @@ export async function controlHumanWorkspace(
     wakeCount: result.wakeCount,
   };
   scheduleSessionCommandPostCommit(deps, "human_workspace_control", [
+    ...sessionEventFanout(deps, context.workspaceId, result.affectedSessionEvents),
     ...(result.workspaceControlEventId
       ? [
           {
@@ -1420,15 +1429,16 @@ export async function controlHumanWorkspaceTimer(
   context: Parameters<typeof controlHumanWorkspace>[1],
   input: import("@opengeni/contracts").WorkspacePauseTimerRequest,
 ): Promise<void> {
-  const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
+  const result = await withWorkspaceSessionActivityRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
-      setWorkspacePauseTimerInTransaction(tx as unknown as Database, {
+      setWorkspacePauseTimerInTransaction(tx as unknown as typeof scoped, {
         ...input,
         ...context,
       }),
     ),
   );
   scheduleSessionCommandPostCommit(deps, "human_workspace_timer", [
+    ...sessionEventFanout(deps, context.workspaceId, result.affectedSessionEvents),
     ...(result.workspaceControlEventId
       ? [
           {
