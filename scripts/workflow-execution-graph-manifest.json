@@ -6,7 +6,7 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "ad34a9de238ee57b91291ce8792acb5e10e86300aebf63a2841f3f8ab6283fb5"
+      "sha256": "15db952b6aa60b27e7bc157d4f2d95549e8161b33d3305c4a5fed5be685d6eda"
     },
     {
       "path": ".github/workflows/agent-release.yml",
@@ -335,7 +335,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
       "step": "Prove embedded helper selection with synthetic payloads",
-      "sha256": "e14c6ebdd17f2911c39e20957c04770eb211407641552ca915db928d55fdc7a5"
+      "sha256": "723959b19c219405fefd8d526bdd7ffb45dd2f2670745ba25c5135549bbe078f"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",

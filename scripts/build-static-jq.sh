@@ -30,7 +30,7 @@ ARCHES="x86_64 aarch64"
 log() { printf 'build-static-jq: %s\n' "$*" >&2; }
 
 if [ "$#" -ne 1 ]; then
-  log "usage: $0 <out-dir>"
+  log "usage: $0 <out-dir> | --check"
   exit 2
 fi
 if [ "$(uname -s)-$(uname -m)" != "Linux-x86_64" ]; then
