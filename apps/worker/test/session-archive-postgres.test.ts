@@ -365,12 +365,16 @@ describe("idle-session archive worker", () => {
       transcript: { key: string; bytes: number; sha256: string; events: number };
     };
     expect(expectedEvents).toBeGreaterThan(1000);
+    const stored = objects.get(manifest.transcript.key)!;
+    expect(new TextDecoder().decode(zstdDecompressSync(stored))).toBe(
+      new TextDecoder().decode(zstdDecompressSync(expectedBytes)),
+    );
     expect(manifest.transcript).toMatchObject({
       bytes: expected.byteSize,
       sha256: expected.sha256,
       events: expectedEvents,
     });
-    expect(Buffer.compare(objects.get(manifest.transcript.key)!, expectedBytes)).toBe(0);
+    expect(Buffer.compare(stored, expectedBytes)).toBe(0);
   }, 120_000);
 
   test("one pass keeps taking batches until no idle session is left", async () => {

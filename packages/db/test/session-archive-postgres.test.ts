@@ -733,7 +733,7 @@ describe("idle-session archive export reads", () => {
       // seconds, and microseconds the millisecond Date truncates.
       await sql`insert into session_events (account_id, workspace_id, session_id, sequence, type,
           payload, payload_codec_version, occurred_at, client_event_id, turn_id, turn_generation,
-          turn_association, duplicate_reason)
+          turn_association)
         select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
           (${types}::text[])[1 + n % ${types.length}],
           case when n % 7 = 0 then ${sql.json(encoded as never)}::jsonb
@@ -746,8 +746,7 @@ describe("idle-session archive export reads", () => {
           case when n % 3 = 0 then 'client-' || n end,
           case when n % 2 = 0 then ${turn!.id}::uuid end,
           case when n % 2 = 0 then ${turn!.execution_generation}::int end,
-          case when n % 2 = 0 then 'current' end,
-          case when n % 11 = 0 then 'reason ' || n end
+          case when n % 2 = 0 then 'current' end
         from (select max(sequence) as last from session_events
           where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
           generate_series(1, 1250) n`;
