@@ -10,7 +10,7 @@ import { migrate } from "../src/migrate";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const migration = readFileSync(
   new URL(
-    "../drizzle/1349_merge_duplicate_personal_logins_across_oauth_clients.sql",
+    "../drizzle/1351_merge_duplicate_personal_logins_across_oauth_clients.sql",
     import.meta.url,
   ),
   "utf8",
@@ -139,7 +139,7 @@ async function turnedOnIn(authorityId: string) {
   return rows.map((row) => row.workspaceId);
 }
 
-describe("1349 merges duplicate personal logins made with different OAuth clients (real PostgreSQL)", () => {
+describe("1351 merges duplicate personal logins made with different OAuth clients (real PostgreSQL)", () => {
   test("the same verified account under an earlier client merges into the kept login", async () => {
     if (!owned || !ownerSql) return;
     const forced = async () =>
@@ -251,7 +251,7 @@ describe("1349 merges duplicate personal logins made with different OAuth client
     expect((await forced()).every((row) => row.forced)).toBe(true);
   }, 180_000);
 
-  test("the login whose client refreshed most recently is kept, never one on a retired client", async () => {
+  test("the login whose client refreshed most recently is kept over one on a retired client that has not refreshed since", async () => {
     if (!owned || !ownerSql) return;
     const { accountId, personal, person } = await organization("client liveness");
     const me = "me@example.test";
