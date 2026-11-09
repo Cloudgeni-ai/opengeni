@@ -3161,7 +3161,7 @@ export const englishMessages = {
    * that microphone.
    */
   "meetings.transcript.nameSMicrophoneWasnTRecordingFromTo":
-    "{name}'s microphone wasn't recording from {from} to {to}",
+    "{name}'s microphone wasn't recording from {from} to {to}. Everyone else was still recorded.",
   "meetings.transcript.nameSuggestedFromTheirVoice":
     "{name}, suggested from their voice. Confirm or correct",
   "meetings.transcript.nothingWasRecordedFromTo": "Nothing was recorded from {from} to {to}",
@@ -3183,7 +3183,7 @@ export const englishMessages = {
   "meetings.transcript.suggestedBecauseTheVoiceSounds": "Sounds like them ({suggestionMatch})",
   "meetings.transcript.suggestedBecauseTheVoiceSounds2": "Sounds like them",
   "meetings.transcript.theMicrophoneWasnTRecordingFromTo":
-    "The microphone wasn't recording from {from} to {to}",
+    "The microphone wasn't recording from {from} to {to}. Other people were still recorded.",
   "meetings.transcript.theNameIsAddedTo": "Anyone in the workspace can pick this name later.",
   "meetings.transcript.transcript": "Transcript",
   "meetings.transcript.usedToSuggestNamesIn": "Remembered voice",

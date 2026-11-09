@@ -522,10 +522,10 @@ describe("transcript turns", () => {
     expect(trackSpeakerName(0, segments, [])).toBeNull();
     expect(trackSpeakerName(1, segments, speakers)).toBeNull();
     expect(unrecordedMarkText(marks[1]!, undefined, "Ingrid Solberg")).toBe(
-      "Ingrid Solberg's microphone wasn't recording from 17:39 to 45:35",
+      "Ingrid Solberg's microphone wasn't recording from 17:39 to 45:35. Everyone else was still recorded.",
     );
     expect(unrecordedMarkText(marks[1]!)).toBe(
-      "The microphone wasn't recording from 17:39 to 45:35",
+      "The microphone wasn't recording from 17:39 to 45:35. Other people were still recorded.",
     );
     expect(unrecordedMarkText(marks[0]!)).toBe("Other people weren't recorded from 0:20 to 1:35");
   });
