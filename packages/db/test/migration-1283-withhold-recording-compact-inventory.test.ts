@@ -24,9 +24,9 @@ test("1283 withholds the compact-audio inventory 1282 granted from every configu
     return row;
   };
   try {
-    // The whole chain runs 1282 and then 1283, so the runtime ends without it.
+    // The whole chain ends with 1359, which grants it again.
     await migrate(owned.ownerUrl);
-    expect(await execute("opengeni_app")).toEqual({ granted: false, public_execute: false });
+    expect(await execute("opengeni_app")).toEqual({ granted: true, public_execute: false });
     for (let index = 0; index < 2; index++) {
       const role = `migration_1283_${crypto.randomUUID().replaceAll("-", "")}`;
       await owned.admin.unsafe(`CREATE ROLE "${role}" NOSUPERUSER NOBYPASSRLS`);
