@@ -104,7 +104,10 @@ test("a provider row needs attention when any of its options does", () => {
   const [row] = collapsed({
     id: "atlassian",
     name: "Jira & Confluence",
-    options: [stated("jira", "added"), { ...stated("confluence", "attention"), status: "Reconnect" }],
+    options: [
+      stated("jira", "added"),
+      { ...stated("confluence", "attention"), status: "Reconnect" },
+    ],
   }).options;
   expect(row).toMatchObject({ state: "attention", status: "Reconnect", connected: true });
   const [restricted] = collapsed({
