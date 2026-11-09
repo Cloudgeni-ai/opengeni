@@ -1790,8 +1790,8 @@ does not grant those origins credentialed cross-origin responses.
 
 A marketing site on another origin of the same site (for example `opengeni.ai`
 beside `app.opengeni.ai`) can show a signed-in visitor as signed in through
-`GET /v1/auth/display-identity`. It resolves the visitor exactly like
-`GET /v1/auth/get-session` and returns only `{"signedIn": false}` or
+`GET /v1/auth/display-identity`. It resolves the visitor like
+`GET /v1/auth/get-session` on a freshly loaded app tab and returns only `{"signedIn": false}` or
 `{"signedIn": true, "name": ..., "image": ...}`, never an email, id or session
 data, with `Cache-Control: private, no-store` and `Vary: Origin`. List the
 site's exact origins in `OPENGENI_LANDING_ORIGINS` (comma-separated, no

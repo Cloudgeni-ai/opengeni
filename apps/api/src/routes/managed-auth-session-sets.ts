@@ -200,6 +200,8 @@ export function registerManagedAuthSessionSetRoutes(app: Hono, deps: ApiRouteDep
     } catch (error) {
       if (!isSignedOutRefusal(error)) throw error;
     }
+    // A provider failure is not an answer about the visitor.
+    if (upstream && upstream.status >= 500) return upstream;
     if (upstream?.ok) {
       identity = displayIdentityFrom(await upstream.json().catch(() => null));
     }

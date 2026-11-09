@@ -155,6 +155,12 @@ describe("GET /v1/auth/display-identity", () => {
     expect(await response.json()).toEqual({ signedIn: false });
   });
 
+  test("a Better Auth server failure is not reported as signed out", async () => {
+    const app = legacyRouteApp(async () => new Response("boom", { status: 503 }));
+    const response = await app.request(DISPLAY_IDENTITY_PATH);
+    expect(response.status).toBe(503);
+  });
+
   test("an unexpected failure is not reported as signed out", async () => {
     const app = legacyRouteApp(async () => {
       throw new Error("database down");
@@ -240,6 +246,13 @@ describe("display-identity CORS", () => {
         expect(response.headers.get("access-control-allow-origin")).toBe("*");
         expect(response.headers.get("access-control-allow-credentials")).toBeNull();
       }
+    }
+  });
+
+  test("near-miss paths get no credentialed CORS", async () => {
+    for (const path of [`${DISPLAY_IDENTITY_PATH}/`, DISPLAY_IDENTITY_PATH.toUpperCase()]) {
+      const response = await app.request(path, { headers: { origin: LANDING } });
+      expect(response.headers.get("access-control-allow-credentials")).toBeNull();
     }
   });
 
