@@ -73,7 +73,8 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
   const appName = options.appName ?? "Opengeni";
   if (!appName.trim() || appName.length > 30)
     throw new Error("appName must contain 1–30 characters");
-  const appFullName = options.appFullName ?? appName;
+  // An explicit full name is trimmed; the default is the short name unchanged.
+  const appFullName = options.appFullName?.trim() ?? appName;
   if (!appFullName.trim() || appFullName.length > 100)
     throw new Error("appFullName must contain 1–100 characters");
   const version = options.version ?? "1.0.0";

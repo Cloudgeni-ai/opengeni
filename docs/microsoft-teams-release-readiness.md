@@ -333,12 +333,17 @@ bun scripts/generate-teams-app-manifest.ts --package-dir /absolute/private/path/
 For the Opengeni Store listing the legal URLs are `https://opengeni.ai`,
 `https://opengeni.ai/privacy` and `https://opengeni.ai/terms`; the generator
 still requires them explicitly. `OPENGENI_TEAMS_APP_NAME` sets `name.short`
-(at most 30 characters), the name Teams shows in chat, which the bot uses for
-itself. `OPENGENI_TEAMS_APP_FULL_NAME` sets `name.full` (at most 100
-characters) and defaults to the short name. The Store requires the Partner
-Center listing name to match the manifest app name; `Opengeni` is already
-reserved in Partner Center, so the Opengeni listing is `Opengeni for Teams`
-with the short name `Opengeni`. `developer.name` defaults to `Opengeni`, the
+(at most 30 characters), the name Teams shows in chat; the bot's welcome
+message and replies must use it. `OPENGENI_TEAMS_APP_FULL_NAME` sets
+`name.full` (at most 100 characters), which Teams uses where a longer name
+fits, and defaults to the short name. The Store requires the Partner Center
+listing name to match the manifest app name, without saying whether it compares
+`name.short` or `name.full`. `Opengeni` is already reserved in Partner Center,
+so the Opengeni listing is `Opengeni for Teams`, set as the full name, with the
+short name `Opengeni`. The Store guidelines also say an app name must not use
+"Teams" or "Microsoft" unless the app is in an official partnership with
+Microsoft, so follow the validation team's feedback on the name if they raise
+it. `developer.name` defaults to `Opengeni`, the
 Partner Center publisher name (the legal entity is Cloudgeni AS), and must match
 the publisher shown in Partner Center; set `OPENGENI_TEAMS_DEVELOPER_NAME` (at
 most 32 characters) for another publisher. `developer.mpnId` defaults to
