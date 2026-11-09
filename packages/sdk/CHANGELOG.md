@@ -1,5 +1,75 @@
 # @opengeni/sdk
 
+## 6.12.0
+
+### Minor Changes
+
+- 64fd53f: An agent can now ask to attach a repository the workspace GitHub App offers to its own chat with the new first-party `github_repository_attach` tool. Every call waits for a person's approval through the ordinary tool approval card, in the app and in the Slack thread of a chat started from Slack. The card names the repository, the branch and the access, and says when a person removed the repository from the chat earlier. Where nobody can answer, such as a scheduled or unattended run, the call is refused.
+
+  The API attaches only a call a person approved for exactly that repository and branch, from the same workspace GitHub App catalog and `github:use` permission as the repository picker, and never an archived or empty repository. The repository joins the chat's repositories as best effort (`optional`), ends any earlier removal record, and is one of the chat's repositories from the next turn. Asking for a repository the chat already has reports the branch it has, and a repository the App has since stopped offering no longer blocks attaching another. A new `session.resources.added` event records it.
+
+  `@opengeni/core` adds `attachSessionRepositoryResource`, `@opengeni/db` adds `listPersonApprovedFirstPartyToolCalls`, and the timeline shows the call as "Attaching a code repository".
+
+  An approval card for a first-party call whose review states its target facts now lists those facts, in the app and in Slack, as app action cards do; the call's raw arguments stay in Details. The Slack bot message card shows its channel and message this way too.
+
+- 281af3a: Add `OPENGENI_CLAUDE_CODE_API_KEY_ENABLED` (default off): Connect provider offers a
+  "Claude Code (API key)" row that opens the Anthropic API-key connection, introduced by a short
+  explanation of the monthly API credits some Claude plans include and how to claim them and create
+  the key. Display only; the Claude subscription connection is unchanged.
+- 2e749ad: Resolve UUID `artifact:` links with one authenticated workspace kind lookup before handing them to host navigation. Chat, embedded viewers, and mobile links now open Sites as well as retained files; old typed routes and native editable-artifact links keep their existing behavior.
+- fcdf7de: Keep operator instructions, skill bodies and the full tool catalog out of default
+  chat session responses through the explicit typed `client.withSessionResponse("chat")` opt-in
+  and JSON content negotiation on the existing Accept header. SDK defaults and
+  required Session fields stay unchanged. Console, mobile and packaged chat clients
+  opt into the compact type. Settings and server-side integrations can explicitly read
+  the full configuration with `getSessionConfiguration` and session-control authority.
+  Server-owned session relays refuse browser configuration and model-context reads.
+
+  Export `OPENGENI_BROWSER_RESPONSE_HEADERS`, share it between API CORS and the
+  packaged relay, and warn once when required history response metadata is unreadable.
+  Cross-origin hosts should use the export for `Access-Control-Expose-Headers`.
+
+- c0b9f88: Add workspace-scoped stateless typed decisions with SDK `decide`. Reuse the
+  deployment's configured decision model, chat-completions authority, usage settlement
+  and residency checks. Calls are deployment-funded, independent of customer agent
+  allowances, with optional tenant-label attribution and off-path usage receipts.
+  Preserve typed refusals and reported, estimated and unknown provider costs.
+
+### Patch Changes
+
+- 2e7c01e: Voice calls on Android now set up the phone's call audio, and a call that is silent on one side says so.
+
+  - Android: `createExpoCallAdapter` no longer returns null. The package's call module now ships an Android side that, while a call runs, takes audio focus for voice communication, switches the phone into communication mode and routes the call to a connected headset or the loudspeaker (every call starts on the loudspeaker, as on iOS), then restores the previous audio state when the call ends. Before, WebRTC recorded and played as if no call were running, and on some phones the microphone handed the call nothing but silence, so the voice never heard the person. There is no system call screen on Android: the adapter reports `showsSystemCall: false`, `systemCall` stays false, and agent calls (`incoming`) remain iOS-only. The package's Android manifest adds `MODIFY_AUDIO_SETTINGS`, a normal permission with no prompt. Native Android builds need a rebuild to include the module.
+  - SDK: while a call is live, the realtime controller reads the peer connection's audio statistics once a second. An unmuted microphone that delivers no sound at all for 8 seconds raises the recoverable `no_input_audio` diagnostic, and a finished reply whose audio never played raises `output_silent`; both set `error` with a plain message and clear once audio flows. Platforms whose statistics lack audio energy report nothing.
+  - React Native: `useNativeRealtimeCall` returns a `notice` for these, and `OpenGeniNativeCallView` shows it under the call status.
+  - React: the voice control shows "No sound from your microphone" or "Reply not played" beside the button, with the detail in its menu.
+
+- e9222e0: A chat whose automatically attached GitHub repository later loses access (the GitHub App is uninstalled, or the repository is taken out of it) no longer refuses every follow-up. Follow-ups used to re-check all of the chat's repositories and answer 422 "The request could not be accepted. Check your input and try again." for good, so Retry could never succeed. Now those optional repositories are left to the worker, which drops them for the turn and reports them as skipped. Repositories a message adds, and ones attached explicitly, are still checked. That refusal now carries `details.code: "github_repository_unavailable"` and the repository names, and the composer says which repository to remove or restore. Any other 400/422 Send refusal that has a server reason shows that reason instead of the generic "check your input". The SDK keeps short string lists in error `details`, for example `repositories` and `allowedLatencyModes`.
+- 8cc1ddd: An agent moving its turn onto a personal (Only me) Connected Machine whose approval for the turn was used up, revoked or expired now gets a typed refusal instead of a raw database error. `sandbox_swap`, `sandbox_attach` and `run_on` return the new code `machine_access_required`, whose reason starts with "Machine access needed: this chat isn’t allowed to use “<machine>” right now.", and the chat stays on its current machine. That sentence now comes from one shared helper, `machineAccessNeededMessage` in `@opengeni/contracts`, used by the failed-turn banner, the worker's turn failure and the refusal.
+- 98938f0: Prepare native call data and microphone-free WebRTC offers while ringing, reuse the workspace voice selection, and overlap outgoing setup with admission. Keep provider calls and microphone capture behind Answer, release abandoned preparation, and expose server setup phase timings.
+- 3929153: Prepare incoming voice connections while ringing only on phones with a native audio device that guarantees silence until Answer. Hold context delivery until the answering phone wins, release unused preparations silently, and retain connect-on-answer behavior on other hosts.
+- 2e1e9c6: Send always wins over the saved draft. Starting a new chat or sending in an existing chat now carries exactly what is in the box and is never refused because the draft changed, on web, the Mac app and mobile; retries stay safe through the message's client event ID.
+
+  API change: `expectedNewSessionDraftRevision` on create and `expectedDraftRevision` on composer submit no longer make the server refuse a Send with `NEW_SESSION_DRAFT_CONFLICT` or `DRAFT_CHANGED`. They are now the revision the sender last saw, the basis for clearing the draft: after an accepted Send the server clears the draft only while it is still at that revision or holds exactly what was sent. Otherwise a newer draft typed on another device stays (composer submit returns it as `draft`) and the composer shows it. Composer submit now also accepts `expectedDraftRevision: 0`, meaning the sender saw no saved draft. Draft saves keep their revision checks.
+
+  A person's other devices now follow their latest draft live through a private, content-free hint on the workspace live stream (`workspace.drafts.changed`), and typing over another device's edit saves on top of it instead of asking which draft to keep. Mobile new chats now clear the saved draft they were sent from. Against a server from before this change, a mobile new chat that the server refuses over its draft is retried once without the draft, as such servers always accepted.
+
+- bee1e4c: With `busySend: "steer"`, a message sent while a turn runs now always reaches that turn, even when the client's copy of the session is a few seconds behind. The composer used to pick Steer or Send from its own view of the session, so a Send right after a turn started could be queued and answered only after the turn finished. It now submits the new `delivery: "steer_or_send"` (accepted by `steerMessage` and draft submits), and the server resolves it under the same locks that start and settle turns: it steers a running or just-starting turn, starts a turn when the session is idle, and queues without resuming when it is paused. Only the resolved `steer` or `send` is recorded, so nothing the model sees changes. Exact retries replay the first decision. Plain `send` and explicit Queue are unchanged, and the composer falls back to its own choice against a server without `steer_or_send`.
+- 65e1fb9: Open `artifact:<32-hex id>` Markdown links as native documents, spreadsheets, or presentations in the current workspace, using the existing artifact navigation and embedded viewer resolvers. Retained-file UUID links continue to open files.
+- Updated dependencies [64fd53f]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+  - @opengeni/connect@6.12.0
+
 ## 6.11.0
 
 ### Minor Changes
