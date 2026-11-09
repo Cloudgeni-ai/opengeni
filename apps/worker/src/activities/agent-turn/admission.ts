@@ -40,6 +40,19 @@ import { startOfUtcMonth } from "./model-usage";
 import { flushHeldSessionUsageReceipts } from "./session-usage-custody";
 import { errorMessage } from "@opengeni/contracts/values";
 
+/**
+ * A turn refused at admission with a fixed, secret-free message that tells the
+ * person what to change (choose a credit-billed model, add credits, upgrade,
+ * wait for a monthly limit). Its name reaches Temporal as the failure type, so
+ * `turn.failed` can show the message instead of the generic activity failure.
+ */
+export class TurnAdmissionRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TurnAdmissionRefusedError";
+  }
+}
+
 export class WorkspaceHumanInputDisabledError extends Error {
   constructor(kind: "resume" | "interruption") {
     super(`Workspace policy rejects structured human-input ${kind}`);
@@ -446,7 +459,7 @@ export async function ensureRunAllowed(
 ): Promise<number | undefined> {
   let creditPolicyRevision: number | undefined;
   if (ownSubscription && connectedSubscriptionsRefusedForOrigin(settings, billingOrigin)) {
-    throw new Error(SUBSCRIPTION_API_UNAVAILABLE_MESSAGE);
+    throw new TurnAdmissionRefusedError(SUBSCRIPTION_API_UNAVAILABLE_MESSAGE);
   }
   // Per-task usage limit: independent of funding, so it applies to
   // credit, subscription, workspace-key and free paths alike.
@@ -496,20 +509,22 @@ export async function ensureRunAllowed(
     creditPolicyRevision = balance.creditPolicyRevision;
     if (balance.balanceMicros <= 0) {
       // Plan credit never pays for API work: say which balance is empty.
-      throw new Error(
+      throw new TurnAdmissionRefusedError(
         billingOrigin === "api" ? API_CREDITS_REQUIRED_MESSAGE : "insufficient workspace credits",
       );
     }
   } else if (!chargesOpenGeniCredits && ownSubscription) {
     // The person's own subscription pays no fee; it needs a paid plan.
     if (!(await ownSubscriptionPlanAllows(db, settings, accountId))) {
-      throw new Error(SUBSCRIPTION_PLAN_REQUIRED_MESSAGE);
+      throw new TurnAdmissionRefusedError(SUBSCRIPTION_PLAN_REQUIRED_MESSAGE);
     }
   } else if (!chargesOpenGeniCredits && byok && byokPlatformFeeActive(settings, accountId)) {
     // The person's own API key pays a platform fee, payable only from paid credit.
     const balance = await getByokFeeSpendableBalance(db, accountId, billingOrigin);
     if (balance.balanceMicros <= 0) {
-      throw new Error(byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(billingOrigin)));
+      throw new TurnAdmissionRefusedError(
+        byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(billingOrigin)),
+      );
     }
   }
   const refusal = await checkWorkspaceAllowance(db, {
@@ -531,7 +546,7 @@ export async function ensureRunAllowed(
       // Equality means this accepted turn is exactly at the cap; greater-than is
       // the race/backstop case where another admission already exceeded the cap.
       if (used > limits.maxMonthlyAgentRunsPerWorkspace) {
-        throw new Error(
+        throw new TurnAdmissionRefusedError(
           `monthly agent run limit reached (${limits.maxMonthlyAgentRunsPerWorkspace})`,
         );
       }
@@ -543,7 +558,9 @@ export async function ensureRunAllowed(
         since: startOfUtcMonth(),
       });
       if (used >= limits.maxMonthlyTokensPerWorkspace) {
-        throw new Error(`monthly token limit reached (${limits.maxMonthlyTokensPerWorkspace})`);
+        throw new TurnAdmissionRefusedError(
+          `monthly token limit reached (${limits.maxMonthlyTokensPerWorkspace})`,
+        );
       }
     }
   }
