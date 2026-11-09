@@ -184,10 +184,16 @@ describe("the callback's account ID read", () => {
         .setExpirationTime("5m")
         .sign(privateKey);
     const seen: string[] = [];
+    let certsAvailable = true;
+    // Token info for a token that only an unproven ID token came with: not ours.
+    let tokenInfo = () => Response.json({ sub: "1001", aud: "another-client" });
     spy = spyOn(network, "pinnedFetch").mockImplementation(async (input) => {
       seen.push(String(input));
       if (String(input) === "https://www.googleapis.com/oauth2/v3/certs")
-        return Response.json({ keys: [jwk] });
+        return certsAvailable
+          ? Response.json({ keys: [jwk] })
+          : new Response(null, { status: 503 });
+      if (String(input) === "https://oauth2.googleapis.com/tokeninfo") return tokenInfo();
       throw new Error(`Unexpected destination: ${String(input)}`);
     });
     for (const issuer of ["https://accounts.google.com", "accounts.google.com"])
@@ -209,7 +215,16 @@ describe("the callback's account ID read", () => {
       },
     ])
       expect(await read(OFFICIAL_GMAIL_MCP_URL, raw)).toEqual({});
-    expect(seen.every((url) => url === "https://www.googleapis.com/oauth2/v3/certs")).toBe(true);
+    // An ID token that can't be checked (Google's keys are unreachable) falls
+    // back to token info for the access token.
+    certsAvailable = false;
+    tokenInfo = () => Response.json({ sub: "1002", aud: "client" });
+    expect(
+      await read(OFFICIAL_GMAIL_MCP_URL, {
+        id_token: await idToken({ sub: "1001", aud: "client" }),
+      }),
+    ).toEqual({ googleSubject: "1002" });
+    expect(seen).toContain("https://oauth2.googleapis.com/tokeninfo");
   });
 
   test("without an ID token, reads token info with the token in the body, never the URL", async () => {

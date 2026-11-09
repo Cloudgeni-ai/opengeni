@@ -91,8 +91,9 @@ const GOOGLE_TOKEN_ORIGIN = "https://oauth2.googleapis.com";
  * Gmail, Calendar and Drive checks read. Google never changes or reuses it,
  * while an account's email can change (a renamed Workspace user or domain), so
  * once two logins both have it, it alone decides whether they are the same
- * account. These sign-ins ask for `openid` so that Google's tokeninfo reports
- * it for the new access token.
+ * account. These sign-ins ask for `openid` so that Google reports it: in the
+ * signed ID token from the code exchange, or else in its token info for the
+ * new access token.
  */
 export const GOOGLE_SUBJECT_KEY = "googleSubject";
 

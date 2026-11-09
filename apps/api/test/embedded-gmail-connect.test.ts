@@ -262,8 +262,8 @@ test.each([
     };
     const askedAll = (attempt: { nextAction: { url: string } }) =>
       new URL(attempt.nextAction.url).searchParams.get("scope")!.split(" ").sort();
-    // Every Google sign-in also asks for "openid", so Google's token info
-    // reports the account ID; the Gmail access asked for is the rest.
+    // Every Google sign-in also asks for "openid", so Google reports the
+    // account ID; the Gmail access asked for is the rest.
     const askedScopes = (attempt: { nextAction: { url: string } }) =>
       askedAll(attempt).filter((scope) => scope !== "openid");
     const [readonlyScope, composeScope, modifyScope] = OFFICIAL_GMAIL_MCP_SCOPES;

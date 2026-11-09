@@ -3148,18 +3148,26 @@ export async function stableAccountIdentity(
   const idToken = token.raw.id_token;
   try {
     if (typeof idToken === "string" && idToken) {
-      const jwks = await readJson(
-        GOOGLE_JWKS_URL,
-        { method: "GET", headers: { accept: "application/json" } },
-        "Google signing keys",
-      );
-      const keys = jwks as unknown as JSONWebKeySet;
-      const { payload } = await jwtVerify(idToken, createLocalJWKSet(keys), {
-        issuer: GOOGLE_ID_TOKEN_ISSUERS,
-        audience: clientId,
-        algorithms: ID_TOKEN_ALGORITHMS,
-      });
-      return { [subjectKey]: googleSubjectFromClaims(payload, clientId) };
+      try {
+        const jwks = await readJson(
+          GOOGLE_JWKS_URL,
+          { method: "GET", headers: { accept: "application/json" } },
+          "Google signing keys",
+        );
+        const keys = jwks as unknown as JSONWebKeySet;
+        const { payload } = await jwtVerify(idToken, createLocalJWKSet(keys), {
+          issuer: GOOGLE_ID_TOKEN_ISSUERS,
+          audience: clientId,
+          algorithms: ID_TOKEN_ALGORITHMS,
+        });
+        return { [subjectKey]: googleSubjectFromClaims(payload, clientId) };
+      } catch (error) {
+        // An ID token that can't be checked proves nothing; Google's token
+        // info for the access token from the same exchange still can.
+        observability?.warn("MCP OAuth ID token unverified; reading Google token info", {
+          reason: identityFailureReason(error),
+        });
+      }
     }
     // POSTed so the token never appears in a URL.
     const info = await readJson(
