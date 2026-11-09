@@ -1562,6 +1562,7 @@ describe("release image workflow contract", () => {
     // agent version, so an unpublished version leaves machines behind.
     const parsed = Bun.YAML.parse(await workflow("agent-release.yml")) as {
       on: { push: { branches?: string[]; paths?: string[]; tags?: string[] } };
+      concurrency: { "cancel-in-progress"?: boolean; queue?: string };
       jobs: Record<
         string,
         { if?: string; outputs?: Record<string, string>; steps?: WorkflowStep[] }
@@ -1570,14 +1571,26 @@ describe("release image workflow contract", () => {
     expect(parsed.on.push.branches).toEqual(["main"]);
     expect(parsed.on.push.paths).toEqual(["agent/Cargo.toml"]);
     expect(parsed.on.push.tags).toEqual(["agent-v*"]);
+    // A later push waits instead of replacing an earlier pending run.
+    expect(parsed.concurrency["cancel-in-progress"]).toBe(false);
+    expect(parsed.concurrency.queue).toBe("max");
     expect(parsed.jobs.guard!.outputs?.publish).toBe("${{ steps.v.outputs.publish }}");
     for (const job of ["build", "publish"]) {
       expect(parsed.jobs[job]!.if).toBe("${{ needs.guard.outputs.publish == 'true' }}");
     }
 
-    const guard = parsed.jobs.guard!.steps!.find(
+    const guardStep = parsed.jobs.guard!.steps!.find(
       (step) => step.name === "Resolve + verify the version",
-    )!.run!;
+    )!;
+    const guard = guardStep.run!;
+    // Event values reach the script through the environment, never inline.
+    expect(guard).not.toContain("${{");
+    expect(guardStep.env).toEqual({
+      EVENT_NAME: "${{ github.event_name }}",
+      REF_TYPE: "${{ github.ref_type }}",
+      DISPATCH_VERSION: "${{ github.event.inputs.version }}",
+      GH_TOKEN: "${{ github.token }}",
+    });
     const directory = mkdtempSync(join(tmpdir(), "agent-release-guard-"));
     try {
       mkdirSync(join(directory, "agent"));
@@ -1586,54 +1599,86 @@ describe("release image workflow contract", () => {
         join(directory, "agent", "Cargo.toml"),
         '[workspace.package]\nversion = "0.1.158"\n',
       );
-      // The stub answers like `git ls-remote --exit-code` for the tag it is asked about.
+      // The stubs record their arguments and answer like `git ls-remote
+      // --exit-code` and the releases API for the tag they are asked about.
       writeFileSync(
         join(directory, "bin", "git"),
-        '#!/usr/bin/env bash\nexit "$FIXTURE_LS_REMOTE_STATUS"\n',
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$FIXTURE_CALLS"\nexit "$FIXTURE_LS_REMOTE_STATUS"\n',
         { mode: 0o755 },
       );
+      writeFileSync(
+        join(directory, "bin", "curl"),
+        '#!/usr/bin/env bash\nprintf \'curl %s\\n\' "${@: -1}" >> "$FIXTURE_CALLS"\n[ "$FIXTURE_RELEASE_STATUS" = fail ] && exit 7\nprintf \'%s\' "$FIXTURE_RELEASE_STATUS"\n',
+        { mode: 0o755 },
+      );
+      let runs = 0;
       const run = (
         event: "push" | "workflow_dispatch",
         refType: "branch" | "tag",
         refName: string,
         lsRemote: number,
+        release: "200" | "404" | "500" | "fail" = "404",
       ) => {
-        const output = join(directory, `output-${event}-${refType}-${lsRemote}`);
+        runs += 1;
+        const output = join(directory, `output-${runs}`);
+        const calls = join(directory, `calls-${runs}`);
         writeFileSync(output, "");
-        const script = guard
-          .replaceAll("${{ github.event_name }}", event)
-          .replaceAll("${{ github.ref_type }}", refType)
-          .replaceAll("${{ github.event.inputs.version }}", "0.1.158");
-        const result = spawnSync("bash", ["-c", script], {
+        writeFileSync(calls, "");
+        const result = spawnSync("bash", ["-c", guard], {
           cwd: directory,
           encoding: "utf8",
           env: {
             PATH: `${join(directory, "bin")}:${process.env.PATH}`,
             GITHUB_OUTPUT: output,
             GITHUB_REF_NAME: refName,
+            GITHUB_API_URL: "https://api.github.test",
+            GITHUB_REPOSITORY: "owner/repo",
+            EVENT_NAME: event,
+            REF_TYPE: refType,
+            DISPATCH_VERSION: "0.1.158",
+            GH_TOKEN: "fixture-token",
+            FIXTURE_CALLS: calls,
             FIXTURE_LS_REMOTE_STATUS: String(lsRemote),
+            FIXTURE_RELEASE_STATUS: release,
           },
         });
         return {
           status: result.status,
           stderr: result.stderr,
           outputs: readFileSync(output, "utf8"),
+          calls: readFileSync(calls, "utf8"),
         };
       };
-      // A main push whose version has no release yet publishes it.
-      expect(run("push", "branch", "main", 2)).toMatchObject({
+      const releaseLookup =
+        "curl https://api.github.test/repos/owner/repo/releases/tags/agent-v0.1.158\n";
+      const tagLookup = "ls-remote --exit-code --tags origin refs/tags/agent-v0.1.158\n";
+      // A main push whose version has no release and no tag publishes it.
+      expect(run("push", "branch", "main", 2, "404")).toMatchObject({
         status: 0,
         outputs: "version=0.1.158\npublish=true\n",
+        calls: releaseLookup + tagLookup,
       });
-      // An already published (or hand-tagged) version is left alone.
-      expect(run("push", "branch", "main", 0)).toMatchObject({
+      // An already released version is left alone.
+      expect(run("push", "branch", "main", 0, "200")).toMatchObject({
         status: 0,
         outputs: "version=0.1.158\npublish=false\n",
+        calls: releaseLookup,
       });
-      // A tag listing that fails is not mistaken for a missing release.
-      const failed = run("push", "branch", "main", 128);
-      expect(failed.status).not.toBe(0);
-      expect(failed.outputs).toBe("");
+      // A tag whose own run never released it fails loudly instead of skipping.
+      const orphanTag = run("push", "branch", "main", 0, "404");
+      expect(orphanTag.status).not.toBe(0);
+      expect(orphanTag.outputs).toBe("");
+      expect(orphanTag.stderr).toContain("exists without a release");
+      // Lookups that fail are not mistaken for a missing release.
+      for (const [lsRemote, release] of [
+        [128, "404"],
+        [2, "500"],
+        [2, "fail"],
+      ] as const) {
+        const failed = run("push", "branch", "main", lsRemote, release);
+        expect(failed.status).not.toBe(0);
+        expect(failed.outputs).toBe("");
+      }
       // Tag pushes and manual dispatch keep their exact-version check.
       expect(run("push", "tag", "agent-v0.1.158", 2)).toMatchObject({
         status: 0,

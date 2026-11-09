@@ -25,7 +25,9 @@ on:
   push:
     branches:
       - main
-    # Branch pushes only; tag pushes ignore path filters.
+    # Branch pushes only; tag pushes ignore path filters. GitHub evaluates the
+    # first 300 changed files of a push, and the merge batcher lands each PR as
+    # its own commit, so only a single PR touching more files could miss this.
     paths:
       - agent/Cargo.toml
     tags:
@@ -39,6 +41,9 @@ on:
 concurrency:
   group: agent-release-${{ github.ref }}
   cancel-in-progress: false
+  # Every version that lands on main is published, so a later push waits in
+  # line instead of replacing an earlier run still waiting for approval.
+  queue: max
 
 permissions:
   contents: read
@@ -61,23 +66,37 @@ jobs:
       - name: Resolve + verify the version
         id: v
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           crate_version="$(grep -m1 '^version' agent/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            version="${{ github.event.inputs.version }}"
-          elif [ "${{ github.ref_type }}" = "branch" ]; then
-            # main changed agent/Cargo.toml: publish its version unless a
-            # release (or a hand-pushed tag) already exists for it.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$DISPATCH_VERSION"
+          elif [ "$REF_TYPE" = "branch" ]; then
+            # main changed agent/Cargo.toml: publish its version unless its
+            # release already exists.
             version="$crate_version"
+            release_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/agent-v$version")" || release_status=error
+            if [ "$release_status" = 200 ]; then
+              echo "agent-v$version is already released; nothing to publish"
+              echo "version=$version" >> "$GITHUB_OUTPUT"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            [ "$release_status" = 404 ] || { echo "::error::could not look up the agent-v$version release (HTTP $release_status)" >&2; exit 1; }
             # 0: the tag exists; 2: it does not; anything else is an error.
             tag_status=0
             git ls-remote --exit-code --tags origin "refs/tags/agent-v$version" >/dev/null || tag_status=$?
             if [ "$tag_status" = 0 ]; then
-              echo "agent-v$version already exists; nothing to publish"
-              echo "version=$version" >> "$GITHUB_OUTPUT"
-              echo "publish=false" >> "$GITHUB_OUTPUT"
-              exit 0
+              echo "::error::tag agent-v$version exists without a release; re-run that tag's Agent Release workflow" >&2
+              exit 1
             fi
             [ "$tag_status" = 2 ] || { echo "::error::could not list agent release tags" >&2; exit 1; }
           else
