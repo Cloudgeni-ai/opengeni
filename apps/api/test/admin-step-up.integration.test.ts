@@ -322,13 +322,9 @@ describe("admin passkey step-up", () => {
     });
     // Once the person confirms in their browser, the agent may go on.
     expect((await stepUp(rt, owner.cookie, owner.passkey)).status).toBe(200);
+    // The route resolves the same access the guard did, so the agent's change goes through.
     const allowed = await asAgent();
-    expect(
-      allowed.status === 403
-        ? ((await allowed.json()) as { error: { details?: { code?: unknown } } }).error.details
-            ?.code
-        : null,
-    ).not.toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
+    expect(allowed.status, await allowed.clone().text()).toBeLessThan(300);
   }, 120_000);
 
   test("a normal member is never asked, and a deployment can leave it off", async () => {

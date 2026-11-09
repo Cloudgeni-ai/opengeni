@@ -29,6 +29,9 @@ describe("admin step-up routes", () => {
       ["PUT", `${WS}/members/external/slack/U1/allowance`],
       ["POST", `${WS}/connect/attempts`],
       ["DELETE", `${WS}/connections/${CONNECTION_ID}`],
+      // PostgreSQL reads these as the same uuid.
+      ["DELETE", `${WS}/connections/${CONNECTION_ID.replaceAll("-", "")}`],
+      ["DELETE", `${WS}/connections/{${CONNECTION_ID}}`],
       ["PATCH", `${WS}/connections/${CONNECTION_ID}`],
       ["PUT", `${WS}/connections/${CONNECTION_ID}/1password/token`],
       ["POST", `${WS}/connections/slack-bot/install`],

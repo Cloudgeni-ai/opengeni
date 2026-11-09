@@ -33,9 +33,13 @@ type AdminRoute = {
   shared?: "created" | "existing";
 };
 
+// Every form PostgreSQL reads as a uuid (hyphens optional, braces allowed), so
+// an id written differently still matches.
+const UUID =
+  "\\{?[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}\\}?";
 const ORG = "/v1/organizations/(?<organizationId>[^/]+)";
-const WS = "/v1/workspaces/(?<workspaceId>[^/]+)";
-const CONNECTION = "(?<connectionId>[0-9a-fA-F-]{36})";
+const WS = `/v1/workspaces/(?<workspaceId>${UUID})`;
+const CONNECTION = `(?<connectionId>${UUID})`;
 const route = (scope: Scope, source: string, options: Partial<AdminRoute> = {}): AdminRoute => ({
   scope,
   pattern: new RegExp(`^${source}/?$`, "u"),
