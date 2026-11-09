@@ -203,8 +203,10 @@ export default function PageMeetingsSection() {
   // audio is only on the device that recorded it.
   const elsewhereAudio = initial.get("upload") === "elsewhere";
   // ?gaps=on: the ready meeting's microphone was unplugged for a while, and
-  // tab sharing ended before the meeting did.
-  const gaps = initial.get("gaps") === "on";
+  // tab sharing ended before the meeting did. ?gaps=all: both tracks went
+  // silent together. ?gaps=long: the microphone dropped an hour in.
+  const gapsParam = initial.get("gaps");
+  const gaps = gapsParam === "on" || gapsParam === "all" || gapsParam === "long";
   const fixture = useMemo(() => {
     const base = createMeetingsFixture({
       state: data,
@@ -224,14 +226,29 @@ export default function PageMeetingsSection() {
         };
       }
       if (gaps && id === base.readyId) {
+        if (gapsParam === "long") {
+          return {
+            ...recording,
+            durationMilliseconds: 3_910_000,
+            tracks: recording.tracks.map((track) => ({
+              ...track,
+              unrecorded:
+                track.source === "microphone"
+                  ? [{ startMilliseconds: 3_759_000, endMilliseconds: null }]
+                  : [],
+            })),
+          };
+        }
         return {
           ...recording,
           tracks: recording.tracks.map((track) => ({
             ...track,
             unrecorded:
-              track.source === "microphone"
+              gapsParam === "all"
                 ? [{ startMilliseconds: 46_000, endMilliseconds: 68_000 }]
-                : [{ startMilliseconds: 148_000, endMilliseconds: null }],
+                : track.source === "microphone"
+                  ? [{ startMilliseconds: 46_000, endMilliseconds: 68_000 }]
+                  : [{ startMilliseconds: 148_000, endMilliseconds: null }],
           })),
         };
       }
@@ -240,7 +257,17 @@ export default function PageMeetingsSection() {
         : recording;
     };
     return { ...base, client: { ...base.client, getRecording } };
-  }, [data, pinned, failure, otherWorkspaces, creditsOnly, subscription, elsewhereAudio, gaps]);
+  }, [
+    data,
+    pinned,
+    failure,
+    otherWorkspaces,
+    creditsOnly,
+    subscription,
+    elsewhereAudio,
+    gaps,
+    gapsParam,
+  ]);
   const store = useMemo(() => createMeetingRecorderStore(), []);
   const [startedAt] = useState(() => Date.now() - 754_000);
   // ?audio=desktop previews the desktop app, which records other apps' audio.

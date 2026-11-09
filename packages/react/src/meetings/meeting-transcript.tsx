@@ -577,14 +577,16 @@ function UnrecordedLine({
   const msg = useOpenGeniText();
   const Icon = mark.source === "microphone" ? MicOffIcon : VolumeXIcon;
   return (
-    // As wide as a turn (72ch of the transcript's type), so its rules end where the bubbles can.
+    // As wide as a turn (72ch of the transcript's type), so its rules end
+    // where the bubbles can. On a phone-width screen a long line wraps, so it
+    // drops the rules and lines up with the speaker names instead.
     <li data-unrecorded="" className="flex max-w-[72ch] min-w-0 items-center gap-3">
-      <span aria-hidden="true" className="h-px min-w-4 flex-1 bg-border" />
-      <span className="flex min-w-0 items-center gap-1.5 text-xs leading-4 text-fg-muted tabular-nums">
-        <Icon aria-hidden="true" className="size-3.5 shrink-0" />
-        <span className="text-pretty">{unrecordedMarkText(mark, msg, speakerName)}</span>
+      <span aria-hidden="true" className="hidden h-px min-w-4 flex-1 bg-border sm:block" />
+      <span className="flex min-w-0 items-start gap-1.5 pl-1 text-xs leading-4 text-fg-muted tabular-nums sm:items-center sm:pl-0">
+        <Icon aria-hidden="true" className="size-3.5 shrink-0 max-sm:mt-px" />
+        <span className="text-balance">{unrecordedMarkText(mark, msg, speakerName)}</span>
       </span>
-      <span aria-hidden="true" className="h-px min-w-4 flex-1 bg-border" />
+      <span aria-hidden="true" className="hidden h-px min-w-4 flex-1 bg-border sm:block" />
     </li>
   );
 }

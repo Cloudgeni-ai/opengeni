@@ -713,7 +713,10 @@ function TranscriptFacts(props: {
   );
 }
 
-/** A quiet line where a track recorded nothing, as on the web. */
+/**
+ * A quiet line where a track recorded nothing, as on the web at phone width:
+ * no rules, since a long line wraps, and lined up with the speaker names.
+ */
 function UnrecordedLine({
   mark,
   speakerName,
@@ -724,34 +727,32 @@ function UnrecordedLine({
   const msg = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
-  const rule = { flex: 1, minWidth: 16, height: 1, backgroundColor: c.border } as const;
   return (
     <View
       accessible
       accessibilityRole="text"
-      style={{ marginTop: 18, flexDirection: "row", alignItems: "center", gap: 10 }}
+      style={{ marginTop: 18, flexDirection: "row", alignItems: "flex-start", gap: 6 }}
     >
-      <View style={rule} />
-      <View style={{ flexShrink: 1, flexDirection: "row", alignItems: "center", gap: 6 }}>
+      <View style={{ marginTop: 1.5 }}>
         <Icon
           name={mark.source === "microphone" ? "mic-off" : "volume-x"}
           size={13}
           color={c["fg-muted"]}
         />
-        <Text
-          style={{
-            ...fontStyle(theme),
-            flexShrink: 1,
-            fontSize: 12,
-            lineHeight: 16,
-            color: c["fg-muted"],
-            fontVariant: ["tabular-nums"],
-          }}
-        >
-          {unrecordedMarkText(mark, msg, speakerName)}
-        </Text>
       </View>
-      <View style={rule} />
+      <Text
+        textBreakStrategy="balanced"
+        style={{
+          ...fontStyle(theme),
+          flexShrink: 1,
+          fontSize: 12,
+          lineHeight: 16,
+          color: c["fg-muted"],
+          fontVariant: ["tabular-nums"],
+        }}
+      >
+        {unrecordedMarkText(mark, msg, speakerName)}
+      </Text>
     </View>
   );
 }
