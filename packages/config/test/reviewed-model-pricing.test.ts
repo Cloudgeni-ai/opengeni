@@ -32,6 +32,7 @@ const reviewedRows = [
   ["grok-4.5", 2, 0.3, null, 6],
   ["grok-4.6", 2, 0.5, null, 6],
   ["grok-4.7", 2, 0.5, null, 6],
+  ["claude-fable-5-2", 8, 0.2, 10, 40],
   ["claude-opus-5-5", 4, 0.2, 5, 20],
   ["claude-sonnet-5-5", 2, 0.1, 2.5, 10],
   ["claude-haiku-5-5", 0.1, 0.01, 0.125, 0.5],
@@ -150,7 +151,7 @@ describe("reviewed supported-model list prices", () => {
     expect(
       models.filter((model) => prices[model.id] === undefined).map((model) => model.id),
     ).toEqual([]);
-    expect(models.length).toBe(56);
+    expect(models.length).toBe(60);
     for (const model of models) {
       if (model.credentialSource.kind === "connected_subscription") {
         expect(model.billing).toEqual({

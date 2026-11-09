@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  claudeNativeModelProfile,
   configuredModels,
   configuredProviders,
   resolveTurnExecutionPolicyV1,
@@ -389,4 +390,32 @@ test("workspace Claude readiness, connection restrictions and admission referenc
   expect(
     disabled.find((row) => row.model.providerId === "workspace-anthropic")?.availability.selectable,
   ).toBe(true);
+});
+
+test("Claude Fable 5.2 is a full native model on API keys and subscriptions", () => {
+  expect(claudeNativeModelProfile("claude-fable-5-2")).toEqual({
+    efforts: ["low", "medium", "high", "xhigh", "max"],
+    defaultEffort: "high",
+    contextWindowTokens: 1_000_000,
+    maxOutputTokens: 128_000,
+    prefixBoundThinking: true,
+    progressUpdates: true,
+  });
+  const settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
+    anthropic: { active: true, models: [{ upstreamModelId: "claude-fable-5-2" }] },
+    claude_subscription: { active: true, models: [{ upstreamModelId: "claude-fable-5-2" }] },
+  });
+  for (const id of [
+    "organization-anthropic/claude-fable-5-2",
+    "organization-claude-subscription/claude-fable-5-2",
+  ]) {
+    const model = configuredModels(settings).find((row) => row.id === id);
+    expect(model?.label).toBe("Claude Fable 5.2");
+    expect(model?.contextWindowTokens).toBe(1_000_000);
+    expect(model?.capabilities.reasoning).toMatchObject({
+      runnable: true,
+      defaultEffort: "high",
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+    });
+  }
 });

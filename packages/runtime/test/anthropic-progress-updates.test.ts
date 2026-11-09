@@ -175,6 +175,7 @@ const expectedOutput = [
 
 describe("Claude progress updates before a tool call", () => {
   test("every model asks for reasoning summaries, so thinking stays readable", async () => {
+    expect(anthropicWritesProgressUpdates("claude-fable-5-2")).toBe(true);
     expect(anthropicWritesProgressUpdates("claude-opus-5-5")).toBe(true);
     expect(anthropicWritesProgressUpdates("claude-sonnet-5-5")).toBe(true);
     for (const model of ["claude-haiku-5-5", "claude-opus-5", "claude-opus-4-6", "claude-x"])
