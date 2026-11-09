@@ -22,7 +22,8 @@ registerDom();
 
 const t = createOpenGeniText();
 let mounted: RenderedComponent | null = null;
-let lightboxOpens: Array<{ src: string; caption: string | undefined; label: string | undefined }> = [];
+let lightboxOpens: Array<{ src: string; caption: string | undefined; label: string | undefined }> =
+  [];
 
 afterEach(async () => {
   if (mounted) {
