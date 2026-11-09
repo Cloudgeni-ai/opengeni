@@ -1,20 +1,24 @@
 /**
  * "What should the agent do?", shaped like the chat composer: what the runs
- * work with on top (repositories, environment, tools), the
- * instructions, then "+" for tools and the model with who pays for it. The
- * textarea takes the enclosing Field's label, hint and error.
+ * work with on top (repositories, environment), the instructions, then one
+ * Connectors control (logos and a count; its menu lists every connected app to
+ * turn on or off) and the model with who pays for it. The textarea takes the
+ * enclosing Field's label, hint and error.
  */
-import { useId, type ReactNode } from "react";
+import { useId, useMemo, type ReactNode } from "react";
 import {
+  BookOpenIcon,
+  ChevronDownIcon,
   ContainerIcon,
+  FolderOpenIcon,
   GitBranchIcon,
   PlugIcon,
-  PlusIcon,
   RotateCcwIcon,
   XIcon,
 } from "lucide-react";
 
 import { CapabilityLogo } from "@opengeni/react/app/components/capabilities/capability-logo";
+import { connectorLogoSources } from "@opengeni/react/app/lib/composer-connectors";
 import { modelPayerHint } from "@opengeni/react/app/lib/model-payer";
 import { ModelPicker, type PickerModelRow } from "@opengeni/react/app/components/pickers";
 import {
@@ -61,12 +65,143 @@ const BUILT_IN_SERVER_COPY = {
   files: {
     name: "Uploaded files",
     needs: "Read files uploaded to the workspace. Needs Workspace files on.",
+    icon: <FolderOpenIcon />,
   },
   docs: {
     name: "Knowledge library",
     needs: "Search the workspace's documents. Needs Knowledge on.",
+    icon: <BookOpenIcon />,
   },
 } as const;
+
+type ServerRow = { id: string; name: string; detail?: string | undefined };
+
+/** A connector's real logo, its built-in glyph, or a monogram. */
+function ServerLogo({
+  server,
+  logo,
+  className,
+}: {
+  server: ServerRow;
+  logo: string | null;
+  className?: string;
+}) {
+  const builtIn = BUILT_IN_SERVER_COPY[server.id as keyof typeof BUILT_IN_SERVER_COPY] as
+    | (typeof BUILT_IN_SERVER_COPY)[keyof typeof BUILT_IN_SERVER_COPY]
+    | undefined;
+  return (
+    <CapabilityLogo
+      src={logo}
+      name={server.name}
+      size="sm"
+      fallback={builtIn?.icon}
+      className={cn("size-4 rounded-[4px] [&_img]:p-px [&_svg]:size-3", className)}
+    />
+  );
+}
+
+const STACK_SIZE = 3;
+
+/**
+ * One control for the connected apps a run gets, like the chat composer's
+ * Connectors: up to three logos and a count, so a long list stays one line.
+ * Its menu lists every connected app to turn on or off, and keeps a chosen app
+ * that is no longer connected visible so it can be removed.
+ */
+function ConnectorsMenu({
+  servers,
+  selected,
+  logos,
+  onToggle,
+  disabled,
+}: {
+  servers: ServerRow[];
+  selected: string[];
+  logos: ReadonlyMap<string, string>;
+  onToggle: (id: string, on: boolean) => void;
+  disabled?: boolean | undefined;
+}) {
+  const known = new Set(servers.map((server) => server.id));
+  const missing: ServerRow[] = selected
+    .filter((id) => !known.has(id))
+    .map((id) => ({ id, name: id, detail: "Unavailable" }));
+  const rows = [...servers, ...missing];
+  const on = rows.filter((server) => selected.includes(server.id));
+  // Real logos first, so the stack doesn't open on monograms.
+  const stack = [...on]
+    .sort((a, b) => Number(logos.has(b.id)) - Number(logos.has(a.id)))
+    .slice(0, STACK_SIZE);
+  const names = on.map((server) => server.name).join(", ");
+  return (
+    <DropdownMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label={
+                on.length
+                  ? `Connectors: ${on.length} on, ${names}. Change`
+                  : "Connectors: none on. Change"
+              }
+              disabled={disabled}
+              className={cn(
+                "inline-flex h-7 max-w-full min-w-0 shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface pr-2 pl-1.5 text-xs text-fg transition-colors duration-[120ms] hover:border-border-strong data-[state=open]:border-border-strong disabled:pointer-events-none disabled:opacity-50 pointer-coarse:h-8",
+                on.length === 0 && "pl-2.5 text-fg-muted hover:text-fg",
+                TOUCH_TARGET,
+              )}
+            >
+              {stack.length ? (
+                <span aria-hidden="true" className="flex shrink-0 items-center">
+                  {stack.map((server, index) => (
+                    <span
+                      key={server.id}
+                      className={cn("flex rounded-[5px] ring-2 ring-surface", index > 0 && "-ml-1")}
+                    >
+                      <ServerLogo server={server} logo={logos.get(server.id) ?? null} />
+                    </span>
+                  ))}
+                </span>
+              ) : (
+                <PlugIcon aria-hidden="true" className="size-3.5 shrink-0" />
+              )}
+              <span>Connectors</span>
+              {on.length ? <span className="text-fg-muted tabular-nums">{on.length}</span> : null}
+              <ChevronDownIcon aria-hidden="true" className="size-3.5 shrink-0 text-fg-subtle" />
+            </button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        {on.length ? <TooltipContent className="max-w-72">{names}</TooltipContent> : null}
+      </Tooltip>
+      <DropdownMenuContent align="start" className="max-h-96 w-80">
+        <DropdownMenuLabel>Connected apps this automation can use</DropdownMenuLabel>
+        {rows.length === 0 ? (
+          <p className="px-2 pb-2 text-xs leading-4.5 text-fg-muted">
+            No apps are connected to this workspace yet.
+          </p>
+        ) : null}
+        {rows.map((server) => (
+          <DropdownMenuCheckboxItem
+            key={server.id}
+            checked={selected.includes(server.id)}
+            onCheckedChange={(checked) => onToggle(server.id, checked === true)}
+            onSelect={(event) => event.preventDefault()}
+          >
+            <ServerLogo server={server} logo={logos.get(server.id) ?? null} />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate">{server.name}</span>
+              {server.detail ? (
+                <span className="block truncate text-xs leading-4.5 text-fg-muted">
+                  {server.detail}
+                </span>
+              ) : null}
+            </span>
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 function RemovableChip({
   icon,
@@ -263,8 +398,14 @@ export function ComposerField({
         ? [...selectedTools.filter((tool) => tool !== id), id]
         : selectedTools.filter((tool) => tool !== id),
     });
-  const toolName = (id: string) => servers.find((server) => server.id === id)?.name;
-  const toolLogo = (id: string) => servers.find((server) => server.id === id)?.logoSrc ?? null;
+  // The chat composer's logos: catalog entries the workspace shell already loaded.
+  const logos = useMemo(
+    () =>
+      connectorLogoSources(context.toolMcpServers, context.workspaceCapabilityCatalog, (path) =>
+        context.client.catalogAssetUrl(path),
+      ),
+    [context.client, context.toolMcpServers, context.workspaceCapabilityCatalog],
+  );
 
   /* ----- model */
   const followed = draft.modelFollowsDefault ? defaultModelSelection : null;
@@ -275,11 +416,7 @@ export function ComposerField({
   const showRigChip =
     !inheritsChatSettings && canUseRigs && (rigOptions.length > 0 || rigs.loading);
   const showContext =
-    !existingChat &&
-    (repositories.length > 0 ||
-      repositoryOptions.length > 0 ||
-      showRigChip ||
-      (!inheritsChatSettings && selectedTools.length > 0));
+    !existingChat && (repositories.length > 0 || repositoryOptions.length > 0 || showRigChip);
   return (
     <div
       className={cn(
@@ -327,25 +464,6 @@ export function ComposerField({
               loading={rigs.loading && liveRigs.length === 0}
             />
           ) : null}
-          {(inheritsChatSettings ? [] : selectedTools).map((id) => {
-            const name = toolName(id);
-            return (
-              <RemovableChip
-                key={id}
-                icon={
-                  name ? (
-                    <CapabilityLogo src={toolLogo(id)} name={name} size="sm" className="size-4" />
-                  ) : (
-                    <PlugIcon />
-                  )
-                }
-                label={name ?? id}
-                hint={name ? undefined : "Unavailable"}
-                onRemove={() => toggleTool(id, false)}
-                disabled={disabled}
-              />
-            );
-          })}
         </div>
       ) : null}
       <textarea
@@ -364,53 +482,13 @@ export function ComposerField({
       />
       <div className="flex min-w-0 items-center gap-2 px-3 pb-3">
         {!inheritsChatSettings ? (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                aria-label="Add tools"
-                disabled={disabled}
-                className={cn(
-                  "grid size-7 shrink-0 place-items-center rounded-full border border-border bg-surface text-fg-muted transition-colors duration-[120ms] hover:border-border-strong hover:text-fg data-[state=open]:border-border-strong data-[state=open]:text-fg pointer-coarse:size-8",
-                  TOUCH_TARGET,
-                  "pointer-coarse:after:-inset-x-1.5",
-                )}
-              >
-                <PlusIcon aria-hidden="true" className="size-4" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-72">
-              <DropdownMenuLabel>Connected apps this automation can use</DropdownMenuLabel>
-              {servers.length === 0 ? (
-                <p className="px-2 pb-2 text-xs leading-4.5 text-fg-muted">
-                  No apps are connected to this workspace yet.
-                </p>
-              ) : null}
-              {servers.map((server) => (
-                <DropdownMenuCheckboxItem
-                  key={server.id}
-                  checked={selectedTools.includes(server.id)}
-                  onCheckedChange={(checked) => toggleTool(server.id, checked === true)}
-                  onSelect={(event) => event.preventDefault()}
-                >
-                  <CapabilityLogo
-                    src={server.logoSrc ?? null}
-                    name={server.name}
-                    size="sm"
-                    className="size-4 rounded-[4px]"
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate">{server.name}</span>
-                    {server.detail ? (
-                      <span className="block truncate text-xs leading-4.5 text-fg-muted">
-                        {server.detail}
-                      </span>
-                    ) : null}
-                  </span>
-                </DropdownMenuCheckboxItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
+          <ConnectorsMenu
+            servers={servers}
+            selected={selectedTools}
+            logos={logos}
+            onToggle={toggleTool}
+            disabled={disabled}
+          />
         ) : (
           <span className="text-xs leading-4.5 text-fg-muted">
             Uses this chat's model, tools and machine.

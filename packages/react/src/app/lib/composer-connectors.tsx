@@ -3,6 +3,40 @@ import type { CapabilityCatalogItem, ConnectionMetadata } from "../types";
 import type { McpServerOption } from "./session-tools";
 import { connectionHealth } from "./capabilities";
 import { capabilityLogoSource } from "../components/capabilities/capability-logo-source";
+import { connectorLogo, connectorLogoIndex } from "../../timeline/connector-logo-index";
+
+/**
+ * Each server's real logo from the workspace catalog: its own logo, else the
+ * catalog entry it comes from (by capability id, then by MCP server id), else
+ * any entry filed under its provider's domain. Servers with none are left out,
+ * so callers fall back to a monogram or glyph.
+ */
+export function connectorLogoSources(
+  servers: readonly McpServerOption[],
+  items: readonly CapabilityCatalogItem[],
+  assetUrl: (path: string | null) => string | null,
+): Map<string, string> {
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const byServerId = new Map<string, CapabilityCatalogItem>();
+  for (const item of items) {
+    const id = item.runtime?.mcpServerId;
+    if (id && !byServerId.has(id)) byServerId.set(id, item);
+  }
+  let domains: ReadonlyMap<string, string> | null = null;
+  const logos = new Map<string, string>();
+  for (const server of servers) {
+    const item =
+      (server.capabilityId ? byId.get(server.capabilityId) : undefined) ??
+      byServerId.get(server.id);
+    let logo = server.logoSrc ?? (item ? capabilityLogoSource(item, assetUrl) : null);
+    if (!logo && server.providerDomain) {
+      domains ??= connectorLogoIndex(items, (path) => assetUrl(path ?? null));
+      logo = connectorLogo(domains, server.providerDomain);
+    }
+    if (logo) logos.set(server.id, logo);
+  }
+  return logos;
+}
 
 /** Catalog identity, never a display-name match, joins selection to connection health. */
 export function composerConnectorOptions(
