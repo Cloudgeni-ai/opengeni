@@ -269,6 +269,13 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // Releases an admission block after access changed: the start signal is
+  // written only while effective control is still active.
+  "packages/db/src/index.ts#releaseSessionAdmissionBlocksAfterAccessChange": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#recoverSessionOwner": {
     inserts: 3,
     contract: "canonical",
