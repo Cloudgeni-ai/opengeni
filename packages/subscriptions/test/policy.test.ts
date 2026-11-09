@@ -1682,6 +1682,129 @@ describe("Codex credit consent", () => {
       ).toMatchObject({ kind: "wait" });
     }
   });
+
+  // A provider quota refusal without a reset gets the adapter's five-hour
+  // fallback. While the weekly window is spent, that fallback is not when the
+  // account serves again, not even on extra credits: the provider applies
+  // credits itself, so its refusal says they did not serve either.
+  const HOUR = 3_600_000;
+  const FALLBACK = 5 * HOUR;
+  const weekly = (resetsAt: number) => ({
+    id: "secondary",
+    usedPercent: 100,
+    resetsAt,
+    status: "exhausted" as const,
+  });
+  const refusal = (observedAt: number) =>
+    quota({
+      windows: [],
+      exhaustedUntil: observedAt + FALLBACK,
+      exhaustedKind: "quota",
+      observedAt,
+      source: "refusal",
+    });
+
+  test("a refusal on a credit account whose weekly window is spent holds until the weekly reset, not the five-hour fallback", () => {
+    const weeklyReset = NOW + 6 * 24 * HOUR;
+    const stored = quota({ windows: [weekly(weeklyReset)], observedAt: NOW - 1_000 });
+    const held = applyQuotaObservation({ refreshGeneration: 1, quota: stored }, refusal(NOW))!;
+    expect(held.exhaustedUntil).toBe(weeklyReset);
+    expect(held.exhaustedKind).toBe("quota");
+    // An unexplained refusal stays unexplained: no claim to end it early.
+    expect(held.exhaustedClaim).toBeUndefined();
+
+    // Another account's weekly window resets sooner, but after the fallback
+    // passes. The wait names that reset, and the credit account is not
+    // retried when its fallback ends.
+    const sooner = NOW + 14 * HOUR;
+    const world = (now: number) =>
+      input({
+        now,
+        session: { onlyThisModel: true },
+        connections: [
+          connection("credits", "codex", { extraCreditsEnabled: true, quota: held }),
+          connection("weekly", "codex", {
+            quota: quota({ windows: [weekly(sooner)], observedAt: NOW - 1_000 }),
+          }),
+        ],
+      });
+    expect(decidePlacement(world(NOW))).toEqual({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: sooner,
+    });
+    // The reported time passes without capacity coming back: still a wait, on
+    // the real reset, never a resumption onto the refused credits.
+    expect(decidePlacement(world(NOW + FALLBACK + 1))).toEqual({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: sooner,
+    });
+    expect(decidePlacement(world(sooner))).toMatchObject({ kind: "run", connectionId: "weekly" });
+  });
+
+  test("a weekly window a usage reading reports after the refusal holds the refusal too", () => {
+    const weeklyReset = NOW + 6 * 24 * HOUR;
+    // The refusal came first, while no window was known to be spent.
+    const refused = applyQuotaObservation(
+      { refreshGeneration: 1, quota: quota({ observedAt: NOW - 60_000 }) },
+      refusal(NOW - 30_000),
+    )!;
+    expect(refused.exhaustedUntil).toBe(NOW - 30_000 + FALLBACK);
+    // A complete usage reading then shows the weekly allowance spent.
+    const reading = quota({ windows: [weekly(weeklyReset)], observedAt: NOW });
+    const held = applyQuotaObservation({ refreshGeneration: 1, quota: refused }, reading, {
+      usageReadingsComplete: true,
+    })!;
+    expect(held.exhaustedUntil).toBe(weeklyReset);
+    const only = (now: number) =>
+      input({
+        now,
+        session: { onlyThisModel: true },
+        connections: [connection("credits", "codex", { extraCreditsEnabled: true, quota: held })],
+      });
+    expect(decidePlacement(only(NOW + FALLBACK))).toEqual({
+      kind: "wait",
+      reason: "no_eligible_capacity",
+      earliestResetAt: weeklyReset,
+    });
+    // A window that is not spent never extends the deadline (ending it early
+    // is the store's authoritative usage read, not this merge).
+    const open = applyQuotaObservation(
+      { refreshGeneration: 1, quota: refused },
+      quota({
+        observedAt: NOW,
+        windows: [{ ...weekly(weeklyReset), usedPercent: 40, status: "ok" }],
+      }),
+      { usageReadingsComplete: true },
+    )!;
+    expect(open.exhaustedUntil).toBe(NOW - 30_000 + FALLBACK);
+  });
+
+  test("a claimed quota block held by a spent window names that window too; rate limits and ended deadlines are not held", () => {
+    const weeklyReset = NOW + 6 * 24 * HOUR;
+    const stored = quota({ windows: [weekly(weeklyReset)], observedAt: NOW - 1_000 });
+    const claimed = applyQuotaObservation(
+      { refreshGeneration: 1, quota: stored },
+      quota({
+        ...refusal(NOW),
+        exhaustedClaim: { until: NOW + FALLBACK, observedAt: NOW, windowIds: ["five_hour"] },
+      }),
+    )!;
+    expect(claimed.exhaustedUntil).toBe(weeklyReset);
+    expect(claimed.exhaustedClaim).toEqual({
+      until: weeklyReset,
+      observedAt: NOW,
+      windowIds: ["five_hour", "secondary"],
+    });
+    expect(quotaBlockClaim(claimed, null)).toEqual(claimed.exhaustedClaim!);
+
+    const limited = applyQuotaObservation(
+      { refreshGeneration: 1, quota: stored },
+      quota({ ...refusal(NOW), exhaustedKind: "rate_limit", exhaustedUntil: NOW + 60_000 }),
+    )!;
+    expect(limited.exhaustedUntil).toBe(NOW + 60_000);
+  });
 });
 
 describe("subscription review regressions", () => {
