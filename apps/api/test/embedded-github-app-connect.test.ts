@@ -294,7 +294,7 @@ test(`${providerId} repair starts at the named installation's fix, and a reinsta
   });
   // Reviews and merges ask first on the installation being repaired. The
   // reinstalled one already blocks merges (chosen before this repair).
-  const policy = (installationId: number, toolName: string, decision: "ask" | "block") => ({
+  const approval = (installationId: number, toolName: string, decision: "ask" | "block") => ({
     accountId: grant.accountId,
     workspaceId,
     subjectId: identity.subjectId,
@@ -305,11 +305,11 @@ test(`${providerId} repair starts at the named installation's fix, and a reinsta
     policy: decision,
   });
   await upsertConnectorActionPolicies(client.db, [
-    policy(uninstalledId, "pull_request_merge", "ask"),
-    policy(uninstalledId, "pull_request_review_submit", "ask"),
+    approval(uninstalledId, "pull_request_merge", "ask"),
+    approval(uninstalledId, "pull_request_review_submit", "ask"),
   ]);
   await upsertConnectorActionPolicies(client.db, [
-    policy(reinstalledId, "pull_request_merge", "block"),
+    approval(reinstalledId, "pull_request_merge", "block"),
   ]);
   let discovery = 0;
   let githubDown = false;
