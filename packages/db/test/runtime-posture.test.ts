@@ -2236,6 +2236,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
+          // 1351 turn timing profiles: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2320,7 +2326,8 @@ describe("runtime database posture evaluator", () => {
         2 + // 1258 Teams conversation context messages and join cutoffs: full-DML, FORCE-RLS.
         1 + // 1294 Teams install welcome claims: full-DML, FORCE-RLS.
         1 + // 1300 Teams onboarding reply limits: full-DML, FORCE-RLS.
-        1; // 1301 Teams reply claims: full-DML, FORCE-RLS.
+        1 + // 1301 Teams reply claims: full-DML, FORCE-RLS.
+        1; // 1351 turn timing profiles: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");

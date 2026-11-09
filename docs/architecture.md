@@ -3450,6 +3450,7 @@ release gate. See [merge batcher](merge-batcher.md) and [main CI](main-ci.md).
 | Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`main-ci.md`](main-ci.md) |
 | Merge batcher and batch CI | `scripts/batcher/`, `.github/workflows/merge-batcher.yml`, `.github/workflows/ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
 | Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`application-observability.md`](application-observability.md), [`deployment.md`](deployment.md) Observability |
+| Per-turn timing profiles (where a turn's time went) | `packages/db/src/turn-timing-profile.ts`, `packages/db/src/turn-timing-profile-store.ts`, `apps/worker/src/activities/turn-timing-profiles.ts` | [`turn-timing-profiles.md`](turn-timing-profiles.md) |
 
 ---
 
