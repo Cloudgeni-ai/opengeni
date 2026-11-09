@@ -151,8 +151,10 @@ and plugged back in), and after its last chunk while another track went on
 (tab sharing ended), with `endMilliseconds: null` for one that runs to the
 end. Stretches under two seconds are left out. Meetings finalized before this
 existed get theirs when they are next transcribed. The transcript shows each
-as a line where it starts ("No microphone audio from 17:39 to the end"), so a
-missing voice doesn't read as words the model missed.
+as a line where it starts ("Ingrid's microphone wasn't recording from 17:39 to
+45:35"), naming the person when the track carries one named voice. Where every
+track is silent at once it says "Nothing was recorded", and no turn runs across
+a stretch, so a missing voice doesn't read as words the model missed.
 
 ## Embedding
 

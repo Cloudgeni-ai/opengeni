@@ -61,6 +61,7 @@ import {
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
+  trackSpeakerName,
   transcriptUnrecordedMarks,
   unrecordedMarkText,
   type TranscriptTurn,
@@ -565,7 +566,14 @@ function EditTurnDialog({
  * unplugged, tab sharing ended), so a missing voice reads as missing audio
  * rather than as a transcript that skipped what was said.
  */
-function UnrecordedLine({ mark }: { mark: TranscriptUnrecordedMark }) {
+function UnrecordedLine({
+  mark,
+  speakerName,
+}: {
+  mark: TranscriptUnrecordedMark;
+  /** The one person heard on the mark's microphone, if someone named them. */
+  speakerName: string | null;
+}) {
   const msg = useOpenGeniText();
   const Icon = mark.source === "microphone" ? MicOffIcon : VolumeXIcon;
   return (
@@ -574,7 +582,7 @@ function UnrecordedLine({ mark }: { mark: TranscriptUnrecordedMark }) {
       <span aria-hidden="true" className="h-px min-w-4 flex-1 bg-border" />
       <span className="flex min-w-0 items-center gap-1.5 text-xs leading-4 text-fg-muted tabular-nums">
         <Icon aria-hidden="true" className="size-3.5 shrink-0" />
-        <span className="text-pretty">{unrecordedMarkText(mark, msg)}</span>
+        <span className="text-pretty">{unrecordedMarkText(mark, msg, speakerName)}</span>
       </span>
       <span aria-hidden="true" className="h-px min-w-4 flex-1 bg-border" />
     </li>
@@ -586,6 +594,7 @@ function MeetingTranscriptContent({
   speakers,
   tracks,
   people,
+  durationMilliseconds,
   activeSegment,
   actions,
   onSeek,
@@ -593,6 +602,11 @@ function MeetingTranscriptContent({
   segments: readonly RecordingTranscriptSegment[];
   speakers: readonly RecordingSpeaker[];
   tracks: readonly RecordingTrack[];
+  /**
+   * The meeting's length, where a track that stopped for good stops being
+   * missing; defaults to its longest track.
+   */
+  durationMilliseconds?: number;
   people: readonly RecordingPerson[];
   /** The segment playing now. */
   activeSegment: number | null;
@@ -601,11 +615,20 @@ function MeetingTranscriptContent({
   onSeek: ((milliseconds: number) => void) | null;
 }) {
   const msg = useOpenGeniText();
-  const turns = useMemo(() => groupTranscriptTurns(segments), [segments]);
-  const items = useMemo(
-    () => interleaveUnrecordedMarks(turns, transcriptUnrecordedMarks(tracks)),
-    [turns, tracks],
+  const length =
+    durationMilliseconds ?? Math.max(0, ...tracks.map((track) => track.durationMilliseconds));
+  const marks = useMemo(() => transcriptUnrecordedMarks(tracks, length), [tracks, length]);
+  // No turn runs across a stretch without audio, so its line sits between them.
+  const turns = useMemo(
+    () =>
+      groupTranscriptTurns(
+        segments,
+        undefined,
+        marks.map((mark) => mark.startMilliseconds),
+      ),
+    [segments, marks],
   );
+  const items = useMemo(() => interleaveUnrecordedMarks(turns, marks), [turns, marks]);
   const slots = useMemo(() => speakerColorSlots(segments), [segments]);
   const labels = useMemo(() => [...slots.keys()], [slots]);
   const [naming, setNaming] = useState<string | null>(null);
@@ -642,7 +665,17 @@ function MeetingTranscriptContent({
       <ol ref={listRef} className="grid gap-6" aria-label={msg("meetings.transcript.transcript")}>
         {items.map((item) => {
           if (item.kind === "unrecorded") {
-            return <UnrecordedLine key={`unrecorded-${item.mark.key}`} mark={item.mark} />;
+            return (
+              <UnrecordedLine
+                key={`unrecorded-${item.mark.key}`}
+                mark={item.mark}
+                speakerName={
+                  item.mark.trackNumber === null
+                    ? null
+                    : trackSpeakerName(item.mark.trackNumber, segments, speakers)
+                }
+              />
+            );
           }
           const turn = item.turn;
           const name = nameOf(turn.speakerLabel);

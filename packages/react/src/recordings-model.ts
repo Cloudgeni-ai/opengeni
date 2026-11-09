@@ -408,6 +408,8 @@ export type TranscriptTurn = {
 export function groupTranscriptTurns(
   segments: readonly RecordingTranscriptSegment[],
   maxGapMilliseconds = 30_000,
+  /** Times no turn runs across, such as where audio went missing. */
+  breaks: readonly number[] = [],
 ): TranscriptTurn[] {
   const turns: TranscriptTurn[] = [];
   for (const segment of segments) {
@@ -415,7 +417,8 @@ export function groupTranscriptTurns(
     if (
       last &&
       last.speakerLabel === segment.speakerLabel &&
-      segment.startMilliseconds - last.endMilliseconds <= maxGapMilliseconds
+      segment.startMilliseconds - last.endMilliseconds <= maxGapMilliseconds &&
+      !breaks.some((at) => at > last.startMilliseconds && at <= segment.startMilliseconds)
     ) {
       last.segments.push(segment);
       last.endMilliseconds = Math.max(last.endMilliseconds, segment.endMilliseconds);
@@ -432,36 +435,103 @@ export function groupTranscriptTurns(
   return turns;
 }
 
-/** Where one track of a meeting has no audio, as the transcript marks it. */
+/** The shortest stretch without audio the transcript marks, as the server keeps them. */
+const UNRECORDED_MIN_MILLISECONDS = 2_000;
+
+/**
+ * Where a meeting has no audio, as the transcript marks it: one track
+ * (`trackNumber`), or every track at once (`trackNumber` null), which is all
+ * of a single-track meeting's stretches.
+ */
 export type TranscriptUnrecordedMark = {
   key: string;
-  trackNumber: number;
-  source: RecordingTrack["source"];
+  trackNumber: number | null;
+  source: RecordingTrack["source"] | null;
   startMilliseconds: number;
-  /** Null when the stretch runs to the end of the recording. */
-  endMilliseconds: number | null;
+  endMilliseconds: number;
 };
 
-/** Every audio track's stretches without audio, in order on the recording's timeline. */
+type Stretch = { start: number; end: number };
+
+/** `from` without any part of `cut`, keeping only pieces long enough to mark. */
+function withoutStretches(from: readonly Stretch[], cut: readonly Stretch[]): Stretch[] {
+  let pieces = [...from];
+  for (const part of cut) {
+    pieces = pieces.flatMap((piece) =>
+      part.end <= piece.start || part.start >= piece.end
+        ? [piece]
+        : [
+            { start: piece.start, end: part.start },
+            { start: part.end, end: piece.end },
+          ],
+    );
+  }
+  return pieces.filter((piece) => piece.end - piece.start >= UNRECORDED_MIN_MILLISECONDS);
+}
+
+/** Where every list has a stretch at once. */
+function overlapOfAll(lists: readonly Stretch[][]): Stretch[] {
+  let shared = lists[0] ?? [];
+  for (const list of lists.slice(1)) {
+    shared = shared.flatMap((left) =>
+      list.flatMap((right) => {
+        const start = Math.max(left.start, right.start);
+        const end = Math.min(left.end, right.end);
+        return end - start >= UNRECORDED_MIN_MILLISECONDS ? [{ start, end }] : [];
+      }),
+    );
+  }
+  return shared;
+}
+
+/**
+ * The stretches of a meeting with no audio, in order on its timeline: where
+ * every track was silent at once (all of a single-track meeting's), then
+ * what each track missed on its own. A stretch running to the end ends at
+ * `durationMilliseconds`, the meeting's length.
+ */
 export function transcriptUnrecordedMarks(
   tracks: readonly RecordingTrack[],
+  durationMilliseconds: number,
 ): TranscriptUnrecordedMark[] {
-  return tracks
+  const audio = tracks
     .filter((track) => track.kind === "audio")
-    .flatMap((track) =>
+    .map((track) => ({
+      track,
       // A server from before tracks said where they have no audio sends none.
-      (track.unrecorded ?? []).map((stretch) => ({
-        key: `${track.trackNumber}:${stretch.startMilliseconds}`,
-        trackNumber: track.trackNumber,
-        source: track.source,
-        startMilliseconds: stretch.startMilliseconds,
-        endMilliseconds: stretch.endMilliseconds,
-      })),
-    )
-    .sort(
-      (left, right) =>
-        left.startMilliseconds - right.startMilliseconds || left.trackNumber - right.trackNumber,
-    );
+      stretches: (track.unrecorded ?? [])
+        .map((stretch) => ({
+          start: stretch.startMilliseconds,
+          end: Math.max(stretch.startMilliseconds, stretch.endMilliseconds ?? durationMilliseconds),
+        }))
+        .filter((stretch) => stretch.end - stretch.start >= UNRECORDED_MIN_MILLISECONDS),
+    }));
+  const silent = overlapOfAll(audio.map((entry) => entry.stretches));
+  const marks: TranscriptUnrecordedMark[] = silent.map((stretch) => ({
+    key: `all:${stretch.start}`,
+    trackNumber: null,
+    source: null,
+    startMilliseconds: stretch.start,
+    endMilliseconds: stretch.end,
+  }));
+  if (audio.length > 1) {
+    for (const { track, stretches } of audio) {
+      for (const stretch of withoutStretches(stretches, silent)) {
+        marks.push({
+          key: `${track.trackNumber}:${stretch.start}`,
+          trackNumber: track.trackNumber,
+          source: track.source,
+          startMilliseconds: stretch.start,
+          endMilliseconds: stretch.end,
+        });
+      }
+    }
+  }
+  return marks.sort(
+    (left, right) =>
+      left.startMilliseconds - right.startMilliseconds ||
+      (left.trackNumber ?? -1) - (right.trackNumber ?? -1),
+  );
 }
 
 export type TranscriptItem =
@@ -470,7 +540,9 @@ export type TranscriptItem =
 
 /**
  * The transcript in reading order: each mark goes before the first turn that
- * starts where its stretch does or later, and after the last turn when none does.
+ * starts where its stretch does or later, and after the last turn when none
+ * does. Group the turns with the marks' starts as breaks, so no turn runs
+ * across one.
  */
 export function interleaveUnrecordedMarks(
   turns: readonly TranscriptTurn[],
@@ -489,28 +561,52 @@ export function interleaveUnrecordedMarks(
   return items;
 }
 
-/** "No microphone audio from 17:39 to the end", in `msg`'s language. */
+/**
+ * The person a track's audio is, when the transcript hears exactly one
+ * voice on it and someone named it ("Ingrid Solberg"); otherwise null.
+ */
+export function trackSpeakerName(
+  trackNumber: number,
+  segments: readonly RecordingTranscriptSegment[],
+  speakers: readonly RecordingSpeaker[],
+): string | null {
+  const labels = new Set<string>();
+  for (const segment of segments) {
+    if (segment.trackNumber === trackNumber && segment.speakerLabel) {
+      labels.add(segment.speakerLabel);
+    }
+  }
+  const [label, ...others] = [...labels];
+  if (!label || others.length > 0 || !speakerIsNamed(label, speakers)) return null;
+  const name = speakers.find((speaker) => speaker.label === label)?.name.trim();
+  return name || null;
+}
+
+/**
+ * "Ingrid Solberg's microphone wasn't recording from 17:39 to 45:35", in
+ * `msg`'s language. `speakerName` names the microphone's one voice
+ * (`trackSpeakerName`); computer or tab audio is the other people.
+ */
 export function unrecordedMarkText(
   mark: TranscriptUnrecordedMark,
   msg: OpenGeniText = defaultText,
+  speakerName: string | null = null,
 ): string {
   const from = formatClock(mark.startMilliseconds);
-  const to = mark.endMilliseconds === null ? null : formatClock(mark.endMilliseconds);
-  switch (mark.source) {
-    case "microphone":
-      return to === null
-        ? msg("meetings.transcript.noMicrophoneAudioFromToTheEnd", { from })
-        : msg("meetings.transcript.noMicrophoneAudioFromTo", { from, to });
-    case "system":
-    case "browser_tab":
-      return to === null
-        ? msg("meetings.transcript.noSharedAudioFromToTheEnd", { from })
-        : msg("meetings.transcript.noSharedAudioFromTo", { from, to });
-    default:
-      return to === null
-        ? msg("meetings.transcript.noAudioFromToTheEnd", { from })
-        : msg("meetings.transcript.noAudioFromTo", { from, to });
+  const to = formatClock(mark.endMilliseconds);
+  if (mark.source === "microphone") {
+    return speakerName
+      ? msg("meetings.transcript.nameSMicrophoneWasnTRecordingFromTo", {
+          name: speakerName,
+          from,
+          to,
+        })
+      : msg("meetings.transcript.theMicrophoneWasnTRecordingFromTo", { from, to });
   }
+  if (mark.source === "system" || mark.source === "browser_tab") {
+    return msg("meetings.transcript.otherPeopleWerenTRecordedFromTo", { from, to });
+  }
+  return msg("meetings.transcript.nothingWasRecordedFromTo", { from, to });
 }
 
 /** The segment playing at `milliseconds`, or the last one that started before it. */

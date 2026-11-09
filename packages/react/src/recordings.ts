@@ -66,6 +66,7 @@ export {
   transcriptErrorText,
   transcriptFixModel,
   transcriptNeedsCredits,
+  trackSpeakerName,
   transcriptUnrecordedMarks,
   unrecordedMarkText,
   versionSummary,

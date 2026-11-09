@@ -15,6 +15,7 @@ import {
   meetingTitle,
   speakerDisplayName,
   speakerIsNamed,
+  trackSpeakerName,
   transcribingText,
   transcriptErrorText,
   transcriptUnrecordedMarks,
@@ -173,7 +174,24 @@ export function useMeetingView({
   const [sheet, setSheet] = useState<Sheet>(null);
   const [pulling, setPulling] = useState(false);
   const tracks = recording?.tracks ?? [];
-  const turns = useMemo(() => groupTranscriptTurns(transcript.segments), [transcript.segments]);
+  const length =
+    recording?.durationMilliseconds ??
+    Math.max(0, ...tracks.map((track) => track.durationMilliseconds));
+  const recordingTracks = recording?.tracks;
+  const marks = useMemo(
+    () => transcriptUnrecordedMarks(recordingTracks ?? [], length),
+    [recordingTracks, length],
+  );
+  // No turn runs across a stretch without audio, so its line sits between them.
+  const turns = useMemo(
+    () =>
+      groupTranscriptTurns(
+        transcript.segments,
+        undefined,
+        marks.map((mark) => mark.startMilliseconds),
+      ),
+    [transcript.segments, marks],
+  );
   const tryAgain = msg("native.meetings.meetingView.tryAgainInAMoment");
   const viewerSubjectId = viewer?.subjectId ?? null;
   const people = useRecordingPeople({ ...scope, enabled: sheet?.kind === "speaker" });
@@ -491,19 +509,30 @@ export function useMeetingView({
                   </Text>
                 ) : (
                   <View style={{ marginTop: 8 }}>
-                    {interleaveUnrecordedMarks(turns, transcriptUnrecordedMarks(tracks)).map(
-                      (item) =>
-                        item.kind === "unrecorded" ? (
-                          <UnrecordedLine key={`unrecorded-${item.mark.key}`} mark={item.mark} />
-                        ) : (
-                          <Turn
-                            key={item.turn.key}
-                            turn={item.turn}
-                            speakers={transcript.speakers}
-                            tracks={tracks}
-                            onSpeaker={(label) => setSheet({ kind: "speaker", label })}
-                          />
-                        ),
+                    {interleaveUnrecordedMarks(turns, marks).map((item) =>
+                      item.kind === "unrecorded" ? (
+                        <UnrecordedLine
+                          key={`unrecorded-${item.mark.key}`}
+                          mark={item.mark}
+                          speakerName={
+                            item.mark.trackNumber === null
+                              ? null
+                              : trackSpeakerName(
+                                  item.mark.trackNumber,
+                                  transcript.segments,
+                                  transcript.speakers,
+                                )
+                          }
+                        />
+                      ) : (
+                        <Turn
+                          key={item.turn.key}
+                          turn={item.turn}
+                          speakers={transcript.speakers}
+                          tracks={tracks}
+                          onSpeaker={(label) => setSheet({ kind: "speaker", label })}
+                        />
+                      ),
                     )}
                   </View>
                 )}
@@ -684,14 +713,24 @@ function TranscriptFacts(props: {
   );
 }
 
-/** A quiet line where one track recorded nothing, as on the web. */
-function UnrecordedLine({ mark }: { mark: TranscriptUnrecordedMark }) {
+/** A quiet line where a track recorded nothing, as on the web. */
+function UnrecordedLine({
+  mark,
+  speakerName,
+}: {
+  mark: TranscriptUnrecordedMark;
+  speakerName: string | null;
+}) {
   const msg = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const rule = { flex: 1, minWidth: 16, height: 1, backgroundColor: c.border } as const;
   return (
-    <View accessible style={{ marginTop: 18, flexDirection: "row", alignItems: "center", gap: 10 }}>
+    <View
+      accessible
+      accessibilityRole="text"
+      style={{ marginTop: 18, flexDirection: "row", alignItems: "center", gap: 10 }}
+    >
       <View style={rule} />
       <View style={{ flexShrink: 1, flexDirection: "row", alignItems: "center", gap: 6 }}>
         <Icon
@@ -709,7 +748,7 @@ function UnrecordedLine({ mark }: { mark: TranscriptUnrecordedMark }) {
             fontVariant: ["tabular-nums"],
           }}
         >
-          {unrecordedMarkText(mark, msg)}
+          {unrecordedMarkText(mark, msg, speakerName)}
         </Text>
       </View>
       <View style={rule} />

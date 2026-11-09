@@ -41033,6 +41033,7 @@
       "speakerIsNamed": "value",
       "tidyLiveText": "value",
       "tidyPartialText": "value",
+      "trackSpeakerName": "value",
       "transcribingText": "value",
       "transcriptErrorText": "value",
       "transcriptFixModel": "value",

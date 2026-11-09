@@ -954,11 +954,12 @@ describe("Meeting page", () => {
       const items = [...view.container.querySelectorAll("ol > li")];
       const lines = items.filter((item) => item.hasAttribute("data-unrecorded"));
       expect(lines.map((line) => line.textContent)).toEqual([
-        "No microphone audio from 0:46 to 1:08",
-        "No shared audio from 2:28 to the end",
+        "Ingrid Solberg's microphone wasn't recording from 0:46 to 1:08",
+        "Other people weren't recorded from 2:28 to 2:32",
       ]);
       // Each sits where its stretch starts: after the turn at 0:38, before
-      // the one at 0:47; the one running to the end closes the transcript.
+      // the one at 0:47; the one running to the end closes the transcript,
+      // ending where the meeting does.
       const before = items[items.indexOf(lines[0]!) - 1]!;
       const after = items[items.indexOf(lines[0]!) + 1]!;
       expect(before.textContent).toContain("0:38");

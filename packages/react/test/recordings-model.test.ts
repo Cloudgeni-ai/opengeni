@@ -25,6 +25,7 @@ import {
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
+  trackSpeakerName,
   transcribingText,
   transcriptErrorText,
   transcriptFixModel,
@@ -474,6 +475,7 @@ describe("transcript turns", () => {
   });
 
   test("a track's stretches without audio sit where they start, in words a reader knows", () => {
+    const hour = 2_735_000;
     const microphone: RecordingTrack = {
       ...tracks[0]!,
       unrecorded: [{ startMilliseconds: 1_059_000, endMilliseconds: null }],
@@ -484,16 +486,20 @@ describe("transcript turns", () => {
     };
     // A server from before tracks said where they have no audio.
     const older = { ...tracks[0]!, unrecorded: undefined } as unknown as RecordingTrack;
-    const marks = transcriptUnrecordedMarks([microphone, shared, older]);
-    expect(marks.map((mark) => [mark.trackNumber, mark.startMilliseconds])).toEqual([
-      [1, 20_000],
-      [0, 1_059_000],
+    expect(transcriptUnrecordedMarks([older], hour)).toEqual([]);
+    const marks = transcriptUnrecordedMarks([microphone, shared], hour);
+    expect(
+      marks.map((mark) => [mark.trackNumber, mark.startMilliseconds, mark.endMilliseconds]),
+    ).toEqual([
+      [1, 20_000, 95_000],
+      [0, 1_059_000, hour],
     ]);
-    const turns = groupTranscriptTurns([
-      segment(0, 0, 4_000, "a"),
-      segment(1, 30_000, 34_000, "b"),
-      segment(2, 1_100_000, 1_104_000, "b"),
-    ]);
+    const segments = [
+      { ...segment(0, 0, 4_000, "track-0"), trackNumber: 0 },
+      { ...segment(1, 30_000, 34_000, "speaker_0"), trackNumber: 1 },
+      { ...segment(2, 1_100_000, 1_104_000, "speaker_0"), trackNumber: 1 },
+    ];
+    const turns = groupTranscriptTurns(segments);
     const order = interleaveUnrecordedMarks(turns, marks).map((item) =>
       item.kind === "turn" ? item.turn.key : item.mark.key,
     );
@@ -502,13 +508,63 @@ describe("transcript turns", () => {
     expect(interleaveUnrecordedMarks(turns.slice(0, 1), marks).at(-1)).toMatchObject({
       kind: "unrecorded",
     });
-    expect(marks.map((mark) => unrecordedMarkText(mark))).toEqual([
-      "No shared audio from 0:20 to 1:35",
-      "No microphone audio from 17:39 to the end",
-    ]);
-    expect(unrecordedMarkText({ ...marks[0]!, source: "upload", endMilliseconds: null })).toBe(
-      "No audio from 0:20 to the end",
+    // The microphone's one named voice is who is missing; computer audio is the others.
+    const speakers = [
+      {
+        label: "track-0",
+        name: "Ingrid Solberg",
+        personId: null,
+        source: "track" as const,
+        confidence: null,
+      },
+    ];
+    expect(trackSpeakerName(0, segments, speakers)).toBe("Ingrid Solberg");
+    expect(trackSpeakerName(0, segments, [])).toBeNull();
+    expect(trackSpeakerName(1, segments, speakers)).toBeNull();
+    expect(unrecordedMarkText(marks[1]!, undefined, "Ingrid Solberg")).toBe(
+      "Ingrid Solberg's microphone wasn't recording from 17:39 to 45:35",
     );
+    expect(unrecordedMarkText(marks[1]!)).toBe(
+      "The microphone wasn't recording from 17:39 to 45:35",
+    );
+    expect(unrecordedMarkText(marks[0]!)).toBe("Other people weren't recorded from 0:20 to 1:35");
+  });
+
+  test("when every track is silent at once, or the meeting has one, nothing was recorded", () => {
+    const both = transcriptUnrecordedMarks(
+      [
+        { ...tracks[0]!, unrecorded: [{ startMilliseconds: 300_000, endMilliseconds: 371_000 }] },
+        { ...tracks[1]!, unrecorded: [{ startMilliseconds: 301_000, endMilliseconds: 370_000 }] },
+      ],
+      600_000,
+    );
+    // One line for the time both were missing; a second either side is too short to mark.
+    expect(both).toEqual([
+      expect.objectContaining({
+        trackNumber: null,
+        startMilliseconds: 301_000,
+        endMilliseconds: 370_000,
+      }),
+    ]);
+    expect(unrecordedMarkText(both[0]!)).toBe("Nothing was recorded from 5:01 to 6:10");
+    const alone = transcriptUnrecordedMarks(
+      [{ ...tracks[0]!, unrecorded: [{ startMilliseconds: 40_000, endMilliseconds: 50_000 }] }],
+      60_000,
+    );
+    expect(alone.map((mark) => [mark.trackNumber, unrecordedMarkText(mark)])).toEqual([
+      [null, "Nothing was recorded from 0:40 to 0:50"],
+    ]);
+    // One voice talking on both sides of the drop reads as two turns, with the line between.
+    const turns = groupTranscriptTurns(
+      [segment(0, 30_000, 39_000, "a"), segment(1, 52_000, 58_000, "a")],
+      undefined,
+      alone.map((mark) => mark.startMilliseconds),
+    );
+    expect(
+      interleaveUnrecordedMarks(turns, alone).map((item) =>
+        item.kind === "turn" ? item.turn.key : item.mark.key,
+      ),
+    ).toEqual([0, "all:40000", 1]);
   });
 });
 
