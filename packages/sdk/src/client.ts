@@ -8621,7 +8621,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** The connected Slack workspaces the agent can be available in, and where it is. */
+  /** The linked Slack workspaces, how the agent is available in each, or why it isn't. */
   async listAgentSlackInstalls(
     workspaceId: string,
     agentId: string,
@@ -8632,7 +8632,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Make the agent available in one Slack workspace, or change how (open use). */
+  /** Change how a shared agent is available in one Slack workspace (open use). */
   async putAgentSlackAvailability(
     workspaceId: string,
     agentId: string,
@@ -8646,7 +8646,11 @@ export class OpenGeniClient {
     );
   }
 
-  /** Stop the agent answering in one Slack workspace. The agent and its chats stay. */
+  /**
+   * @deprecated A shared agent is available in every linked Slack workspace, so
+   * this answers 409 `agent_slack_always_available`. Make the agent Only me
+   * (`updateAgent`) to take it out of Slack.
+   */
   async deleteAgentSlackAvailability(
     workspaceId: string,
     agentId: string,

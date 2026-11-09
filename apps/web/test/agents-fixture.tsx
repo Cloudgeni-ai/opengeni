@@ -129,12 +129,15 @@ const client = fakeAgentsClient(agents, {
         slackTeamId: "T01",
         slackTeamName: "Acme",
         availability: releases.slack[0]!,
+        unavailable: null,
       },
       {
         connectionId: SECOND_CONNECTION,
         slackTeamId: "T02",
         slackTeamName: "Acme Support",
         availability: null,
+        // One Slack workspace per agent for now.
+        unavailable: "agent_slack_single_install",
       },
     ],
   },
@@ -149,15 +152,21 @@ const client = fakeAgentsClient(agents, {
   yours: (agent) => agent.createdBySubjectId === "user-me",
   canCreatePrivate: privateChats,
 });
-// Only Release manager is in Slack, and Meeting notes has only its owner's chat.
+// Every shared agent is in Slack on its own; an Only me agent stays in the
+// app. Meeting notes has only its owner's chat.
 const listInstalls = client.listAgentSlackInstalls.bind(client);
 client.listAgentSlackInstalls = async (workspaceId: string, id: string) => {
   const response = await listInstalls(workspaceId, id);
-  return id === releases.id
+  const agent = agents.find((candidate) => candidate.id === id);
+  return agent?.visibility !== "private"
     ? response
     : {
         ...response,
-        installs: response.installs.map((install) => ({ ...install, availability: null })),
+        installs: response.installs.map((install) => ({
+          ...install,
+          availability: null,
+          unavailable: "agent_slack_requires_workspace_visibility" as const,
+        })),
       };
 };
 const listChats = client.listAgentChats.bind(client);

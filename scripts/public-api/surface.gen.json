@@ -11905,7 +11905,8 @@
         "$.availability": "ref(AgentSlackAvailability)! null",
         "$.connectionId": "string!",
         "$.slackTeamId": "string!",
-        "$.slackTeamName": "string! null"
+        "$.slackTeamName": "string! null",
+        "$.unavailable": "enum! null=[\"\\\"agent_child_chat\\\"\",\"\\\"agent_limit_reached\\\"\",\"\\\"agent_not_found\\\"\",\"\\\"agent_requires_private_chat\\\"\",\"\\\"agent_slack_always_available\\\"\",\"\\\"agent_slack_name_invalid\\\"\",\"\\\"agent_slack_name_taken\\\"\",\"\\\"agent_slack_personal_workspace\\\"\",\"\\\"agent_slack_requires_workspace_visibility\\\"\",\"\\\"agent_slack_single_install\\\"\",\"\\\"agent_version_conflict\\\"\",\"\\\"slack_bot_unavailable\\\"\"]"
       }
     },
     "AgentSlackIntroRequest": {
