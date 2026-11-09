@@ -92,7 +92,7 @@ export const TEAMS_CONNECT_REMINDER_TEXT =
 export const TEAMS_SHARED_CONNECT_TEXT =
   "Your organization hasn't connected Opengeni yet. Send me a direct message to see how to connect it.";
 /** For a mention in a group chat or channel Opengeni isn't turned on in. */
-export function teamsConversationOffText(appName: string = TEAMS_DEFAULT_APP_NAME): string {
+export function teamsAppOffInConversationText(appName: string = TEAMS_DEFAULT_APP_NAME): string {
   return `${appName} isn't turned on in this conversation. Send me a direct message to give me a task instead.`;
 }
 /** For a linked person whose account can't start chats in the connected workspace. */

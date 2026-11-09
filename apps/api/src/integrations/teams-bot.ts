@@ -123,7 +123,7 @@ import {
   teamsAiGeneratedEntity,
   teamsCommand,
   teamsConnectText,
-  teamsConversationOffText,
+  teamsAppOffInConversationText,
   teamsEventUuid,
   teamsHelp,
   teamsMarkdown,
@@ -1151,7 +1151,7 @@ async function replyToDisabledConversation(
     const reply = await budgets.sharedNotice.reserve(m.tenantId, m.actorId);
     if (!reply) return "channel_disabled";
     await sendReserved(reply, () =>
-      send(app, m, teamsConversationOffText(deps.settings.teamsAppName)),
+      send(app, m, teamsAppOffInConversationText(deps.settings.teamsAppName)),
     );
     return "channel_disabled_notice_sent";
   } catch {

@@ -4,7 +4,7 @@ import {
   teamsAiGeneratedEntity,
   teamsCommand,
   teamsConnectText,
-  teamsConversationOffText,
+  teamsAppOffInConversationText,
   teamsEventUuid,
   teamsHelp,
   teamsMarkdown,
@@ -112,13 +112,13 @@ describe("Teams welcome and help", () => {
       }).text,
     ).toContain(`ask your admin to message ${appName} in Teams and connect it.`);
     expect(teamsConnectText()).toContain("ask your admin to message Opengeni in Teams");
-    expect(teamsConversationOffText(appName)).toBe(
+    expect(teamsAppOffInConversationText(appName)).toBe(
       `${appName} isn't turned on in this conversation. Send me a direct message to give me a task instead.`,
     );
     expect(
       teamsWelcome({ personal: true, installation: "active", linked: false }).text,
     ).toStartWith("**Welcome to Opengeni**");
-    expect(teamsConversationOffText()).toStartWith("Opengeni isn't turned on");
+    expect(teamsAppOffInConversationText()).toStartWith("Opengeni isn't turned on");
   });
   test("only an unlinked person in a connected organization's 1:1 chat gets a link button", () => {
     for (const state of states) {

@@ -23,7 +23,7 @@ import {
   TEAMS_CONNECT_REMINDER_TEXT,
   TEAMS_SHARED_CANNOT_START_TEXT,
   TEAMS_UNREADABLE_MESSAGE_TEXT,
-  teamsConversationOffText,
+  teamsAppOffInConversationText,
   TEAMS_WORK_ACCOUNT_TEXT,
 } from "../src/integrations/teams-experience";
 
@@ -671,7 +671,7 @@ test("help is answered in Teams without reaching the agent, for linked and unlin
   await f.handle(closed());
   expect(f.calls).toHaveLength(4);
   expect(f.calls[3]!.conversationId).toContain("19:closed;messageid=");
-  expect(f.calls[3]!.activity.text).toBe(teamsConversationOffText());
+  expect(f.calls[3]!.activity.text).toBe(teamsAppOffInConversationText());
   expect(f.outcomes).toEqual([
     "help_sent",
     "help_sent",
