@@ -195,6 +195,10 @@ describe("Teams app package", () => {
     expect(
       buildTeamsAppManifest({ ...options, appFullName: "x".repeat(100) }).name.full,
     ).toHaveLength(100);
+    expect(buildTeamsAppManifest({ ...options, appName: " Example " }).name).toEqual({
+      short: "Example",
+      full: "Example",
+    });
     expect(buildTeamsAppManifest({ ...options, appFullName: " Example " }).name.full).toBe(
       "Example",
     );

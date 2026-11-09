@@ -79,8 +79,9 @@ const LIMITS = [
 ];
 
 /** How an organization that isn't connected yet connects. Plain text. */
-export const TEAMS_CONNECT_TEXT =
-  "Your organization hasn't connected Opengeni yet. A Microsoft 365 Global Administrator or Teams Administrator connects it once for everyone. If that's you, select Connect your organization. Otherwise, ask your admin to message Opengeni in Teams and connect it.";
+export function teamsConnectText(appName: string = TEAMS_DEFAULT_APP_NAME): string {
+  return `Your organization hasn't connected Opengeni yet. A Microsoft 365 Global Administrator or Teams Administrator connects it once for everyone. If that's you, select Connect your organization. Otherwise, ask your admin to message ${appName} in Teams and connect it.`;
+}
 /** For a person signed in to Teams with a personal Microsoft account. Plain text. */
 export const TEAMS_WORK_ACCOUNT_TEXT =
   "Opengeni needs a Microsoft 365 work or school account. You're using Teams with a personal Microsoft account, which can't connect to Opengeni. Sign in to Teams with your work or school account to use Opengeni.";
@@ -119,7 +120,7 @@ function nextStep(state: TeamsExperienceState, reply: "welcome" | "help"): NextS
       return reply === "welcome"
         ? { text: TEAMS_CONNECT_REMINDER_TEXT }
         : {
-            text: TEAMS_CONNECT_TEXT,
+            text: teamsConnectText(state.appName),
             action: { kind: "link", title: "Connect your organization" },
           };
     if (state.setup === "work_account") return { text: TEAMS_WORK_ACCOUNT_TEXT };

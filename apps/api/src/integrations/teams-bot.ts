@@ -117,12 +117,12 @@ import {
   TEAMS_SHARED_CANNOT_START_TEXT,
   TEAMS_UNREADABLE_MESSAGE_TEXT,
   TEAMS_CONNECT_REMINDER_TEXT,
-  TEAMS_CONNECT_TEXT,
   TEAMS_DEFAULT_APP_NAME,
   TEAMS_SHARED_CONNECT_TEXT,
   TEAMS_WORK_ACCOUNT_TEXT,
   teamsAiGeneratedEntity,
   teamsCommand,
+  teamsConnectText,
   teamsConversationOffText,
   teamsEventUuid,
   teamsHelp,
@@ -319,7 +319,7 @@ export async function sendTeamsReply(
 const ONBOARDING_TEXT = {
   setup: () => "Connect Teams to your Opengeni workspace.",
   link: () => "Link your Opengeni account to use this bot.",
-  connect: (appName: string) => `Welcome to ${appName}. ${TEAMS_CONNECT_TEXT}`,
+  connect: (appName: string) => `Welcome to ${appName}. ${teamsConnectText(appName)}`,
 } as const;
 const ONBOARDING_ACTION = {
   setup: "Connect Teams",

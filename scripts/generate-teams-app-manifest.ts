@@ -70,7 +70,8 @@ function httpsUrl(value: string, name: string): URL {
 
 /** Packaging metadata only: never enables the bot or grants workspace access. */
 export function buildTeamsAppManifest(options: TeamsManifestOptions) {
-  const appName = options.appName ?? "Opengeni";
+  // Trimmed, as the API trims the same OPENGENI_TEAMS_APP_NAME for the bot.
+  const appName = (options.appName ?? "Opengeni").trim();
   if (!appName.trim() || appName.length > 30)
     throw new Error("appName must contain 1–30 characters");
   // An explicit full name is trimmed; the default is the short name unchanged.
