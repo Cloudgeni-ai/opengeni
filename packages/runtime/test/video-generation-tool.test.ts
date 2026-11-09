@@ -173,6 +173,79 @@ describe("video generation runtime surface", () => {
     await expect(invoke("generate_video", { prompt: "animate" })).resolves.toEqual(off);
   });
 
+  test("returns invalid arguments to the model and keeps execution failures fatal", async () => {
+    const executed: unknown[] = [];
+    let failExecution = false;
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "none", webSearchEnabled: false }),
+      [],
+      {
+        humanInputEnabled: false,
+        videoGeneration: {
+          capabilities: async () => capabilities,
+          execute: async (input, context) => {
+            if (failExecution) throw new Error("adapter failed");
+            executed.push(input);
+            return { schemaVersion: 1, status: "accepted", operationId: context.toolCallId };
+          },
+        },
+      },
+    );
+    const tools = (
+      agent as unknown as {
+        tools: Array<{
+          name: string;
+          invoke: (context: unknown, input: string, details: unknown) => Promise<unknown>;
+        }>;
+      }
+    ).tools;
+    const invoke = async (name: string, raw: string) =>
+      await tools
+        .find((candidate) => candidate.name === name)!
+        .invoke(new RunContext({}), raw, { toolCall: { callId: `call-${name}` } });
+
+    const outOfRange = await invoke(
+      "generate_video",
+      JSON.stringify({ prompt: "animate", durationSeconds: 4.5, extra: "secret-value" }),
+    );
+    expect(typeof outOfRange).toBe("string");
+    expect(outOfRange).toContain("generate_video tool was not called");
+    expect(outOfRange).not.toContain("secret-value");
+    expect(await invoke("generate_video", "{not json")).toContain(
+      "generate_video tool was not called",
+    );
+    expect(await invoke("skill_read", JSON.stringify({ skill: 7 }))).toContain(
+      "skill_read tool was not called",
+    );
+    expect(executed).toEqual([]);
+
+    // Strict-mode nulls for omitted optional fields stay valid.
+    await expect(
+      invoke(
+        "generate_video",
+        JSON.stringify({
+          prompt: "animate",
+          modelId: null,
+          source: null,
+          durationSeconds: null,
+          aspectRatio: null,
+          resolution: null,
+          generateAudio: null,
+        }),
+      ),
+    ).resolves.toEqual({
+      schemaVersion: 1,
+      status: "accepted",
+      operationId: "call-generate_video",
+    });
+    expect(executed).toEqual([{ prompt: "animate" }]);
+
+    failExecution = true;
+    await expect(invoke("generate_video", JSON.stringify({ prompt: "animate" }))).rejects.toThrow(
+      "adapter failed",
+    );
+  });
+
   test("attaching the video tools leaves the system prompt byte-identical", async () => {
     const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
     const prompt = async (withVideo: boolean) =>

@@ -417,6 +417,7 @@ import {
   connectMcpServers,
   MaxTurnsExceededError,
   MCPServerStreamableHttp,
+  ModelBehaviorError,
   RunState,
   run,
   Runner,
@@ -3708,6 +3709,39 @@ export function hasCanonicalEditableArtifactToolSurface(
   });
 }
 
+/**
+ * errorFunction for built-in tools whose execution failures must stay fatal.
+ * With `errorFunction: null` the SDK also rethrows its own InvalidToolInputError
+ * (arguments that are not JSON or do not match the schema), which ends the whole
+ * turn over a correctable model mistake. This returns that one error to the model
+ * as a tool result, naming only property paths and issue messages, never values,
+ * and rethrows every other error unchanged.
+ */
+function invalidToolInputOnlyErrorFunction(toolName: string) {
+  return (_context: unknown, error: unknown): string => {
+    if (!(error instanceof ModelBehaviorError) || error.name !== "InvalidToolInputError") {
+      throw error;
+    }
+    const original = (error as { originalError?: unknown }).originalError;
+    // Duck-typed: the schema may come from another copy of zod.
+    const rawIssues = (original as { issues?: unknown } | undefined)?.issues;
+    const issues = Array.isArray(rawIssues)
+      ? rawIssues.slice(0, 10).flatMap((issue: { path?: unknown; message?: unknown }) => {
+          if (typeof issue?.message !== "string") return [];
+          const path = Array.isArray(issue.path) ? issue.path.map(String).join(".") : "";
+          return [path ? `${path}: ${issue.message}` : issue.message];
+        })
+      : [];
+    const detail =
+      issues.length > 0
+        ? ` (${issues.join("; ")})`
+        : original instanceof SyntaxError
+          ? " (not valid JSON)"
+          : "";
+    return `The ${toolName} tool was not called because its arguments do not match its input schema${detail}. Correct the arguments and call the tool again.`;
+  };
+}
+
 const SkillReadToolInput = z.object({
   skill: z.string().min(1).max(512),
   listFiles: z.boolean().optional(),
@@ -3833,7 +3867,7 @@ export function buildOpenGeniAgent(
         description:
           "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; every reference must be a PNG, JPEG, or WebP image, so convert SVG or other formats first. Describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
         parameters: GenerateImageToolInput,
-        errorFunction: null,
+        errorFunction: invalidToolInputOnlyErrorFunction("generate_image"),
         execute: async (input, _context, details) => {
           const toolCallId = details?.toolCall?.callId;
           if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
@@ -3852,7 +3886,7 @@ export function buildOpenGeniAgent(
         description:
           "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call immediately before generate_video, then select a listed model and source mode; availability is runtime state and is never encoded in the generate_video schema.",
         parameters: GetVideoGenerationCapabilitiesToolInput,
-        errorFunction: null,
+        errorFunction: invalidToolInputOnlyErrorFunction("get_video_generation_capabilities"),
         execute: async () => {
           const adapter = options.videoGeneration;
           if (!adapter) throw new Error("Video-generation capability changed during execution");
@@ -3866,7 +3900,7 @@ export function buildOpenGeniAgent(
         description:
           "Start one durable asynchronous video generation after get_video_generation_capabilities. Match the selected model's exact source mode: omit references for text-to-video, provide one exact /workspace image path for image-to-video, or provide one exact /workspace video path for video editing. Call once per intentionally distinct result. An accepted result means work continues independently and must never be retried automatically. A rejected result means no operation or provider request was created; correct the stated reference problem and call again only with corrected input.",
         parameters: GenerateVideoToolInput,
-        errorFunction: null,
+        errorFunction: invalidToolInputOnlyErrorFunction("generate_video"),
         execute: async (input, _context, details) => {
           const toolCallId = details?.toolCall?.callId;
           if (!toolCallId) throw new Error("Video-generation tool call has no durable identity");
@@ -3983,7 +4017,7 @@ export function buildOpenGeniAgent(
           description:
             "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Set listFiles:true without paths to list relative paths only, with no file bodies. Use an id or name from the Skill index.",
           parameters: SkillReadToolInput,
-          errorFunction: null,
+          errorFunction: invalidToolInputOnlyErrorFunction("skill_read"),
           execute: (input) =>
             JSON.stringify(
               readRuntimeSkill(skillComposition, {
