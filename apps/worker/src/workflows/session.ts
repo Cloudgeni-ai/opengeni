@@ -1089,6 +1089,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         input.sessionId,
         trigger,
         "admissionFence" in peek ? peek.admissionFence : undefined,
+        "admissionWakeRevision" in peek ? peek.admissionWakeRevision : undefined,
       ))
     ) {
       if (signalVersion !== closeSignalVersion) continue;
@@ -1102,6 +1103,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     sessionId: string,
     trigger: activities.RunAgentTurnInput["trigger"],
     admissionFence?: activities.FailSessionAttemptInput["admissionFence"],
+    admissionWakeRevision?: number,
   ): Promise<boolean> {
     const capacityWaitEntryBaseline = { wakeups, capacityWakeups };
     // Capture every admission-relevant signal before activity dispatch. A
@@ -1286,6 +1288,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
           : {}),
         ...(admissionFailure ? { preClaimFailure: admissionFailure } : {}),
         ...(admissionFence ? { admissionFence } : {}),
+        ...(admissionFence && admissionWakeRevision !== undefined ? { admissionWakeRevision } : {}),
         ...(postClaimDatabaseRecovery ? { postClaimDatabaseRecovery } : {}),
         trigger,
         error: workflowFailureMessage(outcome.error),

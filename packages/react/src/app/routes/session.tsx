@@ -77,6 +77,7 @@ import { needsSandboxRecoveryCheck } from "../lib/sandbox-failure";
 import {
   admissionRecheckControl,
   admissionControlNeedsRefresh,
+  allowMachineForChat,
   recheckSessionAdmission,
   SessionAdmissionNotice,
 } from "../components/session/session-admission-notice";
@@ -4489,6 +4490,32 @@ function SessionChatPane(props: {
                       }),
                     refresh: [props.onReloadSession, props.queue.refresh],
                   })
+                }
+                onRefresh={async () => {
+                  await Promise.all([props.onReloadSession(), props.queue.refresh()]);
+                }}
+                onAllowMachine={
+                  machineAccess?.isOwner &&
+                  runsOn.activeMachine?.enrollmentId &&
+                  runsOn.activeMachine.sandboxId === props.session.activeSandboxId
+                    ? async () => {
+                        const enrollmentId = runsOn.activeMachine?.enrollmentId;
+                        const allowed = enrollmentId
+                          ? await allowMachineForChat({
+                              client: context.client,
+                              workspaceId: props.session.workspaceId,
+                              session: props.session,
+                              enrollmentId,
+                            })
+                          : false;
+                        await Promise.allSettled([
+                          props.onReloadSession(),
+                          props.queue.refresh(),
+                          runsOn.fleet.refresh(),
+                        ]);
+                        if (!allowed) throw new Error("machine could not be allowed");
+                      }
+                    : undefined
                 }
                 onContinueWaitingWork={async () => {
                   await context.client.continueSessionWaitingWork(

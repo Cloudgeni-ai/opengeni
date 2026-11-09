@@ -84,7 +84,10 @@ import {
   type WorkspaceMemberCandidate,
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
-import { loadWorkspaceCodexCatalogReadiness } from "@opengeni/core";
+import {
+  loadWorkspaceCodexCatalogReadiness,
+  releaseAdmissionBlocksAfterAccessChange,
+} from "@opengeni/core";
 import { REGION_RESTRICTED, REGION_RESTRICTED_MESSAGE } from "@opengeni/contracts";
 import {
   allWorkspacePermissions,
@@ -182,6 +185,7 @@ import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
 import { projectWorkspaceModelCatalog, withRegionAvailability } from "../model-catalog";
+import { ownSubscriptionPlanNeeded, withOwnSubscriptionPlan } from "../own-subscription-plan";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
 import { workspaceControlEventVisibility } from "../workspace-control-visibility";
 import {
@@ -736,6 +740,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
             organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
           })
         : undefined;
+    // Whether this organization's plan includes its own subscriptions, and if
+    // not, the plan that does. A failed read marks nothing: admission still
+    // refuses with Upgrade, so a hint is never worth failing the catalog.
+    const ownSubscriptionPlan = ownSubscriptionPlanNeeded(
+      deps.db,
+      resolvedCatalog.settings,
+      grant.accountId,
+    ).catch(() => null);
     const workspaceConnectionsRead = catalogInputs?.then((inputs) => inputs.workspaceConnections);
     // The original promise remains in the catalog batch. On failure the
     // restrictions keep their standalone read rather than mask its error.
@@ -961,7 +973,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
     }
     c.header("cache-control", "private, no-store");
-    return c.json(WorkspaceModelCatalogResponse.parse(catalog));
+    return c.json(
+      WorkspaceModelCatalogResponse.parse(
+        withOwnSubscriptionPlan(catalog, selections, await ownSubscriptionPlan),
+      ),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
@@ -1822,6 +1838,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch (error) {
       rethrowWorkspaceMemberCandidateError(error);
     }
+    // Restored access lets that person's saved messages start by themselves.
+    await releaseAdmissionBlocksAfterAccessChange(
+      {
+        db: deps.db,
+        requestSessionWorkflowWakeDispatch: () =>
+          deps.workflowClient.requestSessionWorkflowWakeDispatch(),
+      },
+      { accountId: grant.accountId, workspaceId, change: "membership" },
+    );
     const members = await listWorkspacePeople(deps, workspaceId);
     const member = members.find((addedMember) => addedMember.subjectId === subjectId);
     if (!member) {
@@ -1867,6 +1892,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch (error) {
       rethrowWorkspaceMemberCandidateError(error);
     }
+    // Restored access lets that person's saved messages start by themselves.
+    await releaseAdmissionBlocksAfterAccessChange(
+      {
+        db: deps.db,
+        requestSessionWorkflowWakeDispatch: () =>
+          deps.workflowClient.requestSessionWorkflowWakeDispatch(),
+      },
+      { accountId: grant.accountId, workspaceId, change: "membership" },
+    );
     const members = await listWorkspacePeople(deps, workspaceId);
     const member = members.find((candidate) => candidate.subjectId === subjectId);
     if (!member) {
