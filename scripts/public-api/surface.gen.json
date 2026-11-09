@@ -15818,6 +15818,7 @@
       "shape": {
         "$": "union=[\"type=authorize\",\"type=credentials\",\"type=none\",\"type=preview\",\"type=select_account\",\"type=select_resources\",\"type=wait\"]",
         "$|type=authorize": "object",
+        "$|type=authorize.organizationApprovalUrl": "string?",
         "$|type=authorize.type": "const!=[\"\\\"authorize\\\"\"]",
         "$|type=authorize.url": "string!",
         "$|type=credentials": "object",
