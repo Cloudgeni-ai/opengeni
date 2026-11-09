@@ -49,7 +49,6 @@ import { PersonalSecurityProvider } from "@/lib/personal-security-context";
 import { Input } from "@opengeni/react/ui/input";
 import { Label } from "@opengeni/react/ui/label";
 import { Toaster } from "@opengeni/react/app/components/toaster";
-import { AdminStepUpDialog } from "@/components/admin-step-up-dialog";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import {
   clearOrganizationInvitationContinuation,
@@ -72,6 +71,14 @@ export {
 const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
     default: module.AnalyticsManager,
+  })),
+);
+
+// Loaded right after the shell renders, off the eager graph. A refusal that
+// arrives before it mounts is shown as the plain error it is.
+const AdminStepUpDialog = lazy(() =>
+  import("@/components/admin-step-up-dialog").then((module) => ({
+    default: module.AdminStepUpDialog,
   })),
 );
 
@@ -544,7 +551,9 @@ export function RootRouteComponent() {
     // main grow past the viewport when a child mis-owned scroll.
     <main data-window-frame className="flex h-dvh max-h-dvh flex-col overflow-hidden bg-bg text-fg">
       <Toaster />
-      <AdminStepUpDialog />
+      <Suspense fallback={null}>
+        <AdminStepUpDialog />
+      </Suspense>
       <div ref={mountApiUpdateNotice} className="shrink-0" />
       <SignInCallbackNotice
         userId={authSession?.user.id ?? null}
