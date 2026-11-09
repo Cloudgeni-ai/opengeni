@@ -1505,6 +1505,17 @@ them, and readiness requires them from then on. A release that still has the
 
 The dual and broker session-set modes do not offer passkeys yet.
 
+### Breached-password check
+
+Email sign-up, password reset, password change and invited-user account setup
+refuse a new password that appears in the Have I Been Pwned breached-password
+corpus. The API sends only the first five characters of the password's SHA-1
+hash to `api.pwnedpasswords.com` (k-anonymity). Unset
+`OPENGENI_MANAGED_AUTH_BREACHED_PASSWORD_CHECK` checks outside `local` and `test`; `true`
+or `false` turns it on or off in every environment. A lookup that fails or takes
+longer than five seconds lets the password through and logs a warning, so an
+unreachable service never blocks sign-up.
+
 ### Password sign-up email verification
 
 `OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION` optionally overrides the

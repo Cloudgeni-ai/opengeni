@@ -4433,6 +4433,14 @@ const delegatedAccessTokenPrefix = "ogd_";
 const delegatedServiceAccessTokenPrefix = "ogd2_";
 const delegatedRestrictedAccessTokenPrefix = "ogd3_";
 
+/**
+ * The longest a delegated access token (`ogd_`, `ogd2_`, `ogd3_`) may stay
+ * valid: 24 hours (ADA CASA / OWASP ASVS 2.2.3). Tokens carry no issue time,
+ * so the verifier refuses any token whose expiry is further than this from
+ * now. Every Opengeni minter issues tokens of an hour or less.
+ */
+export const DELEGATED_ACCESS_TOKEN_MAX_LIFETIME_SECONDS = 24 * 60 * 60;
+
 export async function signDelegatedAccessToken(
   secret: string,
   payload: DelegatedAccessTokenPayload,
@@ -4490,7 +4498,11 @@ export async function verifyDelegatedAccessToken(
     return null;
   }
   const payload = DelegatedAccessTokenPayload.safeParse(decoded);
-  if (!payload.success || payload.data.exp < nowSeconds) {
+  if (
+    !payload.success ||
+    payload.data.exp < nowSeconds ||
+    payload.data.exp - nowSeconds > DELEGATED_ACCESS_TOKEN_MAX_LIFETIME_SECONDS
+  ) {
     return null;
   }
   if (

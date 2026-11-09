@@ -34,6 +34,12 @@ import {
   hashManagedAuthPassword,
   verifyManagedAuthPassword,
 } from "../auth/managed-auth";
+import {
+  MANAGED_AUTH_PASSWORD_COMPROMISED_CODE,
+  MANAGED_AUTH_PASSWORD_COMPROMISED_MESSAGE,
+  managedAuthBreachedPasswordCheckEnabled,
+  managedAuthPasswordBreached,
+} from "../auth/password-breach";
 import { ApiHttpError } from "../http/api-error";
 import { trustedBrowserOrigins } from "../http/browser-mutation-origin";
 import { runManagedSignInConnect } from "../auth/managed-auth-attempt-context";
@@ -543,6 +549,21 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
               message: "Enter your current password",
             },
             403,
+          );
+        }
+        if (
+          await managedAuthPasswordBreached(body.newPassword, {
+            enabled: managedAuthBreachedPasswordCheckEnabled(deps.settings),
+            onUnavailable: (reason) =>
+              deps.observability?.warn("Breached-password lookup unavailable", { reason }),
+          })
+        ) {
+          return context.json(
+            {
+              code: MANAGED_AUTH_PASSWORD_COMPROMISED_CODE,
+              message: MANAGED_AUTH_PASSWORD_COMPROMISED_MESSAGE,
+            },
+            422,
           );
         }
         request.expectedPasswordHash = credential?.password ?? null;

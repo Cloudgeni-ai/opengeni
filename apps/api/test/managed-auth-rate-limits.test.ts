@@ -89,6 +89,20 @@ describe("managed auth per-email throttles", () => {
     }
   });
 
+  test("admit at most 100 password attempts per account per hour", () => {
+    // ADA CASA / OWASP ASVS 1.1.1: no more than 100 failed attempts per hour
+    // on one account. Windows longer than an hour would hide a larger hourly
+    // budget, shorter ones would multiply it.
+    const signIn = MANAGED_AUTH_EMAIL_THROTTLES["/sign-in/email"];
+    expect(signIn.windowSeconds).toBe(60 * 60);
+    expect(signIn.perEmailMax).toBeLessThanOrEqual(100);
+    expect(signIn.perSourceMax).toBe(20);
+    for (const throttle of Object.values(MANAGED_AUTH_EMAIL_THROTTLES)) {
+      expect(throttle.windowSeconds).toBe(60 * 60);
+      expect(throttle.perEmailMax).toBeLessThanOrEqual(100);
+    }
+  });
+
   test("key one normalized address without storing it", () => {
     const key = managedAuthEmailThrottleKey("secret", "sign_in", " Victim@Example.TEST ");
     expect(key).toBe(managedAuthEmailThrottleKey("secret", "sign_in", "victim@example.test"));
