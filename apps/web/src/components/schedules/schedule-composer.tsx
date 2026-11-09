@@ -137,7 +137,7 @@ function ConnectorsMenu({
   const stack = [...on]
     .sort((a, b) => Number(logos.has(b.id)) - Number(logos.has(a.id)))
     .slice(0, STACK_SIZE);
-  // Shown on hover and read as the button's description, so the label stays short.
+  // Names are shown on hover; the menu lists them for everyone.
   const names = on
     .map((server) => (server.unavailable ? `${server.name} (unavailable)` : server.name))
     .join(", ");
@@ -407,9 +407,11 @@ export function ComposerField({
         : selectedTools.filter((tool) => tool !== id),
     });
   // A chosen app that is no longer connected keeps its catalog name when the
-  // catalog still knows it, so it can be recognized and removed.
+  // catalog still knows it, so it can be recognized and removed. It is called
+  // unavailable only once the workspace's connected apps have loaded.
   const known = new Set(servers.map((server) => server.id));
-  const missing = selectedTools.filter((id) => !known.has(id));
+  const missing = [...new Set(selectedTools)].filter((id) => !known.has(id));
+  const confirmedMissing = context.workspaceMcpCatalogLoadedSuccessfully;
   const rows: ServerRow[] = [
     ...servers,
     ...missing.map((id) => ({
@@ -417,8 +419,7 @@ export function ComposerField({
       name:
         context.workspaceCapabilityCatalog.find((item) => item.runtime?.mcpServerId === id)?.name ??
         id,
-      detail: "Unavailable",
-      unavailable: true as const,
+      ...(confirmedMissing ? { detail: "Unavailable", unavailable: true as const } : {}),
     })),
   ];
   // The chat composer's logos: catalog entries the workspace shell already

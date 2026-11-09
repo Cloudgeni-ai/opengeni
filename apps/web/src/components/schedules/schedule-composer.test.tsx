@@ -34,6 +34,7 @@ const context = {
   accessContext: null,
   githubRepos: [] as unknown[],
   toolMcpServers,
+  workspaceMcpCatalogLoadedSuccessfully: true,
   workspaceCapabilityCatalog: [
     catalogItem("mcp:posthog", {
       runtime: { available: true, mcpServerId: "cap-posthog" },
@@ -222,4 +223,22 @@ test("disabled, existing-chat and chat-settings forms keep their rules", async (
   await render(["cap-posthog"], undefined, { inheritsChatSettings: true });
   expect(connectorsButton()).toBeNull();
   expect(document.body.textContent).toContain("Uses this chat's model, tools and machine.");
+});
+
+test("before the connected apps load, a chosen app isn't called unavailable", async () => {
+  context.workspaceMcpCatalogLoadedSuccessfully = false;
+  try {
+    await render(["cap-posthog", "cap-retired", "cap-retired"]);
+    const button = connectorsButton()!;
+    expect(button.getAttribute("aria-label")).toBe("Connectors: 2 on. Change");
+    const menu = await openConnectors();
+    const rows = [...menu.querySelectorAll('[role="menuitemcheckbox"]')].map((item) => [
+      label(item),
+      item.getAttribute("aria-checked"),
+    ]);
+    // Still listed once, by its catalog name, and can be turned off.
+    expect(rows.slice(-1)).toEqual([["Retired", "true"]]);
+  } finally {
+    context.workspaceMcpCatalogLoadedSuccessfully = true;
+  }
 });

@@ -28,7 +28,7 @@ export function connectorLogoSources(
     const item =
       (server.capabilityId ? byId.get(server.capabilityId) : undefined) ??
       byServerId.get(server.id);
-    let logo = server.logoSrc ?? (item ? capabilityLogoSource(item, assetUrl) : null);
+    let logo = server.logoSrc || (item ? capabilityLogoSource(item, assetUrl) : null);
     if (!logo && server.providerDomain) {
       domains ??= connectorLogoIndex(items, (path) => assetUrl(path ?? null));
       logo = connectorLogo(domains, server.providerDomain);
