@@ -2617,6 +2617,7 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_TEAMS_BOT_CLIENT_ID", env.OPENGENI_TEAMS_BOT_CLIENT_ID),
     valueEnv("OPENGENI_TEAMS_BOT_CLIENT_SECRET", env.OPENGENI_TEAMS_BOT_CLIENT_SECRET),
     valueEnv("OPENGENI_TEAMS_BOT_TENANT_ID", env.OPENGENI_TEAMS_BOT_TENANT_ID),
+    valueEnv("OPENGENI_TEAMS_APP_NAME", env.OPENGENI_TEAMS_APP_NAME),
     ...(mcpOauthEnabled
       ? [requiredEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)]
       : publicBaseUrl

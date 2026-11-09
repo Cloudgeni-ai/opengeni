@@ -84,6 +84,7 @@ Reference: [Azure Bot registration](https://learn.microsoft.com/en-us/azure/bot-
 | `OPENGENI_TEAMS_BOT_CLIENT_ID` | Bot's Entra application ID |
 | `OPENGENI_TEAMS_BOT_CLIENT_SECRET` | Server-only bot credential |
 | `OPENGENI_TEAMS_BOT_TENANT_ID` | Home tenant used to acquire bot service tokens |
+| `OPENGENI_TEAMS_APP_NAME` | The name the bot uses for itself in its welcome, help and notices (default `Opengeni`, at most 30 characters); set it to the package's `name.short` |
 | `OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED` | Independent broad Graph-tools rollout; default false |
 | `OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS` | Explicit tools pilot/reviewer workspace admission |
 
@@ -321,9 +322,9 @@ export OPENGENI_TEAMS_WEBSITE_URL='https://YOUR_PRODUCT_WEBSITE'
 export OPENGENI_TEAMS_PRIVACY_URL='https://YOUR_APPROVED_PRIVACY_PAGE'
 export OPENGENI_TEAMS_TERMS_URL='https://YOUR_APPROVED_TERMS_PAGE'
 export OPENGENI_TEAMS_APP_VERSION='1.0.0'
-export OPENGENI_TEAMS_APP_NAME='Opengeni'
-# Optional: the full app name, here the Partner Center listing name.
-export OPENGENI_TEAMS_APP_FULL_NAME='Opengeni Assistant'
+export OPENGENI_TEAMS_APP_NAME='Opengeni Assistant'
+# Optional: a longer full app name; it defaults to OPENGENI_TEAMS_APP_NAME.
+# export OPENGENI_TEAMS_APP_FULL_NAME='Opengeni Assistant'
 # Optional: the publisher name and Microsoft AI Cloud Partner Program ID.
 export OPENGENI_TEAMS_DEVELOPER_NAME='Opengeni'
 export OPENGENI_TEAMS_MPN_ID='7181379'
@@ -332,17 +333,19 @@ bun scripts/generate-teams-app-manifest.ts --package-dir /absolute/private/path/
 
 For the Opengeni Store listing the legal URLs are `https://opengeni.ai`,
 `https://opengeni.ai/privacy` and `https://opengeni.ai/terms`; the generator
-still requires them explicitly. `OPENGENI_TEAMS_APP_NAME` sets `name.short`
-(at most 30 characters), the name Teams shows in chat; the bot's welcome
-message and replies must use it. `OPENGENI_TEAMS_APP_FULL_NAME` sets
-`name.full` (at most 100 characters), which Teams uses where a longer name
-fits, and defaults to the short name. The Store requires the Partner Center
-listing name to match the manifest app name, without saying whether it compares
-`name.short` or `name.full`. `Opengeni` is already reserved in Partner Center,
-so the Opengeni listing is `Opengeni Assistant`, set as the full name, with the
-short name `Opengeni`. Neither name may use "Teams" or "Microsoft": the Store
-allows those only for apps in an official partnership with Microsoft.
-`developer.name` defaults to `Opengeni`, the
+still requires them explicitly. `OPENGENI_TEAMS_APP_NAME` (default `Opengeni`,
+at most 30 characters) sets `name.short`, the name Teams shows in chat.
+`OPENGENI_TEAMS_APP_FULL_NAME` sets `name.full` (at most 100 characters),
+which Teams uses where a longer name fits, and defaults to the short name. The
+Store requires the Partner Center listing name, the manifest app name and the
+name in the bot's welcome message to match, so set the same
+`OPENGENI_TEAMS_APP_NAME` in the API runtime (see [Runtime gates](#runtime-gates)):
+the bot then uses it for itself in its welcome, help and notices, while text
+about the service and accounts still says Opengeni. `Opengeni` is already
+reserved in Partner Center, so the Opengeni listing, both manifest names and
+the bot's name are `Opengeni Assistant`. Neither name may use "Teams" or
+"Microsoft": the Store allows those only for apps in an official partnership
+with Microsoft. `developer.name` defaults to `Opengeni`, the
 Partner Center publisher name (the legal entity is Cloudgeni AS), and must match
 the publisher shown in Partner Center; set `OPENGENI_TEAMS_DEVELOPER_NAME` (at
 most 32 characters) for another publisher. `developer.mpnId` defaults to
@@ -350,9 +353,9 @@ Opengeni's PartnerGlobal ID `7181379`; set `OPENGENI_TEAMS_MPN_ID` to another
 numeric ID, or to `none` to leave it out (for example for a private staging
 package); an empty value uses the default. Anyone publishing their own
 deployment's package must set both to their own publisher, or `none` for the
-partner ID. The descriptions and command text name the product, Opengeni, even
-when `OPENGENI_TEAMS_APP_NAME` changes the app's display name; a deployment
-that rebrands must change that copy in the generator too, because the Store
+partner ID. The manifest descriptions and command text name the product,
+Opengeni, whatever `OPENGENI_TEAMS_APP_NAME` is; a deployment that rebrands
+the product must change that copy in the generator too, because the Store
 requires the name to be consistent across the metadata.
 
 The short and full descriptions are generated for the enabled scopes. They name

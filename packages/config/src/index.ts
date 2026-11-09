@@ -783,6 +783,9 @@ const SettingsSchema = z.object({
   teamsBotClientId: z.string().uuid().optional(),
   teamsBotClientSecret: z.string().min(1).optional(),
   teamsBotTenantId: z.string().uuid().optional(),
+  // The app name the Teams bot uses for itself (welcome, help). Keep it the
+  // same as the package's name.short (OPENGENI_TEAMS_APP_NAME there too).
+  teamsAppName: z.string().trim().min(1).max(30).default("Opengeni"),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   integrationsPrivateNetworkAllowedHosts: z.preprocess(
@@ -5988,6 +5991,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     teamsBotClientId: optional("OPENGENI_TEAMS_BOT_CLIENT_ID"),
     teamsBotClientSecret: optional("OPENGENI_TEAMS_BOT_CLIENT_SECRET"),
     teamsBotTenantId: optional("OPENGENI_TEAMS_BOT_TENANT_ID"),
+    teamsAppName: optional("OPENGENI_TEAMS_APP_NAME"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",

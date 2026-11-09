@@ -118,11 +118,12 @@ import {
   TEAMS_UNREADABLE_MESSAGE_TEXT,
   TEAMS_CONNECT_REMINDER_TEXT,
   TEAMS_CONNECT_TEXT,
-  TEAMS_CONVERSATION_OFF_TEXT,
+  TEAMS_DEFAULT_APP_NAME,
   TEAMS_SHARED_CONNECT_TEXT,
   TEAMS_WORK_ACCOUNT_TEXT,
   teamsAiGeneratedEntity,
   teamsCommand,
+  teamsConversationOffText,
   teamsEventUuid,
   teamsHelp,
   teamsMarkdown,
@@ -316,9 +317,9 @@ export async function sendTeamsReply(
   return teamsReceipt(response);
 }
 const ONBOARDING_TEXT = {
-  setup: "Connect Teams to your Opengeni workspace.",
-  link: "Link your Opengeni account to use this bot.",
-  connect: `Welcome to Opengeni. ${TEAMS_CONNECT_TEXT}`,
+  setup: () => "Connect Teams to your Opengeni workspace.",
+  link: () => "Link your Opengeni account to use this bot.",
+  connect: (appName: string) => `Welcome to ${appName}. ${TEAMS_CONNECT_TEXT}`,
 } as const;
 const ONBOARDING_ACTION = {
   setup: "Connect Teams",
@@ -326,10 +327,13 @@ const ONBOARDING_ACTION = {
   connect: "Connect your organization",
 } as const;
 /** The notice for a tenant that isn't admitted, with the operator's support address when set. */
-export function teamsTenantUnavailableText(settings: Pick<Settings, "supportEmail">): string {
+export function teamsTenantUnavailableText(
+  settings: Pick<Settings, "supportEmail"> & Partial<Pick<Settings, "teamsAppName">>,
+): string {
+  const appName = settings.teamsAppName ?? TEAMS_DEFAULT_APP_NAME;
   return settings.supportEmail
-    ? `Opengeni isn't available for your organization yet. Your Microsoft 365 or Teams admin can request access at ${settings.supportEmail}.`
-    : "Opengeni isn't available for your organization yet. Your Microsoft 365 or Teams admin can contact the Opengeni team to request access.";
+    ? `${appName} isn't available for your organization yet. Your Microsoft 365 or Teams admin can request access at ${settings.supportEmail}.`
+    : `${appName} isn't available for your organization yet. Your Microsoft 365 or Teams admin can contact the Opengeni team to request access.`;
 }
 export const TEAMS_SETUP_CONFIRMED_TEXT =
   "Opengeni is now connected for your organization. Send me a message to start. Everyone else in your organization links their own Opengeni account the first time they message me.";
@@ -340,9 +344,10 @@ export async function sendTeamsOnboarding(
   m: Pick<TeamsMessage, "personal" | "serviceUrl" | "conversationId">,
   purpose: "setup" | "link" | "connect",
   url: string,
+  appName: string = TEAMS_DEFAULT_APP_NAME,
 ): Promise<string | null> {
   if (!m.personal) throw new Error("teams_onboarding_requires_personal_chat");
-  const text = ONBOARDING_TEXT[purpose];
+  const text = ONBOARDING_TEXT[purpose](appName);
   const client = app.api.fromServiceUrl({ serviceUrl: teamsServiceUrl(m.serviceUrl) });
   const response = await client.conversations.createActivity(m.conversationId, {
     type: "message",
@@ -466,7 +471,13 @@ export async function replyToUnconnectedTeamsTenant(
     source === "message" &&
     deps.settings.teamsBotSetupAdminIds.includes(`${m.tenantId}:${m.actorId}`)
   ) {
-    await sendTeamsOnboarding(app, m, "setup", proofLink(deps, m, null));
+    await sendTeamsOnboarding(
+      app,
+      m,
+      "setup",
+      proofLink(deps, m, null),
+      deps.settings.teamsAppName,
+    );
     return "setup_link_sent";
   }
   const personal = { ...m, threadId: null };
@@ -484,7 +495,7 @@ export async function replyToUnconnectedTeamsTenant(
   const card = await budget.reserve(m.tenantId, m.actorId);
   if (card) {
     await sendReserved(card, () =>
-      sendTeamsOnboarding(app, m, "connect", proofLink(deps, m, null)),
+      sendTeamsOnboarding(app, m, "connect", proofLink(deps, m, null), deps.settings.teamsAppName),
     );
     return "connect_link_sent";
   }
@@ -495,7 +506,7 @@ export async function replyToUnconnectedTeamsTenant(
       app,
       personal,
       source === "install"
-        ? `Welcome to Opengeni. ${TEAMS_CONNECT_REMINDER_TEXT}`
+        ? `Welcome to ${deps.settings.teamsAppName}. ${TEAMS_CONNECT_REMINDER_TEXT}`
         : TEAMS_CONNECT_REMINDER_TEXT,
     ),
   );
@@ -664,6 +675,7 @@ function experienceState(
     sharedConversations,
     ...(setup ? { setup } : {}),
     ...(supportEmail ? { supportEmail } : {}),
+    ...(unconnected ? { appName: unconnected.deps.settings.teamsAppName } : {}),
   };
 }
 /** Whether any group chat or channel of this tenant is on the allowlists. */
@@ -1138,7 +1150,9 @@ async function replyToDisabledConversation(
   try {
     const reply = await budgets.sharedNotice.reserve(m.tenantId, m.actorId);
     if (!reply) return "channel_disabled";
-    await sendReserved(reply, () => send(app, m, TEAMS_CONVERSATION_OFF_TEXT));
+    await sendReserved(reply, () =>
+      send(app, m, teamsConversationOffText(deps.settings.teamsAppName)),
+    );
     return "channel_disabled_notice_sent";
   } catch {
     return "channel_disabled_notice_failed";
@@ -1279,7 +1293,14 @@ export async function handleTeamsActivity(
   if (!grant) {
     const sent = await once(async () => {
       // Identity bearers are never sent to channels or shared conversations.
-      if (m.personal) await sendTeamsOnboarding(replies.app, m, "link", proofLink(deps, m, i));
+      if (m.personal)
+        await sendTeamsOnboarding(
+          replies.app,
+          m,
+          "link",
+          proofLink(deps, m, i),
+          deps.settings.teamsAppName,
+        );
       else
         await send(
           replies.app,
@@ -2022,8 +2043,7 @@ async function drainRoute(
           lead: "Started. Follow progress or approve requests",
           ...(r.personal
             ? {
-                after:
-                  "Opengeni is an AI agent and can make mistakes. Send **help** for tips and commands.",
+                after: `${deps.settings.teamsAppName} is an AI agent and can make mistakes. Send **help** for tips and commands.`,
               }
             : {}),
         });

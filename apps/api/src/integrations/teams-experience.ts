@@ -33,7 +33,15 @@ export type TeamsExperienceState = {
    * when there is no other way forward.
    */
   supportEmail?: string;
+  /**
+   * The name the bot uses for itself, the package's short name (Opengeni by
+   * default). Text about the service and accounts always says Opengeni.
+   */
+  appName?: string;
 };
+
+/** The app name when none is configured. */
+export const TEAMS_DEFAULT_APP_NAME = "Opengeni";
 
 /** One deterministic reply: Teams Markdown text and an optional card button. */
 export type TeamsExperienceReply = {
@@ -62,8 +70,8 @@ export function teamsCommand(text: string): TeamsCommand | null {
   return null;
 }
 
-const ABOUT =
-  "Opengeni is an AI agent that works on tasks for you: it answers questions, researches, writes, and works with the tools your organization connects. Replies are AI-generated and can be wrong, so check important details.";
+const about = (appName: string) =>
+  `${appName} is an AI agent that works on tasks for you: it answers questions, researches, writes, and works with the tools your organization connects. Replies are AI-generated and can be wrong, so check important details.`;
 const LIMITS = [
   "You need an Opengeni account, and your organization must connect Opengeni to Microsoft Teams.",
   "I read text messages. Files and images sent in Teams aren't supported yet.",
@@ -83,8 +91,9 @@ export const TEAMS_CONNECT_REMINDER_TEXT =
 export const TEAMS_SHARED_CONNECT_TEXT =
   "Your organization hasn't connected Opengeni yet. Send me a direct message to see how to connect it.";
 /** For a mention in a group chat or channel Opengeni isn't turned on in. */
-export const TEAMS_CONVERSATION_OFF_TEXT =
-  "Opengeni isn't turned on in this conversation. Send me a direct message to give me a task instead.";
+export function teamsConversationOffText(appName: string = TEAMS_DEFAULT_APP_NAME): string {
+  return `${appName} isn't turned on in this conversation. Send me a direct message to give me a task instead.`;
+}
 /** For a linked person whose account can't start chats in the connected workspace. */
 export const TEAMS_CANNOT_START_TEXT =
   "Your Opengeni account can't start chats in the workspace your organization connected to Microsoft Teams. Ask an admin of that workspace to give you access to start chats, then message me again.";
@@ -146,11 +155,12 @@ function withNextStep(
 
 /** Sent once when someone adds the bot for themselves. */
 export function teamsWelcome(state: TeamsExperienceState): TeamsExperienceReply {
+  const appName = state.appName ?? TEAMS_DEFAULT_APP_NAME;
   return withNextStep(
     teamsMarkdown(
       [
-        "**Welcome to Opengeni**",
-        ABOUT,
+        `**Welcome to ${appName}**`,
+        about(appName),
         LIMITS.map((line) => `- ${line}`).join("\n"),
         "Send **help** at any time for tips and commands, or **unlink** to disconnect your account.",
       ].join("\n\n"),
@@ -162,6 +172,7 @@ export function teamsWelcome(state: TeamsExperienceState): TeamsExperienceReply 
 
 /** The reply to "help": the same in every state, plus the person's next step. */
 export function teamsHelp(state: TeamsExperienceState): TeamsExperienceReply {
+  const appName = state.appName ?? TEAMS_DEFAULT_APP_NAME;
   const commands = [
     "- **help**: show this message",
     ...(state.personal
@@ -176,15 +187,15 @@ export function teamsHelp(state: TeamsExperienceState): TeamsExperienceReply {
     ...(!state.personal
       ? ["Mention me in this conversation to give me a task."]
       : state.sharedConversations
-        ? ["In a group chat or channel where Opengeni is enabled, mention me to give me a task."]
+        ? [`In a group chat or channel where ${appName} is enabled, mention me to give me a task.`]
         : []),
     "Use the thumbs up or down on a reply to tell us how it went.",
   ];
   return withNextStep(
     teamsMarkdown(
       [
-        "**Opengeni help**",
-        `${ABOUT} Describe what you need and I'll reply here when the task is done.`,
+        `**${appName} help**`,
+        `${about(appName)} Describe what you need and I'll reply here when the task is done.`,
         `**Commands**\n${commands.join("\n")}`,
         `**Good to know**\n${tips.map((line) => `- ${line}`).join("\n")}`,
       ].join("\n\n"),

@@ -23,7 +23,7 @@ import {
   TEAMS_CONNECT_REMINDER_TEXT,
   TEAMS_SHARED_CANNOT_START_TEXT,
   TEAMS_UNREADABLE_MESSAGE_TEXT,
-  TEAMS_CONVERSATION_OFF_TEXT,
+  teamsConversationOffText,
   TEAMS_WORK_ACCOUNT_TEXT,
 } from "../src/integrations/teams-experience";
 
@@ -554,6 +554,8 @@ test("in an organization that hasn't connected Opengeni, a redelivered install g
   const settings = {
     teamsBotSelfServeSetupEnabled: true,
     teamsBotAllowedTenantIds: [f.tenant, other],
+    // The welcome uses the configured app name.
+    teamsAppName: "Opengeni Assistant",
   };
   // Replicas share the install-welcome budget, but a second delivery is kept
   // from even reaching it by the database claim.
@@ -564,7 +566,9 @@ test("in an organization that hasn't connected Opengeni, a redelivered install g
   expect(await replicaA(install)).toEqual({ status: 200 });
   expect(await replicaB(install)).toEqual({ status: 200 });
   expect(f.calls).toHaveLength(1);
-  expect(f.calls[0]!.activity.text).toContain("Your organization hasn't connected Opengeni yet.");
+  expect(f.calls[0]!.activity.text).toStartWith(
+    "Welcome to Opengeni Assistant. Your organization hasn't connected Opengeni yet.",
+  );
   // Throttled: Teams is asked to redeliver. The throttled card keeps its
   // count, so a person flooding their own chat can't retry without limit, and
   // the redelivery gets the short welcome.
@@ -573,7 +577,9 @@ test("in an organization that hasn't connected Opengeni, a redelivered install g
   expect(await replicaA(throttled)).toEqual({ status: 503 });
   expect(await replicaA(throttled)).toEqual({ status: 200 });
   expect(f.calls).toHaveLength(2);
-  expect(f.calls[1]!.activity.text).toBe(`Welcome to Opengeni. ${TEAMS_CONNECT_REMINDER_TEXT}`);
+  expect(f.calls[1]!.activity.text).toBe(
+    `Welcome to Opengeni Assistant. ${TEAMS_CONNECT_REMINDER_TEXT}`,
+  );
   expect(f.outcomes).toEqual([
     "connect_link_sent",
     "welcome_duplicate",
@@ -665,7 +671,7 @@ test("help is answered in Teams without reaching the agent, for linked and unlin
   await f.handle(closed());
   expect(f.calls).toHaveLength(4);
   expect(f.calls[3]!.conversationId).toContain("19:closed;messageid=");
-  expect(f.calls[3]!.activity.text).toBe(TEAMS_CONVERSATION_OFF_TEXT);
+  expect(f.calls[3]!.activity.text).toBe(teamsConversationOffText());
   expect(f.outcomes).toEqual([
     "help_sent",
     "help_sent",
