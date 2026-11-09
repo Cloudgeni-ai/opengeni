@@ -136,6 +136,38 @@ redirect/error projection rather than sharing one HTTP status: for example,
 Integration Definition OAuth reports `connection_conflict`, while social OAuth
 reports `not_authorized`.
 
+**OAuth states are bound to the browser that started them.** A signed state
+proves which flow a callback belongs to, not who opened the consent link, so a
+person could otherwise start a Gmail connection and send the provider's consent
+link to someone else, whose mailbox would then land in the starter's
+workspace. MCP OAuth (including the Gmail, Drive and Calendar connectors) and
+Integration Definition OAuth therefore sign a `browserProof` into their state
+(`apps/api/src/integrations/oauth-browser-binding.ts`):
+
+- `cookie`: a start from a signed-in browser sets a random HttpOnly,
+  SameSite=Lax `opengeni_oauth_binding` cookie on `/v1` and signs only its
+  SHA-256. The callback must arrive in a browser holding that cookie. One
+  browser reuses one value, so parallel connections all finish.
+- `session`: the desktop app's consent finishes in the person's own browser,
+  and a native app credential arrives as a bearer, so neither can carry the
+  cookie. That callback browser must be signed in to Opengeni as the starter.
+- `none`: API keys, services and host products (delegated tokens and external
+  user continuations) authenticate with credentials issued to the host's
+  server, which decides which of its users finishes the consent.
+
+A refused callback reports `browser_mismatch` at `state_verify` before any
+attempt is claimed, nonce consumed or code exchanged, so the starter can still
+finish, and it returns to Opengeni's own integrations page rather than the
+attempt's external `returnUrl`. A state minted before the proof existed is
+honoured for its ten-minute life during a rolling deploy.
+
+Connect attempts started from the Opengeni browser session may return only to
+this deployment's own origins: the public and web base URLs,
+`OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS`, the cookie-CORS allowlist, local-mode
+origins and published Sites. Host products return their users to their own
+pages; Opengeni keeps no registry of those, so their authenticated host
+credential remains the authority for that destination.
+
 **Native Google Drive and Atlassian removal.** Integration Knowledge sync was
 removed, and with it the native Google Drive and Atlassian source connectors:
 their install, OAuth callback, browsing and source routes are gone. Agents reach

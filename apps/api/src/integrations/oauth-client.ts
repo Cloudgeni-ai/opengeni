@@ -1,6 +1,13 @@
 import { assertGoogleConnectorSetupEnabled } from "./google-connector-availability";
 import { sql } from "drizzle-orm";
 import { safeReturnPath } from "./oauth-return-path";
+import {
+  OAUTH_BROWSER_MISMATCH_MESSAGE,
+  oauthCallbackBrowserAccepted,
+  oauthStateBrowserBinding,
+  type OAuthCallbackBrowser,
+  type OAuthStateBrowserBinding,
+} from "./oauth-browser-binding";
 import { assertOrganizationIntegrationAllowed, stableJson } from "@opengeni/contracts";
 import {
   withOrganizationIntegrationAcquisition,
@@ -200,6 +207,8 @@ export type OAuthStartContext = {
    * the live authenticated principal, never inferred here.
    */
   personalOwnershipAllowed: boolean;
+  /** How the callback proves it finishes in the starter's browser (oauth-browser-binding.ts). */
+  browserBinding: OAuthStateBrowserBinding;
   requestUrl: string;
   payload: OAuthStartRequest;
 };
@@ -234,6 +243,9 @@ type OAuthStatePayload = {
   ownership: ConnectionOwnership;
   /** Signed proof that a live managed human authorized personal ownership. */
   personalOwnerVerified: boolean;
+  /** Absent only on states minted before browser binding. */
+  browserProof?: OAuthStateBrowserBinding["browserProof"];
+  browserBinding?: string;
   providerDomain: string;
   mcpUrl: string;
   resource: string;
@@ -644,6 +656,7 @@ async function startMcpOAuthWithinDeadline(
     // principal of its own and enforces exactly this decision.
     ...connectOwnerStateFields(context, context.personalOwnershipAllowed),
     ownership,
+    ...context.browserBinding,
     ...(externalContinuation
       ? {
           encryptedExternalContinuation: encryptEnvironmentValue(
@@ -822,6 +835,8 @@ export async function completeMcpOAuthCallback(
     state?: string | undefined;
     /** The provider's `error` parameter, for example `access_denied` on Cancel. */
     error?: string | undefined;
+    /** What the callback request proves about its browser; see oauth-browser-binding.ts. */
+    browser?: OAuthCallbackBrowser | undefined;
     requestUrl: string;
   },
 ): Promise<OAuthCallbackResult> {
@@ -841,6 +856,7 @@ async function completeMcpOAuthCallbackWithinDeadline(
     code?: string | undefined;
     state?: string | undefined;
     error?: string | undefined;
+    browser?: OAuthCallbackBrowser | undefined;
     requestUrl: string;
   },
   deadline: OAuthCallbackDeadline,
@@ -872,6 +888,14 @@ async function completeMcpOAuthCallbackWithinDeadline(
   try {
     state = await resolveMcpOAuthState(db, settings, input.state, deadline);
     integrationKey = state.integrationKey ?? "custom:mcp";
+    // Before any attempt is claimed: a consent finished in someone else's
+    // browser leaves the starter's attempt untouched (CASA 3.2.2).
+    if (!oauthCallbackBrowserAccepted(state, input.browser))
+      throw new OAuthCallbackStageError(
+        "state_verify",
+        "browser_mismatch",
+        new HTTPException(403, { message: OAUTH_BROWSER_MISMATCH_MESSAGE }),
+      );
     if (state.connectAttemptId) {
       const stored = await getConnectAttempt(db, state, state.connectAttemptId);
       // Dedicated Google setup shares this callback. Bind each trusted provider
@@ -1318,7 +1342,13 @@ async function completeMcpOAuthCallbackWithinDeadline(
                   : "Authorization could not be verified. Your previous connection is unchanged. Start a new connection attempt.",
       });
     }
-    return callbackStateResult(state, "error", {
+    // A browser that did not start this flow never follows the starter's
+    // external return URL; it lands on Opengeni's own integrations page.
+    const errorState =
+      state && staged.reason === "browser_mismatch"
+        ? (({ returnUrl: _returnUrl, ...rest }) => rest)(state)
+        : state;
+    return callbackStateResult(errorState, "error", {
       stage: staged.stage,
       reason: staged.reason,
     });
@@ -2372,6 +2402,7 @@ function readOAuthState(state: string, settings: Settings): OAuthStatePayload {
     ownership,
     // Absent on a legacy state, which therefore cannot land a personal owner.
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
+    ...oauthStateBrowserBinding(payload),
     ...(payload.integrationKey
       ? {
           integrationKey: payload.integrationKey as
