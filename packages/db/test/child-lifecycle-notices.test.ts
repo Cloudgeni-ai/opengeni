@@ -9,6 +9,7 @@ import {
   addSessionSystemUpdateWithSourceMutation,
   applySessionTurnSettlement,
   armSubscriptionCoreCapacityWait,
+  reconcileSubscriptionCoreCapacityWait,
   bootstrapWorkspace,
   buildChildRequiresActionPayload,
   childRequiresActionSummary,
@@ -1659,6 +1660,57 @@ describe("child lifecycle notices", () => {
     expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
       kind: "runnable",
     });
+
+    // A later check finds the reset later than the parent was told (its time
+    // passed without capacity, or a longer limit binds): the parent gets a
+    // second notice naming the reset that now holds, and the worker's
+    // timeline a waiting event; the person still gets nothing.
+    const laterReset = new Date(resetsAt.getTime() + 2 * 24 * 60 * 60_000);
+    const reconcileCodex = (earliestResetAt: Date | null) =>
+      reconcileSubscriptionCoreCapacityWait(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: codexChild.session.id,
+        waiterId: codex.waiter.waiterId,
+        generation: codex.waiter.generation,
+        evaluatedWakeRevision: codex.waiter.wakeRevision,
+        evaluation: {
+          kind: "wait",
+          waitReason: "no_eligible_capacity",
+          earliestResetAt,
+          healthRetryAt: null,
+        },
+      });
+    const restated = await reconcileCodex(laterReset);
+    expect(restated.action).toBe("waiting");
+    expect(restated.events.map((event) => event.type)).toEqual(["codex.capacity.waiting"]);
+    expect(restated.events[0]!.payload).toMatchObject({
+      earliestResetAt: laterReset.toISOString(),
+    });
+    const restatedNotice = await outbox(
+      grant,
+      childWaitingCapacityDedupeKey({
+        childSessionId: codexChild.session.id,
+        waiterId: codex.waiter.waiterId,
+        restatedResetsAt: laterReset.toISOString(),
+      }),
+    );
+    expect(restatedNotice).toMatchObject({
+      kind: "child_waiting_capacity",
+      targetSessionId: parent.session.id,
+      payload: { resetsAt: laterReset.toISOString() },
+    });
+    expect(restatedNotice!.summary).toContain(
+      `until about ${laterReset.toISOString().slice(0, 16).replace("T", " ")} UTC`,
+    );
+    // Unchanged or sooner: nothing more is said.
+    expect((await reconcileCodex(laterReset)).events).toEqual([]);
+    expect((await reconcileCodex(resetsAt)).events).toEqual([]);
+    expect(
+      (await listSessionEvents(client.db, grant.workspaceId, codexChild.session.id)).some(
+        (event) => event.type === "session.notification.posted",
+      ),
+    ).toBe(false);
   });
 
   test("a child_requires_action auto-resumes a cap-paused parent goal and wakes it", async () => {

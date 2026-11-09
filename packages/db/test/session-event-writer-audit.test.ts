@@ -519,7 +519,12 @@ const expectedChildLifecycleNoticeProducers: Record<string, string[]> = {
     "applySessionTurnSettlement",
     "settleSessionWorkBeforeAttemptClaim",
   ],
-  enqueueChildWaitingCapacityOutboxTx: ["armSubscriptionCoreCapacityWait"],
+  // The reconcile locks the waiting child with its parent, then restates a
+  // reset the parent was told that no longer holds.
+  enqueueChildWaitingCapacityOutboxTx: [
+    "armSubscriptionCoreCapacityWait",
+    "reconcileSubscriptionCoreCapacityWait",
+  ],
   enqueueChildProgressOutboxTx: ["recordSessionGoalProgressWithEvent"],
 };
 const expectedControlPlaneChildOutboxWrappers: Record<string, string[]> = {

@@ -11250,8 +11250,13 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * 3: `child_waiting_capacity` is produced only for a long wait (reset far
  * away, unknown, or needing a person), carries `resetsAt`, and wakes the
  * parent immediately instead of riding its next claim.
+ *
+ * 4: a waiting child produces a further `child_waiting_capacity` for the same
+ * waiter when a later check finds its reset later than the parent was told
+ * (the time passed without capacity, or a longer limit binds) or unknown; its
+ * dedupe key adds that reset (`…:<waiterId>:<resetsAt|unknown>`).
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 3;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 4;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
