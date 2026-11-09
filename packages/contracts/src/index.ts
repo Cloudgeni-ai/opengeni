@@ -23520,6 +23520,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: primitives.optionalBoolean,
+    // Whether Connect provider offers "Claude Code (API key)". Absent on older
+    // servers and when not offered.
+    claudeCodeApiKeyEnabled: primitives.optionalBoolean,
     // Whether organization admins may connect Azure OpenAI as this
     // deployment's own Microsoft Entra identity (the operator offers it).
     // Absent on older servers and when not offered.

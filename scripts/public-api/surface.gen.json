@@ -14607,6 +14607,7 @@
         "$.browserExtension": "object?",
         "$.browserExtension.installUrl": "string!",
         "$.browserExtension.name": "string!",
+        "$.claudeCodeApiKeyEnabled": "boolean?",
         "$.claudeSubscriptionEnabled": "boolean?",
         "$.codeSearch": "object!",
         "$.codeSearch.available": "boolean!",

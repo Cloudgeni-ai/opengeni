@@ -30,11 +30,20 @@ export type ModelsProvider =
   | "claude_subscription"
   | "openai_compatible";
 
+/**
+ * "Claude Code (API key)" is not a provider of its own: it is the Anthropic
+ * API-key connection, reached from its own row and introduced by an
+ * explanation of the monthly API credits some Claude plans include.
+ */
+export const CLAUDE_CODE_API_STEP = "claude_code_api";
+
 export type ModelsView =
   | "connect"
   | "connect-workspace"
   | `connect:${ModelsProvider}`
   | `connect-org:${ModelsProvider}`
+  | `connect:${typeof CLAUDE_CODE_API_STEP}`
+  | `connect-org:${typeof CLAUDE_CODE_API_STEP}`
   | "allowed-models"
   | "compaction"
   | "account-rule-locks"
@@ -64,6 +73,8 @@ const VIEWS: ReadonlySet<string> = new Set<ModelsView>([
   "connect-workspace",
   ...PROVIDERS.map((provider) => `connect:${provider}` as const),
   ...PROVIDERS.map((provider) => `connect-org:${provider}` as const),
+  `connect:${CLAUDE_CODE_API_STEP}` as const,
+  `connect-org:${CLAUDE_CODE_API_STEP}` as const,
   "allowed-models",
   "compaction",
   "account-rule-locks",
@@ -141,15 +152,15 @@ export function accountKey(
 /** The provider a connect step is for, and whether it connects for the organization. */
 export function connectStepOf(
   view: ModelsView | undefined,
-): { provider: ModelsProvider; organization: boolean } | null {
+): { provider: ModelsProvider; organization: boolean; claudeCodeApi?: true } | null {
   if (!view) return null;
-  if (view.startsWith("connect-org:")) {
-    return { provider: view.slice("connect-org:".length) as ModelsProvider, organization: true };
-  }
-  if (view.startsWith("connect:")) {
-    return { provider: view.slice("connect:".length) as ModelsProvider, organization: false };
-  }
-  return null;
+  const organization = view.startsWith("connect-org:");
+  if (!organization && !view.startsWith("connect:")) return null;
+  const name = view.slice(organization ? "connect-org:".length : "connect:".length);
+  // Claude Code (API key) is the Anthropic API-key step with an introduction.
+  return name === CLAUDE_CODE_API_STEP
+    ? { provider: "anthropic", organization, claudeCodeApi: true }
+    : { provider: name as ModelsProvider, organization };
 }
 
 /**
@@ -191,6 +202,9 @@ export function organizationModelsSearch(input: {
   const step = connectStepOf(input.view);
   return {
     account: key && !key.organization ? accountKey(key.provider, key.id, true) : input.account,
-    view: step && !step.organization ? `connect-org:${step.provider}` : input.view,
+    view:
+      step && !step.organization
+        ? `connect-org:${step.claudeCodeApi ? CLAUDE_CODE_API_STEP : step.provider}`
+        : input.view,
   };
 }
