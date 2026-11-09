@@ -23,6 +23,13 @@ import type { RepoFile, TreeEntry } from "./renumber";
 
 const NOW = 1_800_000_000_000;
 const hash = (value: string) => createHash("sha1").update(value).digest("hex");
+/** What GitHub answers when it will not run a workflow run again. */
+const refusedRerun = (path: string) =>
+  new GitHubError(
+    403,
+    path,
+    '{"message":"This workflow run cannot be retried","documentation_url":"https://docs.github.com/rest/actions/workflow-runs","status":"403"}',
+  );
 
 interface FakePull {
   number: number;
@@ -386,7 +393,19 @@ class FakeGitHub implements GitHub {
   }
 
   async rerunFailedJobs(id: number) {
+    if (this.rerunRefusals.has(id)) throw refusedRerun(`actions/runs/${id}/rerun-failed-jobs`);
     this.log.push(`rerun ${id}`);
+  }
+
+  /**
+   * Runs GitHub will not rerun: only their failed jobs (a run that failed
+   * before any job started), or not at all.
+   */
+  rerunRefusals = new Map<number, "failed jobs" | "all">();
+
+  async rerunAll(id: number) {
+    if (this.rerunRefusals.get(id) === "all") throw refusedRerun(`actions/runs/${id}/rerun`);
+    this.log.push(`rerun all ${id}`);
   }
 
   /** Failed job names by run id; a run id missing here makes the lookup fail. */
@@ -793,6 +812,42 @@ describe("a batcher pass", () => {
     expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
     gh.finishCi(single.sha, "failure", 2, [UNIT, SHARD]);
     await run(gh, options());
+    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+  });
+
+  test("a run that failed before any job started, so GitHub will not rerun its failed jobs, runs again in full", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.addPull(2);
+    await run(gh, options());
+    const first = gh.batch();
+    gh.finishCi(first.sha, "failure", 1, []);
+    gh.rerunRefusals.set(42, "failed jobs");
+    await run(gh, options());
+    expect(gh.log).toContain("rerun all 42");
+    expect(gh.batch().sha).toBe(first.sha);
+  });
+
+  test("a run GitHub will not run again at all fails its batch instead of stopping every pass", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.addPull(2);
+    await run(gh, options());
+    const first = gh.batch();
+    gh.finishCi(first.sha, "failure", 1, []);
+    gh.rerunRefusals.set(42, "all");
+    // The pass completes and bisects the batch as after a failed retry.
+    await run(gh, options());
+    expect(gh.log.filter((line) => line.startsWith("rerun"))).toEqual([]);
+    const half = gh.batch();
+    expect(half.manifest.members.map((m) => m.number)).toEqual([1]);
+    expect(half.manifest.pending).toEqual([[2]]);
+
+    // A single PR is ejected on a run GitHub will not run again, like after its retry.
+    gh.finishCi(half.sha, "failure", 1, []);
+    await run(gh, options());
+    expect(gh.comments.at(-1)).toMatchObject({ number: 1 });
     expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
     expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
   });

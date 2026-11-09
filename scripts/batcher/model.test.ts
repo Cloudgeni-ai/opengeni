@@ -120,6 +120,16 @@ describe("verdict", () => {
     expect(verdict(batch([1], { runs: [again] }), NOW, DEFAULT_SETTINGS).kind).toBe("failed");
   });
 
+  test("a run GitHub will not run again fails the batch without a retry", () => {
+    // GitHub refused to run it again: the failure stands without a retry.
+    const final = run({ conclusion: "failure", attempt: 1, final: true });
+    const retryable = run({ id: 2, conclusion: "failure", attempt: 1 });
+    expect(verdict(batch([1, 2], { runs: [retryable, final] }), NOW, DEFAULT_SETTINGS)).toEqual({
+      kind: "failed",
+      runs: [retryable, final],
+    });
+  });
+
   test("a run GitHub cancelled is retried instead of bisected, up to three attempts", () => {
     // A job past its time limit during a GitHub outage cancels the run after
     // its one ordinary retry; the PRs in the batch did nothing wrong.

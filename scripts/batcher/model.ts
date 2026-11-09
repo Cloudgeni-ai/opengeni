@@ -195,6 +195,11 @@ export interface BatchRun {
    * could not list them.
    */
   failedJobs?: string[] | null;
+  /**
+   * GitHub refused to run it again, neither its failed jobs nor in full: its
+   * failure is final and is judged without a retry.
+   */
+  final?: true;
 }
 
 export interface Batch {
@@ -285,6 +290,9 @@ export function verdict(batch: Batch, now: number, settings: Settings): Verdict 
   if (batch.runs.some((run) => run.status !== "completed")) return { kind: "running" };
   const failed = batch.runs.filter((run) => !PASSING.has(run.conclusion ?? ""));
   if (!failed.length) return { kind: "passed" };
+  // A run GitHub will not run again fails the batch as it is; asking again
+  // every pass would hold the queue forever.
+  if (failed.some((run) => run.final)) return { kind: "failed", runs: failed };
   // Bisecting a batch GitHub cancelled would test every half again for a
   // failure none of its PRs caused.
   if (failed.every((run) => run.conclusion === "cancelled" && run.attempt < CANCELLED_RUN_ATTEMPTS))
