@@ -601,6 +601,104 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
     ).toEqual({ action: "stale", events: [] });
   });
 
+  test("the person's notification is restated in place when its reset passes or a later limit binds, never for an earlier one", async () => {
+    const org = await organization();
+    const connectionId = await sharedConnection(org, "restated");
+    // A short-window reset an hour out: the wait is announced with it.
+    const shortReset = Date.now() + 3_600_000;
+    await exhaust(org, connectionId, shortReset);
+    const turn = await runningTurn(org, { workspaceId: org.sharedWorkspaceId });
+    const armed = await arm(turn, new Date(shortReset));
+    if (armed.action !== "waiting") throw new Error(`arm returned ${armed.action}`);
+    const announced = armed.events.find((event) => event.type === "session.notification.posted");
+    expect(announced!.payload).toMatchObject({
+      key: `capacity-wait:${turn.identity.turnId}`,
+      replaced: false,
+    });
+    const marker = async () => {
+      const [row] = await shared!.admin<{ notice: { key: string; resetsAt: string | null } }[]>`
+        select metadata->'capacityWaitNoticeV1' as notice from session_turns
+        where id = ${turn.identity.turnId}::uuid`;
+      return row!.notice;
+    };
+    expect(await marker()).toEqual({
+      key: `capacity-wait:${turn.identity.turnId}`,
+      resetsAt: new Date(shortReset).toISOString(),
+    });
+    const reconcile = (earliestResetAt: Date | null) =>
+      reconcileSubscriptionCoreCodexCapacityWait(client!.db, {
+        accountId: org.accountId,
+        workspaceId: org.sharedWorkspaceId,
+        sessionId: turn.identity.sessionId,
+        waiterId: armed.waiter.waiterId,
+        generation: armed.waiter.generation,
+        evaluatedWakeRevision: armed.waiter.wakeRevision,
+        evaluation: {
+          kind: "wait" as const,
+          waitReason: "no_eligible_capacity",
+          earliestResetAt,
+          healthRetryAt: null,
+        },
+      });
+
+    // The check finds the weekly limit binding days later: the same
+    // notification now names that reset, silently (replaced).
+    const weeklyReset = new Date(Date.now() + 5 * 86_400_000);
+    const restated = await reconcile(weeklyReset);
+    expect(restated.action).toBe("waiting");
+    expect(restated.events.map((event) => event.type)).toEqual(["session.notification.posted"]);
+    const weeklyText = `${weeklyReset.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+    expect(restated.events[0]!.payload).toMatchObject({
+      key: `capacity-wait:${turn.identity.turnId}`,
+      replaced: true,
+      body: expect.stringContaining(weeklyText),
+    });
+    expect(await marker()).toMatchObject({ resetsAt: weeklyReset.toISOString() });
+    // Unchanged, or expected back sooner than it says: nothing more is posted.
+    expect((await reconcile(weeklyReset)).events).toEqual([]);
+    expect((await reconcile(new Date(weeklyReset.getTime() - 86_400_000))).events).toEqual([]);
+
+    // The time the notification named passes without capacity: the next
+    // check restates the reset that now holds, never leaving a past promise.
+    const passed = new Date(Date.now() - 60_000).toISOString();
+    await shared!.admin`
+      update session_turns
+      set metadata = jsonb_set(metadata, '{capacityWaitNoticeV1,resetsAt}', to_jsonb(${passed}::text))
+      where id = ${turn.identity.turnId}::uuid`;
+    const afterPass = await reconcile(weeklyReset);
+    expect(afterPass.events.map((event) => event.type)).toEqual(["session.notification.posted"]);
+    expect(afterPass.events[0]!.payload).toMatchObject({
+      replaced: true,
+      body: expect.stringContaining(weeklyText),
+    });
+    // An unknown reset is said as unknown.
+    const unknown = await reconcile(null);
+    expect(unknown.events[0]!.payload).toMatchObject({
+      body: expect.stringContaining("no reset time is known"),
+    });
+    expect(await marker()).toMatchObject({ resetsAt: null });
+    expect(await rowState(turn)).toMatchObject({
+      session_status: "waiting_capacity",
+      turn_status: "waiting_capacity",
+    });
+    // The wait's end still withdraws the one notification by its key.
+    await exhaust(org, connectionId, null);
+    const resumed = await reconcileSubscriptionCoreCodexCapacityWait(client!.db, {
+      accountId: org.accountId,
+      workspaceId: org.sharedWorkspaceId,
+      sessionId: turn.identity.sessionId,
+      waiterId: armed.waiter.waiterId,
+      generation: armed.waiter.generation,
+      evaluatedWakeRevision: armed.waiter.wakeRevision,
+      evaluation: { kind: "run" },
+    });
+    expect(resumed.action).toBe("resumed");
+    expect(resumed.events.at(-1)).toMatchObject({
+      type: "session.notification.withdrawn",
+      payload: { key: `capacity-wait:${turn.identity.turnId}` },
+    });
+  });
+
   test("a redeemed reset credit resumes a turn parked on a stale weekly window without a usage read", async () => {
     const org = await organization();
     // Reset credits are redeemed from the workspace that manages the connection.
