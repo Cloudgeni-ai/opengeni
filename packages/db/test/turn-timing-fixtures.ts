@@ -118,7 +118,7 @@ export function projectTurnTimingPayload(
         if (args && typeof args === "object" && !Array.isArray(args)) {
           out.arguments = pick(args, ["name"]);
         } else if (typeof args === "string") {
-          const match = /"name"\s*:\s*"([^"]{1,256})"/.exec(args);
+          const match = /"name"\s*:\s*"([^"]{1,255})"/.exec(args);
           out.arguments = match ? { name: match[1] } : {};
         }
       }
