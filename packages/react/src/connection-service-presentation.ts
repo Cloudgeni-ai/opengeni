@@ -1,5 +1,6 @@
 import type { ConnectAccount, ConnectProvider } from "@opengeni/connect";
 import type { CapabilityCatalogItem } from "@opengeni/sdk";
+import type { ConnectServiceMessageKey, OpenGeniText } from "./messages/runtime";
 import teamsLogo from "./assets/microsoft-teams.svg";
 import oneDriveLogo from "./assets/onedrive.svg";
 import sharePointLogo from "./assets/sharepoint.svg";
@@ -29,13 +30,41 @@ const services: Record<string, { name: string; logo: string; mcpUrl?: string }> 
   "microsoft-sharepoint": { name: "SharePoint", logo: sharePointLogo },
 };
 
-export function connectionServicePresentation(provider: Pick<ConnectProvider, "id" | "label">) {
-  return (
-    (Object.hasOwn(services, provider.id) ? services[provider.id] : undefined) ?? {
-      name: provider.label,
-      logo: null,
-    }
-  );
+/**
+ * The host's own words for a service (`connectService.<providerId>.name` and
+ * `.description` messages), so it reads the same in discovery, connected
+ * accounts, sign-in and approval help. Absent when the host supplies none.
+ */
+export function connectionServiceWording(
+  t: OpenGeniText,
+  providerId: string,
+): { name?: string; description?: string } {
+  const lookup = (part: "name" | "description") => {
+    const key: ConnectServiceMessageKey = `connectService.${providerId}.${part}`;
+    // These keys have no English default, so an unset one comes back as itself.
+    const value = (t as unknown as (key: string) => string)(key).trim();
+    return value && value !== key ? value : undefined;
+  };
+  const name = lookup("name");
+  const description = lookup("description");
+  return { ...(name ? { name } : {}), ...(description ? { description } : {}) };
+}
+
+/**
+ * How a service is shown: the host's name and description when it set them
+ * (pass `t`), else the bundled name, else the provider's label.
+ */
+export function connectionServicePresentation(
+  provider: Pick<ConnectProvider, "id" | "label">,
+  t?: OpenGeniText,
+): { name: string; description: string | null; logo: string | null } {
+  const bundled = Object.hasOwn(services, provider.id) ? services[provider.id] : undefined;
+  const own = t ? connectionServiceWording(t, provider.id) : {};
+  return {
+    name: own.name ?? bundled?.name ?? provider.label,
+    description: own.description ?? null,
+    logo: bundled?.logo ?? null,
+  };
 }
 
 export function capabilityConnectProviderId(

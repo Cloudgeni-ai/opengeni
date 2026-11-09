@@ -69,7 +69,7 @@ function ScopedCard({
 }: SessionIntegrationCapabilityCardProps) {
   const t = useOpenGeniText();
   const definitionId = integrationDefinitionIdFromCapabilityId(capabilityId) ?? capabilityId;
-  const presentation = connectionServicePresentation({ id: definitionId, label: name });
+  const presentation = connectionServicePresentation({ id: definitionId, label: name }, t);
   const [windows] = useState(() => browserConnectWindowHost(window));
   const flow = useIntegrationCapabilityConnect({
     client,

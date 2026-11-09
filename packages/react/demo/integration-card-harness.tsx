@@ -4,6 +4,7 @@
 // state come from a synthetic client, so nothing reaches an API or Microsoft.
 //   ?state=suggested|sign-in|admin-approval|admin-maybe|unfinished|personal-unavailable|connected
 //   ?view=setup renders the Connect setup dialog body instead   ?theme=light|dark
+//   ?lang=nb shows a host's own service name and approval wording (Norwegian)
 import { useEffect, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -13,7 +14,12 @@ import {
   type ConnectTransport,
 } from "@opengeni/connect";
 import type { SessionEvent } from "@opengeni/sdk";
-import { MessageTimeline, OpenGeniProvider, type AuthNeededItem } from "@opengeni/react";
+import {
+  MessageTimeline,
+  OpenGeniProvider,
+  type AuthNeededItem,
+  type OpenGeniMessages,
+} from "@opengeni/react";
 import { ConnectSetup } from "@opengeni/react/connect";
 import { AppContext } from "@opengeni/react/app/app-context";
 import { AppHostProvider } from "@opengeni/react/app/lib/app-host";
@@ -29,6 +35,24 @@ const params = new URLSearchParams(window.location.search);
 const state = params.get("state") ?? "suggested";
 const view = params.get("view") ?? "card";
 const dark = params.get("theme") === "dark";
+// What a host passes as `messages` to name the service and word the approval help itself.
+const HOST_MESSAGES: OpenGeniMessages | undefined =
+  params.get("lang") === "nb"
+    ? {
+        "connectService.microsoft-outlook-mail.name": "Outlook-e-post",
+        "connectService.microsoft-outlook-mail.description": "Kan lese og sende e-post for deg",
+        "connectSetup.organizationApprovalRequiredTitle": "IT må godkjenne {product} først",
+        "connectSetup.microsoftAdminApprovalRequired":
+          "Organisasjonen din lar bare en administrator godkjenne slike apper. Send IT meldingen med godkjenningslenken. De godkjenner én gang for alle, så logger du inn igjen.",
+        "connectSetup.copyMessageForIt": "Kopier melding til IT",
+        "connectSetup.showMessageForIt": "Vis meldingen",
+        "connectSetup.copyAdminApprovalLink": "Kopier godkjenningslenke",
+        "connectSetup.openApprovalLinkAsAdmin": "Åpne godkjenningslenken",
+        "connectSetup.trySigningInAgain": "Prøv å logge inn igjen",
+        "connectSetup.itMessageWithLink":
+          "Hei! Jeg vil koble {service} til {product}, men organisasjonen vår krever at en administrator godkjenner appen først. Kan du godkjenne den med denne lenken? Du logger inn med en administratorkonto og ser hva den ber om. Det trengs bare én gang for alle her.\n\n{link}",
+      }
+    : undefined;
 const SIGN_IN_URL =
   "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=00000000-0000-0000-0000-000000000000&response_type=code&redirect_uri=https%3A%2F%2Fapp.opengeni.ai%2Fv1%2Fintegrations%2Fprovider-oauth%2Fcallback&scope=offline_access%20User.Read%20Mail.ReadWrite%20Mail.Send";
 const APPROVAL_URL =
@@ -241,7 +265,7 @@ function Preview() {
     [client],
   );
   return (
-    <OpenGeniProvider client={client as never} workspaceId={WORKSPACE_ID}>
+    <OpenGeniProvider client={client as never} workspaceId={WORKSPACE_ID} messages={HOST_MESSAGES}>
       <AppHostProvider
         host={{
           api: { apiBaseUrl: "https://app.opengeni.ai" } as never,
