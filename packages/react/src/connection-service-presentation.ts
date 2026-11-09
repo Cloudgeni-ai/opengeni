@@ -4,19 +4,21 @@ import teamsLogo from "./assets/microsoft-teams.svg";
 import oneDriveLogo from "./assets/onedrive.svg";
 import sharePointLogo from "./assets/sharepoint.svg";
 import gmailLogo from "./assets/gmail.ico";
+import googleCalendarLogo from "./assets/google-calendar.svg";
+import googleDriveLogo from "./assets/google-drive.svg";
 import outlookLogo from "./assets/outlook.ico";
 
 /** Passive service identity only. Never selects an account or grants tool access. */
-const services: Record<string, { name: string; logo: string | null; mcpUrl?: string }> = {
+const services: Record<string, { name: string; logo: string; mcpUrl?: string }> = {
   "google-drive": {
     name: "Google Drive",
-    logo: null,
+    logo: googleDriveLogo,
     mcpUrl: "https://drivemcp.googleapis.com/mcp/v1",
   },
   gmail: { name: "Gmail", logo: gmailLogo, mcpUrl: "https://gmailmcp.googleapis.com/mcp/v1" },
   "google-calendar": {
     name: "Google Calendar",
-    logo: null,
+    logo: googleCalendarLogo,
     mcpUrl: "https://calendarmcp.googleapis.com/mcp/v1",
   },
   "microsoft-teams": { name: "Microsoft Teams", logo: teamsLogo },
@@ -42,6 +44,30 @@ export function capabilityConnectProviderId(
   return Object.entries(services).find(
     ([, service]) => service.mcpUrl && service.mcpUrl === item.mcpUrl,
   )?.[0];
+}
+
+/** The registry id prefix the catalog import gives a service's MCP host. */
+function registryCapabilityIdPrefix(mcpUrl: string): string {
+  return `mcp:integrations-sh:${new URL(mcpUrl).hostname.replaceAll(".", "-")}-`;
+}
+
+/**
+ * The bundled mark of a reviewed service, matched by its MCP identity (or the
+ * registry id derived from it when a projection omits the URL). These rows
+ * have no vendored catalog asset, so without this they show a letter.
+ */
+export function bundledServiceLogo(
+  item: Pick<CapabilityCatalogItem, "id"> & Partial<Pick<CapabilityCatalogItem, "mcpUrl">>,
+): string | null {
+  for (const service of Object.values(services)) {
+    if (!service.mcpUrl) continue;
+    if (
+      item.mcpUrl === service.mcpUrl ||
+      item.id.startsWith(registryCapabilityIdPrefix(service.mcpUrl))
+    )
+      return service.logo;
+  }
+  return null;
 }
 
 export function accountServiceCapability(account: ConnectAccount, items: CapabilityCatalogItem[]) {
