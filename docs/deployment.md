@@ -2069,6 +2069,14 @@ strict-origin-when-cross-origin` (the setup-account page keeps its stricter
 API compresses JSON responses and leaves SSE and other streaming transports
 uncompressed.
 
+Set `OPENGENI_WEB_NOINDEX=true` on a deployment search engines should not
+index, such as staging: every response the web server sends then carries
+`X-Robots-Tag: noindex, nofollow`. It is off by default. Keep `/robots.txt`
+crawlable, because a crawler that may not fetch a page never sees its
+`noindex` and keeps an already indexed URL. The Helm chart passes the shared
+`config` values to the web pod, so `config.OPENGENI_WEB_NOINDEX: "true"` is
+enough.
+
 The shell carries a meta description plus Open Graph and Twitter card tags so
 shared console links unfurl with the bundled 1200x630 `/og-image.png`. Link
 preview crawlers need an absolute image URL, and the static shell cannot know
