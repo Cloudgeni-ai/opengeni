@@ -714,8 +714,8 @@ function TranscriptFacts(props: {
 }
 
 /**
- * A quiet line where a track recorded nothing, as on the web at phone width:
- * no rules, since a long line wraps, and lined up with the speaker names.
+ * A quiet line where a track recorded nothing, as on the web:
+ * lined up with the speaker names, wrapping evenly when it is long.
  */
 function UnrecordedLine({
   mark,
