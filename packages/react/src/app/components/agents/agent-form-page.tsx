@@ -23,6 +23,7 @@ import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "../../../
 import { FormPage } from "../../../ui/form-dialog";
 import { SegmentedControl } from "../../../ui/segmented-control";
 import { useAppContext } from "../../app-context";
+import { dismissAgentSuggestion } from "../../lib/agent-suggestion-dismissal";
 import { agentErrorCode, useAgent } from "../../lib/agents";
 import { useNavigate } from "../../lib/navigation";
 import { forgetSessionAgent } from "../../lib/session-agent";
@@ -391,13 +392,18 @@ function AgentForm({
   );
 }
 
-/** The new-agent form; with `sourceSessionId`, prefilled from that chat. */
+/**
+ * The new-agent form; with `sourceSessionId`, prefilled from that chat, and
+ * with `suggestionId`, from the draft in that chat's agent suggestion.
+ */
 export function NewAgentPage({
   workspaceId,
   sourceSessionId,
+  suggestionId,
 }: {
   workspaceId: string;
   sourceSessionId?: string | null | undefined;
+  suggestionId?: string | null | undefined;
 }) {
   const { client } = useAppContext();
   const navigate = useNavigate();
@@ -413,12 +419,20 @@ export function NewAgentPage({
       (session) => {
         if (!live) return;
         setSourceTitle(session.title?.trim() || undefined);
+        // The agent's own draft, when the person came from its suggestion card.
+        const draft =
+          suggestionId &&
+          session.agentSuggestion?.id === suggestionId &&
+          session.agentSuggestion.kind === "create"
+            ? session.agentSuggestion
+            : null;
         setInitial({
           ...EMPTY,
-          name: session.title?.trim() ?? "",
-          description: session.description?.trim() ?? "",
-          avatar: session.avatar ?? null,
-          instructions: session.instructions?.trim() ?? "",
+          name: draft?.name ?? session.title?.trim() ?? "",
+          description: draft ? (draft.description ?? "") : (session.description?.trim() ?? ""),
+          avatar: draft ? draft.avatar : (session.avatar ?? null),
+          instructions: draft?.instructions ?? session.instructions?.trim() ?? "",
+          firstMessage: draft?.firstMessage ?? "",
           // Shared like the chat, so an Only me chat makes an Only me agent.
           visibility: session.tenancy?.visibility === "private" ? "private" : "workspace",
         });
@@ -431,7 +445,7 @@ export function NewAgentPage({
     return () => {
       live = false;
     };
-  }, [client, sourceSessionId, workspaceId]);
+  }, [client, sourceSessionId, suggestionId, workspaceId]);
   const close = () => {
     if (sourceSessionId) {
       void navigate({
@@ -457,6 +471,8 @@ export function NewAgentPage({
       sourceTitle={sourceTitle}
       onClose={close}
       onSaved={(agent) => {
+        // Its suggestion card has done its job.
+        if (sourceSessionId && suggestionId) dismissAgentSuggestion(sourceSessionId, suggestionId);
         toast.success(`Created ${agent.name}`);
         void navigate({
           to: "/workspaces/$workspaceId/agents/$agentId",

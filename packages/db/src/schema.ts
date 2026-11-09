@@ -50,6 +50,7 @@ export * from "./subscription-core-schema";
 import type {
   ApiIntegrationAuthPreview,
   ResolvedAgentConfig,
+  SessionAgentSuggestion,
   SessionAvatar,
   SessionToolPolicy,
 } from "@opengeni/contracts";
@@ -5620,6 +5621,9 @@ export const sessions = pgTable(
     // NULL is a legacy chat (instructions already in `instructions`): never
     // add the agent layer to it.
     agentPromptRevision: integer("agent_prompt_revision"),
+    // Migration 1353: the agent suggestion made in this chat
+    // (`agent_suggest`), written once. Display state only, never model context.
+    agentSuggestion: jsonb("agent_suggestion").$type<SessionAgentSuggestion>(),
     // Migration 1124: hosted web-search records reach the model as runtime
     // input instead of assistant messages. Set once by a worker, never reset.
     searchRecordsAsInput: boolean("search_records_as_input").notNull().default(false),

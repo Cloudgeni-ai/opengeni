@@ -8,6 +8,7 @@ import {
   ensureManagedAccessForUserWithOrganizationMemberships,
   getSession,
   getAgent,
+  getSessionVisibility,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -577,5 +578,386 @@ describe("bots through the API (real PostgreSQL)", () => {
     expect(
       (await app.request(avatarUrl({ kind: "image", artifactId: crypto.randomUUID() }))).status,
     ).toBe(404);
+  }, 180_000);
+
+  test("the agent suggests an agent only after repeated work, and only records it", async () => {
+    if (!shared) return;
+    const workspace = await freshWorkspace("agents suggest");
+    const auth = await bearer(workspace, "agents-person", [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+    ]);
+    const base = `/v1/workspaces/${workspace.workspaceId}/sessions`;
+    /** A chat people have sent `requests` messages, and the agent's tools in it. */
+    const chatWithRequests = async (requests: number, extra: Record<string, unknown> = {}) => {
+      const created = await call(auth, "POST", base, {
+        initialMessage: "Check this invoice against the PO",
+        model: "scripted-model",
+        ...extra,
+      });
+      expect(created.status).toBe(202);
+      const id = created.json.id as string;
+      for (let sent = 1; sent < requests; sent += 1) {
+        const event = await call(auth, "POST", `${base}/${id}/events`, {
+          type: "user.message",
+          payload: { text: `Same check again, number ${sent + 1}` },
+        });
+        expect(event.status).toBeLessThan(300);
+      }
+      const server = buildOpenGeniMcpServer(deps, {
+        ...agentGrant(workspace, id),
+        metadata: { delegated: true, sessionId: id, firstPartyMcpTools: ["agent_suggest"] },
+      });
+      return { id, server };
+    };
+    const invoiceChecker = {
+      kind: "create",
+      name: "Invoice checker",
+      description: "Checks supplier invoices against purchase orders",
+      avatar: { kind: "emoji", emoji: "🧾", hue: 60 },
+      instructions: "Check each invoice against its PO and list mismatches.",
+      firstMessage: "Which mailbox do the invoices arrive in?",
+      reason: "You have asked for three invoice checks in this chat.",
+    };
+
+    // Too little repetition is refused: the agent's own count, and people's real requests.
+    const early = await chatWithRequests(2);
+    expect(
+      (
+        await callTool(early.server, "agent_suggest", {
+          ...invoiceChecker,
+          similarRequestsInARow: 3,
+        })
+      ).body,
+    ).toMatchObject({ status: "not_suggested", code: "too_few_similar_requests" });
+    const mixed = await chatWithRequests(5);
+    expect(
+      (
+        await callTool(mixed.server, "agent_suggest", {
+          ...invoiceChecker,
+          similarRequestsInARow: 2,
+        })
+      ).body,
+    ).toMatchObject({ status: "not_suggested", code: "too_few_similar_requests" });
+    for (const chat of [early, mixed]) {
+      expect(
+        (await getSession(client.db, workspace.workspaceId, chat.id))?.agentSuggestion,
+      ).toBeUndefined();
+    }
+
+    const { id: sessionId, server } = await chatWithRequests(3);
+    // A draft needs something for the agent to do.
+    expect(
+      (
+        await callTool(server, "agent_suggest", {
+          ...invoiceChecker,
+          instructions: " ",
+          firstMessage: undefined,
+          similarRequestsInARow: 3,
+        })
+      ).body,
+    ).toMatchObject({ status: "not_suggested", code: "draft_required" });
+    const before = await getSession(client.db, workspace.workspaceId, sessionId);
+    const suggested = await callTool(server, "agent_suggest", {
+      ...invoiceChecker,
+      similarRequestsInARow: 3,
+    });
+    expect(suggested.isError).toBe(false);
+    expect(suggested.body).toMatchObject({
+      type: "agent_suggestion",
+      status: "suggested",
+      kind: "create",
+      agentId: null,
+      name: "Invoice checker",
+      avatar: { kind: "emoji", emoji: "🧾", hue: 60 },
+      instructions: "Check each invoice against its PO and list mismatches.",
+      firstMessage: "Which mailbox do the invoices arrive in?",
+    });
+    // Recorded as display state only: no agent, and the chat keeps its look and activity time.
+    const after = await getSession(client.db, workspace.workspaceId, sessionId);
+    expect(after?.agentSuggestion).toMatchObject({
+      id: suggested.body.id,
+      name: "Invoice checker",
+    });
+    expect(after?.avatar).toBeNull();
+    expect(after?.description).toBeNull();
+    expect(after?.updatedAt).toBe(before?.updatedAt);
+    const agents = await call(auth, "GET", `/v1/workspaces/${workspace.workspaceId}/agents`);
+    expect(agents.status).toBe(200);
+    expect(agents.json.agents).toEqual([]);
+    // The chat's detail read carries the card for the app.
+    const detail = await call(auth, "GET", `${base}/${sessionId}/configuration`);
+    expect(detail.json.agentSuggestion).toMatchObject({ id: suggested.body.id });
+    // Once per chat, so a dismissed card never comes back.
+    expect(
+      (await callTool(server, "agent_suggest", { ...invoiceChecker, similarRequestsInARow: 4 }))
+        .body,
+    ).toMatchObject({ status: "not_suggested", code: "already_suggested" });
+
+    const sre = await call(auth, "POST", `/v1/workspaces/${workspace.workspaceId}/agents`, {
+      name: "SRE agent",
+      description: "Watches production",
+      avatar: { kind: "icon", icon: "shield-check", hue: 200 },
+      instructions: "Watch production and handle alerts.",
+    });
+    expect(sre.status).toBe(201);
+    const sreId = sre.json.agent.id as string;
+
+    // A taken name points the agent at what already exists.
+    const taken = await callTool((await chatWithRequests(3)).server, "agent_suggest", {
+      ...invoiceChecker,
+      name: "sre AGENT",
+      similarRequestsInARow: 3,
+    });
+    expect(taken.body).toMatchObject({ status: "not_suggested", code: "name_taken" });
+    expect(taken.body.agents).toEqual([
+      expect.objectContaining({ agentId: sreId, name: "SRE agent" }),
+    ]);
+
+    // Reuse points at an agent this chat may name.
+    const reuse = await callTool((await chatWithRequests(3)).server, "agent_suggest", {
+      kind: "reuse",
+      agentId: sreId,
+      similarRequestsInARow: 3,
+      reason: "The SRE agent already watches production.",
+    });
+    expect(reuse.body).toMatchObject({
+      status: "suggested",
+      kind: "reuse",
+      agentId: sreId,
+      name: "SRE agent",
+      description: "Watches production",
+      avatar: { kind: "icon", icon: "shield-check", hue: 200 },
+      instructions: null,
+    });
+    const refusals = await chatWithRequests(3);
+    expect(
+      (
+        await callTool(refusals.server, "agent_suggest", {
+          kind: "reuse",
+          similarRequestsInARow: 3,
+          reason: "x",
+        })
+      ).body,
+    ).toMatchObject({ code: "agent_required" });
+    expect(
+      (
+        await callTool(refusals.server, "agent_suggest", {
+          kind: "reuse",
+          agentId: crypto.randomUUID(),
+          similarRequestsInARow: 3,
+          reason: "x",
+        })
+      ).body,
+    ).toMatchObject({ code: "not_found" });
+
+    // Someone else's Only me agent is never revealed or pointed at.
+    await member(workspace, "user:agents-someone-else");
+    const someoneElse = await bearer(workspace, "user:agents-someone-else", [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+    ]);
+    const privateAgent = await call(
+      someoneElse,
+      "POST",
+      `/v1/workspaces/${workspace.workspaceId}/agents`,
+      { name: "Private helper", instructions: "Help privately.", visibility: "private" },
+    );
+    expect(privateAgent.status).toBe(201);
+    expect(
+      (
+        await callTool(refusals.server, "agent_suggest", {
+          kind: "reuse",
+          agentId: privateAgent.json.agent.id,
+          similarRequestsInARow: 3,
+          reason: "x",
+        })
+      ).body,
+    ).toMatchObject({ status: "not_suggested", code: "not_found" });
+
+    // A chat with an agent is not offered one, and neither is a chat an agent was made from.
+    const agentChat = await chatWithRequests(3, { agentId: sreId });
+    expect(
+      (
+        await callTool(agentChat.server, "agent_suggest", {
+          ...invoiceChecker,
+          name: "Ops",
+          similarRequestsInARow: 3,
+        })
+      ).body,
+    ).toMatchObject({ code: "already_an_agent" });
+    const madeFrom = await chatWithRequests(3);
+    const made = await call(auth, "POST", `/v1/workspaces/${workspace.workspaceId}/agents`, {
+      name: "Release owner",
+      instructions: "Own releases.",
+      sourceSessionId: madeFrom.id,
+    });
+    expect(made.status).toBe(201);
+    expect(
+      (
+        await callTool(madeFrom.server, "agent_suggest", {
+          ...invoiceChecker,
+          name: "Ops",
+          similarRequestsInARow: 3,
+        })
+      ).body,
+    ).toMatchObject({ code: "already_made" });
+  }, 180_000);
+
+  test("concurrent agent suggestions leave one card", async () => {
+    if (!shared) return;
+    const workspace = await freshWorkspace("agents suggest race");
+    const auth = await bearer(workspace, "agents-person", [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+    ]);
+    const base = `/v1/workspaces/${workspace.workspaceId}/sessions`;
+    const created = await call(auth, "POST", base, {
+      initialMessage: "Check this invoice",
+      model: "scripted-model",
+    });
+    const id = created.json.id as string;
+    for (const text of ["Same check again", "And again"]) {
+      await call(auth, "POST", `${base}/${id}/events`, { type: "user.message", payload: { text } });
+    }
+    const server = buildOpenGeniMcpServer(deps, {
+      ...agentGrant(workspace, id),
+      metadata: { delegated: true, sessionId: id, firstPartyMcpTools: ["agent_suggest"] },
+    });
+    const attempt = (name: string) =>
+      callTool(server, "agent_suggest", {
+        kind: "create",
+        name,
+        instructions: "Check invoices.",
+        similarRequestsInARow: 3,
+        reason: "Three invoice checks in a row.",
+      });
+    const results = await Promise.all([attempt("Checker A"), attempt("Checker B")]);
+    const won = results.filter((result) => result.body.status === "suggested");
+    expect(won).toHaveLength(1);
+    expect(results.find((result) => result !== won[0])?.body).toMatchObject({
+      status: "not_suggested",
+      code: "already_suggested",
+    });
+    expect((await getSession(client.db, workspace.workspaceId, id))?.agentSuggestion?.id).toBe(
+      won[0]!.body.id,
+    );
+  }, 180_000);
+
+  test("a shared chat's card never names its person's Only me agents", async () => {
+    if (!shared) return;
+    const userId = `agents-audience-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const provisioned = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Agents audience owner",
+    });
+    const workspaceId = provisioned.accessContext.defaultWorkspaceId!;
+    const accountId = provisioned.accessContext.workspaceGrants.find(
+      (grant) => grant.workspaceId === workspaceId,
+    )!.accountId;
+    const workspace = { accountId, workspaceId };
+    const auth = await bearer(workspace, subjectId, [
+      "workspace:read",
+      "sessions:create",
+      "sessions:read",
+      "sessions:control",
+    ]);
+    const base = `/v1/workspaces/${workspace.workspaceId}/sessions`;
+    const toolsIn = (id: string) =>
+      buildOpenGeniMcpServer(deps, {
+        ...agentGrant(workspace, id),
+        subjectId,
+        metadata: { delegated: true, sessionId: id, firstPartyMcpTools: ["agent_suggest"] },
+      });
+    // A chat made directly in the database has no first request, so send three.
+    const sendThree = async (id: string) => {
+      for (const text of ["Check this invoice", "Same check again", "And again"]) {
+        const sent = await call(auth, "POST", `${base}/${id}/events`, {
+          type: "user.message",
+          payload: { text },
+        });
+        expect(sent.status).toBeLessThan(300);
+      }
+    };
+    const startChat = async (visibility: "workspace_shared" | "user_private") => {
+      const chat = await createSession(client.db, {
+        ...workspace,
+        initialMessage: "Check this invoice",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId },
+        subjectId,
+        visibility,
+      });
+      await sendThree(chat.id);
+      return chat.id;
+    };
+    const privateAgent = await call(auth, "POST", `/v1/workspaces/${workspaceId}/agents`, {
+      name: "Secret payroll agent",
+      description: "Handles the layoffs list",
+      instructions: "Keep this private.",
+      visibility: "private",
+    });
+    expect(privateAgent.status).toBe(201);
+    const privateAgentId = privateAgent.json.agent.id as string;
+    const sharedAgent = await call(auth, "POST", `/v1/workspaces/${workspaceId}/agents`, {
+      name: "Shared helper",
+      instructions: "Help.",
+    });
+    expect(sharedAgent.status).toBe(201);
+    const suggest = (server: unknown, request: Record<string, unknown>) =>
+      callTool(server, "agent_suggest", {
+        similarRequestsInARow: 3,
+        reason: "Repeated.",
+        instructions: "Do the work.",
+        ...request,
+      });
+
+    const sharedChat = await startChat("workspace_shared");
+    expect(await getSessionVisibility(client.db, workspaceId, sharedChat)).toBe("workspace_shared");
+    expect(
+      (await suggest(toolsIn(sharedChat), { kind: "reuse", agentId: privateAgentId })).body,
+    ).toMatchObject({ status: "not_suggested", code: "not_found" });
+    // A name only an Only me agent uses is free here, so nothing private is listed.
+    const created = await suggest(toolsIn(sharedChat), {
+      kind: "create",
+      name: "Secret payroll agent",
+    });
+    expect(created.body).toMatchObject({ status: "suggested", kind: "create" });
+    const stored = JSON.stringify(
+      (await getSession(client.db, workspaceId, sharedChat))?.agentSuggestion,
+    );
+    expect(stored).not.toContain("layoffs");
+
+    // The taken-name list in a shared chat is built only from shared agents.
+    const taken = await suggest(toolsIn(await startChat("workspace_shared")), {
+      kind: "create",
+      name: "shared HELPER",
+    });
+    expect(taken.body).toMatchObject({ code: "name_taken" });
+    expect(taken.body.agents.map((agent: { name: string }) => agent.name)).toEqual([
+      "Shared helper",
+    ]);
+
+    // In the person's own Only me chat, their own Only me agents are fair to name.
+    const privateChat = await startChat("user_private");
+    expect(
+      (await suggest(toolsIn(privateChat), { kind: "reuse", agentId: privateAgentId })).body,
+    ).toMatchObject({
+      status: "suggested",
+      agentId: privateAgentId,
+      name: "Secret payroll agent",
+    });
   }, 180_000);
 });

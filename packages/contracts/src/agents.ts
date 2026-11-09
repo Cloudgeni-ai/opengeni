@@ -399,3 +399,42 @@ export const AGENT_ERROR_CODES = [
   "agent_child_chat",
 ] as const;
 export type AgentErrorCode = (typeof AGENT_ERROR_CODES)[number];
+
+// --- Agent suggestions -----------------------------------------------------
+
+/** The longest Instructions draft a suggestion carries (an agent may hold more). */
+export const AGENT_SUGGESTION_INSTRUCTIONS_MAX_LENGTH = AGENT_INSTRUCTIONS_SOFT_LIMIT;
+/** The longest First message draft a suggestion carries. */
+export const AGENT_SUGGESTION_FIRST_MESSAGE_MAX_LENGTH = 4_000;
+export const AGENT_SUGGESTION_REASON_MAX_LENGTH = 400;
+/**
+ * A suggestion is refused until this many similar requests came in a row from
+ * people in the chat: an agent is for work that keeps coming back, not a
+ * one-off.
+ */
+export const AGENT_SUGGESTION_MIN_SIMILAR_REQUESTS = 3;
+
+/**
+ * The agent suggestion made in a chat with `agent_suggest`, shown to people
+ * as a card. `create`: make an agent from this chat, with the name, icon,
+ * description, Instructions and First message the agent drafted. `reuse`: an
+ * agent (`agentId`) that already does this work. Display state only: it never
+ * makes or changes an agent by itself.
+ */
+export const SessionAgentSuggestion = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: Uuid,
+      kind: z.enum(["create", "reuse"]),
+      agentId: Uuid.nullable(),
+      name: z.string().min(1).max(AGENT_NAME_MAX_LENGTH),
+      description: z.string().max(AGENT_DESCRIPTION_MAX_LENGTH).nullable(),
+      avatar: SessionAvatar.nullable(),
+      instructions: z.string().max(AGENT_SUGGESTION_INSTRUCTIONS_MAX_LENGTH).nullable(),
+      firstMessage: z.string().max(AGENT_SUGGESTION_FIRST_MESSAGE_MAX_LENGTH).nullable(),
+      reason: z.string().max(AGENT_SUGGESTION_REASON_MAX_LENGTH).nullable(),
+      createdAt: z.string(),
+    })
+    .strict(),
+);
+export type SessionAgentSuggestion = z.output<typeof SessionAgentSuggestion>;

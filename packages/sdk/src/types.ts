@@ -36,10 +36,11 @@ import type {
   ScheduledTaskEventsInput,
   ScheduledTaskRunEventOccurrence,
   ScheduledTaskSkill,
+  SessionAgentSuggestion,
   SessionAutomationWaitSummary,
   SessionAvatar,
 } from "@opengeni/contracts";
-export type { SessionAvatar, SessionAvatarIcon } from "@opengeni/contracts";
+export type { SessionAvatar, SessionAvatarIcon, SessionAgentSuggestion } from "@opengeni/contracts";
 export type { ScheduledTaskSkill } from "@opengeni/contracts";
 export type {
   McpElicitationAnswer,
@@ -2000,6 +2001,8 @@ export type Session = {
   description?: string | null | undefined;
   /** Display-only avatar. Never sent to the model. */
   avatar?: SessionAvatar | null | undefined;
+  /** The agent suggestion made here (`agent_suggest`); detail reads only. */
+  agentSuggestion?: SessionAgentSuggestion | null | undefined;
   instructions: string | null;
   /** Immutable normalized prompt-policy role; distinct from membership roles. */
   policyRole: string | null;
@@ -4395,6 +4398,7 @@ export type FirstPartyMcpToolName =
   | "session_human_input_respond"
   | "set_other_session_title"
   | "bot_template_save"
+  | "agent_suggest"
   | "interaction_discover"
   | "browser_open"
   | "browser_tabs"

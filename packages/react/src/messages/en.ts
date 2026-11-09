@@ -6126,6 +6126,8 @@ export const englishMessages = {
   "timeline.toolStep.runSchedule.running": "Running an automation",
   "timeline.toolStep.saveBotTemplate.done": "Made an agent",
   "timeline.toolStep.saveBotTemplate.running": "Making an agent",
+  "timeline.toolStep.suggestAgent.done": "Suggested an agent",
+  "timeline.toolStep.suggestAgent.running": "Suggesting an agent",
   "timeline.toolStep.saveGuide.done": "Saved a skill",
   "timeline.toolStep.saveGuide.running": "Saving a skill",
   "timeline.toolStep.saveMeetingNotes.done": "Saved meeting notes",

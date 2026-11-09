@@ -117,16 +117,19 @@ export function AgentSlackIntroRoute({
 export function NewAgentRoute({
   workspaceId,
   sourceSessionId,
+  suggestionId,
 }: {
   workspaceId: string;
   sourceSessionId?: string | undefined;
+  suggestionId?: string | undefined;
 }) {
   return (
     <ContentPage width="standard" className={PAGE_FRAME}>
       <NewAgentPage
-        key={sourceSessionId ?? "new"}
+        key={`${sourceSessionId ?? "new"}:${suggestionId ?? ""}`}
         workspaceId={workspaceId}
         sourceSessionId={sourceSessionId}
+        suggestionId={suggestionId}
       />
     </ContentPage>
   );

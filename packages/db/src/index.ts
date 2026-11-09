@@ -92,6 +92,7 @@ import {
 export * from "./organization-slack-bots";
 export * from "./slack-agents";
 export * from "./agents";
+export * from "./agent-suggestions";
 export * from "./slack-agent-proposals";
 export * from "./slack-agent-updates";
 export * from "./voice-transcription-settlement";
@@ -313,6 +314,7 @@ export {
 import type { GoalAdmissionPausedReason } from "@opengeni/contracts";
 import { accountContactEmail } from "@opengeni/contracts/passkey-only-account";
 import { SessionAvatar as SessionAvatarSchema, type SessionAvatar } from "@opengeni/contracts";
+import { storedSessionAgentSuggestion } from "./agent-suggestions";
 import { SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import { subscriptionExecutionAuthorityFromTurn } from "./accepted-subscription-authority";
 import {
@@ -74895,6 +74897,14 @@ export async function updateSessionTitleWithEvent(
   );
 }
 
+/** The stored agent suggestion as an optional session field (absent when none). */
+function optionalAgentSuggestion(value: unknown): {
+  agentSuggestion?: NonNullable<ReturnType<typeof storedSessionAgentSuggestion>>;
+} {
+  const suggestion = storedSessionAgentSuggestion(value);
+  return suggestion ? { agentSuggestion: suggestion } : {};
+}
+
 /** A stored avatar, or null for one this version cannot read. */
 export function storedSessionAvatar(value: unknown): SessionAvatar | null {
   if (value === null || value === undefined) return null;
@@ -96333,6 +96343,7 @@ function mapSession(
     description: row.description ?? null,
     avatar: storedSessionAvatar(row.avatar),
     agentId: row.agentId ?? null,
+    ...optionalAgentSuggestion(row.agentSuggestion),
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,
     agentAccess: sessionAgentAccessFromRow(row),

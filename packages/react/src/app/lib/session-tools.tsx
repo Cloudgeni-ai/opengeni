@@ -99,6 +99,7 @@ const FIRST_PARTY_ACTION_LABELS: Partial<Record<FirstPartyMcpToolName, string>> 
   inbox_tidy: "Tidy your inbox",
   set_other_session_title: "Rename another session",
   bot_template_save: "Make an agent",
+  agent_suggest: "Suggest an agent",
   run_on: "Choose where work runs",
   excel_run: "Work in your Excel workbooks",
   admin_actions_search: "Find things to do in the app for you",

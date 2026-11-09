@@ -932,6 +932,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   // Chats, goals and notifications
   nameChat: "rename",
   saveBotTemplate: "rename",
+  suggestAgent: "rename",
   notify: "bell",
   callYou: "phone",
   withdrawNotification: "bell",

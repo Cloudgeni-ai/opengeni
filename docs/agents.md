@@ -304,6 +304,41 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
   header's ⋯ menu opens a new agent prefilled from the chat's name, icon,
   description and instructions.
 
+### The agent suggesting an agent
+
+When most of a person's requests in a chat are the same kind of work,
+including the last three or more in a row, the agent may call `agent_suggest`
+(capability `subagents`, needs `sessions:read`). The agent judges similarity
+and says how many requests in a row match; the server declines fewer than
+`AGENT_SUGGESTION_MIN_SIMILAR_REQUESTS` (3), or more than people have actually
+sent that chat. It also declines a second suggestion in the same chat (so a
+dismissed card never comes back) and a chat that already belongs to an agent.
+It offers one of two things:
+
+- `create`: make an agent from this chat. The agent chooses the name, a
+  one-line description and an icon, and drafts Instructions and an optional
+  First message. It is declined once an agent was made from the chat
+  (`agents.source_session_id`), and when an agent the chat may name already
+  has that name, with those agents listed, so the agent can suggest one.
+- `reuse`: an agent (`agentId`) that already does this work.
+
+Everyone who can open a chat can read its card and the tool's result, so a
+shared chat may only name shared agents, never its person's own Only me ones;
+an Only me chat may also name that person's. The stored suggestion is written
+once (`agent_suggestion IS NULL` in the update), so concurrent calls leave one
+card.
+
+The tool changes nothing. It records the suggestion on the chat
+(`sessions.agent_suggestion`, migration `1353_session_agent_suggestion.sql`,
+display state that never reaches the model and that forks copy, returned as
+`Session.agentSuggestion`) and the chat shows it as a card. **Make this an
+agent…** opens the same form as the header's menu
+(`/agents/new?sourceSessionId=<chat>&suggestion=<id>`), filled in from the
+draft; the card goes away once the agent is created. A `reuse` card's **Chat
+with** starts a chat with the agent (`/sessions?agent=<id>`). **Not now** hides
+the card in that browser. One sentence of prompt guidance, shown only while
+the tool can be available, tells the agent when to call it.
+
 ## Release plan
 
 1. Expand: tables, session columns, backfill, sync triggers,

@@ -25,7 +25,7 @@
 //   /workspaces/:id/automations/sources      → event sources (?kind on /new; /:sourceId for one)
 //   /workspaces/:id/automations/templates    → templates: built in and saved in the workspace
 //   /workspaces/:id/agents                   → agents (all or yours; new, import)
-//   /workspaces/:id/agents/new               → new agent (?sourceSessionId: Make this an agent)
+//   /workspaces/:id/agents/new               → new agent (?sourceSessionId: Make this an agent; ?suggestion: its agent's draft)
 //   /workspaces/:id/agents/:agentId          → one agent (chats, instructions, memory, Slack)
 //   /workspaces/:id/agents/:agentId/edit     → edit agent
 //   /workspaces/:id/agents/:agentId/introduce/:connectionId → introduce it in Slack channels
@@ -796,9 +796,17 @@ const workspaceAgentsRoute = createRoute({
 const workspaceAgentNewRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "agents/new",
-  validateSearch: (search: Record<string, unknown>): { sourceSessionId?: string } =>
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { sourceSessionId?: string; suggestion?: string } =>
     typeof search.sourceSessionId === "string" && search.sourceSessionId.length > 0
-      ? { sourceSessionId: search.sourceSessionId }
+      ? {
+          sourceSessionId: search.sourceSessionId,
+          // The chat's agent suggestion whose draft fills the form.
+          ...(typeof search.suggestion === "string" && search.suggestion.length > 0
+            ? { suggestion: search.suggestion }
+            : {}),
+        }
       : {},
   component: AgentNew,
 });
@@ -1401,8 +1409,14 @@ function Agents() {
 
 function AgentNew() {
   const { workspaceId } = workspaceAgentNewRoute.useParams();
-  const { sourceSessionId } = workspaceAgentNewRoute.useSearch();
-  return <LazyNewAgentRoute workspaceId={workspaceId} sourceSessionId={sourceSessionId} />;
+  const { sourceSessionId, suggestion } = workspaceAgentNewRoute.useSearch();
+  return (
+    <LazyNewAgentRoute
+      workspaceId={workspaceId}
+      sourceSessionId={sourceSessionId}
+      suggestionId={suggestion}
+    />
+  );
 }
 
 function AgentDetail() {

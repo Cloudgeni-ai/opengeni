@@ -25,6 +25,7 @@ import {
 export * from "./integration-sources";
 import { defineSchema } from "./define-schema";
 import { SessionAvatar, SessionDescription } from "./bots";
+import { SessionAgentSuggestion } from "./agents";
 import { secretValue } from "./secret-value";
 export * from "./session-target";
 export * from "./turn-serving-policy";
@@ -1130,6 +1131,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "session_human_input_respond",
   "set_other_session_title",
   "bot_template_save",
+  "agent_suggest",
   "interaction_discover",
   "browser_open",
   "browser_tabs",
@@ -16810,6 +16812,8 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
      * ordinary chat. Fixed at create. Omitted by older servers.
      */
     agentId: primitives.uuid.nullable().optional(),
+    /** The agent suggestion made here (`agent_suggest`); detail reads only. */
+    agentSuggestion: SessionAgentSuggestion.nullable().optional(),
     // Per-session agent persona/system instructions supplied at create. Org-visible
     // metadata (exposed like title/goal), never a secret and never a timeline event.
     // null when the session carried none.

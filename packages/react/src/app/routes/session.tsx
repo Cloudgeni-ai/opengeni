@@ -1,4 +1,5 @@
 import { t } from "../lib/console-text";
+import { currentAgentSuggestion } from "../lib/agent-suggestions";
 import { Fragment } from "react";
 import {
   createSessionRetainedScreenshotLoader,
@@ -371,6 +372,11 @@ const ChatInteractiveBlock = lazy(() =>
 );
 
 const HumanInputSurface = lazy(() => import("../components/session/human-input"));
+const AgentSuggestionCard = lazy(() =>
+  import("../components/agents/agent-suggestion-card").then((module) => ({
+    default: module.AgentSuggestionCard,
+  })),
+);
 const DescendantRequests = lazy(() => import("../components/session/descendant-requests"));
 const SessionSkillReviews = lazy(() =>
   import("../components/session/session-skill-reviews").then((module) => ({
@@ -3004,6 +3010,10 @@ function SessionChatPane(props: {
     context.clientConfig.billingMode === "stripe" &&
     Boolean(workspaceAccountId) &&
     hasAccountPermission(context.accessContext, workspaceAccountId ?? "", "billing:manage");
+  const agentSuggestion = useMemo(
+    () => currentAgentSuggestion(props.session, props.events),
+    [props.session, props.events],
+  );
   const composer = useComposer(props.session.id, {
     canBuyCredits,
     events: props.events,
@@ -4312,6 +4322,14 @@ function SessionChatPane(props: {
                                   events={props.events}
                                 />
                               </LazyPart>
+                              {agentSuggestion ? (
+                                <LazyPart fallback={null}>
+                                  <AgentSuggestionCard
+                                    session={props.session}
+                                    suggestion={agentSuggestion}
+                                  />
+                                </LazyPart>
+                              ) : null}
                               {props.humanInput.requests.length > 0 &&
                               props.session.status === "requires_action" ? (
                                 <div className="pb-1" data-human-input-timeline-surface="">
