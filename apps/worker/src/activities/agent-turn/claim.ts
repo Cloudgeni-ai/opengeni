@@ -949,6 +949,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     }
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
     control.turnMetricOutcome = "recovering";
+    control.turnRecoveryCause = "control";
     control.activityStatus = "recovering";
     return {
       exit: claimedResult({
