@@ -292,18 +292,24 @@ test(`${providerId} repair starts at the named installation's fix, and a reinsta
     repositoryIds: [uninstalledId + 2],
     eventRouteSecret: null,
   });
-  // Merges ask first on the installation being repaired.
+  // Reviews and merges ask first on the installation being repaired. The
+  // reinstalled one already blocks merges (chosen before this repair).
+  const policy = (installationId: number, toolName: string, decision: "ask" | "block") => ({
+    accountId: grant.accountId,
+    workspaceId,
+    subjectId: identity.subjectId,
+    connectionId: `github-app:${installationId}`,
+    serverId: GITHUB_REST_MCP_APP_SERVER_ID,
+    toolName,
+    actionName: toolName,
+    policy: decision,
+  });
   await upsertConnectorActionPolicies(client.db, [
-    {
-      accountId: grant.accountId,
-      workspaceId,
-      subjectId: identity.subjectId,
-      connectionId: `github-app:${uninstalledId}`,
-      serverId: GITHUB_REST_MCP_APP_SERVER_ID,
-      toolName: "pull_request_merge",
-      actionName: "pull_request_merge",
-      policy: "ask",
-    },
+    policy(uninstalledId, "pull_request_merge", "ask"),
+    policy(uninstalledId, "pull_request_review_submit", "ask"),
+  ]);
+  await upsertConnectorActionPolicies(client.db, [
+    policy(reinstalledId, "pull_request_merge", "block"),
   ]);
   let discovery = 0;
   let githubDown = false;
@@ -432,7 +438,8 @@ test(`${providerId} repair starts at the named installation's fix, and a reinsta
       (binding) => binding.installationId,
     ),
   ).toEqual([reinstalledId]);
-  // Its approvals carried over to the new installation.
+  // Its approvals carried over, without overriding a choice already made
+  // on the new installation.
   expect(
     (
       await listConnectorActionPolicies(client.db, {
@@ -440,8 +447,13 @@ test(`${providerId} repair starts at the named installation's fix, and a reinsta
         workspaceId,
         connectionIds: [`github-app:${reinstalledId}`],
       })
-    ).map(({ toolName, policy }) => ({ toolName, policy })),
-  ).toEqual([{ toolName: "pull_request_merge", policy: "ask" }]);
+    )
+      .map(({ toolName, policy }) => ({ toolName, policy }))
+      .sort((left, right) => left.toolName.localeCompare(right.toolName)),
+  ).toEqual([
+    { toolName: "pull_request_merge", policy: "block" },
+    { toolName: "pull_request_review_submit", policy: "ask" },
+  ]);
 
   // Installed: straight to that installation's owner sign-in.
   const authorizing = await (await begin(`github-installation:${reinstalledId}`)).json();

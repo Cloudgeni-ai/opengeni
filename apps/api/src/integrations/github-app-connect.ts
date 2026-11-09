@@ -394,12 +394,23 @@ export async function completeGitHubAppConnect(
                 await listGitHubInstallationAccessForWorkspace(tx, state.workspaceId)
               ).find((binding) => binding.installationId === repaired);
               if (previous && previous.githubAccountId === proof.installation.accountId) {
-                // The approvals chosen for it carry over to the new installation.
-                const policies = await listConnectorActionPolicies(tx, {
+                // The approvals chosen for it carry over to the new
+                // installation, never over a choice already made there.
+                const from = `github-app:${repaired}`;
+                const to = `github-app:${installationId}`;
+                const existing = await listConnectorActionPolicies(tx, {
                   accountId: state.accountId,
                   workspaceId: state.workspaceId,
-                  connectionIds: [`github-app:${repaired}`],
+                  connectionIds: [from, to],
                 });
+                const scope = (policy: (typeof existing)[number]) =>
+                  JSON.stringify([policy.serverId, policy.toolName, policy.actionName]);
+                const chosen = new Set(
+                  existing.filter((policy) => policy.connectionId === to).map(scope),
+                );
+                const policies = existing.filter(
+                  (policy) => policy.connectionId === from && !chosen.has(scope(policy)),
+                );
                 for (let offset = 0; offset < policies.length; offset += 128)
                   await upsertConnectorActionPolicies(
                     tx,
@@ -407,7 +418,7 @@ export async function completeGitHubAppConnect(
                       accountId: state.accountId,
                       workspaceId: state.workspaceId,
                       subjectId: state.subjectId,
-                      connectionId: `github-app:${installationId}`,
+                      connectionId: to,
                       serverId: policy.serverId,
                       toolName: policy.toolName,
                       actionName: policy.actionName,
