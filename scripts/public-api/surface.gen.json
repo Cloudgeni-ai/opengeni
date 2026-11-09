@@ -24893,6 +24893,17 @@
         "$.resources[]": "ref(OwnResource)"
       }
     },
+    "OwnSubscriptionPlanV1": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.key": "string!",
+        "$.label": "string!",
+        "$.monthlyPriceMicros": "integer! null"
+      }
+    },
     "PasskeySummary": {
       "io": [
         "output"
@@ -35087,6 +35098,7 @@
         "$.pricing": "ref(ModelPricingScheduleV1)?",
         "$.provider": "string!",
         "$.providerLabel": "string!",
+        "$.requiredPlan": "ref(OwnSubscriptionPlanV1)?",
         "$.residency": "ref(ClientModelResidencyV1)?",
         "$.schemaVersion": "const?=[\"1\"]",
         "$.shortLabel": "string?",
@@ -35102,7 +35114,8 @@
         "$.creditsSelection": "ref(DefaultModelSelection)? null",
         "$.defaultSelection": "ref(DefaultModelSelection)?",
         "$.models": "array!",
-        "$.models[]": "ref(WorkspaceModelCatalogModel)"
+        "$.models[]": "ref(WorkspaceModelCatalogModel)",
+        "$.ownSubscriptionPlan": "ref(OwnSubscriptionPlanV1)?"
       }
     },
     "WorkspaceOpenRouterCustomModel": {
@@ -36807,6 +36820,7 @@
       "OwnResourceReachResponse": "type",
       "OwnResourceReachWorkspace": "type",
       "OwnResourcesResponse": "type",
+      "OwnSubscriptionPlan": "type",
       "parseBrowserFrameMetadata": "value",
       "parseCodexRealtimeV3Event": "value",
       "parseComputerFrameMetadata": "value",
@@ -40885,6 +40899,7 @@
       "PickerModelRow": "type",
       "projectClientModelRows": "value",
       "projectPickerRows": "value",
+      "requiredPlanHint": "value",
       "runnableLatencyModesForModel": "value",
       "scopedBillingClassLabel": "value",
       "sortPickerRows": "value",
