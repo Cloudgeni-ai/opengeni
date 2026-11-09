@@ -1066,6 +1066,7 @@
   "patchedDependencies": {
     "@openai/agents-openai@0.14.3": "patches/@openai%2Fagents-openai@0.14.3.patch",
     "@temporalio/worker@1.22.0": "patches/@temporalio%2Fworker@1.22.0.patch",
+    "zod@4.6.7": "patches/zod@4.6.7.patch",
     "postgres@3.4.9": "patches/postgres@3.4.9.patch",
     "@openai/agents-core@0.14.3": "patches/@openai%2Fagents-core@0.14.3.patch",
     "postcss-selector-parser@7.2.0": "patches/postcss-selector-parser@7.2.0.patch",

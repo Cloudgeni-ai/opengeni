@@ -293,6 +293,7 @@
     "postgres@3.4.9": "patches/postgres@3.4.9.patch",
     "ts-proto@2.12.0": "patches/ts-proto@2.12.0.patch",
     "postcss-selector-parser@7.2.0": "patches/postcss-selector-parser@7.2.0.patch",
-    "happy-dom@21.0.4": "patches/happy-dom@21.0.4.patch"
+    "happy-dom@21.0.4": "patches/happy-dom@21.0.4.patch",
+    "zod@4.6.7": "patches/zod@4.6.7.patch"
   }
 }
