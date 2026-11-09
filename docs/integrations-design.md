@@ -162,8 +162,10 @@ Integration Definition OAuth therefore sign a `browserProof` into their state
 
 A refused callback reports `browser_mismatch` at `state_verify` before any
 attempt is claimed, nonce consumed or code exchanged, so the starter can still
-finish, and it returns to Opengeni's own integrations page rather than the
-attempt's external `returnUrl`. A state minted before the proof existed is
+finish. A refused MCP callback returns to Opengeni's own integrations page
+rather than an external `returnUrl`; a refused provider connect attempt returns
+to the attempt's `returnUrl`, which for a signed-in starter is on this
+deployment. A state minted before the proof existed is
 honoured for its ten-minute life during a rolling deploy.
 
 Connect attempts started by a signed-in person (browser session or native app

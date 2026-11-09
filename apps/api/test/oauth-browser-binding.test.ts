@@ -420,12 +420,16 @@ describe("integration OAuth is bound to the browser that started it", () => {
 });
 
 describe("connect return URLs stay on this deployment for signed-in people", () => {
-  async function begin(human: ManagedHuman, returnUrl: string) {
+  async function begin(
+    human: ManagedHuman,
+    returnUrl: string,
+    headers: Record<string, string> = {},
+  ) {
     return await buildApp(microsoftFixture().fetch).request(
       `${PUBLIC_BASE_URL}/v1/workspaces/${human.personalWorkspaceId}/connect/attempts`,
       {
         method: "POST",
-        headers: { cookie: human.cookie, "content-type": "application/json" },
+        headers: { cookie: human.cookie, "content-type": "application/json", ...headers },
         body: JSON.stringify({
           providerId: MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION.id,
           ownership: "personal",
@@ -450,6 +454,15 @@ describe("connect return URLs stay on this deployment for signed-in people", () 
       expect(response.status, returnUrl).toBe(400);
       expect(await response.text()).toMatch(/own origin|invalid return URL/);
     }
+  });
+
+  test("the desktop app, which shows this deployment's console, returns there too", async () => {
+    if (!shared) return;
+    const human = await provisionManagedHuman();
+    const desktop = { [OPENGENI_DESKTOP_APP_HEADER]: "macos" };
+    expect((await begin(human, "https://evil.example/landing", desktop)).status).toBe(400);
+    const own = await begin(human, `${PUBLIC_BASE_URL}/workspaces/x/capabilities`, desktop);
+    expect(own.status, await own.clone().text()).toBe(200);
   });
 
   test("a returnUrl on the deployment's own origin begins the attempt", async () => {
