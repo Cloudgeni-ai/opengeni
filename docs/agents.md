@@ -160,8 +160,9 @@ the legacy rows in the same transaction, with
 `set_config('opengeni.agents_dual_write', '1', true)` so the sync triggers
 stand aside:
 
-- `bot_templates` for agents whose origin is a bot template (the joined
-  Instructions as `setup_instructions`);
+- `bot_templates` for agents whose origin is a bot template (the stored
+  First message as `setup_instructions`, or the joined Instructions once it
+  has joined them);
 - `slack_agents` while the agent is available in Slack, in the installation's
   workspace and targeting the home workspace (Instructions, `open`, Memory
   collection, `version` mirrored). Turning Slack off deletes that row, not the
@@ -247,8 +248,10 @@ defaults to off when omitted. The rules live in
 Agents used to have a second text, a First message the app put in the
 composer. Now Instructions are the one text saying what an agent does, and
 the First message is read as part of them: `agentInstructionsWithFirstMessage`
-(`@opengeni/contracts`) joins it after the Instructions as its own paragraph,
-unless they already contain it, and `agentInstructionsSql` reads stored
+(`@opengeni/contracts`) joins it after the Instructions as its own paragraph
+led by "When a chat starts:" (it was what a new chat opened with, so it stays
+something for the start of a chat rather than a standing rule), unless they
+already contain it, and `agentInstructionsSql` reads stored
 revisions the same way for Slack routing and a chat's agent prompt. Nothing
 is migrated and the column stays:
 
@@ -261,9 +264,12 @@ is migrated and the column stays:
   the revision keep both as sent (readers still see them joined).
 - A `firstMessage` from an older client, `bot_template_save`'s older
   `firstMessage`/`setupInstructions`, and `/bot-templates`
-  `setupInstructions` all become Instructions. The legacy `bot_templates`
-  row's `setup_instructions` holds the joined text, so an older release's
-  gallery still opens the same words.
+  `setupInstructions` all become Instructions. The legacy rows copy what is
+  stored, never a cut text: `bot_templates.setup_instructions` holds the
+  stored First message, or the joined Instructions once it has joined them,
+  and `slack_agents.instructions` the joined text when it fits, else the
+  stored Instructions. An older release writing either row back keeps the
+  stored First message, so no text is lost or repeated during a rollout.
 - A chat with an agent whose current revision has a First message gets it as
   part of its Instructions from then on.
 - Rollback: an older release reads agents stored this way as Instructions

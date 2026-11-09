@@ -21,6 +21,7 @@
  * grants anything.
  */
 import {
+  AGENT_FIRST_MESSAGE_LEAD,
   AGENT_INSTRUCTIONS_MAX_LENGTH,
   agentInitialsAvatar,
   agentInstructionsWithFirstMessage,
@@ -66,6 +67,8 @@ function storedAgentContent(
 }
 
 const SQL_TRIMMED = sql.raw(`E' \\t\\n\\r\\f\\v'`);
+/** `AGENT_FIRST_MESSAGE_LEAD` and its line break, as SQL. */
+const FIRST_MESSAGE_LEAD_SQL = sql`${`${AGENT_FIRST_MESSAGE_LEAD}\n`}::text`;
 
 /**
  * A stored revision's Instructions as readers see them, with any First
@@ -78,9 +81,9 @@ export function agentInstructionsSql(revision: string): SQL {
   return sql`case
       when ${r}.instructions is null then null
       when btrim(${r}.first_message, ${SQL_TRIMMED}) = '' then ${r}.instructions
-      when btrim(${r}.instructions, ${SQL_TRIMMED}) = '' then btrim(${r}.first_message, ${SQL_TRIMMED})
       when strpos(${r}.instructions, btrim(${r}.first_message, ${SQL_TRIMMED})) > 0 then ${r}.instructions
-      else btrim(${r}.instructions, ${SQL_TRIMMED}) || E'\\n\\n' || btrim(${r}.first_message, ${SQL_TRIMMED})
+      when btrim(${r}.instructions, ${SQL_TRIMMED}) = '' then ${FIRST_MESSAGE_LEAD_SQL} || btrim(${r}.first_message, ${SQL_TRIMMED})
+      else btrim(${r}.instructions, ${SQL_TRIMMED}) || E'\\n\\n' || ${FIRST_MESSAGE_LEAD_SQL} || btrim(${r}.first_message, ${SQL_TRIMMED})
     end`;
 }
 
@@ -484,17 +487,27 @@ function privateOwnerRefusal(error: unknown, visibility: AgentVisibilityValue | 
   throw error;
 }
 
-/** A legacy template's setup text: what readers see as the Instructions, within its limit. */
+/**
+ * A legacy template's setup text, copied from the stored revision so an older
+ * release writing the row back loses nothing: the stored Instructions (the
+ * joined text) when the First message joined them, else the stored First
+ * message as it is, which an older release reads as the setup text.
+ */
 function legacyTemplateText(stored: { instructions: string; firstMessage: string }): string {
-  return agentInstructionsWithFirstMessage(stored.instructions, stored.firstMessage).slice(
-    0,
-    AGENT_INSTRUCTIONS_MAX_LENGTH,
-  );
+  return stored.firstMessage ? stored.firstMessage : stored.instructions;
 }
 
-/** A legacy Slack agent row's Instructions, within its limit. */
+/**
+ * A legacy Slack agent row's Instructions: the joined text when it fits, else
+ * the stored Instructions as they are. An older release writing the row back
+ * keeps the stored First message, which the joined text already contains, so
+ * neither way loses or repeats text.
+ */
 function legacySlackInstructions(agent: Pick<AgentRecord, "content">): string {
-  return (agent.content?.instructions ?? "").slice(0, AGENT_INSTRUCTIONS_MAX_LENGTH);
+  const joined = agent.content?.instructions ?? "";
+  return joined.length <= AGENT_INSTRUCTIONS_MAX_LENGTH
+    ? joined
+    : (agent.content?.stored.instructions ?? "");
 }
 
 async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgentInput) {

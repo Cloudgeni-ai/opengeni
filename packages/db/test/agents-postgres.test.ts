@@ -30,7 +30,7 @@ import {
   withWorkspaceSessionActivityRls,
   type CreateAgentInput,
 } from "../src/index";
-import { agentInstructionsWithFirstMessage } from "@opengeni/contracts";
+import { AGENT_FIRST_MESSAGE_LEAD, agentInstructionsWithFirstMessage } from "@opengeni/contracts";
 
 let shared: RestrictedRuntimeTestDatabase;
 let app: ReturnType<typeof createDb>;
@@ -139,15 +139,18 @@ describe("agents data layer (restricted runtime role)", () => {
     expect(await revisionCount(agent.id)).toBe(1);
     // A First message joins the Instructions as its own paragraph.
     expect(agent.content).toMatchObject({
-      instructions: "Be brief.\n\nPlan it.",
+      instructions: "Be brief.\n\nWhen a chat starts:\nPlan it.",
       firstMessage: "",
     });
     const [stored] = await shared.admin<{ instructions: string; first_message: string }[]>`
       select instructions, first_message from agent_revisions where agent_id = ${agent.id}`;
-    expect(stored).toEqual({ instructions: "Be brief.\n\nPlan it.", first_message: "" });
+    expect(stored).toEqual({
+      instructions: "Be brief.\n\nWhen a chat starts:\nPlan it.",
+      first_message: "",
+    });
     const [template] = await shared.admin<{ setup_instructions: string }[]>`
       select setup_instructions from bot_templates where id = ${agent.id}`;
-    expect(template?.setup_instructions).toBe("Be brief.\n\nPlan it.");
+    expect(template?.setup_instructions).toBe("Be brief.\n\nWhen a chat starts:\nPlan it.");
 
     // A retried create with the same id finds the agent it made.
     const again = await createAgent(app.db, org.homeScope, {
@@ -207,7 +210,7 @@ describe("agents data layer (restricted runtime role)", () => {
     await olderRevision("Be brief.", "  Ask which release.  ");
     const read = await getAgent(app.db, org.homeScope, agent.id);
     expect(read?.content).toMatchObject({
-      instructions: "Be brief.\n\nAsk which release.",
+      instructions: "Be brief.\n\nWhen a chat starts:\nAsk which release.",
       firstMessage: "",
     });
     expect(read?.hasFirstMessage).toBe(false);
@@ -223,7 +226,10 @@ describe("agents data layer (restricted runtime role)", () => {
       select r.instructions, r.first_message from agents a
       join agent_revisions r on r.agent_id = a.id and r.revision = a.current_revision
       where a.id = ${agent.id}`;
-    expect(stored).toEqual({ instructions: "Be brief.\n\nAsk which release.", first_message: "" });
+    expect(stored).toEqual({
+      instructions: "Be brief.\n\nWhen a chat starts:\nAsk which release.",
+      first_message: "",
+    });
     // Sent again by an older client, it isn't added twice.
     const again = await updateAgent(app.db, org.homeScope, {
       agentId: agent.id,
@@ -255,7 +261,25 @@ describe("agents data layer (restricted runtime role)", () => {
       select instructions, first_message from agent_revisions where agent_id = ${kept.agent.id}`;
     expect(both?.instructions.length).toBe(15_000);
     expect(both?.first_message.length).toBe(15_000);
-    expect(kept.agent.content?.instructions.length).toBe(30_002);
+    expect(kept.agent.content?.instructions.length).toBe(
+      30_002 + `${AGENT_FIRST_MESSAGE_LEAD}\n`.length,
+    );
+    // A legacy template row copies the stored First message as it is, never a
+    // cut joined text, so an older release writing it back loses nothing.
+    const keptTemplate = await createAgent(
+      app.db,
+      org.homeScope,
+      agentInput(org, {
+        name: "Long template",
+        origin: "bot_template",
+        legacyBotTemplate: true,
+        instructions: long,
+        firstMessage: "y".repeat(15_000),
+      }),
+    );
+    const [legacy] = await shared.admin<{ setup_instructions: string }[]>`
+      select setup_instructions from bot_templates where id = ${keptTemplate.agent.id}`;
+    expect(legacy?.setup_instructions).toBe("y".repeat(15_000));
     // The SQL form, for reads that never map an agent, reads the same.
     const viaSql = async (instructions: string, firstMessage: string) => {
       const rows = (await app.db.execute(

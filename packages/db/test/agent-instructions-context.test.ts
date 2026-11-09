@@ -271,7 +271,7 @@ test("an edit becomes one history item before the turn that first sees it; retri
   await f.settle(fourth);
   await f.edit("Answer in Spanish.", "Hola");
   const fifth = await f.claim();
-  expect(await f.deliver(fifth)).toContain("Answer in Spanish.\n\nHola");
+  expect(await f.deliver(fifth)).toContain("Answer in Spanish.\n\nWhen a chat starts:\nHola");
   await f.settle(fifth);
   expect(
     (await f.delivered()).map((context) => context?.kind === "revision" && context.revision),

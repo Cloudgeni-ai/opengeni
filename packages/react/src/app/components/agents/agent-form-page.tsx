@@ -42,6 +42,8 @@ export const INSTRUCTIONS_HINT =
   "What it does and how. Applies in every chat. Put long reference material in Memory.";
 export const INSTRUCTIONS_LONG_HINT =
   "Long instructions slow every reply. Move reference material to Memory.";
+/** An older agent whose First message joined its Instructions can be over the limit. */
+export const INSTRUCTIONS_OVER_LIMIT_HINT = `Over ${AGENT_INSTRUCTIONS_MAX_LENGTH.toLocaleString("en-US")} characters, so they stay as they are until you shorten them. Other changes save as usual.`;
 
 export type AgentFormValues = {
   name: string;
@@ -112,7 +114,13 @@ export function agentChanges(agent: Agent, values: AgentFormValues): UpdateAgent
   if (JSON.stringify(values.avatar) !== JSON.stringify(agent.avatar)) change.avatar = values.avatar;
   if (values.instructions.trim() !== agent.instructions)
     change.instructions = values.instructions.trim();
-  if (values.memoryEnabled !== agent.memory.enabled) change.memoryEnabled = values.memoryEnabled;
+  // Memory on with no collection yet (it couldn't be set up when the agent was
+  // made): saving sends it again, so the collection is set up now.
+  if (
+    values.memoryEnabled !== agent.memory.enabled ||
+    (values.memoryEnabled && agent.memory.collectionId === null)
+  )
+    change.memoryEnabled = values.memoryEnabled;
   if (values.visibility !== agent.visibility) change.visibility = values.visibility;
   return change;
 }
@@ -186,6 +194,10 @@ function AgentForm({
     workspaces.find((row) => row.id === (agent?.workspaceId ?? workspaceId))?.name ?? null;
   const inSlack = (agent?.slack.length ?? 0) > 0;
   const long = instructions.length > AGENT_INSTRUCTIONS_SOFT_LIMIT;
+  // Unchanged Instructions are never sent, so only changed ones must fit.
+  const instructionsChanged = !agent || instructions.trim() !== agent.instructions;
+  const overLimitAsStored =
+    !instructionsChanged && lengthError(instructions, AGENT_INSTRUCTIONS_MAX_LENGTH) !== undefined;
 
   const values = (): AgentFormValues => ({
     name,
@@ -201,7 +213,9 @@ function AgentForm({
     const next: FormErrors = {
       ...(nameError ? { name: nameError } : {}),
       ...optionalError("description", lengthError(description, AGENT_DESCRIPTION_MAX_LENGTH)),
-      ...optionalError("instructions", lengthError(instructions, AGENT_INSTRUCTIONS_MAX_LENGTH)),
+      ...(instructionsChanged
+        ? optionalError("instructions", lengthError(instructions, AGENT_INSTRUCTIONS_MAX_LENGTH))
+        : {}),
       ...sessionAvatarDraftErrors(draft, name, null),
     };
     setErrors(next);
@@ -320,8 +334,16 @@ function AgentForm({
           error={errors.instructions}
           aside={lengthCount(instructions, AGENT_INSTRUCTIONS_MAX_LENGTH)}
           hint={
-            <span data-agent-instructions-hint={long ? "long" : undefined}>
-              {long ? INSTRUCTIONS_LONG_HINT : INSTRUCTIONS_HINT}
+            <span
+              data-agent-instructions-hint={
+                overLimitAsStored ? "over-limit" : long ? "long" : undefined
+              }
+            >
+              {overLimitAsStored
+                ? INSTRUCTIONS_OVER_LIMIT_HINT
+                : long
+                  ? INSTRUCTIONS_LONG_HINT
+                  : INSTRUCTIONS_HINT}
             </span>
           }
         >

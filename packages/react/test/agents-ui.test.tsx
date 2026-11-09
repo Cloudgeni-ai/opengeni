@@ -54,6 +54,7 @@ const {
   NewAgentPage,
   EditAgentPage,
   INSTRUCTIONS_LONG_HINT,
+  INSTRUCTIONS_OVER_LIMIT_HINT,
   ONLY_ME_UNAVAILABLE,
   agentChanges,
   lengthCount,
@@ -225,6 +226,35 @@ test("the form sends only what changed, at the version it opened", () => {
       visibility: "workspace",
     }),
   ).toEqual({ expectedVersion: 4, instructions: "New", memoryEnabled: true });
+});
+
+test("saving an agent whose Memory has no collection yet sends Memory again, so it is set up", () => {
+  const values = (agent: ReturnType<typeof makeAgent>) => ({
+    name: agent.name,
+    description: agent.description,
+    avatar: agent.avatar,
+    instructions: agent.instructions,
+    memoryEnabled: true,
+    visibility: agent.visibility,
+  });
+  const missing = makeAgent({
+    version: 2,
+    memory: { enabled: true, collectionId: null, scope: "workspace", reviewFirst: false },
+  });
+  expect(agentChanges(missing, values(missing))).toEqual({
+    expectedVersion: 2,
+    memoryEnabled: true,
+  });
+  const ready = makeAgent({
+    version: 2,
+    memory: {
+      enabled: true,
+      collectionId: "eeeeeeee-eeee-4eee-8eee-000000000001",
+      scope: "workspace",
+      reviewFirst: false,
+    },
+  });
+  expect(agentChanges(ready, values(ready))).toEqual({ expectedVersion: 2 });
 });
 
 // --- Agents page ---------------------------------------------------------------
@@ -819,6 +849,26 @@ test("long text is never cut: a count shows near the limit and Save says what to
   await flush();
   expect(container.textContent).toContain("Shorten it to 20,000 characters. It has 20,001.");
   expect(client.calls.some((call) => call[0] === "createAgent")).toBe(false);
+});
+
+test("an agent over the limit as stored still saves other changes, and says why its Instructions stay", async () => {
+  const agent = makeAgent({ name: "Long one", instructions: "x".repeat(20_030) });
+  const client = fakeAgentsClient([agent]);
+  const container = await render(
+    <AgentsTestHost context={appContext(client)}>
+      <EditAgentPage workspaceId={WORKSPACE_ID} agentId={agent.id} />
+    </AgentsTestHost>,
+  );
+  expect(container.textContent).toContain(INSTRUCTIONS_OVER_LIMIT_HINT);
+  const name = container.querySelector<HTMLInputElement>("input[placeholder='Release manager']")!;
+  await act(async () => setValue(name, "Long desk"));
+  await act(async () => button(container, "Save").click());
+  await flush();
+  const update = client.calls.find((call) => call[0] === "updateAgent")?.[3] as
+    | Record<string, unknown>
+    | undefined;
+  expect(update).toMatchObject({ name: "Long desk" });
+  expect(update && "instructions" in update).toBe(false);
 });
 
 test("Only me is off with a reason where Only me chats aren't available", async () => {

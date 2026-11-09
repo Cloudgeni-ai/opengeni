@@ -169,7 +169,8 @@ describe("agents through the API (real PostgreSQL)", () => {
       revision: 1,
       // An older client's First message joins the Instructions as its own paragraph.
       hasFirstMessage: false,
-      instructions: "Answer in short sentences.\n\nHelp me plan the next release.",
+      instructions:
+        "Answer in short sentences.\n\nWhen a chat starts:\nHelp me plan the next release.",
       firstMessage: "",
       revisionCreatedBySubjectId: "user:alice",
       memory: { enabled: false, collectionId: null, scope: "workspace" },
@@ -181,7 +182,8 @@ describe("agents through the API (real PostgreSQL)", () => {
     expect(await shared.admin`select id from bot_templates where id = ${agent.id}`).toHaveLength(0);
 
     expect((await call(reader, "GET", `${base}/${agent.id}`)).json.agent).toMatchObject({
-      instructions: "Answer in short sentences.\n\nHelp me plan the next release.",
+      instructions:
+        "Answer in short sentences.\n\nWhen a chat starts:\nHelp me plan the next release.",
       viewer: { canEdit: false },
     });
     const listed = await call(reader, "GET", base);
@@ -226,7 +228,8 @@ describe("agents through the API (real PostgreSQL)", () => {
       revisions: [
         {
           revision: 1,
-          instructions: "Answer in short sentences.\n\nHelp me plan the next release.",
+          instructions:
+            "Answer in short sentences.\n\nWhen a chat starts:\nHelp me plan the next release.",
           firstMessage: "",
         },
       ],

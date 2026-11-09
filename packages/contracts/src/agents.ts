@@ -41,10 +41,18 @@ export const AGENT_INSTRUCTIONS_SOFT_LIMIT = 8_000;
 export const AGENTS_PER_WORKSPACE_MAX = 500;
 
 /**
+ * What an older First message joined to the Instructions starts with: it was
+ * what a new chat opened with, so it stays something for the start of a chat
+ * rather than becoming a standing rule.
+ */
+export const AGENT_FIRST_MESSAGE_LEAD = "When a chat starts:";
+
+/**
  * An agent's Instructions with an older First message joined as its own
- * paragraph, after them. Nothing is added when there is no First message or
- * the Instructions already contain it, so joining twice changes nothing. The
- * database's `agentInstructionsSql` reads stored revisions the same way.
+ * paragraph after them, led by `AGENT_FIRST_MESSAGE_LEAD`. Nothing is added
+ * when there is no First message or the Instructions already contain it, so
+ * joining twice changes nothing. The database's `agentInstructionsSql` reads
+ * stored revisions the same way.
  */
 export function agentInstructionsWithFirstMessage(
   instructions: string,
@@ -52,10 +60,10 @@ export function agentInstructionsWithFirstMessage(
 ): string {
   const first = firstMessage.trim();
   if (first.length === 0) return instructions;
-  const base = instructions.trim();
-  if (base.length === 0) return first;
   if (instructions.includes(first)) return instructions;
-  return `${base}\n\n${first}`;
+  const paragraph = `${AGENT_FIRST_MESSAGE_LEAD}\n${first}`;
+  const base = instructions.trim();
+  return base.length === 0 ? paragraph : `${base}\n\n${paragraph}`;
 }
 
 /**
