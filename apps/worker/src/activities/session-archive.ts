@@ -292,12 +292,17 @@ export function createSessionArchiveActivities(
     deadline: number,
   ): Promise<number> {
     let purged = 0;
+    // Resume at the table the last step left unfinished; the step itself
+    // ends with a full pass that confirms every table is empty.
+    let fromTable = 0;
     while (now() < deadline) {
       const step = await purgeArchivedSessionContent(db, scope, {
         batchSize: SESSION_ARCHIVE_PURGE_BATCH_ROWS,
+        fromTable,
       });
       purged += step.deleted;
       if (step.complete) break;
+      fromTable = step.nextTable;
     }
     return purged;
   }
