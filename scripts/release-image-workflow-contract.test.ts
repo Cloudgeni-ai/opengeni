@@ -1,9 +1,10 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import { excludedWorkspaceDirectories } from "./publishable-workspaces";
 
@@ -1554,6 +1555,65 @@ describe("release image workflow contract", () => {
     expect(publish).toBeDefined();
     expect(publish!.with?.target_commitish).toBe("${{ github.sha }}");
     expect(publish!.with?.tag_name).toBe("agent-v${{ needs.guard.outputs.version }}");
+  });
+
+  test("every agent version that lands on main is published without a hand-pushed tag", async () => {
+    // Deployments serve and update Connected Machines to their own build's
+    // agent version, so an unpublished version leaves machines behind.
+    const parsed = Bun.YAML.parse(await workflow("agent-release.yml")) as {
+      on: { push: { branches?: string[]; paths?: string[]; tags?: string[] } };
+      jobs: Record<string, { if?: string; outputs?: Record<string, string>; steps?: WorkflowStep[] }>;
+    };
+    expect(parsed.on.push.branches).toEqual(["main"]);
+    expect(parsed.on.push.paths).toEqual(["agent/Cargo.toml"]);
+    expect(parsed.on.push.tags).toEqual(["agent-v*"]);
+    expect(parsed.jobs.guard!.outputs?.publish).toBe("${{ steps.v.outputs.publish }}");
+    for (const job of ["build", "publish"]) {
+      expect(parsed.jobs[job]!.if).toBe("${{ needs.guard.outputs.publish == 'true' }}");
+    }
+
+    const guard = parsed.jobs.guard!.steps!.find((step) => step.name === "Resolve + verify the version")!.run!;
+    const directory = mkdtempSync(join(tmpdir(), "agent-release-guard-"));
+    try {
+      mkdirSync(join(directory, "agent"));
+      mkdirSync(join(directory, "bin"));
+      writeFileSync(join(directory, "agent", "Cargo.toml"), '[workspace.package]\nversion = "0.1.158"\n');
+      // The stub answers like `git ls-remote --exit-code` for the tag it is asked about.
+      writeFileSync(join(directory, "bin", "git"), '#!/usr/bin/env bash\nexit "$FIXTURE_LS_REMOTE_STATUS"\n', { mode: 0o755 });
+      const run = (event: "push" | "workflow_dispatch", refType: "branch" | "tag", refName: string, lsRemote: number) => {
+        const output = join(directory, `output-${event}-${refType}-${lsRemote}`);
+        writeFileSync(output, "");
+        const script = guard
+          .replaceAll("${{ github.event_name }}", event)
+          .replaceAll("${{ github.ref_type }}", refType)
+          .replaceAll("${{ github.event.inputs.version }}", "0.1.158");
+        const result = spawnSync("bash", ["-c", script], {
+          cwd: directory,
+          encoding: "utf8",
+          env: {
+            PATH: `${join(directory, "bin")}:${process.env.PATH}`,
+            GITHUB_OUTPUT: output,
+            GITHUB_REF_NAME: refName,
+            FIXTURE_LS_REMOTE_STATUS: String(lsRemote),
+          },
+        });
+        return { status: result.status, stderr: result.stderr, outputs: readFileSync(output, "utf8") };
+      };
+      // A main push whose version has no release yet publishes it.
+      expect(run("push", "branch", "main", 2)).toMatchObject({ status: 0, outputs: "version=0.1.158\npublish=true\n" });
+      // An already published (or hand-tagged) version is left alone.
+      expect(run("push", "branch", "main", 0)).toMatchObject({ status: 0, outputs: "version=0.1.158\npublish=false\n" });
+      // A tag listing that fails is not mistaken for a missing release.
+      const failed = run("push", "branch", "main", 128);
+      expect(failed.status).not.toBe(0);
+      expect(failed.outputs).toBe("");
+      // Tag pushes and manual dispatch keep their exact-version check.
+      expect(run("push", "tag", "agent-v0.1.158", 2)).toMatchObject({ status: 0, outputs: "version=0.1.158\npublish=true\n" });
+      expect(run("push", "tag", "agent-v0.1.159", 2).status).not.toBe(0);
+      expect(run("workflow_dispatch", "branch", "main", 2)).toMatchObject({ status: 0, outputs: "version=0.1.158\npublish=true\n" });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test("standalone macOS agent signing keeps the same stable identity as the app", async () => {

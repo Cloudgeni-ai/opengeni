@@ -3811,6 +3811,10 @@ version only after the corresponding `agent-v<version>` release and its signed
 assets exist; never move or delete an agent release tag. A baked asset still
 takes precedence so a deployed control-plane image serves its release-coherent
 binary directly.
+The Agent Release workflow publishes that release when a push to `main`
+changes `agent/Cargo.toml` to a version without an `agent-v<version>` tag, so
+raising the agent version is enough. Its protected environment still approves
+each publication, and a pushed tag or a manual dispatch still works.
 Explicit `/agent/v<version>/<asset>` binary and signature requests always use
 that immutable archive release; a baked canary cannot override a version pin.
 Linux canary builds use `scripts/bake-agent.sh` with the exact source commit as

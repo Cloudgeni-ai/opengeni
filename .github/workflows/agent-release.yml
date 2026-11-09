@@ -1,8 +1,13 @@
 name: Agent Release
 
 # Cross-platform signed release of the opengeni-agent binary.
-# Triggered on a pushed `agent-v*` tag (decoupled from the npm changesets release so
-# the Rust binary versions independently) or a manual dispatch. Reuses release.yml's
+# Triggered when main's agent/Cargo.toml names a version that has no `agent-v*`
+# release yet, on a pushed `agent-v*` tag (decoupled from the npm changesets
+# release so the Rust binary versions independently) or a manual dispatch.
+# Deployments serve and update Connected Machines to the agent version of their
+# own build, so every agent version that lands on main is published without a
+# hand-pushed tag (the protected agent-release environment still approves it).
+# Reuses release.yml's
 # conventions: actions/checkout@v6, the built-in GITHUB_TOKEN, version-as-source-of-
 # truth, and a dormant-until-opted-in guard (RELEASE_ENABLED) for tag pushes.
 #
@@ -18,6 +23,11 @@ name: Agent Release
 
 on:
   push:
+    branches:
+      - main
+    # Branch pushes only; tag pushes ignore path filters.
+    paths:
+      - agent/Cargo.toml
     tags:
       - "agent-v*"
   workflow_dispatch:
@@ -43,6 +53,7 @@ jobs:
     if: ${{ vars.RELEASE_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
     outputs:
       version: ${{ steps.v.outputs.version }}
+      publish: ${{ steps.v.outputs.publish }}
     steps:
       - name: Check out repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -52,22 +63,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          crate_version="$(grep -m1 '^version' agent/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             version="${{ github.event.inputs.version }}"
+          elif [ "${{ github.ref_type }}" = "branch" ]; then
+            # main changed agent/Cargo.toml: publish its version unless a
+            # release (or a hand-pushed tag) already exists for it.
+            version="$crate_version"
+            # 0: the tag exists; 2: it does not; anything else is an error.
+            tag_status=0
+            git ls-remote --exit-code --tags origin "refs/tags/agent-v$version" >/dev/null || tag_status=$?
+            if [ "$tag_status" = 0 ]; then
+              echo "agent-v$version already exists; nothing to publish"
+              echo "version=$version" >> "$GITHUB_OUTPUT"
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            [ "$tag_status" = 2 ] || { echo "::error::could not list agent release tags" >&2; exit 1; }
           else
             version="${GITHUB_REF_NAME#agent-v}"
           fi
-          crate_version="$(grep -m1 '^version' agent/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
           echo "tag/input version: $version ; crate version: $crate_version"
           if [ "$version" != "$crate_version" ]; then
             echo "::error::version mismatch — tag $version != agent/Cargo.toml $crate_version" >&2
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.target }}
     needs: guard
+    if: ${{ needs.guard.outputs.publish == 'true' }}
     environment: agent-release
     permissions:
       contents: read
@@ -644,6 +671,7 @@ jobs:
     environment: agent-release
     name: Publish release
     needs: [guard, build]
+    if: ${{ needs.guard.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -778,6 +806,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # `/agent/latest/<asset>` is an API compatibility route, not a moving
-      # provider tag. Deployments promote or roll back that route by changing
-      # OPENGENI_AGENT_STABLE_VERSION after this immutable versioned release
-      # exists. Never delete or move an agent release tag.
+      # provider tag. Each deployment serves its own build's agent release
+      # once this immutable versioned release exists; an operator's
+      # OPENGENI_AGENT_STABLE_VERSION pin holds or rolls it back. Never delete
+      # or move an agent release tag.
