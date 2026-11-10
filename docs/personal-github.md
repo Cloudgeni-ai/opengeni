@@ -291,8 +291,12 @@ calling turn's frozen Your GitHub delegation
 connection and credential binding, the repository ID looked up as the person,
 and access capped by `checkPersonalGitHubRepositoryAccess`, so the chosen list
 and All my repositories mode both work. Without `access` it takes the most the
-turn holds (write only when both the turn and the person's current access
-allow it). A repository outside the delegation, more access than the turn
+turn holds (write only when the same check allows write now). A partly
+specified resource is completed the same way; a `credentialBindingId` or
+`repositoryId` it carries must match the turn's binding and the repository, and
+GitHub App fields are dropped. The GitHub lookup in All my repositories is the
+calling attempt's own accepted use of the person's connection, fenced like the
+Git broker; GitHub refusing the token asks the person to reconnect. A repository outside the delegation, more access than the turn
 holds, a repository a person removed from the calling chat, or a turn without
 Your GitHub access is refused with a message naming the cause. The child then
 inherits the connection use through durable propagation; it never receives

@@ -39,6 +39,7 @@ const TOOLS: FirstPartyMcpToolName[] = [
   "session_create",
   "github_connect_link",
   "scheduled_tasks_create",
+  "scheduled_tasks_update",
 ];
 const listed = {
   repositoryId: "9007199254740993",
@@ -276,6 +277,8 @@ async function personWithYourGitHub(allRepositories: "read" | "write" | null) {
       "/repos/acme/elsewhere": githubRepository("acme/elsewhere", "77", true),
       "/repos/acme/read-only": githubRepository("acme/read-only", "78", false),
     }[url.pathname];
+    // GitHub no longer accepts the person's token for this one.
+    if (url.pathname === "/repos/acme/token-revoked") return new Response("{}", { status: 401 });
     return known ? Response.json(known) : new Response("{}", { status: 404 });
   }) as typeof fetch;
   const noop = async () => undefined;
@@ -326,10 +329,16 @@ async function personWithYourGitHub(allRepositories: "read" | "write" | null) {
       }
     )._registeredTools[name];
     if (!tool) throw new Error(`MCP tool not registered: ${name}`);
-    const result = (await tool.handler(args, {})) as {
+    let result: {
       isError?: boolean;
       content?: Array<{ text?: string }>;
     };
+    try {
+      result = (await tool.handler(args, {})) as typeof result;
+    } catch (error) {
+      // The MCP transport reports a thrown refusal as a tool error.
+      return { isError: true, text: error instanceof Error ? error.message : String(error) };
+    }
     return { isError: result.isError === true, text: result.content?.[0]?.text ?? "" };
   }
   async function child(resources: Record<string, unknown>[]) {
@@ -447,6 +456,57 @@ describe("agent-created workers act as the person (real PostgreSQL)", () => {
         access: "read",
       }),
     ]);
+
+    // Editing the schedule resolves the same way, and refuses the same way.
+    const updated = await person.call("scheduled_tasks_update", {
+      id: taskId,
+      agentConfig: {
+        prompt: "nightly work",
+        resources: [
+          {
+            kind: "repository",
+            uri: "git@github.com:Cloudgeni-ai/opengeni.git",
+            ref: "release",
+            connectionType: "github_personal",
+          },
+        ],
+        tools: [],
+        metadata: {},
+      },
+    });
+    expect(updated.isError).toBe(false);
+    const [edited] = await shared.admin<Array<{ agentConfig: { resources: unknown[] } }>>`
+      select agent_config as "agentConfig" from scheduled_tasks where id = ${taskId}
+    `;
+    expect(edited?.agentConfig.resources).toEqual([
+      expect.objectContaining({
+        uri: listed.canonicalUrl,
+        ref: "release",
+        credentialBindingId: person.credentialBindingId,
+        repositoryId: listed.repositoryId,
+        access: "write",
+      }),
+    ]);
+    const refusedEdit = await person.call("scheduled_tasks_update", {
+      id: taskId,
+      agentConfig: {
+        prompt: "nightly work",
+        resources: [
+          {
+            kind: "repository",
+            uri: "https://github.com/acme/elsewhere",
+            ref: "main",
+            connectionType: "github_personal",
+          },
+        ],
+        tools: [],
+        metadata: {},
+      },
+    });
+    expect(refusedEdit.isError).toBe(true);
+    expect(refusedEdit.text).toContain(
+      "acme/elsewhere is not part of this turn's Your GitHub access",
+    );
   });
 
   test("All my repositories resolves any repository the person can reach, as the person", async () => {
@@ -504,6 +564,16 @@ describe("agent-created workers act as the person (real PostgreSQL)", () => {
       },
     ]);
     expect("error" in missing && missing.error).toContain("GitHub has no repository acme/missing");
+    // GitHub refusing the person's token asks them to reconnect, not to retry.
+    const revoked = await person.child([
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/token-revoked",
+        ref: "main",
+        connectionType: "github_personal",
+      },
+    ]);
+    expect("error" in revoked && revoked.error).toContain("reconnect Your GitHub");
 
     const status = await person.call("github_connect_link", {});
     expect(JSON.parse(status.text).personal).toMatchObject({

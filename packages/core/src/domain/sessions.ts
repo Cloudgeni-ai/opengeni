@@ -3350,9 +3350,11 @@ async function createSessionForRequestInFileScope(
         ? payload.resources
         : (parentSession?.resources.filter((resource) => resource.kind === "repository") ??
           payload.resources),
+      turnDelegations: inheritedPersonalConnectionDelegations,
       services: agentPersonalGitHubRepositoryServices({
         db,
         settings,
+        workspaceId,
         accountId: grant.accountId,
         githubPersonalFetch: unresolvedDeps.githubPersonalFetch,
       }),

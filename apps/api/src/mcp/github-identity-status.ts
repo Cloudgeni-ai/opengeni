@@ -200,9 +200,16 @@ export async function personalGitHubIdentityStatus(input: {
   };
 }
 
-/** Agent guidance shared by the GitHub status tool and its setup cards. */
-export const GITHUB_IDENTITIES_GUIDANCE =
-  "Two GitHub identities exist. Your GitHub (personal): the person's own account; commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose or all of theirs. GitHub app: work appears as the app's bot, shared with the workspace, installed per organization or account. 'Connect my GitHub', 'use my account' or 'do it as me' means personal; 'install the GitHub app' or 'give the app access to the org/repos' means the app.";
+/**
+ * Agent guidance shared by the GitHub status tool and its setup cards.
+ * `allRepositories` adds that the person may allow all their repositories,
+ * only where this deployment offers that mode.
+ */
+export function githubIdentitiesGuidance(allRepositories: boolean): string {
+  return `Two GitHub identities exist. Your GitHub (personal): the person's own account; commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose${allRepositories ? " or all of theirs" : ""}. GitHub app: work appears as the app's bot, shared with the workspace, installed per organization or account. 'Connect my GitHub', 'use my account' or 'do it as me' means personal; 'install the GitHub app' or 'give the app access to the org/repos' means the app.`;
+}
+
+export const GITHUB_IDENTITIES_GUIDANCE = githubIdentitiesGuidance(false);
 
 /** Console origin for the person's links: the web console, never the API's own origin. */
 export function personalGitHubConsoleBaseUrl(input: {

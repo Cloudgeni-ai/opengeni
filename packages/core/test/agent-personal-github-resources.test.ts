@@ -503,5 +503,90 @@ describe("agent-named personal GitHub repositories", () => {
         personalGitHubResources: [{ ...foreign, uri: "https://github.com/Acme/Listed" }],
       }),
     ).toThrow("exceeds parent authority");
+    // A person or API caller sending the simple shape gets the strict check,
+    // whose message names both shapes.
+    expect(() =>
+      personalGitHubRepositoryResources(
+        normalizeResources([simple("https://github.com/Acme/Listed")]),
+      ),
+    ).toThrow("can name just uri, ref and connectionType");
+  });
+
+  test("partly specified resources are completed and what was given is checked", async () => {
+    const deps = services({ turn: [listedTurn], current: currentState() });
+    // Copied from a parent without access, or with stray App fields.
+    expect(
+      await resolve(
+        [
+          simple("https://github.com/Acme/Listed", {
+            provider: "github",
+            credentialBindingId: bindingId,
+            repositoryId: "42",
+          }),
+          simple("https://github.com/Acme/Listed", { connectionId: "app-connection" }),
+        ],
+        deps,
+      ),
+    ).toEqual([
+      expect.objectContaining({ repositoryId: "42", access: "write" }),
+      expect.not.objectContaining({ connectionId: expect.anything() }),
+    ]);
+    expect(
+      await rejection(
+        resolve(
+          [simple("https://github.com/Acme/Listed", { credentialBindingId: otherBindingId })],
+          deps,
+        ),
+      ),
+    ).toContain("is not this turn's Your GitHub account");
+    expect(
+      await rejection(
+        resolve([simple("https://github.com/Acme/Listed", { repositoryId: "43" })], deps),
+      ),
+    ).toContain("repositoryId given does not match Acme/Listed");
+  });
+
+  test("without a requested level, write only when the person can push now", async () => {
+    const archived = services({
+      turn: [listedTurn],
+      current: currentState({ repositories: [{ ...listed, archived: true }] }),
+    });
+    expect(await resolve([simple("https://github.com/Acme/Listed")], archived)).toEqual([
+      expect.objectContaining({ repositoryId: "42", access: "read" }),
+    ]);
+  });
+
+  test("a mode narrowed after the turn started refuses, and says a new message fixes it", async () => {
+    const narrowed = services({
+      turn: [allTurn("write")],
+      current: currentState({
+        selectionGeneration: 6,
+        allRepositoriesAccess: "read",
+        allRepositoriesGeneration: 6,
+      }),
+      github: [unlisted],
+    });
+    const message = await rejection(
+      resolve([simple("https://github.com/acme/elsewhere", { access: "read" })], narrowed),
+    );
+    expect(message).toContain("changed since this turn started");
+    expect(message).toContain("The person needs to send a new message");
+  });
+
+  test("ambiguous accounts and a missing chat get their own messages", async () => {
+    const twoAccounts = services({
+      turn: [listedTurn, { ...listedTurn, connectionId: "connection-1" }],
+      current: currentState(),
+    });
+    expect(
+      await rejection(resolve([simple("https://github.com/Acme/Listed")], twoAccounts)),
+    ).toContain("more than one Your GitHub account");
+    const noChat = {
+      ...services({ turn: [listedTurn], current: currentState() }),
+      loadSessionMembership: async () => null,
+    };
+    expect(await rejection(resolve([simple("https://github.com/Acme/Listed")], noChat))).toContain(
+      "This chat could not be found",
+    );
   });
 });

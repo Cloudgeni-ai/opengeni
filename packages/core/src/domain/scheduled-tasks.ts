@@ -1589,6 +1589,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
   /** See createValidatedScheduledTask. */
   eventSourceFetch?: typeof fetch | undefined;
+  /** See createValidatedScheduledTask. */
+  githubPersonalFetch?: typeof fetch | undefined;
 }): Promise<UpdateScheduledTaskInput> {
   const requestedPrompt =
     input.payload.prompt ??
@@ -1830,6 +1832,7 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       ...(input.existing.agentConfig.toolPolicy
         ? { existingToolPolicy: input.existing.agentConfig.toolPolicy }
         : {}),
+      githubPersonalFetch: input.githubPersonalFetch,
     });
     if (
       materializedReusable &&
@@ -2501,6 +2504,7 @@ async function validateScheduledTaskAgentConfig(input: {
       services: agentPersonalGitHubRepositoryServices({
         db: input.db,
         settings: input.settings,
+        workspaceId: input.workspaceId,
         accountId: input.grant.accountId,
         githubPersonalFetch: input.githubPersonalFetch,
       }),

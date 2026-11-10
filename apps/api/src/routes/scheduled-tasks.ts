@@ -430,6 +430,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       })
     ).settings;
     const update = await validatedScheduledTaskUpdate({
+      githubPersonalFetch: deps.githubPersonalFetch,
       settings: catalogSettings,
       db,
       objectStorage,
@@ -491,6 +492,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       })
     ).settings;
     const update = await validatedScheduledTaskUpdate({
+      githubPersonalFetch: deps.githubPersonalFetch,
       settings: catalogSettings,
       db,
       objectStorage,
