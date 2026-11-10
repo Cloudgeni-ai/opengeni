@@ -601,14 +601,16 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         },
       ]);
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${session.id}`);
-      await page.getByRole("img", { name: "session-only.svg" }).waitFor();
+      // The sent message shows the file as the composer did: a chip named
+      // after it whose thumbnail is read through this session's authority.
+      await page.getByRole("button", { name: "Preview session-only.svg" }).waitFor();
+      const thumbnail = page.locator("[data-og-message-attachments] img");
+      await thumbnail.waitFor();
       expect(
-        await page
-          .getByRole("img", { name: "session-only.svg" })
-          .evaluate(
-            (image) =>
-              (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0,
-          ),
+        await thumbnail.evaluate(
+          (image) =>
+            (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0,
+        ),
       ).toBe(true);
       expect(seen).toContain(
         `/v1/workspaces/${workspaceId}/files/${fileId}?sessionId=${session.id}`,

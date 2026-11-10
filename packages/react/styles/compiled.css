@@ -1680,9 +1680,6 @@
 :where(.og-root).h-36,:where(.og-root) .h-36 {
     height: calc(var(--spacing) * 36);
   }
-:where(.og-root).h-40,:where(.og-root) .h-40 {
-    height: calc(var(--spacing) * 40);
-  }
 :where(.og-root).h-48,:where(.og-root) .h-48 {
     height: calc(var(--spacing) * 48);
   }
