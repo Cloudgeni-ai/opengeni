@@ -242,28 +242,31 @@ only on that image, never the number of later images. Originals stay retained;
 coordinate-mapping notes describe the request-local rendition. A per-image
 limit alone cannot bound an accumulating conversation.
 
-On models with prefix-bound thinking, every request with thinking on (and any
-checkpoint or resized-image projection) opts into the documented
-`thinking-binding-controls-2026-08-01` beta with
-`prefix_mismatch_behavior: "drop_block"`. The prefix legitimately changes between
-turns: the system prompt lists live repository Skills, workspace instructions
-and the Skill index, and a session can move between models, accounts and
-transports. The provider, not the client, may omit only reasoning invalidated by
-the changed prefix; when the prefix still matches nothing is dropped. Signed
-blocks remain verbatim in durable history and in requests, and because every
-thinking request opts in, the thinking mode (part of the cache key) never changes
-within a conversation. Responses expose only counts of dropped blocks by closed
-reason, not signatures or prompt data. This reset can lose old reasoning and cost
-new reasoning tokens; it is not a claim that a client-generated checkpoint
-preserves prefix binding.
+On models with prefix-bound thinking, a checkpoint or resized-image projection
+opts into the documented `thinking-binding-controls-2026-08-01` beta with
+`prefix_mismatch_behavior: "drop_block"`. The provider, not the client, may omit
+only reasoning invalidated by the changed prefix. Signed blocks remain verbatim
+in durable history and in requests. The retained checkpoint/image makes that
+choice stable after restart; ordinary unchanged prefixes keep strict behavior.
+Responses expose only counts of dropped blocks by closed reason, not signatures
+or prompt data. This reset can lose old reasoning and cost new reasoning tokens;
+it is not a claim that a client-generated checkpoint preserves prefix binding.
 
-On every Claude transport (Anthropic API, Claude subscription, gateways), a 400
-that refuses a replayed thinking signature is sent once more with the blocks that
-request carried as readable historical reasoning text. Those blocks are
-remembered per provider in the worker process, so later requests do not repeat
-the refusal; blocks issued afterwards stay native. If Claude still refuses, the
-turn fails with the code `anthropic_reasoning_replay_rejected` and a short
-message, keeping Claude's own wording only as the diagnostic detail.
+Every other change of binding is handled by one replay policy for opaque
+reasoning on every route (`opaque-reasoning-replay.ts`), the same one that keeps
+OpenAI `encrypted_content` with its issuing provider. A Claude signed thinking
+block records the binding it was issued under: the platform and account, the
+model and, for prefix-bound models, a digest of the system prompt (which a
+session can change between turns, for example when a turn adds a repository
+Skill). A request under another binding replays the block as readable
+historical reasoning text; canonical history keeps the signed block, so a switch
+back replays it natively. This works on every Claude transport, including
+gateways that do not forward the binding beta. Blocks stored before bindings
+were recorded stay native until Claude refuses them: a 400 that refuses a
+replayed signature is sent once more with the blocks it carried as text, and the
+refusal is remembered per provider in the worker process. If Claude still
+refuses, the turn fails with the code `anthropic_reasoning_replay_rejected` and
+a short message, keeping Claude's own wording only as diagnostic detail.
 See Anthropic's [preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
 
 Both the preflight refusal and a real HTTP 413 before a response stream use the

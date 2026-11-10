@@ -1,6 +1,7 @@
 import { collapseRepeatedSessionGoalContexts } from "@opengeni/contracts";
 import { isAnthropicWebSearchItem } from "./anthropic-web-search";
 import { chatReasoning, chatReasoningDetails, chatReasoningDetailsText } from "./chat-reasoning";
+import { claudeSignedThinkingBlock, claudeThinkingSecret } from "./opaque-reasoning-replay";
 import {
   projectHostedSearchEvidence,
   withSearchRecordForm,
@@ -33,12 +34,13 @@ export type ProviderHistoryOptions = {
    */
   searchRecordForm?: SearchRecordForm;
   /**
-   * The provider that receives this Responses request. Opaque reasoning (its
-   * `encrypted_content`) that another provider issued, or that
+   * The binding this Responses or Claude request has (see
+   * opaque-reasoning-replay). Opaque reasoning (`encrypted_content`, or a
+   * Claude thinking signature) recorded under another binding, or that
    * `isRejectedArtifact` reports, reaches it only as readable historical text:
-   * only the issuing provider can decrypt it. The origin record
-   * ({@link ARTIFACT_ORIGIN_KEY}) is removed from every item, so the issuing
-   * provider receives exactly the item it returned.
+   * only its issuer can verify it, under the binding it was issued with. The
+   * origin record ({@link ARTIFACT_ORIGIN_KEY}) is removed from every item, so
+   * the issuer receives exactly the item it returned.
    */
   artifactScope?: string;
   /** True for an opaque item this provider already refused to decrypt. */
@@ -52,8 +54,9 @@ const HISTORICAL_FACT_MAX_CHARS = 32_000;
 /** Marks a request-local item that declares tools newly available to the model. */
 export const TOOL_DISCLOSURE_KEY = "opengeni.tool_disclosure.v1";
 /**
- * Records, on an opaque reasoning item, the provider that issued it. It is
- * stored with the item and never sent to a provider.
+ * Records, on an opaque reasoning item, the binding it was issued under (the
+ * provider, and for Claude its account, model and prefix). It is stored with
+ * the item and never sent to a provider.
  */
 export const ARTIFACT_ORIGIN_KEY = "opengeni.artifact_origin.v1";
 const TOOL_DISCLOSURE_TEXT_WITH_INVOKE =
@@ -226,9 +229,15 @@ function providerDataOf(item: Record<string, unknown>): Record<string, unknown> 
     : undefined;
 }
 
-/** The provider-issued ciphertext of a Responses reasoning item, if any. */
+/**
+ * The provider-issued state of a reasoning item that only its issuer can
+ * verify, if any: Responses ciphertext, or Claude's thinking signature (or
+ * redacted thinking data).
+ */
 function opaqueReasoningCiphertext(item: Record<string, unknown>): string | undefined {
   if (item.type !== "reasoning") return undefined;
+  const block = claudeSignedThinkingBlock(item);
+  if (block) return claudeThinkingSecret(block);
   const metadata = providerDataOf(item);
   for (const value of [
     item.encrypted_content,
@@ -285,11 +294,11 @@ function withoutArtifactOrigin(item: Record<string, unknown>): Record<string, un
 }
 
 /**
- * Opaque reasoning goes back natively only to the provider that issued it.
- * Another provider cannot decrypt it and rejects the whole request, so it gets
- * the readable summary instead, exactly as Claude and Chat routes already do.
- * Untagged items (stored before origins were recorded) stay native until the
- * provider refuses them.
+ * Opaque reasoning goes back natively only under the binding that issued it.
+ * Any other request cannot verify it and the provider rejects the whole
+ * request, so it gets the readable summary instead, exactly as Chat routes
+ * already do. Untagged items (stored before origins were recorded) stay
+ * native until the provider refuses them.
  */
 function scopedOpaqueArtifact(
   item: Record<string, unknown>,
@@ -560,7 +569,8 @@ function projectWireHistory(
         ? { type: "message", role: "system", content: item.content }
         : item.type === "message" && item.role === "developer"
           ? { ...item, role: "system" }
-          : (foreignReasoningFact(item, providerApi) ??
+          : (scopedOpaqueArtifact(item, options) ??
+            foreignReasoningFact(item, providerApi) ??
             portableChatMetadata(item, items[index - 1]));
       changed ||= next !== item;
       return next;

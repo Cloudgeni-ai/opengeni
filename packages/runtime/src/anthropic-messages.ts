@@ -25,7 +25,17 @@ import {
 import { withClaudeModelRequest } from "./claude-subscription-usage";
 import { createModelImageSizer } from "./model-image-sizing";
 import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
-import { historicalReasoningText, projectHistoryForProvider } from "./provider-history-adapter";
+import {
+  ARTIFACT_ORIGIN_KEY,
+  historicalReasoningText,
+  projectHistoryForProvider,
+} from "./provider-history-adapter";
+import {
+  claudeThinkingFingerprint,
+  opaqueReasoningFingerprint,
+  refusedOpaqueReasoning,
+  rememberRefusedOpaqueReasoning,
+} from "./opaque-reasoning-replay";
 import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 import { splitStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import {
@@ -136,53 +146,39 @@ export const CLAUDE_REASONING_REPLAY_REJECTED = "anthropic_reasoning_replay_reje
 const REASONING_REPLAY_REJECTION =
   /\binvalid\W+(?:signature|data)\W+in\W+(?:redacted_)?thinking\W+block\b|\bthinking\W+block\b[^.]{0,80}\bbound to a different\b/i;
 
-/** Bound on remembered refused thinking blocks per provider (process-local). */
-const REFUSED_THINKING_PER_PROVIDER = 4_096;
-const refusedThinking = new Map<string, Set<string>>();
-
-/** A short digest of a signed block's signature (or redacted data), never the value. */
-function signedThinkingFingerprint(block: Json): string | null {
-  if (block?.type !== "thinking" && block?.type !== "redacted_thinking") return null;
-  const secret = block.type === "thinking" ? block.signature : block.data;
-  if (typeof secret !== "string" || !secret) return null;
-  return createHash("sha256")
-    .update(`opengeni-claude-thinking\0${secret}`)
-    .digest("base64url")
-    .slice(0, 22);
-}
-
-function rememberRefusedThinking(scope: string, fingerprints: readonly string[]): void {
-  let refused = refusedThinking.get(scope);
-  if (!refused) refusedThinking.set(scope, (refused = new Set()));
-  for (const fingerprint of fingerprints) {
-    refused.add(fingerprint);
-    if (refused.size > REFUSED_THINKING_PER_PROVIDER)
-      refused.delete(refused.values().next().value as string);
-  }
-}
-
 /**
- * Replay signed thinking this provider already refused as readable historical
- * text, exactly as another provider's reasoning is replayed: only the issuing
- * conversation can verify the signature. Returns the fingerprints of the
- * signed blocks still sent natively. Durable history is never changed.
+ * The binding a signed thinking block issued for this request is valid under,
+ * recorded on it and compared on every later request (see
+ * opaque-reasoning-replay). Anthropic binds a signature to the organization,
+ * platform and model that issued it; a prefix-bound model's signature also
+ * binds the system prompt, which a session can change between turns (for
+ * example a repository Skill added mid-chat); that is what Claude's refusal
+ * names. Tools are left out: loading a tool changes them between requests of
+ * one turn. Earlier messages change only through compaction, which resets the
+ * prefix explicitly. Any other refusal is caught by the one retry. A digest
+ * keeps credentials and prompt text out of stored history.
  */
-function replaySignedThinking(messages: Message[], refused: ReadonlySet<string> | undefined) {
-  const sent: string[] = [];
-  for (const message of messages) {
-    if (message.role !== "assistant") continue;
-    message.content = message.content.map((block) => {
-      const fingerprint = signedThinkingFingerprint(block);
-      if (!fingerprint) return block;
-      if (!refused?.has(fingerprint)) {
-        sent.push(fingerprint);
-        return block;
-      }
-      const summary = block.type === "thinking" ? String(block.thinking ?? "") : "";
-      return { type: "text", text: historicalReasoningText(summary) };
-    });
-  }
-  return sent;
+export function claudeReplayScope(
+  request: Pick<ModelRequest, "systemInstructions">,
+  model: string,
+  provider: ClaudeRequestProvider,
+): string {
+  const binding = createHash("sha256")
+    .update(provider.baseUrl ?? "https://api.anthropic.com/v1")
+    .update("\0")
+    .update(anthropicSearchAccountScope(provider) ?? `provider:${provider.id}`);
+  if (claudeNativeModelProfile(model)?.prefixBoundThinking)
+    binding.update("\0").update(request.systemInstructions ?? "");
+  return `claude:${model}:${binding.digest("base64url").slice(0, 22)}`;
+}
+
+/** Fingerprints of the signed thinking blocks a request body sends natively. */
+function sentThinkingFingerprints(messages: readonly Message[]): string[] {
+  return messages.flatMap((message) =>
+    message.role === "assistant"
+      ? message.content.flatMap((block) => claudeThinkingFingerprint(block) ?? [])
+      : [],
+  );
 }
 
 /** Closed provider rejections carry authored copy, never arbitrary response text. */
@@ -375,7 +371,11 @@ function imageSource(value: unknown): Json {
 
 function contentBlocks(
   value: unknown,
-  options: { citations?: boolean; assistant?: boolean } = {},
+  options: {
+    citations?: boolean;
+    assistant?: boolean;
+    isRefusedThinking?: (fingerprint: string | null) => boolean;
+  } = {},
 ): Json[] {
   if (typeof value === "string") return value ? [{ type: "text", text: value }] : [];
   const blocks = Array.isArray(value) ? value : [value];
@@ -384,8 +384,13 @@ function contentBlocks(
     // History recorded while progress updates became assistant messages keeps
     // Claude's own signed thinking block on the message. It goes back exactly
     // as received, never as the summary text it was shown as.
+    // One this provider refused goes back as its readable text instead.
     const signed = options.assistant ? block.providerData?.anthropic?.block : undefined;
-    if (signed?.type === "thinking") return [structuredClone(object(signed))];
+    if (signed?.type === "thinking") {
+      if (!options.isRefusedThinking?.(claudeThinkingFingerprint(signed)))
+        return [structuredClone(object(signed))];
+      return [{ type: "text", text: historicalReasoningText(String(signed.thinking ?? "")) }];
+    }
     if (["text", "input_text", "output_text", "refusal"].includes(block.type)) {
       const blockText = text(block.text ?? block.refusal, "text");
       // Claude rejects an empty text block. Other providers can record one (a
@@ -433,7 +438,12 @@ function contentBlocks(
  */
 export function anthropicMessages(
   input: ModelRequest["input"],
-  options: { webSearch?: boolean; accountScope?: string | null } = {},
+  options: {
+    webSearch?: boolean;
+    accountScope?: string | null;
+    /** A signed thinking block (by fingerprint) this provider already refused. */
+    isRefusedThinking?: (fingerprint: string | null) => boolean;
+  } = {},
 ): Message[] {
   const messages: Message[] = [];
   let foreignSearch = false;
@@ -490,6 +500,7 @@ export function anthropicMessages(
           contentBlocks(item.content, {
             citations: role === "assistant" && options.webSearch === true && !foreignSearch,
             assistant: role === "assistant",
+            ...(options.isRefusedThinking ? { isRefusedThinking: options.isRefusedThinking } : {}),
           }),
         );
         break;
@@ -730,11 +741,13 @@ function placeConversationSystems(messages: Message[]): Message[] {
   return result;
 }
 
+type ClaudeRequestProvider = Pick<ResolvedModelProvider, "anthropic"> &
+  Partial<Pick<ResolvedModelProvider, "kind" | "apiKey" | "id" | "baseUrl">>;
+
 export function buildAnthropicRequest(
   request: ModelRequest,
   model: string,
-  provider: Pick<ResolvedModelProvider, "anthropic"> &
-    Partial<Pick<ResolvedModelProvider, "kind" | "apiKey">>,
+  provider: ClaudeRequestProvider,
   stream: boolean,
 ): Json {
   if (request.previousResponseId || request.conversationId)
@@ -761,14 +774,23 @@ export function buildAnthropicRequest(
       );
     return matches[0]![0];
   };
+  // Signed thinking goes back natively only under the binding it was issued
+  // with, and never once this provider refused it (opaque-reasoning-replay).
+  const isRefused = provider.id ? refusedOpaqueReasoning(provider.id) : undefined;
   const input =
     typeof request.input === "string"
       ? request.input
-      : (projectHistoryForProvider(request.input, "anthropic-messages") as ModelRequest["input"]);
+      : (projectHistoryForProvider(request.input, "anthropic-messages", {
+          artifactScope: claudeReplayScope(request, model, provider),
+          ...(isRefused
+            ? { isRejectedArtifact: (item) => isRefused(opaqueReasoningFingerprint(item)) }
+            : {}),
+        }) as ModelRequest["input"]);
   const webSearch = request.tools.some(isHostedWebSearchTool);
   let messages = anthropicMessages(input, {
     webSearch,
     accountScope: anthropicSearchAccountScope(provider),
+    ...(isRefused ? { isRefusedThinking: isRefused } : {}),
   });
   if (!messages.length) throw new AnthropicProtocolError("Claude requires at least one message");
   // A recorded session-independent prefix becomes its own block so it can
@@ -1037,6 +1059,8 @@ export function anthropicResponse(
     progressUpdates?: boolean;
     /** The search results the request sent, in order, read only when needed. */
     requestSearchResults?: () => readonly ClaudeCiteSource[];
+    /** The request's binding (`claudeReplayScope`), recorded on signed thinking. */
+    replayScope?: string;
   } = {},
 ): ModelResponse {
   // A refused response can be HTTP 200 with no content blocks. It must not
@@ -1163,6 +1187,7 @@ export function anthropicResponse(
                 ? { progressUpdate: true }
                 : {}),
             },
+            ...(options.replayScope ? { [ARTIFACT_ORIGIN_KEY]: options.replayScope } : {}),
           },
         });
         break;
@@ -1272,10 +1297,7 @@ export class AnthropicMessagesModel implements Model {
     for (const message of body.messages) {
       message.content = await this.sizeImageBlocks(message.content, projection, request.signal);
     }
-    const signedThinking = replaySignedThinking(
-      body.messages,
-      refusedThinking.get(this.provider.id),
-    );
+    const signedThinking = sentThinkingFingerprints(body.messages);
     request.signal?.throwIfAborted();
     const base = this.provider.baseUrl ?? "https://api.anthropic.com/v1";
     const url = new URL(`${base.replace(/\/$/, "")}/messages`);
@@ -1285,22 +1307,23 @@ export class AnthropicMessagesModel implements Model {
     headers.set("content-type", "application/json");
     headers.set("accept", stream ? "text/event-stream" : "application/json");
     headers.set("anthropic-version", "2023-06-01");
-    // Prefix-bound thinking is valid only under the exact earlier prefix, and
-    // that prefix legitimately changes between turns: the system prompt lists
-    // live repository Skills, workspace instructions and the Skill index, and
-    // a session can move between models, accounts and transports. A portable
-    // checkpoint (including a standalone tool-less summary request) and
-    // image-policy upgrades rewrite it too. Keep signed blocks verbatim and use
-    // the provider's explicit invalid-block reset, never strip signatures
-    // ourselves: when the prefix still matches nothing is dropped. Every
-    // thinking request opts in, so the thinking mode (part of the cache key)
-    // is the same on every request of a conversation. A summary request that
-    // reuses the prepared ordinary prefix keeps that mode unchanged.
+    // A portable checkpoint (including a standalone tool-less summary request)
+    // rewrites the prefix. Image-policy upgrades can do so too. Keep signed
+    // blocks verbatim and use the provider's explicit invalid-block reset, never
+    // strip signatures ourselves. Retained checkpoints/images make this choice
+    // reproducible after worker/model-instance restarts. A summary request that
+    // reuses the prepared ordinary prefix keeps its thinking mode unchanged (the
+    // mode is part of the cache key) and only opts its existing thinking into
+    // the reset, in case the checkpoint history differs from what was sent.
+    // Every other binding change is handled by our own replay policy, which
+    // works on every Claude transport (opaque-reasoning-replay).
+    const preparedCompaction =
+      request.modelSettings.providerData?.opengeni_compaction_prefix === "prepared";
     const resetsPrefix =
-      Boolean(body.thinking) ||
       projection.resized ||
       request.modelSettings.providerData?.opengeni_portable_compaction === true ||
-      (Array.isArray(request.input) && request.input.some(isCompactionSummary));
+      (Array.isArray(request.input) && request.input.some(isCompactionSummary)) ||
+      (preparedCompaction && Boolean(body.thinking));
     if (claudeNativeModelProfile(this.model)?.prefixBoundThinking && resetsPrefix) {
       body.thinking = {
         type: "adaptive",
@@ -1391,7 +1414,7 @@ export class AnthropicMessagesModel implements Model {
           error.code !== CLAUDE_REASONING_REPLAY_REJECTED
         )
           throw error;
-        rememberRefusedThinking(this.provider.id, prepared.signedThinking);
+        rememberRefusedOpaqueReasoning(this.provider.id, prepared.signedThinking);
       }
     }
   }
@@ -1510,6 +1533,7 @@ export class AnthropicMessagesModel implements Model {
       {
         progressUpdates: anthropicWritesProgressUpdates(this.model),
         requestSearchResults: () => this.requestSearchResults(request),
+        replayScope: claudeReplayScope(request, this.model, this.provider),
       },
     );
   }
@@ -1581,6 +1605,7 @@ export class AnthropicMessagesModel implements Model {
       {
         progressUpdates: anthropicWritesProgressUpdates(this.model),
         requestSearchResults: () => this.requestSearchResults(request),
+        replayScope: claudeReplayScope(request, this.model, this.provider),
       },
     );
     yield protocol.StreamEventResponseCompleted.parse({

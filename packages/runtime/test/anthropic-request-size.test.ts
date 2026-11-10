@@ -206,7 +206,7 @@ test.each(["checkpoint", "continuation"] as const)(
   },
 );
 
-test("requests without thinking and older models do not opt into thinking resets", async () => {
+test("ordinary unchanged prefixes and older models do not opt into thinking resets", async () => {
   for (const modelId of ["claude-opus-5-5", "claude-opus-4-6"]) {
     const model = new AnthropicMessagesModel(provider, modelId, (async (_url, init) => {
       expect(new Headers(init?.headers).get("anthropic-beta") ?? "").not.toContain(
