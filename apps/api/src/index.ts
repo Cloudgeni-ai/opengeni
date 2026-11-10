@@ -544,6 +544,8 @@ export async function startApi(options: StartApiOptions = {}) {
     expectedRole: settings.runtimeDatabaseRole,
     targetSchema: settings.dbSchema.trim() || "public",
   } as const;
+  // One reporter for startup and readiness, so a degraded posture logs once.
+  const reportDegradedPosture = reportRuntimeDatabaseDegraded(observability, "api");
   // The PRIVILEGED control-plane NATS login (M-AUTH): when the server runs with
   // auth_callout, api/worker authenticate as a static account user permitted to
   // request exact generation-fenced agent RPC subjects. Null in local dev
@@ -564,12 +566,7 @@ export async function startApi(options: StartApiOptions = {}) {
     );
     await retryStartupDependency(
       "PostgreSQL runtime posture",
-      () =>
-        assertRuntimeDatabaseReadiness(
-          dbClient.db,
-          databasePosture,
-          reportRuntimeDatabaseDegraded(observability, "api-startup"),
-        ),
+      () => assertRuntimeDatabaseReadiness(dbClient.db, databasePosture, reportDegradedPosture),
       { ...retryOptions, onRetry, shouldRetry: isRetryableRuntimeDatabaseStartupError },
     );
     const resolvedCatalog = await retryStartupDependency(
@@ -651,11 +648,7 @@ export async function startApi(options: StartApiOptions = {}) {
         : {}),
       observability,
       readinessChecks: {
-        db: runtimeDatabaseReadyCheck(
-          dbClient.db,
-          databasePosture,
-          reportRuntimeDatabaseDegraded(observability, "api-readiness"),
-        ),
+        db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture, reportDegradedPosture),
       },
     },
     { startBillingAutoTopUps: true },

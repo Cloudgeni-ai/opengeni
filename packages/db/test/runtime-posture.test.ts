@@ -4604,6 +4604,8 @@ describe("runtime readiness: a missing required EXECUTE grant degrades a feature
 
     // PUBLIC EXECUTE on a declared runtime definer whose runtime grant is
     // missing: the PUBLIC grant is fatal, only the missing grant is degraded.
+    // (PostgreSQL itself reports runtime EXECUTE once PUBLIC has it; this
+    // pins the evaluator, the real-PostgreSQL test covers the catalog shape.)
     const publicDefiner = safePosture();
     publicDefiner.privateRoutines.push({
       name: "list_due_event_trigger_tasks_v1(integer)",
@@ -4658,6 +4660,49 @@ describe("runtime readiness: a missing required EXECUTE grant degrades a feature
     });
   });
 
+  test("revoking any single granted routine is degraded only; a runtime-owned one stays fatal", () => {
+    const base = safePosture();
+    const revocable = [
+      ...base.privateRoutines
+        .filter((routine) => routine.execute)
+        .map((routine) => ({ schema: "privateRoutines" as const, name: routine.name })),
+      ...base.targetRoutines
+        .filter((routine) => routine.execute)
+        .map((routine) => ({ schema: "targetRoutines" as const, name: routine.name })),
+    ];
+    expect(revocable.length).toBeGreaterThan(100);
+    for (const { schema, name } of revocable) {
+      const posture = safePosture();
+      const routine = posture[schema].find((entry) => entry.name === name)!;
+      routine.execute = false;
+      const classified = runtimePosture.classifyRuntimeDatabasePosture(posture, options);
+      expect(classified.fatal, name).toEqual([]);
+      expect(classified.degraded, name).toEqual(evaluateRuntimeDatabasePosture(posture, options));
+      if (schema !== "privateRoutines") continue;
+      // The same revocation next to an unsafe change on that routine.
+      routine.owner = "opengeni_app";
+      expect(runtimePosture.classifyRuntimeDatabasePosture(posture, options).fatal, name).toContain(
+        `runtime role owns private routine ${name}`,
+      );
+    }
+  }, 180_000);
+
+  test("a missing object stays fatal", () => {
+    const posture = safePosture();
+    const capability = RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES[0];
+    posture.targetRoutines = posture.targetRoutines.filter(
+      (routine) => routine.name !== capability,
+    );
+    const strict = evaluateRuntimeDatabasePosture(posture, options);
+    expect(strict).toContain(
+      `target-schema runtime capability ${capability} is missing or ambiguous`,
+    );
+    expect(runtimePosture.classifyRuntimeDatabasePosture(posture, options)).toEqual({
+      fatal: strict,
+      degraded: [],
+    });
+  });
+
   test("CONNECT, schema USAGE and identity findings stay fatal", () => {
     const noConnect = revoked();
     noConnect.identity.canConnectDatabase = false;
@@ -4703,6 +4748,19 @@ describe("runtime readiness: a missing required EXECUTE grant degrades a feature
     expect(gauges).toEqual([0, 1, 1, 1, 0, 0]);
     expect(logs.map((log) => log.level)).toEqual(["warn", "warn", "info"]);
     expect(logs[0]!.attributes).toEqual({ source: "test", findingCount: 1, findings: missing });
-    expect(logs[2]!.attributes).toEqual({ source: "test", previousFindings: missing });
+    expect(logs[2]!.attributes).toEqual({ source: "test", previousFindingCount: 1 });
+
+    // A blanket revoke names a bounded number of findings and keeps the count.
+    const many = Array.from(
+      { length: 25 },
+      (_, index) => `finding ${String(index).padStart(2, "0")}`,
+    );
+    report(many);
+    expect(gauges.at(-1)).toBe(25);
+    expect(logs.at(-1)!.attributes).toEqual({
+      source: "test",
+      findingCount: 25,
+      findings: `${many.slice(0, 20).join("; ")}; and 5 more`,
+    });
   });
 });

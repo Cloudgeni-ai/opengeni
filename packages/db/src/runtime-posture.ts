@@ -4057,7 +4057,17 @@ const COLUMN_DENIED_PRIVATE_TABLES = new Set<string>([
   "session_usage_limit_capabilities",
 ]);
 
-/** Pure deterministic evaluator used by startup/readiness and unit tests. */
+/**
+ * Pure deterministic evaluator used by startup/readiness and unit tests.
+ *
+ * Invariant for {@link classifyRuntimeDatabasePosture}: a missing runtime
+ * EXECUTE grant may only ADD findings. Never let `execute === false` skip,
+ * guard or select another check (for example `if (routine.execute) continue;`
+ * ahead of owner or search_path checks, or an unsafe check nested under
+ * `if (!routine.execute)`): the classifier would see that unsafe finding
+ * disappear once the grant is present and report it as degraded. Use
+ * `!execute` only as a direct term of the finding's own condition.
+ */
 export function evaluateRuntimeDatabasePosture(
   catalogPosture: RuntimeDatabasePosture,
   options: RuntimeDatabasePostureOptions,
@@ -7069,16 +7079,24 @@ export type RuntimeDatabaseDegradedObserver = {
   setGauge(input: { name: string; help?: string; value: number }): void;
 };
 
+/**
+ * Degraded findings of the latest completed posture inspection in this
+ * process. An inspection that throws (database unreachable, a fatal finding
+ * still reports first) leaves the previous value.
+ */
 export const RUNTIME_DATABASE_DEGRADED_GAUGE = "opengeni_runtime_database_degraded_findings";
+/** At most this many findings are named in one log line; the count is exact. */
+export const RUNTIME_DATABASE_DEGRADED_LOG_FINDINGS = 20;
 /** A persisting degraded posture is logged again at most this often. */
 export const RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS = 10 * 60_000;
 
 /**
  * Reports degraded runtime posture: the gauge holds the number of degraded
- * findings of the latest inspection; a structured warning names them when
+ * findings of the latest completed inspection; a structured warning names them when
  * they change, and again at most every
  * {@link RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS} while they persist; an
- * info line records recovery.
+ * info line records recovery. Use one reporter per process for startup and
+ * readiness, so a pod logs a degraded posture once, not once per path.
  */
 export function reportRuntimeDatabaseDegraded(
   observability: RuntimeDatabaseDegradedObserver,
@@ -7088,33 +7106,42 @@ export function reportRuntimeDatabaseDegraded(
   const interval = options.logIntervalMs ?? RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS;
   const now = options.now ?? Date.now;
   let last = "";
+  let lastCount = 0;
   let loggedAt = 0;
   return (degraded) => {
     try {
       observability.setGauge({
         name: RUNTIME_DATABASE_DEGRADED_GAUGE,
-        help: "Runtime database posture findings that disable a feature (a missing required EXECUTE grant) without failing readiness, from the latest inspection.",
+        help: "Runtime database posture findings that disable a feature (a missing required EXECUTE grant) without failing readiness, from the latest completed inspection.",
         value: degraded.length,
       });
     } catch {
       // Metrics are best effort.
     }
-    const current = [...degraded].sort().join("; ");
+    const findings = sorted(degraded);
+    const current = findings.join("; ");
     const changed = current !== last;
-    const previous = last;
+    const previousCount = lastCount;
     last = current;
-    if (!changed && (current === "" || now() - loggedAt < interval)) return;
+    lastCount = findings.length;
+    if (!changed && (findings.length === 0 || now() - loggedAt < interval)) return;
     loggedAt = now();
     try {
-      if (current === "") {
+      if (findings.length === 0) {
         observability.info("Runtime database posture is no longer degraded", {
           source,
-          previousFindings: previous,
+          previousFindingCount: previousCount,
         });
       } else {
+        const named = findings.slice(0, RUNTIME_DATABASE_DEGRADED_LOG_FINDINGS);
+        const omitted = findings.length - named.length;
         observability.warn(
           "Runtime database posture is degraded: features that need these grants will fail; readiness is unaffected",
-          { source, findingCount: degraded.length, findings: current },
+          {
+            source,
+            findingCount: findings.length,
+            findings: named.join("; ") + (omitted > 0 ? `; and ${omitted} more` : ""),
+          },
         );
       }
     } catch {

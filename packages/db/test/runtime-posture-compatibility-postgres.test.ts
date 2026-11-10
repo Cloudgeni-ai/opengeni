@@ -11,6 +11,7 @@ import {
   assertRuntimeDatabaseReadiness,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
+  RuntimeDatabasePostureError,
   runtimeDatabaseReadyCheck,
 } from "../src/runtime-posture";
 import {
@@ -105,9 +106,12 @@ realTest(
 
       // Excess privilege is fatal, also next to the degraded finding.
       await admin.unsafe(`GRANT EXECUTE ON FUNCTION ${reader} TO opengeni_app`);
-      await expect(ready()).rejects.toThrow(
+      const error = await ready().catch((caught: unknown) => caught);
+      // The readiness error names only the fatal findings.
+      expect(error).toBeInstanceOf(RuntimeDatabasePostureError);
+      expect((error as RuntimeDatabasePostureError).violations).toEqual([
         "runtime or PUBLIC can call the internal sender connection reader",
-      );
+      ]);
       expect(reported.at(-1)).toEqual([missing]);
       await admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${reader} FROM opengeni_app`);
       await admin.unsafe(`GRANT EXECUTE ON FUNCTION ${sweep} TO PUBLIC`);

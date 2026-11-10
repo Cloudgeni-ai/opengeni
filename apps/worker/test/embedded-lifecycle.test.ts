@@ -976,30 +976,38 @@ describe("embedded worker lifecycle contract", () => {
     // while the strict release-gate evaluation still rejects it.
     const routines = catalogResults[8] as Array<{ name: string; can_execute: boolean }>;
     const revoked = routines.find((row) => row.name === "knowledge_index_due_v1(text, integer)")!;
-    revoked.can_execute = false;
-    const missing =
-      "runtime role lacks EXECUTE on private routine knowledge_index_due_v1(text, integer)";
-    // Its maintenance-work check also requires the grant; with the grant
-    // present that finding goes away, so it is degraded as well.
-    const maintenance =
-      "maintenance work check knowledge_index_due_v1(text, integer) is missing or has unsafe posture";
-    const degraded: (readonly string[])[] = [];
-    catalogQueries = 0;
-    await dbReadyCheck(db, posture, undefined, (findings) => degraded.push(findings))();
-    expect(degraded).toEqual([[maintenance, missing]]);
-    catalogQueries = 0;
-    await expect(opengeniDb.assertRuntimeDatabasePosture(db, posture)).rejects.toThrow(missing);
-
-    // Excess privilege stays fatal, even while the missing grant is degraded.
     const identity = (catalogResults[0] as Array<{ rolbypassrls: boolean }>)[0]!;
-    identity.rolbypassrls = true;
-    catalogQueries = 0;
-    await expect(
-      dbReadyCheck(db, posture, undefined, (findings) => degraded.push(findings))(),
-    ).rejects.toThrow("runtime role has BYPASSRLS");
-    expect(degraded.at(-1)).toEqual([maintenance, missing]);
-    identity.rolbypassrls = false;
-    revoked.can_execute = true;
+    try {
+      revoked.can_execute = false;
+      const missing =
+        "runtime role lacks EXECUTE on private routine knowledge_index_due_v1(text, integer)";
+      // Its maintenance-work check also requires the grant; with the grant
+      // present that finding goes away, so it is degraded as well.
+      const maintenance =
+        "maintenance work check knowledge_index_due_v1(text, integer) is missing or has unsafe posture";
+      const degraded: (readonly string[])[] = [];
+      catalogQueries = 0;
+      await dbReadyCheck(db, posture, undefined, (findings) => degraded.push(findings))();
+      expect(degraded).toEqual([[maintenance, missing]]);
+      catalogQueries = 0;
+      await expect(opengeniDb.assertRuntimeDatabasePosture(db, posture)).rejects.toThrow(missing);
+
+      // Excess privilege stays fatal, even while the missing grant is degraded.
+      identity.rolbypassrls = true;
+      catalogQueries = 0;
+      const error = await dbReadyCheck(db, posture, undefined, (findings) =>
+        degraded.push(findings),
+      )().catch((caught: unknown) => caught);
+      // The readiness error names only the fatal findings.
+      expect(error).toBeInstanceOf(opengeniDb.RuntimeDatabasePostureError);
+      expect((error as opengeniDb.RuntimeDatabasePostureError).violations).toEqual([
+        "runtime role has BYPASSRLS",
+      ]);
+      expect(degraded.at(-1)).toEqual([maintenance, missing]);
+    } finally {
+      identity.rolbypassrls = false;
+      revoked.can_execute = true;
+    }
   });
 
   test("embedded readiness enforces runtime receipts without a session-tenancy activation interlock", async () => {
