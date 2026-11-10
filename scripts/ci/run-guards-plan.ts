@@ -16,6 +16,7 @@ const COMMANDS: Readonly<Record<string, readonly string[]>> = {
   "migration-deployment-mode": ["bun", "scripts/check-migration-deployment-mode.ts"],
   "migration-online-safety": ["bun", "scripts/check-migration-online-safety.ts"],
   "migration-immutability": ["bun", "scripts/check-migration-immutability.ts"],
+  "migration-previous-release": ["bun", "scripts/check-migration-previous-release.ts"],
   "migration-test-budgets": ["bun", "scripts/check-migration-test-budgets.ts"],
   "subscription-contract": ["bun", "run", "check:subscription-contract"],
   "publish-closure": ["bun", "scripts/publish-closure-guard.ts"],

@@ -455,7 +455,65 @@ changes that break old binaries, such as dropping a unique constraint an
 without a default, `ADD CHECK ... NOT VALID`, `DROP VIEW`, `DROP TYPE` or
 `RENAME VALUE`. Passing the guard does not make a change backward compatible;
 the review still has to. Shipped migrations are frozen and exempt; never raise
-the threshold to exempt a new file.
+the threshold to exempt a new file. Revokes, routine, view and type removals,
+`SET SCHEMA` and dynamic DDL are the previous-release guard's, below.
+
+### Previous-release dependencies
+
+`bun run check:migration-previous-release`
+(`scripts/check-migration-previous-release.ts`) runs in CI on every migration
+change. A rolling migration runs before the rollout, while the previous release
+still serves, so it must not remove anything that release's readiness or code
+needs. The guard reads the runtime posture of **the releases that may still be
+serving** from their own source: `packages/db/src/runtime-posture.ts` at the
+merge base with `origin/main` (the newest binary that may already be deployed,
+for example to staging) and at the pinned production baseline. Today's posture
+is not the judge: a change that defers a routine and revokes it in the same PR
+still breaks the release before it. Every migration the head adds is checked;
+there is no ordinal floor and no annotation for this rule.
+
+A rolling migration fails with `previous-release-dependency` when, after it
+commits, either release would lose:
+
+- EXECUTE on a routine in its `RUNTIME_DEFINER_ROUTINES` that is not in its
+  `DEFERRED_RUNTIME_PRIVATE_ROUTINES` (revoked, dropped, renamed or moved,
+  including `ALL FUNCTIONS IN SCHEMA opengeni_private`);
+- a privilege its `RUNTIME_TABLE_PRIVILEGES` requires on a table, or the table
+  itself (dropped, renamed or moved), unless its `RETIRING_FEATURE_TABLES` lets
+  the table be absent;
+- USAGE on `public` or `opengeni_private`.
+
+SQL inside DO blocks and `EXECUTE` strings counts. A removal the same file
+undoes before it commits (a revoke followed by a grant of the same privilege,
+a drop followed by a create and the grant) does not, and neither does revoking
+only from PUBLIC (definers and tables must not be PUBLIC's) or touching an
+object the file itself created. Maintenance migrations run with the fleet
+stopped and are exempt.
+
+The fix is the contract phase. Release N stops needing the object: for a
+definer, add it to `DEFERRED_RUNTIME_PRIVATE_ROUTINES` and make its callers
+treat `insufficient_privilege` as "not yet"; for a table, stop using it and
+list it in `RETIRING_FEATURE_TABLES`. A migration in a later PR, once release
+N is the pinned production baseline and main, removes it. If no such sequence
+works, use maintenance with a justification.
+
+This would have caught 1283. 1282 had granted
+`opengeni_private.list_uncompacted_recording_tracks_v1(integer, text)` and
+removed it from `DEFERRED_RUNTIME_PRIVATE_ROUTINES`, so the 6.13.0 binary
+serving staging required its EXECUTE. 1283 put it back on the deferred list and
+revoked the grant in the same change; the guard judges the revoke against the
+merge base, which still required it. Applied before the rollout, the revoke
+took every 6.13.0 API and worker pod unready (staging, 10 November 2026,
+15:32-16:05 UTC).
+
+From 1359, the same guard also asks for `-- contract-step:` (as for dropped
+columns) on other removals static analysis cannot judge: revoking privileges
+from a role other than PUBLIC on a routine the previous release's posture names
+in any contract, dropping or renaming a routine, view, materialized view, type,
+domain, sequence or schema the file did not create (`RENAME VALUE`,
+`RENAME ATTRIBUTE` and `DROP ATTRIBUTE` on types too), and revokes, drops or
+renames whose target is built at run time. Table drops and renames stay with the
+deployment-mode guard's contract-step rule.
 
 ## Online-safety guard
 
