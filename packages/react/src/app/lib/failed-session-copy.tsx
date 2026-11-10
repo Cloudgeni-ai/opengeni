@@ -2,6 +2,10 @@ import {
   MACHINE_ACCESS_REQUIRED_CODE,
   machineAccessNeededMessage,
 } from "@opengeni/contracts/machine-access";
+import {
+  ENCRYPTED_CONTENT_REJECTION_CODE,
+  isEncryptedReasoningRefusalText,
+} from "@opengeni/contracts/encrypted-reasoning-refusal";
 import { t } from "./console-text";
 import {
   creditRefusalHeadline,
@@ -106,25 +110,27 @@ const PROVIDER_ERROR: KnownFailure = {
   suggestModel: true,
 };
 /**
- * The provider refused encrypted reasoning that another model or account left
- * in this chat, after the worker already resent it as readable text. The same
- * model refuses it again, so Retry waits for another model.
+ * The provider refused encrypted reasoning another model or account left in
+ * this chat. Retry stays: the worker resends that reasoning as readable text
+ * where it can, and failures recorded before it did succeed on Retry.
  */
 const UNREADABLE_HISTORY: KnownFailure = {
   kind: "model_history",
-  message: "This model can’t read earlier reasoning in this chat from another model.",
-  retryUnhelpful: true,
+  message: "This model can’t read earlier reasoning in this chat.",
+  retryUnhelpful: false,
   suggestModel: true,
 };
 
-/** A provider's definitive refusal of encrypted reasoning it cannot decrypt. */
-function isUnreadableHistory(text: string): boolean {
+/**
+ * The same HTTP 400 refusal the runtime recovers from
+ * (`classifyEncryptedArtifactRejection`). Recorded with no failure code: a coded
+ * failure keeps its own copy and retry decision.
+ */
+function isUnreadableHistory(recorded: string, status: string | null): boolean {
   return (
-    text.includes("invalid_encrypted_content") ||
-    (/\bencrypted[ _](?:content|reasoning)\b/.test(text) &&
-      /\b(?:could not be (?:verified|decrypted|parsed)|could not decrypt|cannot be decrypted)\b/.test(
-        text,
-      ))
+    status === "400" &&
+    (new RegExp(`\\b${ENCRYPTED_CONTENT_REJECTION_CODE}\\b`).test(recorded) ||
+      isEncryptedReasoningRefusalText(recorded))
   );
 }
 
@@ -186,11 +192,11 @@ export function classifyProviderFailure(
   // Platform credit exhaustion ("workspace credits"; older history says
   // "Opengeni credits") has a dedicated billing remedy upstream.
   if (text.includes("workspace credits") || text.includes("opengeni credits")) return null;
-  if (isUnreadableHistory(text)) return UNREADABLE_HISTORY;
   // Provider SDKs prefix the HTTP status ("401 Incorrect API key ..."). A
   // status alone classifies only 401/402/403/429; other statuses do not prove
   // a cause and use the generic headline with recorded diagnostics.
   const status = /^\s*(4\d\d)\b/.exec(recorded)?.[1] ?? null;
+  if (!failureCode && isUnreadableHistory(recorded, status)) return UNREADABLE_HISTORY;
   if (
     status === "401" ||
     /\b(?:incorrect|invalid)[ _-]?(?:api[ _-]?key|x-api-key|subscription key)\b/.test(text) ||
