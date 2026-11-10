@@ -18,7 +18,13 @@
 //       never two active concurrently.
 
 import { describe, expect, test } from "bun:test";
-import { SandboxWorkspaceReadNotFoundError, type SandboxSessionLike } from "@openai/agents/sandbox";
+import {
+  SandboxInvalidManifestPathError,
+  SandboxPathResolutionError,
+  SandboxWorkspaceReadNotFoundError,
+  type SandboxSessionLike,
+} from "@openai/agents/sandbox";
+import { createObservability, sandboxOperationMetricObserver } from "@opengeni/observability";
 import { SandboxFilesystemNotFoundError } from "modal";
 import { discoverWorkspaceSkills } from "../src/workspace-skills";
 import {
@@ -313,6 +319,91 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       { op: "listDir", outcome: "not_found" },
       { op: "readFile", outcome: "failed" },
     ]);
+  });
+
+  test("a caller path rejection is not counted as a provider failure", async () => {
+    const observations: Array<{ backend: string; op: string; outcome: string }> = [];
+    const firstOperations: Parameters<
+      NonNullable<RoutingSandboxSessionDeps["onFirstOperation"]>
+    >[0][] = [];
+    // The pinned SDK's own refusals, as Modal's view_image raised them for
+    // `/tmp/x-1.png` before the box could read it.
+    const escapes = new SandboxInvalidManifestPathError(
+      'Sandbox path "/tmp/x-1.png" escapes the workspace root.',
+    );
+    const remoteEscape = new SandboxPathResolutionError(
+      'Sandbox path "link.png" failed remote validation: workspace escape: /etc/x.png',
+    );
+    const materialization = new SandboxInvalidManifestPathError("manifest entry escapes root");
+    const backend: RoutableBackendSession = {
+      async viewImage() {
+        throw escapes;
+      },
+      async readFile() {
+        throw remoteEscape;
+      },
+      async materializeEntry() {
+        throw materialization;
+      },
+    };
+    const observeMetric = (observation: { backend: string; op: string; outcome: string }) =>
+      observations.push({
+        backend: observation.backend,
+        op: observation.op,
+        outcome: observation.outcome,
+      });
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onFirstOperation: (observation) => firstOperations.push(observation),
+      onOperation: observeMetric,
+    });
+
+    await expect(proxy.viewImage({ path: "/tmp/x-1.png" })).rejects.toBe(escapes);
+    await expect(proxy.readFile({ path: "link.png" })).rejects.toBe(remoteEscape);
+    await expect(
+      proxy.materializeEntry({ path: "../outside", entry: { type: "dir" } } as never),
+    ).rejects.toBe(materialization);
+
+    expect(observations).toEqual([
+      { backend: "modal", op: "viewImage", outcome: "rejected" },
+      { backend: "modal", op: "readFile", outcome: "rejected" },
+      // A platform-issued path is our bug, so it stays a failure.
+      { backend: "modal", op: "materializeEntry", outcome: "failed" },
+    ]);
+    expect(firstOperations).toMatchObject([
+      {
+        op: "viewImage",
+        outcome: "completed",
+        phases: { providerOperation: { outcome: "completed" } },
+      },
+    ]);
+
+    // Through the real Prometheus contract: the rejected operations stay out of
+    // both the failure-ratio numerator and its ok|failed denominator.
+    const obs = createObservability(
+      {
+        serviceName: "opengeni",
+        environment: "test",
+        deploymentRevision: "revision-test",
+        observabilityStructuredLogs: false,
+        observabilityMetricsEnabled: true,
+        observabilityOtlpEndpoint: "",
+        observabilityOtlpHeaders: "",
+      },
+      { component: "worker", now: () => 1 },
+    );
+    const metricProxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onOperation: sandboxOperationMetricObserver(obs),
+    });
+    await expect(metricProxy.viewImage({ path: "/tmp/x-1.png" })).rejects.toBe(escapes);
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_operations_total\{[^}]*backend="modal"[^}]*op="viewImage"[^}]*outcome="rejected"[^}]*\} 1\b/,
+    );
+    expect(metrics).not.toMatch(/opengeni_sandbox_operations_total\{[^}]*outcome="failed"/);
   });
 
   test("an observer failure cannot change a provider result", async () => {

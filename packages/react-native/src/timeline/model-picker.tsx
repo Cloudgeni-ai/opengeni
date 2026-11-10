@@ -7,7 +7,11 @@ import {
   type ModelPickerGroupPresentation,
   type ModelPickerInput,
 } from "@opengeni/react/model-picker-model";
-import { labelReasoningEffort, type PickerBillingClass } from "@opengeni/react/model-policy";
+import {
+  labelReasoningEffort,
+  requiredPlanHint,
+  type PickerBillingClass,
+} from "@opengeni/react/model-policy";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import { useState, type ReactNode } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
@@ -248,13 +252,13 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
                 {group.rows.map((row) => {
                   const active = row.selectable && row.id === props.model;
                   const enabled = row.selectable && !props.disabled;
+                  // Why it can't be picked, else the plan it needs ("Needs Pro").
+                  const hint = row.unavailableReason ?? requiredPlanHint(t, row.catalog);
                   return (
                     <Pressable
                       key={row.id}
                       accessibilityRole="button"
-                      accessibilityLabel={[row.label, row.unavailableReason]
-                        .filter(Boolean)
-                        .join(", ")}
+                      accessibilityLabel={[row.label, hint].filter(Boolean).join(", ")}
                       accessibilityState={{ selected: active, disabled: !enabled }}
                       disabled={!enabled}
                       onPress={() => choose(row)}
@@ -276,9 +280,9 @@ export function ModelPickerSheet(props: ModelPickerSheetProps) {
                         <Text numberOfLines={1} style={label}>
                           {row.label}
                         </Text>
-                        {row.unavailableReason ? (
+                        {hint ? (
                           <Text numberOfLines={2} style={muted}>
-                            {row.unavailableReason}
+                            {hint}
                           </Text>
                         ) : null}
                       </View>

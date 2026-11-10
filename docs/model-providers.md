@@ -2585,7 +2585,7 @@ in order; later system items keep their conversation position. Tool names unsupp
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
 ordinary function tools and Opengeni's text compaction remain available.
 
-Claude Opus 5.5 and Sonnet 5.5 can write a progress update before a tool call
+Claude Fable 5.2, Opus 5.5 and Sonnet 5.5 can write a progress update before a tool call
 as its own `thinking` block. For those models requests use
 `thinking.display: "updates"` (beta `thinking-display-updates-2026-08-18`):
 reasoning blocks come back empty, and only progress updates carry text. That

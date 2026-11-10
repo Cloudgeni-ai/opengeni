@@ -547,12 +547,12 @@
                                 {
                                   "check": "min_length",
                                   "minimum": 1,
-                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                  "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                 },
                                 {
                                   "check": "max_length",
                                   "maximum": 64,
-                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                  "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                 }
                               ],
                               "type": "string"
@@ -569,12 +569,12 @@
                                 {
                                   "check": "min_length",
                                   "minimum": 1,
-                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                  "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                 },
                                 {
                                   "check": "max_length",
                                   "maximum": 32,
-                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                  "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                 }
                               ],
                               "type": "string"
@@ -594,12 +594,12 @@
                                       {
                                         "check": "min_length",
                                         "minimum": 1,
-                                        "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                        "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                       },
                                       {
                                         "check": "max_length",
                                         "maximum": 64,
-                                        "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                        "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                       }
                                     ],
                                     "type": "string"
@@ -647,7 +647,7 @@
                                 {
                                   "check": "max_length",
                                   "maximum": 20,
-                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                  "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                 }
                               ],
                               "element": "<schema>",
@@ -712,7 +712,7 @@
                           {
                             "check": "max_length",
                             "maximum": 20,
-                            "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                            "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                           }
                         ],
                         "element": "<schema>",
@@ -875,7 +875,7 @@
                 {
                   "check": "max_length",
                   "maximum": 20,
-                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                  "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                 }
               ],
               "element": "<schema>",

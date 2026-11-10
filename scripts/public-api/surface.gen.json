@@ -24894,6 +24894,17 @@
         "$.resources[]": "ref(OwnResource)"
       }
     },
+    "OwnSubscriptionPlanV1": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.key": "string!",
+        "$.label": "string!",
+        "$.monthlyPriceMicros": "integer! null"
+      }
+    },
     "PasskeySummary": {
       "io": [
         "output"
@@ -26195,6 +26206,8 @@
         "$.source": "ref(RecordingTrackSource)!",
         "$.totalBytes": "integer!",
         "$.trackNumber": "integer!",
+        "$.unrecorded": "array!",
+        "$.unrecorded[]": "ref(RecordingUnrecordedStretch)",
         "$.video": "object! null",
         "$.video.frameCount": "integer!",
         "$.video.height": "integer!",
@@ -26379,6 +26392,16 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"region_restricted\\\"\",\"\\\"unpriced\\\"\"]"
+      }
+    },
+    "RecordingUnrecordedStretch": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.endMilliseconds": "integer! null",
+        "$.startMilliseconds": "integer!"
       }
     },
     "RecordingVoiceprintConsent": {
@@ -28085,7 +28108,6 @@
         "$.avatar": "ref(SessionAvatar)! null",
         "$.createdAt": "string!",
         "$.description": "string! null",
-        "$.firstMessage": "string! null",
         "$.id": "string!",
         "$.instructions": "string! null",
         "$.kind": "enum!=[\"\\\"create\\\"\",\"\\\"reuse\\\"\"]",
@@ -35107,6 +35129,7 @@
         "$.pricing": "ref(ModelPricingScheduleV1)?",
         "$.provider": "string!",
         "$.providerLabel": "string!",
+        "$.requiredPlan": "ref(OwnSubscriptionPlanV1)?",
         "$.residency": "ref(ClientModelResidencyV1)?",
         "$.schemaVersion": "const?=[\"1\"]",
         "$.shortLabel": "string?",
@@ -35122,7 +35145,8 @@
         "$.creditsSelection": "ref(DefaultModelSelection)? null",
         "$.defaultSelection": "ref(DefaultModelSelection)?",
         "$.models": "array!",
-        "$.models[]": "ref(WorkspaceModelCatalogModel)"
+        "$.models[]": "ref(WorkspaceModelCatalogModel)",
+        "$.ownSubscriptionPlan": "ref(OwnSubscriptionPlanV1)?"
       }
     },
     "WorkspaceOpenRouterCustomModel": {
@@ -36827,6 +36851,7 @@
       "OwnResourceReachResponse": "type",
       "OwnResourceReachWorkspace": "type",
       "OwnResourcesResponse": "type",
+      "OwnSubscriptionPlan": "type",
       "parseBrowserFrameMetadata": "value",
       "parseCodexRealtimeV3Event": "value",
       "parseComputerFrameMetadata": "value",
@@ -40906,6 +40931,7 @@
       "PickerModelRow": "type",
       "projectClientModelRows": "value",
       "projectPickerRows": "value",
+      "requiredPlanHint": "value",
       "runnableLatencyModesForModel": "value",
       "scopedBillingClassLabel": "value",
       "sortPickerRows": "value",
@@ -41008,6 +41034,7 @@
       "groupLiveTurns": "value",
       "groupTranscriptTurns": "value",
       "ImportRecordingAudioInput": "type",
+      "interleaveUnrecordedMarks": "value",
       "languageName": "value",
       "LiveTranscriptLine": "type",
       "LiveTranscriptTurn": "type",
@@ -41026,11 +41053,16 @@
       "speakerIsNamed": "value",
       "tidyLiveText": "value",
       "tidyPartialText": "value",
+      "trackSpeakerName": "value",
       "transcribingText": "value",
       "transcriptErrorText": "value",
       "transcriptFixModel": "value",
+      "TranscriptItem": "type",
       "transcriptNeedsCredits": "value",
       "TranscriptTurn": "type",
+      "TranscriptUnrecordedMark": "type",
+      "transcriptUnrecordedMarks": "value",
+      "unrecordedMarkText": "value",
       "useLiveTranscript": "value",
       "UseLiveTranscriptOptions": "type",
       "UseLiveTranscriptResult": "type",
@@ -41085,6 +41117,8 @@
       "admissionControlNeedsRefresh": "value",
       "admissionRecheckControl": "value",
       "AgentMessageItem": "type",
+      "AllowMachineClient": "type",
+      "allowMachineForChat": "value",
       "ApprovalDecisionOptions": "type",
       "approvalsDecidable": "value",
       "approvalsFromRequiresAction": "value",
@@ -41166,8 +41200,10 @@
       "sessionAdmissionApprovedElsewhereCopy": "value",
       "sessionAdmissionCopy": "value",
       "SessionAdmissionCopy": "type",
+      "sessionAdmissionMachineAccessCopy": "value",
       "sessionAdmissionMachineChangedCopy": "value",
       "sessionAdmissionNeedsDifferentMachine": "value",
+      "sessionAdmissionNeedsMachineAccess": "value",
       "sessionAdmissionReason": "value",
       "SessionAdmissionReason": "type",
       "SessionAttentionClientLike": "type",

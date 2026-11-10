@@ -46,6 +46,15 @@ kept, so the next dial reads again. A caller-provided `ClientConfig` no longer
 triggers a platform read it then discards. Its tests are named
 `platform_certs_tests`.
 
+`Cargo.toml` (and `Cargo.toml.orig`) require `rustls-webpki` 0.103.13 instead
+of 0.102, as upstream did in 0.47.0 (nats-io/nats.rs#1550), so no build carries
+the unmaintained 0.102 line and its open advisories. The crate uses it only to
+parse trust anchors; the feature that selects aws-lc-rs is named `aws-lc-rs` in
+0.103. Because 0.103 no longer re-exports `types`, `tls.rs` and `connector.rs`
+take `CertificateDer`, `PrivateKeyDer` and `ServerName` from
+`crate::rustls::pki_types`, exactly as upstream 0.47.0 does. They are the same
+`rustls-pki-types` types, so behavior is unchanged.
+
 The package is excluded from the workspace's member set. Native CI runs its
 focused library tests explicitly; unrelated upstream server integration tests
 are not part of the agent suite. Remove this vendored copy when an upstream

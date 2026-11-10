@@ -14,6 +14,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  getAgent,
   getSession,
   initializeSessionStartAtomically,
   listSessionEvents,
@@ -347,6 +348,30 @@ describe("agent configuration client config and MCP (real PostgreSQL)", () => {
       type: "object",
       properties: { capabilities: { anyOf: expect.any(Array) } },
     });
+  });
+
+  test("an agent a chat makes with bot_template_save remembers, with its Memory collection", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const root = await rootSession(grant, null, ["bot_template_save"]);
+    const attempt = await liveAttempt(grant, root.id);
+    const server = buildOpenGeniMcpServer(
+      routeDeps(),
+      agentGrant(grant, attempt, ["bot_template_save"]),
+    );
+    const saved = await callMcpTool(server, "bot_template_save", {
+      name: "Release notes",
+      instructions: "Write the release notes.",
+    });
+    expect(saved.isError).not.toBe(true);
+    const agentId = (JSON.parse(saved.text) as { agent: { id: string } }).agent.id;
+    expect(
+      await getAgent(
+        client.db,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        agentId,
+      ),
+    ).toMatchObject({ memoryEnabled: true, memoryCollectionId: expect.any(String) });
   });
 });
 

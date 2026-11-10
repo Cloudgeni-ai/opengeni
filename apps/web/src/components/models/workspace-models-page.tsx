@@ -147,6 +147,7 @@ import {
 } from "@opengeni/react/app/lib/models-route";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
+import { OwnSubscriptionPlanNote } from "@opengeni/react/app/components/credits/own-subscription-plan-notice";
 import { notifyModelConnectionsChanged } from "@opengeni/react/app/lib/shared-query";
 import { useOrganizationModelDefaults } from "./use-organization-model-defaults";
 import {
@@ -470,6 +471,11 @@ export function WorkspaceModelsPageBody({
   const { orgCodex, orgGrok, orgClaude, orgGateways, orgCompatible, audiences, setAudiences } =
     organizationAccounts;
   const catalog = useWorkspaceModelCatalog(workspaceId);
+  // Connecting a subscription says when the organization's plan doesn't
+  // include using it, with the plan and price from the plan catalog.
+  const subscriptionPlanNote = catalog.ownSubscriptionPlan ? (
+    <OwnSubscriptionPlanNote plan={catalog.ownSubscriptionPlan} />
+  ) : null;
   const credits = useOpenGeniCredits(organizationId);
   // What every workspace follows until it changes it: owners and admins only.
   const organizationDefaults = useOrganizationModelDefaults(
@@ -997,6 +1003,7 @@ export function WorkspaceModelsPageBody({
             : false;
     const fields = (
       <>
+        {subscriptionProvider(provider) ? subscriptionPlanNote : null}
         {step.claudeCodeApi ? <ClaudeCodeApiIntro /> : null}
         <ConnectAudienceFields
           organizationName={organizationName}
@@ -1150,6 +1157,16 @@ export function WorkspaceModelsPageBody({
         {`It will belong to ${workspaceName}: everyone here can use it. ${workspaceName}'s admins and ${organizationName}'s owners and admins can change or remove it.`}
       </p>
     ) : undefined;
+    // A subscription says what using it needs, above its sign-in.
+    const subscriptionFields =
+      subscriptionPlanNote && subscriptionProvider(provider) ? (
+        <>
+          {subscriptionPlanNote}
+          {note}
+        </>
+      ) : (
+        note
+      );
     // A workspace's own key is added, not replaced: it opens the list again.
     const keyConnected = () => {
       connectionChanged();
@@ -1187,7 +1204,7 @@ export function WorkspaceModelsPageBody({
           codex={codex}
           places={codexPlaces}
           onClose={backToList}
-          fields={note}
+          fields={subscriptionFields}
           scope={onlyMe || (key?.provider === "codex" && ownKey) ? "user" : undefined}
         />
       ) : provider === "supergrok" ? (
@@ -1195,7 +1212,7 @@ export function WorkspaceModelsPageBody({
           grok={grok}
           places={grokPlaces}
           onClose={backToList}
-          fields={note}
+          fields={subscriptionFields}
           // Your own in a Personal workspace, as a member, or signing your
           // own in again; a shared workspace's admin chooses.
           scope={
@@ -1215,7 +1232,7 @@ export function WorkspaceModelsPageBody({
           allowPrivate={!personal}
           onClose={account ? () => nav.openAccount(account) : backToList}
           onConnected={(id) => (id ? claudePlaces.openAccount(id) : backToList())}
-          fields={note}
+          fields={subscriptionFields}
         />
       ) : (
         <ProviderConnectPage
@@ -2119,6 +2136,11 @@ type ConnectChoice =
   | "openai"
   | "azure_openai"
   | "openai_compatible";
+
+/** Providers people connect with their own subscription, which needs a paid plan to use. */
+function subscriptionProvider(provider: string): boolean {
+  return provider === "codex" || provider === "supergrok" || provider === "claude_subscription";
+}
 
 /** API keys at a shared workspace are a setting, so its admins add them. */
 const API_KEYS_FOR_ADMINS: ConnectChoiceState = { unavailable: "Only admins can add API keys" };

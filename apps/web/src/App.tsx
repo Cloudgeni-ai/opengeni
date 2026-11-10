@@ -226,6 +226,10 @@ const LazySubscriptionPlansPreview = lazyRouteComponent(
   () => import("@/dev/subscription-plans-preview"),
   "SubscriptionPlansPreview",
 );
+const LazyOwnSubscriptionPlanPreview = lazyRouteComponent(
+  () => import("@/dev/own-subscription-plan-preview"),
+  "OwnSubscriptionPlanPreview",
+);
 const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
 const LazyReadOnlyChatsRoute = lazyRouteComponent(
   () => import("@/routes/read-only-chats"),
@@ -503,6 +507,11 @@ const subscriptionPlansPreviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "dev/subscription-plans",
   component: LazySubscriptionPlansPreview,
+});
+const ownSubscriptionPlanPreviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "dev/own-subscription-plan",
+  component: LazyOwnSubscriptionPlanPreview,
 });
 // DEV-only: production MessageTimeline replaying deterministic scenarios (native parity reference).
 const devSessionTimelineRoute = createRoute({
@@ -1105,6 +1114,7 @@ const routeTree = rootRoute.addChildren([
         composerChromeGalleryRoute,
         onboardingPreviewRoute,
         subscriptionPlansPreviewRoute,
+        ownSubscriptionPlanPreviewRoute,
         devSessionTimelineRoute,
       ]
     : []),

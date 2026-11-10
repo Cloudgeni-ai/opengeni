@@ -14,7 +14,7 @@ import { SessionAvatar } from "../session/session-avatar";
 /**
  * The agent's own suggestion (`agent_suggest`), as a card under the chat.
  * `create`: make an agent from this chat; the "Make this an agent" form opens
- * filled in with the name, icon, description, Instructions and First message
+ * filled in with the name, icon, description and Instructions
  * the agent drafted. `reuse`: start a chat with the agent that already does
  * this work. Nothing changes until the person acts; "Not now" hides it here.
  */

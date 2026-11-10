@@ -10,6 +10,15 @@ import {
   type ConnectController,
   type ConnectTransport,
 } from "@opengeni/connect";
+import { organizationAppApproval, type OrganizationAppApproval } from "@opengeni/contracts/connect";
+import type { ConnectAttemptHints } from "./connect-window-host";
+import {
+  browserSignInMemory,
+  forgetSignIn,
+  rememberSignIn,
+  signInNeverReturned,
+  unreturnedSignIn,
+} from "./connect-sign-in-memory";
 import { useConnect, type ConnectView } from "./hooks/use-connect";
 import { useOpenGeniText, type OpenGeniText } from "./messages/runtime";
 
@@ -190,6 +199,56 @@ export function adminApprovalLink(
   }
 }
 
+/**
+ * Help for an organization that must approve the app before its people can
+ * connect. `required`: the provider said only an administrator can grant
+ * access. `possible`: it declined, which is also how a person leaving its
+ * "needs admin approval" page comes back. `unfinished`: the person was sent to
+ * sign in and never came back, the other way that page ends.
+ */
+export type OrganizationApproval = {
+  reason: "required" | "possible" | "unfinished";
+  /** Link an administrator opens to approve the app, when the provider has one. */
+  url: string | null;
+  /** The app's client ID, for administrators who allow apps by ID. */
+  appId: string | null;
+};
+
+/**
+ * The approval help an attempt calls for. `unfinished` is the approval a
+ * sign-in the person never came back from offers (see `connect-sign-in-memory`).
+ */
+export function organizationApprovalFor(
+  attempt: Pick<ConnectAttempt, "error" | "nextAction">,
+  unfinished: OrganizationAppApproval | null = null,
+): OrganizationApproval | null {
+  const link = adminApprovalLink(attempt);
+  if (link) {
+    const appId = new URL(link.url).searchParams.get("client_id");
+    return { reason: link.required ? "required" : "possible", url: link.url, appId };
+  }
+  if (!unfinished || attempt.error || attempt.nextAction.type !== "authorize") return null;
+  // The attempt's own sign-in names the app the person is about to approve.
+  const current = organizationAppApproval(attempt.nextAction.url) ?? unfinished;
+  return { reason: "unfinished", url: current.approvalUrl, appId: current.appId };
+}
+
+/**
+ * The ready-made message a person sends their IT, in the host's words
+ * (`connectSetup.itMessageWithLink` / `connectSetup.itMessageWithAppId`).
+ */
+export function organizationApprovalMessage(
+  t: OpenGeniText,
+  approval: Pick<OrganizationApproval, "url" | "appId">,
+  serviceName: string | undefined,
+): string | null {
+  const service = serviceName?.trim() || t("connectSetup.myWorkAccount");
+  if (approval.url) return t("connectSetup.itMessageWithLink", { service, link: approval.url });
+  if (approval.appId)
+    return t("connectSetup.itMessageWithAppId", { service, appId: approval.appId });
+  return null;
+}
+
 /** The provider's device-verification page, when it is a safe HTTPS link. */
 export function deviceVerificationUrl(action: ConnectAttempt["nextAction"]): string | null {
   if (action.type !== "wait" || !action.verificationUrl) return null;
@@ -216,6 +275,12 @@ export type ConnectSetupFlowOptions = {
    * its own "Try again", so its error line points there instead.
    */
   inChat?: boolean | undefined;
+  /**
+   * Where sign-ins the person never came back from are remembered, so the next
+   * visit can offer organization approval help. Defaults to the browser's
+   * local storage; `null` turns it off (a chat card keeps its own).
+   */
+  signInMemory?: ConnectAttemptHints | null | undefined;
 };
 
 /** What a Connect setup step shows and the steps a person can take from it. */
@@ -229,6 +294,8 @@ export type ConnectSetupFlow = {
   awaitingOwner: boolean;
   autoFinishing: boolean;
   adminApproval: { url: string; required: boolean } | null;
+  /** Organization approval help to show, or null. */
+  organizationApproval: OrganizationApproval | null;
   terminal: boolean;
   /** The manual controls (form, sign-in, status and cancel) are shown. */
   interactive: boolean;
@@ -275,8 +342,16 @@ export function useConnectSetupFlow(
   const [localError, setLocalError] = useState(false);
   const [signInClosed, setSignInClosed] = useState(false);
   const [navigating, setNavigating] = useState(false);
+  // A sign-in to this connection the person never came back from, earlier.
+  const [unreturned, setUnreturned] = useState<OrganizationAppApproval | null>(null);
   const latest = useRef(options);
   latest.current = options;
+  const memory =
+    options.signInMemory !== undefined
+      ? options.signInMemory
+      : options.inChat
+        ? null
+        : browserSignInMemory;
   // One automatic step per attempt revision; a failure falls back to the
   // manual controls instead of retrying in a loop.
   const autoStep = useRef<string | null>(null);
@@ -293,6 +368,26 @@ export function useConnectSetupFlow(
     }
   }, []);
   const attempt = view.attempt;
+  const awaitsSignIn = attempt?.nextAction.type === "authorize";
+  useEffect(() => {
+    setUnreturned(null);
+    if (!attempt || !awaitsSignIn || !memory) return;
+    const abort = new AbortController();
+    void unreturnedSignIn(memory, controller.transport, attempt.workspaceId, attempt.providerId, {
+      signal: abort.signal,
+    })
+      .then((approval) => {
+        if (!abort.signal.aborted) setUnreturned(approval);
+      })
+      .catch(() => undefined);
+    return () => abort.abort();
+    // Checked once per attempt waiting for sign-in.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attempt?.id, awaitsSignIn, memory, controller]);
+  // The provider answered, or setup moved on: nothing left to explain later.
+  useEffect(() => {
+    if (attempt && !signInNeverReturned(attempt)) forgetSignIn(memory, attempt);
+  }, [attempt, memory]);
   useEffect(() => {
     if (!attempt || view.busy || localError || view.error) return;
     const step = `${attempt.id}:${attempt.revision}`;
@@ -315,6 +410,13 @@ export function useConnectSetupFlow(
     (curatedAutoAdvance(attempt) !== null ||
       (attempt.state === "installing" && isCuratedDefinitionAttempt(attempt) && !attempt.error));
   const adminApproval = attempt ? adminApprovalLink(attempt) : null;
+  // Closing the sign-in window before finishing is the other way a provider's
+  // "needs admin approval" page ends, so it offers the same help right away.
+  const unfinished =
+    attempt && signInClosed && attempt.nextAction.type === "authorize"
+      ? (organizationAppApproval(attempt.nextAction.url) ?? unreturned)
+      : unreturned;
+  const organizationApproval = attempt ? organizationApprovalFor(attempt, unfinished) : null;
   const terminal = !!attempt && ["complete", "cancelled", "expired"].includes(attempt.state);
   const busy = view.busy || navigating;
   const run = (advance: ConnectAdvance) => {
@@ -331,6 +433,7 @@ export function useConnectSetupFlow(
     awaitingOwner,
     autoFinishing,
     adminApproval,
+    organizationApproval,
     terminal,
     /** The manual controls (form, sign-in, status and cancel) are shown. */
     interactive: !!attempt && !terminal && !autoFinishing,
@@ -425,6 +528,7 @@ export function useConnectSetupFlow(
     authorize() {
       if (!attempt) return;
       const snapshot = JSON.parse(JSON.stringify(attempt)) as ConnectAttempt;
+      rememberSignIn(memory, snapshot);
       invoke(() => latest.current.onAuthorize(snapshot));
     },
     refresh() {

@@ -47,7 +47,7 @@ export function ConnectPanel({
   const activeSetup =
     attempt !== null && !["complete", "cancelled", "expired"].includes(attempt.state);
   const serviceName = attempt
-    ? connectionServicePresentation({ id: attempt.providerId, label: "" }).name
+    ? connectionServicePresentation({ id: attempt.providerId, label: "" }, t).name
     : "";
   return (
     <div className={["og-connect", className].filter(Boolean).join(" ")}>
@@ -96,6 +96,7 @@ export function ConnectPanel({
       {activeSetup && (
         <ConnectSetup
           {...setup}
+          serviceName={setup.serviceName ?? (serviceName || undefined)}
           authorizeLabel={
             setup.authorizeLabel ??
             (serviceName

@@ -1186,6 +1186,8 @@ export const englishMessages = {
   "composerMessages.messageTheAgent2": "Message the agent",
   "composerMessages.messageTheAgentItWill": "Message the agent — it will wait in the queue…",
   "composerMessages.model": "Model",
+  "composerMessages.openFailed": "Couldn't open it. Select to try again.",
+  "composerMessages.openName": "Open {name}",
   "composerMessages.pausedBy": "Paused by",
   "composerMessages.pausedByDisplayname": "Paused by {displayName}",
   "composerMessages.pausedHere": "Paused here",
@@ -1247,6 +1249,7 @@ export const englishMessages = {
   "composerMessages.thisSessionWillBeAble": "This session will be able to run",
   "composerMessages.thisWorkstreamWasPausedWhile":
     "This workstream was paused while you were sending. Nothing was sent, and your draft is still here.",
+  "composerMessages.unavailable": "Unavailable",
   "composerMessages.uploadFailed": "Upload failed",
   "composerMessages.uploading": "Uploading",
   "composerMessages.useOtherDraft": "Use other draft",
@@ -1518,6 +1521,7 @@ export const englishMessages = {
     "Connection setup could not continue. Refresh its status before trying again.",
   "connectSetup.continue": "Continue",
   "connectSetup.copyAdminApprovalLink": "Copy approval link",
+  "connectSetup.copyMessageForIt": "Copy message for IT",
   "connectSetup.couldNotVerifyThisConnection":
     "Could not verify this connection. Check the key and server, then submit again. Nothing was connected.",
   "connectSetup.donTSeeYourOrganization":
@@ -1525,17 +1529,28 @@ export const englishMessages = {
   "connectSetup.enterConnectionDetails": "Enter connection details",
   "connectSetup.enterTheRequestedKey": "Enter the requested key",
   "connectSetup.microsoftAdminApprovalMaybe":
-    "Microsoft didn't grant access. If it asked for admin approval, send this link to your Microsoft 365 admin.",
+    "If Microsoft said an admin has to approve {product}, send your IT the message with the approval link. Otherwise, sign in again.",
   "connectSetup.microsoftAdminApprovalRequired":
-    "Send this link to your Microsoft 365 admin to approve access, then sign in again.",
+    "Your organization lets only an admin approve apps like this. Send your IT the message with the approval link. They approve it once for everyone, then you sign in again.",
+  "connectSetup.itMessageWithAppId":
+    "Hi! I'd like to connect {service} to {product}, but our organization only allows apps an admin has approved. Could you allow it? Its app (client) ID is {appId}.",
+  "connectSetup.itMessageWithLink":
+    "Hi! I'd like to connect {service} to {product}, but our organization requires an admin to approve the app first. Could you approve it with this link? You sign in with an admin account and can review what it asks for. It only has to be done once for everyone here.\n\n{link}",
+  "connectSetup.myWorkAccount": "my work account",
   "connectSetup.moreResourcesAreAvailableReview":
     "More resources are available. Review all pages before submitting a selection.",
   "connectSetup.noAccountPublicService": "No account (public service)",
   "connectSetup.nothingIsConnectedUntilThen":
     "Nothing is connected until then. You can close this and keep working.",
   "connectSetup.onlyYourWorkCanUse": "Only your work can use this connection.",
+  "connectSetup.openApprovalLinkAsAdmin": "Open approval link",
   "connectSetup.openProviderVerificationPageNew": "Open the sign-in page",
   "connectSetup.opensInNewTab": "(opens in a new tab)",
+  "connectSetup.organizationApprovalPossibleTitle": "Microsoft didn't give access",
+  "connectSetup.organizationApprovalRequiredTitle": "Your IT needs to approve {product} first",
+  "connectSetup.organizationApprovalUnfinished":
+    "If the sign-in page said an admin has to approve {product}, send your IT the message with the approval details. After they approve, sign in again.",
+  "connectSetup.organizationApprovalUnfinishedTitle": "Didn't get to finish signing in?",
   "connectSetup.personalConnection": "Personal connection",
   "connectSetup.readyToConnect": "Ready to connect",
   "connectSetup.sendTheApprovalLinkTo": "Send the admin approval link to your Microsoft 365 admin.",
@@ -1544,6 +1559,7 @@ export const englishMessages = {
   "connectSetup.setupCouldNotContinueTryAgain": "Setup couldn't continue. You can try again.",
   "connectSetup.setupExpired": "Setup expired",
   "connectSetup.setupOutcomeNeedsChecking": "Setup outcome needs checking",
+  "connectSetup.showMessageForIt": "Show the message",
   "connectSetup.signInWindowClosed": "Sign-in window closed. You can try connecting again.",
   "connectSetup.theIntegrationSourceChangedReview":
     "The integration source changed. Review the updated tools before adding them.",
@@ -2980,6 +2996,8 @@ export const englishMessages = {
     "This organization's policy doesn't allow this model. Try another model.",
   "meetings.recordings.errorTimedOut":
     "Transcribing took too long and was stopped. Try again, or try another model.",
+  "meetings.recordings.errorWorkerStopped":
+    "The server kept stopping while it transcribed this meeting, most likely for lack of memory. Try again later, or ask whoever runs this server.",
   "meetings.recordings.errorUnknown":
     "Something went wrong while transcribing. Try again, or pick another model.",
   /** A speaker nobody has named yet. */
@@ -3152,9 +3170,23 @@ export const englishMessages = {
   "meetings.transcript.name": "Name",
   "meetings.transcript.nameChangeWhoThisIs": "{name}, change who this is",
   "meetings.transcript.nameNameThisSpeaker": "{name}, name this speaker",
+  /**
+   * Quiet lines in a meeting transcript where audio is missing: a microphone
+   * was unplugged or turned off, or tab sharing ended. {from} and {to} are
+   * times in the recording, like 17:39; {name} is the one person heard on
+   * that microphone.
+   */
+  "meetings.transcript.nameSMicrophoneWasnTRecordingFromTo":
+    "{name}'s microphone wasn't recording from {from} to {to}.",
+  /** As above, when every other track kept recording. */
+  "meetings.transcript.nameSMicrophoneWasnTRecordingFromToEveryoneElse":
+    "{name}'s microphone wasn't recording from {from} to {to}. Everyone else was still recorded.",
   "meetings.transcript.nameSuggestedFromTheirVoice":
     "{name}, suggested from their voice. Confirm or correct",
+  "meetings.transcript.nothingWasRecordedFromTo": "Nothing was recorded from {from} to {to}.",
   "meetings.transcript.noLeaveUnnamed": "No, leave unnamed",
+  "meetings.transcript.otherPeopleWerenTRecordedFromTo":
+    "Other people weren't recorded from {from} to {to}.",
   "meetings.transcript.orPickWhoItIs": "Or pick who it is",
   "meetings.transcript.playFromFormatclock": "Play from {formatClock}",
   "meetings.transcript.rememberDisplaynameSVoice": "Remember {displayName}'s voice…",
@@ -3169,6 +3201,11 @@ export const englishMessages = {
   "meetings.transcript.suggested": "Suggested",
   "meetings.transcript.suggestedBecauseTheVoiceSounds": "Sounds like them ({suggestionMatch})",
   "meetings.transcript.suggestedBecauseTheVoiceSounds2": "Sounds like them",
+  "meetings.transcript.theMicrophoneWasnTRecordingFromTo":
+    "The microphone wasn't recording from {from} to {to}.",
+  /** As above, when every other track kept recording. */
+  "meetings.transcript.theMicrophoneWasnTRecordingFromToOtherPeople":
+    "The microphone wasn't recording from {from} to {to}. Other people were still recorded.",
   "meetings.transcript.theNameIsAddedTo": "Anyone in the workspace can pick this name later.",
   "meetings.transcript.transcript": "Transcript",
   "meetings.transcript.usedToSuggestNamesIn": "Remembered voice",
@@ -3366,6 +3403,7 @@ export const englishMessages = {
   "modelPolicy.geographyUs": "US",
   "modelPolicy.models": "Models",
   "modelPolicy.needsCredits": "Not covered by your credits",
+  "modelPolicy.needsPlan": "Needs {plan}",
   "modelPolicy.notEntitled": "Not entitled",
   "modelPolicy.opengeniCredits": "{product} credits",
   "modelPolicy.opengeniCreditsAutomaticManagedRoute": "{product} credits · automatic managed route",
@@ -4392,6 +4430,9 @@ export const englishMessages = {
   "secretRefChip.secret": "Secret:",
   "secretRefChip.secretFile": "Secret file:",
   "secretReferenceLabel.secret": "Secret",
+  "sessionAdmission.allowFailed": "That couldn’t be confirmed. Refresh the chat and try again.",
+  "sessionAdmission.allowForThisChat": "Allow for this chat",
+  "sessionAdmission.allowing": "Allowing…",
   "sessionAdmission.aMember": "another member",
   "sessionAdmission.approvedElsewhereBody":
     "You sent it for “{approved}”, but this chat now runs on “{machine}”. A saved message only runs on the machine it was sent for.",
@@ -4402,8 +4443,7 @@ export const englishMessages = {
   "sessionAdmission.approvedElsewhereTitle": "Your message is waiting for “{approved}”",
   "sessionAdmission.approvedElsewhereUnavailableNext":
     "“{approved}” isn’t available to this chat right now. Remove the message from the queue and send it again to use “{machine}”.",
-  "sessionAdmission.cantRecheckNote":
-    "Someone with permission to control this session can recheck after the issue is resolved.",
+  "sessionAdmission.cantRetryNote": "Someone who can control this chat can try again.",
   "sessionAdmission.chooseAMachineForThisChat": "Choose a machine for this chat",
   "sessionAdmission.chooseMachine": "Choose machine",
   "sessionAdmission.continueWaitingWork_one": "Continue with it",
@@ -4415,25 +4455,35 @@ export const englishMessages = {
   "sessionAdmission.continuingWaitingWork": "Continuing…",
   "sessionAdmission.copyRequestTo": "Copy request to {owner}",
   "sessionAdmission.genericBody":
-    "{product} couldn't start the next step. Your queued work is saved.",
+    "{product} couldn’t start your next message. Your message is saved.",
   "sessionAdmission.genericNext":
-    "Ask a workspace admin to investigate. Once the problem is fixed, try again. It will not retry automatically.",
+    "Try again. If it still doesn’t start, ask a workspace admin to look into it.",
   "sessionAdmission.genericTitle": "Couldn't start",
   "sessionAdmission.grantBody":
-    "The next message needs a machine or other personal resource that isn’t approved for this chat. Your queued work is saved.",
+    "Your next message needs a machine or other personal resource that isn’t allowed for this chat. Your message is saved.",
   "sessionAdmission.grantNext":
-    "Choose one this chat may use, or ask the person it belongs to to allow it here. Then recheck to continue. It will not retry automatically.",
-  "sessionAdmission.grantTitle": "Not approved for this chat",
+    "The person it belongs to can allow it for this chat. It starts by itself once they do.",
+  "sessionAdmission.grantTitle": "Not allowed for this chat",
+  "sessionAdmission.machineAccessBody":
+    "This chat isn’t allowed to use “{machine}” right now. Your message is saved.",
+  "sessionAdmission.machineAccessOthersBody":
+    "This chat isn’t allowed to use {owner}’s machine “{machine}” right now. The message is saved.",
+  "sessionAdmission.machineAccessOthersNext":
+    "Only {owner} can allow it. It starts by itself once they do.",
+  "sessionAdmission.machineAccessOwnerNext":
+    "Allow it for this chat and your message starts right away.",
+  "sessionAdmission.machineAccessOwnerSettingsNext":
+    "You can allow it in the machine’s settings. Your message starts by itself once you do.",
+  "sessionAdmission.machineAccessTitle": "Machine access needed",
   "sessionAdmission.machineChangeFailed":
     "The machine change could not be confirmed. Refresh and try again.",
-  "sessionAdmission.machineChangedBody": "The saved message has not started yet.",
-  "sessionAdmission.machineChangedNext":
-    "Recheck access to try it on the selected machine. It will not retry automatically.",
-  "sessionAdmission.machineChangedTitle": "Machine changed",
+  "sessionAdmission.machineChangedBody": "Your message is saved.",
+  "sessionAdmission.machineChangedNext": "It starts by itself on the new machine.",
+  "sessionAdmission.machineChangedTitle": "Starting on the new machine",
   "sessionAdmission.membershipBody":
-    "The person who started this work needs workspace access. Your queued work is saved.",
+    "The person who sent this message no longer has access to this workspace. Their message is saved.",
   "sessionAdmission.membershipNext":
-    "Ask a workspace admin to restore their access, then recheck to continue. It will not retry automatically.",
+    "A workspace admin can restore their access. It starts by itself once they do.",
   "sessionAdmission.membershipTitle": "Workspace access needed",
   "sessionAdmission.messagesWaitingExplanation":
     "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start work there, so messages from other people wait for {owner}.",
@@ -4460,7 +4510,7 @@ export const englishMessages = {
   "sessionAdmission.otherMachineExplanation":
     "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start new work there.",
   "sessionAdmission.otherMachineQueuedNext":
-    "The queued message is saved. Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. After changing machines or access, recheck to run the saved message.",
+    "The message is saved. Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. It starts by itself once the chat is on a machine you can use.",
   "sessionAdmission.otherMachineWorkNote":
     "Updates from agents you start here also wait for {owner}.",
   "sessionAdmission.othersApprovedElsewhereBody":
@@ -4486,34 +4536,30 @@ export const englishMessages = {
   "sessionAdmission.ownMachineExplanation":
     "This chat runs on your personal machine “{machine}”. Messages from other people cannot start work on it.",
   "sessionAdmission.ownMachineQueuedNext":
-    "The queued message is saved. Choose a workspace or cloud machine, or ask a workspace admin to share this machine. After changing machines or access, recheck to run the saved message.",
+    "The message is saved. Choose a workspace or cloud machine, or ask a workspace admin to share this machine. It starts by itself once the chat is on a machine its sender can use.",
   "sessionAdmission.ownMachineSharedHeadsUp":
     "This chat runs on your personal machine “{machine}”. People in this workspace see what the agent does on it.",
   "sessionAdmission.ownerRequest":
     "This chat runs on your personal machine “{machine}”, so my message can't start there. Could you make the machine available to the workspace, or help me choose a shared machine?",
-  "sessionAdmission.pausedNote":
-    "This workstream is also paused. Use the existing Resume controls when you are ready; rechecking does not clear that pause.",
+  "sessionAdmission.pausedNote": "This chat is also paused. Your message starts when it’s resumed.",
   "sessionAdmission.permissionBody":
-    "The next step was blocked by a permission check. Your queued work is saved.",
+    "A permission check stopped your next message. Your message is saved.",
   "sessionAdmission.permissionNext":
-    "Check access to this chat's machine and resources with their owner or a workspace admin. After access changes, recheck to continue. It will not retry automatically.",
+    "It starts by itself once access to this chat’s machine or resources is fixed. Their owner or a workspace admin can fix it.",
   "sessionAdmission.permissionTitle": "Permission needed",
   "sessionAdmission.preSendTitle": "Choose a machine before sending",
-  "sessionAdmission.recheckAccess": "Recheck access",
-  "sessionAdmission.recheckFailed":
-    "The recheck could not be confirmed. Check the session status before trying again.",
-  "sessionAdmission.rechecking": "Rechecking…",
   "sessionAdmission.refreshFailed": "Session status could not be refreshed. Try refreshing again.",
-  "sessionAdmission.refreshRequiredNote":
-    "Session controls changed. Refresh the status before rechecking.",
   "sessionAdmission.refreshSessionStatus": "Refresh session status",
   "sessionAdmission.refreshing": "Refreshing…",
   "sessionAdmission.requestCopied": "Request copied",
   "sessionAdmission.requestCopiedNote":
     "Paste it into a message to the owner. Nothing has been sent.",
+  "sessionAdmission.retryFailed":
+    "That couldn’t be confirmed. Check the chat’s status before trying again.",
   "sessionAdmission.runOnApprovedMachine": "Run it on {approved}",
   "sessionAdmission.savedMessageMachineNote":
-    "Use a workspace or cloud machine for the saved message. A new personal-machine permission only applies to new messages.",
+    "Use a workspace or cloud machine for the saved message. It starts by itself once the chat moves.",
+  "sessionAdmission.starting": "Starting…",
   "sessionAdmission.theMachineOwner": "the machine owner",
   "sessionAdmission.tryAgain": "Try again",
   "sessionAdmission.updatesWaitingExplanation":

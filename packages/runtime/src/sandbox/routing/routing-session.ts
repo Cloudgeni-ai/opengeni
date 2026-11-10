@@ -101,7 +101,7 @@ import {
   type RemoteOperationObservation,
 } from "../op-correlation";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
-import { isReadOnlyPathProbeMiss } from "../operation-purpose";
+import { isCallerPathRejection, isReadOnlyPathProbeMiss } from "../operation-purpose";
 import {
   clearSecretFilesCommand,
   secretEnvFileContent,
@@ -397,7 +397,10 @@ function eligibleForSupervision(args: unknown): boolean {
 export type RoutingSandboxOperationObservation = {
   backend: string;
   op: string;
-  outcome: "ok" | "not_found" | "failed";
+  /** `not_found` is a read-only probe's definite path miss; `rejected` is a
+   * caller-supplied path the SDK refused before any provider work. Neither is
+   * a provider failure. */
+  outcome: "ok" | "not_found" | "rejected" | "failed";
   durationMs: number;
   materializationFailureReason?: MaterializationFailureReason;
 };
@@ -1893,7 +1896,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       outcome = "completed";
       return result;
     } catch (error) {
-      if (isReadOnlyPathProbeMiss(op, error)) outcome = "completed";
+      if (isReadOnlyPathProbeMiss(op, error) || isCallerPathRejection(op, error)) {
+        outcome = "completed";
+      }
       throw error;
     } finally {
       try {
@@ -2107,7 +2112,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           );
           providerOutcome = "completed";
         } catch (error) {
-          if (isReadOnlyPathProbeMiss(op, error)) providerOutcome = "completed";
+          if (isReadOnlyPathProbeMiss(op, error) || isCallerPathRejection(op, error)) {
+            providerOutcome = "completed";
+          }
           throw error;
         } finally {
           recordFirstOperationPhase(
@@ -2466,6 +2473,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       materializationFailureReason = materializationVerificationDiagnostic(error)?.reason;
       if (isReadOnlyPathProbeMiss(op, error)) {
         outcome = "not_found";
+      } else if (isCallerPathRejection(op, error)) {
+        outcome = "rejected";
       }
       throw error;
     } finally {

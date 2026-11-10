@@ -202,9 +202,10 @@ describe("SessionStartNotice", () => {
     );
     expect(container!.textContent).toContain("Denne meldingen trenger en annen maskin");
     expect(container!.textContent).toContain("Only Kari can start new work there.");
-    expect(container!.textContent).toContain("The queued message is saved.");
-    // Rechecking on the same machine would be refused again.
-    expect(button("Recheck access")!.disabled).toBe(true);
+    expect(container!.textContent).toContain("The message is saved.");
+    expect(container!.textContent).toContain("It starts by itself once the chat is on a machine");
+    // There is no recheck: the server starts it once the chat moves.
+    expect(button("Recheck access")).toBeUndefined();
 
     await act(async () => button("Velg maskin")!.click());
     const labels = [...container!.querySelectorAll("li button")].map(
@@ -224,7 +225,7 @@ describe("SessionStartNotice", () => {
     expect(resumeSession).not.toHaveBeenCalled();
   });
 
-  test("after the move, one fenced recheck runs the saved message", async () => {
+  test("after the move, the saved message starts by itself: no button, no Resume", async () => {
     const moved: MachinesResponse = {
       activeSandboxId: "build",
       activeEpoch: 4,
@@ -242,10 +243,33 @@ describe("SessionStartNotice", () => {
       />,
     );
     expect(container!.textContent).toContain("Permission needed");
-    const recheck = button("Recheck access")!;
+    expect(container!.textContent).toContain("starts by itself");
+    expect(container!.querySelectorAll("button")).toHaveLength(0);
+    expect(resumeSession).not.toHaveBeenCalled();
+  });
+
+  test("an unknown failure offers one fenced Try again", async () => {
+    const { client, resumeSession } = fakeClient(null);
+    const onSessionChanged = mock(async () => {});
+    await render(
+      <SessionStartNotice
+        client={client as never}
+        workspaceId="workspace-a"
+        session={blockedSession({
+          admissionBlock: {
+            reason: "database_claim_rejected",
+            sqlState: "23505",
+            retryPolicy: "explicit_recheck",
+            blockedAt: "2026-10-21T12:40:43Z",
+          },
+        } as Partial<Session>)}
+        onSessionChanged={onSessionChanged}
+      />,
+    );
+    const retry = button("Try again")!;
     await act(async () => {
-      recheck.click();
-      recheck.click();
+      retry.click();
+      retry.click();
     });
     expect(resumeSession).toHaveBeenCalledTimes(1);
     const [workspaceId, sessionId, options] = resumeSession.mock.calls[0] as unknown as [
@@ -259,6 +283,83 @@ describe("SessionStartNotice", () => {
       "etag-4",
     ]);
     expect(options.clientEventId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(onSessionChanged).toHaveBeenCalledTimes(1);
+  });
+
+  test("the owner's Allow for this chat issues one grant for this chat and never resends", async () => {
+    const response: MachinesResponse = {
+      activeSandboxId: "owner-laptop",
+      activeEpoch: 3,
+      machines: fleet.map((entry) =>
+        entry.sandboxId === "owner-laptop"
+          ? { ...entry, enrollmentId: "laptop-enrollment" }
+          : entry,
+      ),
+      sessionMachineAccess: {
+        sandboxId: "owner-laptop",
+        machineName: "Kari's laptop",
+        ownerName: "Kari",
+        isOwner: true,
+        queuedTurnBlocked: false,
+      },
+    };
+    const { client, resumeSession } = fakeClient(response);
+    const listUserResourceAuthorities = mock(async () => ({
+      authorities: [
+        {
+          authorityId: "other-authority",
+          resourceKind: "connected_machine",
+          resourceId: "other-enrollment",
+          status: "active",
+        },
+        {
+          authorityId: "laptop-authority",
+          resourceKind: "connected_machine",
+          resourceId: "laptop-enrollment",
+          status: "active",
+        },
+      ],
+      nextCursor: null,
+    }));
+    const issueUserResourceGrant = mock(async () => ({}));
+    client.listUserResourceAuthorities = listUserResourceAuthorities;
+    client.issueUserResourceGrant = issueUserResourceGrant;
+    const onSessionChanged = mock(async () => {});
+    await render(
+      <SessionStartNotice
+        client={client as never}
+        workspaceId="workspace-a"
+        session={blockedSession({
+          tenancy: { visibility: "workspace", authorityEpoch: 7 },
+        } as unknown as Partial<Session>)}
+        onSessionChanged={onSessionChanged}
+      />,
+    );
+    // A claim-time permission refusal on the owner's machine is machine access.
+    expect(container!.textContent).toContain("Machine access needed");
+    expect(container!.textContent).not.toContain("Permission needed");
+    const allow = button("Allow for this chat")!;
+    await act(async () => {
+      allow.click();
+      allow.click();
+    });
+    expect(issueUserResourceGrant.mock.calls).toEqual([
+      [
+        "workspace-a",
+        "laptop-authority",
+        {
+          scope: "user",
+          resourceKind: "connected_machine",
+          mode: "session",
+          context: "workspace_shared",
+          sessionId: "session-a",
+          expectedAuthorityEpoch: 7,
+          workspaceSharedAcknowledged: true,
+        },
+      ],
+    ] as never);
+    // The server starts the saved message once the grant lands.
+    expect(resumeSession).not.toHaveBeenCalled();
     expect(onSessionChanged).toHaveBeenCalledTimes(1);
   });
 
@@ -309,7 +410,7 @@ describe("SessionStartNotice", () => {
     );
     expect(container!.textContent).toContain("Permission needed");
     expect(button("Choose machine")).toBeUndefined();
-    expect(button("Recheck access")!.disabled).toBe(false);
+    expect(container!.querySelectorAll("button")).toHaveLength(0);
   });
 
   test("a viewer who can't read machines never requests them", async () => {
@@ -328,7 +429,7 @@ describe("SessionStartNotice", () => {
     expect(button("Choose machine")).toBeUndefined();
   });
 
-  test("a message sent for the owner's other machine runs there: one move, then one fenced recheck", async () => {
+  test("a message sent for the owner's other machine runs there: one move, no Resume", async () => {
     const response: MachinesResponse = {
       activeSandboxId: "owner-laptop",
       activeEpoch: 3,
@@ -370,11 +471,8 @@ describe("SessionStartNotice", () => {
     expect(swapActiveSandbox.mock.calls).toEqual([
       ["workspace-a", "session-a", { target: "home-server" }],
     ] as never);
-    expect(resumeSession).toHaveBeenCalledTimes(1);
-    expect(
-      (
-        resumeSession.mock.calls[0] as unknown as [string, string, { expectedControlEtag: string }]
-      )[2].expectedControlEtag,
-    ).toBe("etag-4");
+    // The server starts it on the machine it was sent for; nothing is resent.
+    expect(resumeSession).not.toHaveBeenCalled();
+    expect(onSessionChanged).toHaveBeenCalledTimes(1);
   });
 });

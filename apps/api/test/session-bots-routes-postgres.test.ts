@@ -468,7 +468,7 @@ describe("bots through the API (real PostgreSQL)", () => {
       ).isError,
     ).toBe(true);
 
-    // "Make this an agent": standing Instructions plus an optional First message.
+    // "Make this an agent": standing Instructions. An older First message joins them.
     const saved = await callTool(server, "bot_template_save", {
       name: "Release owner",
       description: "Keeps the release checklist moving",
@@ -482,15 +482,22 @@ describe("bots through the API (real PostgreSQL)", () => {
       visibility: "workspace",
       revision: 1,
     });
+    // The result says what happened to its Memory, so the agent can tell the person.
+    expect(["ready", "pending_review", "learning_off", "not_saved"]).toContain(
+      saved.body.memory.status,
+    );
+    expect(typeof saved.body.memory.note).toBe("string");
     const stored = await getAgent(client.db, workspace, saved.body.agent.id);
     expect(stored).toMatchObject({
       origin: "app",
       sourceSessionId: sessionId,
       avatar: { kind: "icon", icon: "rocket", hue: 30 },
-      memoryEnabled: false,
+      // New agents remember by default, wherever they are made.
+      memoryEnabled: true,
       content: {
-        instructions: "You own releases. Keep the checklist current.",
-        firstMessage: "Install the release Skill and ask about their cadence.",
+        instructions:
+          "You own releases. Keep the checklist current.\n\nWhen a chat starts:\nInstall the release Skill and ask about their cadence.",
+        firstMessage: "",
       },
     });
     // It needs something to say.
@@ -532,7 +539,7 @@ describe("bots through the API (real PostgreSQL)", () => {
       visibility: "user_private",
     });
     const grant = { ...agentGrant({ accountId, workspaceId }, chat.id), subjectId };
-    // The older setupInstructions argument still works, as the First message.
+    // The older setupInstructions argument still works: it joins the Instructions.
     const saved = await callTool(buildOpenGeniMcpServer(deps, grant), "bot_template_save", {
       name: "My release owner",
       setupInstructions: "You own my releases.",
@@ -545,7 +552,7 @@ describe("bots through the API (real PostgreSQL)", () => {
       visibility: "private",
       ownerSubjectId: subjectId,
       createdBySubjectId: subjectId,
-      content: { instructions: "", firstMessage: "You own my releases." },
+      content: { instructions: "When a chat starts:\nYou own my releases.", firstMessage: "" },
     });
   }, 180_000);
 
@@ -618,7 +625,6 @@ describe("bots through the API (real PostgreSQL)", () => {
       description: "Checks supplier invoices against purchase orders",
       avatar: { kind: "emoji", emoji: "🧾", hue: 60 },
       instructions: "Check each invoice against its PO and list mismatches.",
-      firstMessage: "Which mailbox do the invoices arrive in?",
       reason: "You have asked for three invoice checks in this chat.",
     };
 
@@ -654,7 +660,6 @@ describe("bots through the API (real PostgreSQL)", () => {
         await callTool(server, "agent_suggest", {
           ...invoiceChecker,
           instructions: " ",
-          firstMessage: undefined,
           similarRequestsInARow: 3,
         })
       ).body,
@@ -673,7 +678,6 @@ describe("bots through the API (real PostgreSQL)", () => {
       name: "Invoice checker",
       avatar: { kind: "emoji", emoji: "🧾", hue: 60 },
       instructions: "Check each invoice against its PO and list mismatches.",
-      firstMessage: "Which mailbox do the invoices arrive in?",
     });
     // Recorded as display state only: no agent, and the chat keeps its look and activity time.
     const after = await getSession(client.db, workspace.workspaceId, sessionId);

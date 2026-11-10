@@ -263,7 +263,7 @@ describe("turn-capacity Prometheus alerts", () => {
     );
     const expected = new Map([
       ["OpenGeniTurnFailureRatioHigh", ["opengeni_turns_total", 'outcome="failed"']],
-      ["OpenGeniTurnRecoveryRatioHigh", ["opengeni_turns_total", 'outcome="recovering"']],
+      ["OpenGeniTurnRecoveryRatioHigh", ["opengeni_turn_recoveries_total", 'cause!="provider"']],
       [
         "OpenGeniTurnWorkerDeathRecovered",
         ["opengeni_turn_worker_death_recoveries_total", 'outcome="recovering"'],

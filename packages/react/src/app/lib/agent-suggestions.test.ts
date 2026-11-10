@@ -11,7 +11,6 @@ const kept: SessionAgentSuggestion = {
   description: "Checks invoices",
   avatar: { kind: "emoji", emoji: "🧾", hue: 60 },
   instructions: "Check each invoice.",
-  firstMessage: null,
   reason: "Three checks so far.",
   createdAt: "2026-10-27T10:00:00.000Z",
 };

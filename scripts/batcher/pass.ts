@@ -1,6 +1,7 @@
 import {
   GitHubError,
   isTransientGitHubFailure,
+  refusesRetry,
   type CommitSummary,
   type GitHub,
   type PullFile,
@@ -112,6 +113,8 @@ interface Context {
   dryRun: boolean;
   /** PRs this pass ejected: their departure is the batcher's doing, not their author's. */
   ejected: Set<number>;
+  /** Batch runs GitHub refused to run again in this pass, by run ID: their failure is final. */
+  unretryable: Set<number>;
 }
 
 function context(gh: GitHub, options: PassOptions & { dryRun?: boolean }): Context {
@@ -127,6 +130,7 @@ function context(gh: GitHub, options: PassOptions & { dryRun?: boolean }): Conte
     queuedSlots: new Map(),
     dryRun: options.dryRun ?? false,
     ejected: new Set(),
+    unretryable: new Set(),
   };
 }
 
@@ -263,7 +267,9 @@ async function observe(ctx: Context): Promise<Observation> {
       tip: branch.sha,
       manifest,
       createdAt: commit.date,
-      runs: await withFailedJobs(ctx, await gh.runs(branch.name, branch.sha)),
+      runs: (await withFailedJobs(ctx, await gh.runs(branch.name, branch.sha))).map((summary) =>
+        ctx.unretryable.has(summary.id) ? { ...summary, final: true as const } : summary,
+      ),
     };
     if (manifest.base === mainSha) batch.sameTree = await sameTree(ctx, batch, commit, pulls);
     batches.push(batch);
@@ -839,10 +845,7 @@ async function act(ctx: Context, action: Action) {
     case "abandon":
       return abandon(ctx, action.batch, action.reason, action.changed);
     case "retry":
-      for (const ci of action.runs) {
-        ctx.log(`Retrying the failed jobs of ${ci.url}`);
-        await ctx.gh.rerunFailedJobs(ci.id);
-      }
+      for (const ci of action.runs) await retry(ctx, ci);
       return;
     case "land":
       return land(ctx, action.batch);
@@ -860,6 +863,29 @@ async function act(ctx: Context, action: Action) {
     case "wait":
       return;
   }
+}
+
+/**
+ * Run a failed batch run's failed jobs again. A run that failed before any job
+ * started (GitHub could not start the workflow) has none, and GitHub refuses
+ * that, so it runs again in full. When GitHub refuses both, the failure is
+ * final: the next round judges the batch on it, as for a failed retry.
+ */
+async function retry(ctx: Context, failed: Batch["runs"][number]) {
+  ctx.log(`Retrying the failed jobs of ${failed.url}`);
+  try {
+    return await ctx.gh.rerunFailedJobs(failed.id);
+  } catch (error) {
+    if (!refusesRetry(error)) throw error;
+  }
+  ctx.log(`GitHub cannot retry only the failed jobs of ${failed.url}; running all of it again`);
+  try {
+    return await ctx.gh.rerunAll(failed.id);
+  } catch (error) {
+    if (!refusesRetry(error)) throw error;
+  }
+  ctx.log(`GitHub cannot run ${failed.url} again, so its failure is final`);
+  ctx.unretryable.add(failed.id);
 }
 
 /**
@@ -936,6 +962,7 @@ export async function run(
       for (const action of actions) ctx.log(`Plan: ${describe(action)}`);
       if (options.dryRun) return actions;
       let waitUntil: number | null = null;
+      const unretryable = ctx.unretryable.size;
       for (const action of actions) {
         if (action.kind === "wait") waitUntil = action.until;
         else await act(ctx, action);
@@ -948,8 +975,12 @@ export async function run(
         await sleep(Math.max(0, waitUntil - ctx.now()) + 1_000);
         continue;
       }
-      // Only a landing, an ejection or an abandoned batch can make more work now.
-      if (!actions.some((a) => a.kind === "land" || a.kind === "eject" || a.kind === "abandon"))
+      // Only a landing, an ejection, an abandoned batch or a run GitHub would
+      // not retry (its batch is judged next) can make more work now.
+      if (
+        !actions.some((a) => a.kind === "land" || a.kind === "eject" || a.kind === "abandon") &&
+        ctx.unretryable.size === unretryable
+      )
         break;
     }
   } finally {

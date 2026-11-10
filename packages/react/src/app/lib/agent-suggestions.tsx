@@ -44,7 +44,6 @@ function suggestionFrom(value: unknown, depth = 0): SessionAgentSuggestion | nul
       description: stringOrNull(output.description),
       avatar,
       instructions: stringOrNull(output.instructions),
-      firstMessage: stringOrNull(output.firstMessage),
       reason: stringOrNull(output.reason),
       createdAt: typeof output.createdAt === "string" ? output.createdAt : "",
     };

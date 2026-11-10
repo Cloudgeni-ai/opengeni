@@ -1051,6 +1051,7 @@ export type {
   SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,
+  OwnSubscriptionPlan,
   DefaultModelSelection,
   DefaultModelSelectionSource,
   WorkspaceGatewayCustomModel,

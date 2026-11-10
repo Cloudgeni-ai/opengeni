@@ -5,7 +5,6 @@ import {
   AGENT_FIRST_MESSAGE_MAX_LENGTH,
   AGENT_INSTRUCTIONS_MAX_LENGTH,
   AGENT_NAME_MAX_LENGTH,
-  AGENT_SUGGESTION_FIRST_MESSAGE_MAX_LENGTH,
   AGENT_SUGGESTION_INSTRUCTIONS_MAX_LENGTH,
   AGENT_SUGGESTION_MIN_SIMILAR_REQUESTS,
   AGENT_SUGGESTION_REASON_MAX_LENGTH,
@@ -16,7 +15,12 @@ import {
   SessionAvatar,
   type AccessGrant,
 } from "@opengeni/contracts";
-import { agentViewerForGrant, updateSessionProfile, type ApiRouteDeps } from "@opengeni/core";
+import {
+  agentViewerForGrant,
+  requireLiveAgentAttemptAuthorization,
+  updateSessionProfile,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   AgentLimitError,
   AgentPrivateOwnerError,
@@ -30,11 +34,16 @@ import {
   getSessionVisibility,
   listAgents,
   storedSessionAvatar,
+  withSessionRlsActorContext,
   type AgentRecord,
 } from "@opengeni/db";
 import { randomUUID } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
+import {
+  ensureAgentMemoryCollection,
+  type AgentMemoryStatus,
+} from "../integrations/agent-memory-collection";
 import { requireUsableSessionAvatar } from "../routes/session-avatar";
 
 /**
@@ -138,6 +147,25 @@ export async function setSessionProfileFromTool(
   };
 }
 
+/** What `bot_template_save` reports about the new agent's Memory, for the person. */
+const AGENT_MEMORY_RESULT: Record<AgentMemoryStatus, { status: AgentMemoryStatus; note: string }> =
+  {
+    ready: { status: "ready", note: "It remembers across chats." },
+    pending_review: {
+      status: "pending_review",
+      note: "Its memory starts once its Memory collection is approved in Knowledge review.",
+    },
+    learning_off: {
+      status: "learning_off",
+      note: "Agent learning is Off for this chat, so its memory wasn't set up. Saving the agent once in Agents sets it up.",
+    },
+    not_saved: {
+      status: "not_saved",
+      note: "Its memory couldn't be set up. Saving the agent once in Agents sets it up.",
+    },
+    off: { status: "off", note: "Memory is off: each chat starts fresh." },
+  };
+
 export function registerBotTemplateTools(input: {
   server: McpServer;
   deps: ApiRouteDeps;
@@ -151,18 +179,22 @@ export function registerBotTemplateTools(input: {
     "bot_template_save",
     {
       description:
-        "Make an agent from this chat when the person asks to make this an agent or a template. Write its Instructions, which every chat with it follows, from what this chat established: its job, how it works, its standing rules and preferences, and the Skills, plugins, connections and machines it relies on. Put one-time setup (installs, schedules, event triggers, first questions) in the optional First message, which starts each new chat's composer. Leave out one-off tasks, history, personal details and secrets. Show the person your draft first unless they asked you to save it directly. It is shared like this chat. avatar takes the same shapes as in set_session_title.",
+        "Make an agent from this chat when the person asks to make this an agent or a template. Write its Instructions, which every chat with it follows, from what this chat established: its job, how it works, its standing rules and preferences, and the Skills, plugins, connections and machines it relies on. Leave out one-off tasks and one-time setup, history, personal details and secrets. Show the person your draft first unless they asked you to save it directly. It is shared like this chat. If the result's memory status isn't ready, tell the person its note. avatar takes the same shapes as in set_session_title.",
       inputSchema: {
         name: z4.string().min(1).max(AGENT_NAME_MAX_LENGTH),
         description: z4.string().max(AGENT_DESCRIPTION_MAX_LENGTH).optional(),
         avatar: AvatarInput,
         instructions: z4.string().max(AGENT_INSTRUCTIONS_MAX_LENGTH).optional(),
-        firstMessage: z4.string().max(AGENT_FIRST_MESSAGE_MAX_LENGTH).optional(),
+        firstMessage: z4
+          .string()
+          .max(AGENT_FIRST_MESSAGE_MAX_LENGTH)
+          .optional()
+          .describe("Older field; joins the instructions."),
         setupInstructions: z4
           .string()
           .max(AGENT_FIRST_MESSAGE_MAX_LENGTH)
           .optional()
-          .describe("Older name for firstMessage."),
+          .describe("Older field; joins the instructions."),
       },
     },
     async ({ name, description, avatar, instructions, firstMessage, setupInstructions }) => {
@@ -195,7 +227,7 @@ export function registerBotTemplateTools(input: {
       const request = parsed.data;
       if (!request.instructions && !request.firstMessage) {
         throw new HTTPException(422, {
-          message: "Give the agent Instructions, a First message, or both.",
+          message: "Give the agent Instructions.",
         });
       }
       const viewer = await agentViewerForGrant(deps.db, grant);
@@ -209,22 +241,47 @@ export function registerBotTemplateTools(input: {
         sharedWithWorkspace: visibility === "workspace",
       });
       try {
-        const { agent } = await createAgent(
+        const home = { accountId: grant.accountId, workspaceId: grant.workspaceId };
+        const { agent: created } = await createAgent(deps.db, home, {
+          visibility: request.visibility,
+          ownerSubjectId: request.visibility === "private" ? viewer.subjectId : null,
+          name: request.name,
+          description: request.description,
+          avatar: request.avatar,
+          instructions: request.instructions,
+          firstMessage: request.firstMessage,
+          // New agents remember by default, wherever they are made.
+          memoryEnabled: true,
+          origin: "app",
+          sourceSessionId: sessionId,
+          createdBySubjectId: viewer.subjectId,
+          maxPerWorkspace: AGENTS_PER_WORKSPACE_MAX,
+        });
+        // Its Memory collection is saved by this chat, under its Agent learning.
+        const { agent, memory } = await ensureAgentMemoryCollection(
           deps.db,
-          { accountId: grant.accountId, workspaceId: grant.workspaceId },
-          {
-            visibility: request.visibility,
-            ownerSubjectId: request.visibility === "private" ? viewer.subjectId : null,
-            name: request.name,
-            description: request.description,
-            avatar: request.avatar,
-            instructions: request.instructions,
-            firstMessage: request.firstMessage,
-            memoryEnabled: false,
-            origin: "app",
-            sourceSessionId: sessionId,
-            createdBySubjectId: viewer.subjectId,
-            maxPerWorkspace: AGENTS_PER_WORKSPACE_MAX,
+          home,
+          created,
+          async (save) => {
+            const attempt = await requireLiveAgentAttemptAuthorization(deps.db, grant, sessionId);
+            return await withSessionRlsActorContext(
+              {
+                subjectId: attempt.subjectId,
+                initiatingHumanSubjectId: attempt.initiatingHumanSubjectId,
+              },
+              () =>
+                save({
+                  accountId: grant.accountId,
+                  workspaceId: grant.workspaceId,
+                  actor: {
+                    kind: "agent",
+                    sessionId: attempt.callerSessionId,
+                    turnId: attempt.turnId,
+                    attemptId: attempt.attemptId,
+                    executionGeneration: attempt.executionGeneration,
+                  },
+                }),
+            );
           },
         );
         return input.json({
@@ -236,6 +293,7 @@ export function registerBotTemplateTools(input: {
             visibility: agent.visibility,
             revision: agent.currentRevision,
           },
+          memory: AGENT_MEMORY_RESULT[memory],
         });
       } catch (error) {
         if (error instanceof AgentLimitError) {
@@ -261,7 +319,7 @@ function sameName(left: string, right: string): boolean {
 /**
  * `agent_suggest`: when a chat keeps doing the same kind of work, the agent
  * may offer to make an agent of it (choosing the name, description and avatar
- * itself and drafting its Instructions and First message), or point to an
+ * itself and drafting its Instructions), or point to an
  * agent that already does this work. Nothing changes here: the suggestion is
  * recorded on the chat as display state and shown to people as a card; only a
  * person's own action makes an agent.
@@ -281,7 +339,7 @@ function registerAgentSuggestTool(input: {
       description:
         "Offer the person an agent for this work, shown as a card under this conversation. Use it at most once here, only when most of their requests are the same kind of work, including the last three or more in a row, and only if this chat is not already an agent's. Do not use it for a one-off task or because they might want something again. " +
         "kind=reuse names an agent that already does this work (agentId); prefer it when one fits (a kind=create whose name is taken returns the existing agents). " +
-        "kind=create offers to make an agent from this conversation: choose a short name (a first name or a role, e.g. 'Invoice checker'), a one-line description and an avatar, and draft its Instructions, which every chat with it follows (its job, how it works, its standing rules, and the Skills, connections and machines it relies on), plus an optional First message for one-time setup. Leave out one-off tasks, history, personal details and secrets. " +
+        "kind=create offers to make an agent from this conversation: choose a short name (a first name or a role, e.g. 'Invoice checker'), a one-line description and an avatar, and draft its Instructions, which every chat with it follows (its job, how it works, its standing rules, and the Skills, connections and machines it relies on). Leave out one-off tasks and one-time setup, history, personal details and secrets. " +
         "Nothing changes until the person acts on the card. Do not mention the card in your reply. avatar takes the same shapes as in set_session_title.",
       inputSchema: {
         kind: z4.enum(["create", "reuse"]),
@@ -300,11 +358,6 @@ function registerAgentSuggestTool(input: {
           .max(AGENT_SUGGESTION_INSTRUCTIONS_MAX_LENGTH)
           .optional()
           .describe("kind=create: draft Instructions for the agent."),
-        firstMessage: z4
-          .string()
-          .max(AGENT_SUGGESTION_FIRST_MESSAGE_MAX_LENGTH)
-          .optional()
-          .describe("kind=create: optional one-time setup that starts each new chat."),
         agentId: z4.string().uuid().optional().describe("kind=reuse: the agent."),
         reason: z4
           .string()
@@ -373,7 +426,6 @@ function registerAgentSuggestTool(input: {
           description: agent.description || null,
           avatar: storedSessionAvatar(agent.avatar),
           instructions: null,
-          firstMessage: null,
           reason: request.reason,
           createdAt: new Date().toISOString(),
         };
@@ -384,12 +436,8 @@ function registerAgentSuggestTool(input: {
         const name = request.name?.trim();
         if (!name) return notSuggested("name_required", "kind=create needs a name.");
         const instructions = request.instructions?.trim() || null;
-        const firstMessage = request.firstMessage?.trim() || null;
-        if (!instructions && !firstMessage) {
-          return notSuggested(
-            "draft_required",
-            "kind=create needs draft Instructions, a First message, or both.",
-          );
+        if (!instructions) {
+          return notSuggested("draft_required", "kind=create needs draft Instructions.");
         }
         const agents = (
           await listAgents(deps.db, home, { viewerSubjectId: viewer.subjectId })
@@ -417,7 +465,6 @@ function registerAgentSuggestTool(input: {
           description: request.description?.trim() || null,
           avatar,
           instructions,
-          firstMessage,
           reason: request.reason,
           createdAt: new Date().toISOString(),
         };

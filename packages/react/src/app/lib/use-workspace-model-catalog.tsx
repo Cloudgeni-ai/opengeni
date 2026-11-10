@@ -1,5 +1,9 @@
 import { t } from "./console-text";
-import type { DefaultModelSelection, WorkspaceModelCatalogModel } from "@opengeni/sdk";
+import type {
+  DefaultModelSelection,
+  OwnSubscriptionPlan,
+  WorkspaceModelCatalogModel,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { useAppContext } from "../app-context";
@@ -16,6 +20,11 @@ export type WorkspaceModelCatalogState = {
   defaultSelection: DefaultModelSelection | null;
   /** Hypothetical default after a general-credit purchase. */
   creditsSelection: DefaultModelSelection | null;
+  /**
+   * The plan the organization needs before its own subscriptions run, while
+   * its plan doesn't include them; null when they run or it isn't known.
+   */
+  ownSubscriptionPlan: OwnSubscriptionPlan | null;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
@@ -71,6 +80,7 @@ export function useWorkspaceModelCatalog(
     rows,
     defaultSelection: query.data?.defaultSelection ?? null,
     creditsSelection: query.data?.creditsSelection ?? null,
+    ownSubscriptionPlan: query.data?.ownSubscriptionPlan ?? null,
     loading: query.loading,
     error: query.error ? userErrorText(query.error) : null,
     refresh,

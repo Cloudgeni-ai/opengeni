@@ -9,6 +9,7 @@ import {
 } from "./personal-connection-approval";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 export { canonicalSecretPermissions } from "./canonical-secret-permissions";
+import { agentInstructionsSql } from "./agents";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 import { automationRunPresentation } from "./automation-run-presentation";
 import { resolveSessionAppActionAuthority } from "./session-admin-access";
@@ -112,6 +113,7 @@ import {
 } from "./disconnect-audit";
 export {
   getConnectionMetadata,
+  getConnectionMetadataByIds,
   getProviderConnectionHomeWorkspace,
   listConnectionsMetadata,
   type ConnectionMetadataWithVerification,
@@ -3413,6 +3415,30 @@ export async function listSharedWorkspacesForAccount(
   return await mapWorkspaceProjections(db, rows, async (row) =>
     mapWorkspace(row, await workspaceControlProjection(db, row.id), "shared"),
   );
+}
+
+/** Ids of the organization's shared workspaces, newest first; no projections. */
+export async function listOrganizationWorkspaceIds(
+  db: Database,
+  accountId: string,
+  limit = 200,
+): Promise<string[]> {
+  const rows = await withRlsContext(db, { accountId, workspaceId: null }, async (scopedDb) =>
+    scopedDb
+      .select({ id: schema.workspaces.id })
+      .from(schema.workspaces)
+      .where(
+        and(
+          eq(schema.workspaces.accountId, accountId),
+          sql`${schema.workspaces.id} in (
+            select workspace_id from list_organization_workspace_ids(${accountId}::uuid)
+          )`,
+        ),
+      )
+      .orderBy(desc(schema.workspaces.createdAt))
+      .limit(limit),
+  );
+  return rows.map((row) => row.id);
 }
 
 export async function countWorkspacesForAccount(db: Database, accountId: string): Promise<number> {
@@ -44556,7 +44582,7 @@ export async function readSessionAgentPrompt(
     ? await readBoundAgentRows<{ instructions: string }>(
         db,
         scope,
-        sql`select r.instructions
+        sql`select ${agentInstructionsSql("r")} as instructions
           from agent_revisions r
           join agents a on a.workspace_id = r.workspace_id and a.id = r.agent_id
           where r.workspace_id = ${input.workspaceId}::uuid
@@ -44596,7 +44622,7 @@ export async function ensureSessionAgentInstructions(
     ? await readBoundAgentRows<{ revision: number; instructions: string | null }>(
         db,
         input,
-        sql`select a.current_revision as revision, r.instructions
+        sql`select a.current_revision as revision, ${agentInstructionsSql("r")} as instructions
           from agents a
           left join agent_revisions r
             on r.workspace_id = a.workspace_id
@@ -83291,7 +83317,12 @@ export type SessionWorkPeek =
       executionGeneration: number;
       activityRef: SessionAttemptActivityRef;
     }
-  | { kind: "runnable"; admissionFence?: SessionAdmissionFence }
+  | {
+      kind: "runnable";
+      admissionFence?: SessionAdmissionFence;
+      /** Wake revision observed with the fence; a later wake makes a block stale. */
+      admissionWakeRevision?: number;
+    }
   | {
       kind: "admission-blocked";
       reason?:
@@ -83304,7 +83335,12 @@ export type SessionWorkPeek =
       kind: "sandbox-lifecycle-wait";
       ref: SandboxLifecycleWait;
     }
-  | { kind: "approval-pending"; triggerEventId: string; admissionFence?: SessionAdmissionFence }
+  | {
+      kind: "approval-pending";
+      triggerEventId: string;
+      admissionFence?: SessionAdmissionFence;
+      admissionWakeRevision?: number;
+    }
   | {
       kind: "approval-wait";
       humanInputRequestId?: string;
@@ -83750,6 +83786,7 @@ export async function peekSessionWork(
     // settlement fences against the allocation cursor, so observe that same
     // authority here without taking a writer lock during this advisory peek.
     let admissionSequence = session.lastSequence;
+    let admissionWakeRevision = 0;
     if (includeAdmissionFence) {
       const [cursor] = await scopedDb
         .select({ lastSequence: schema.sessionEventCursors.lastSequence })
@@ -83768,6 +83805,17 @@ export async function peekSessionWork(
         );
       }
       admissionSequence = cursor.lastSequence;
+      const [wake] = await scopedDb
+        .select({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision })
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(
+          and(
+            eq(schema.sessionWorkflowWakeOutbox.workspaceId, workspaceId),
+            eq(schema.sessionWorkflowWakeOutbox.sessionId, sessionId),
+          ),
+        )
+        .limit(1);
+      admissionWakeRevision = wake ? Number(wake.wakeRevision) : 0;
     }
     const fence = includeAdmissionFence
       ? {
@@ -83775,6 +83823,7 @@ export async function peekSessionWork(
             lastSequence: admissionSequence,
             controlVersion: effectiveControl.controlVersion,
           },
+          admissionWakeRevision,
         }
       : {};
     const runnable = { kind: "runnable", ...fence } as const;
@@ -84462,6 +84511,10 @@ export async function blockSessionWorkBeforeAttemptClaim(
     workflowId: string;
     attemptId: string;
     fence: SessionAdmissionFence;
+    /** Wake revision observed with the fence. A wake registered since then
+     * (access granted, membership restored, machine changed) may have fixed
+     * what the claim saw, so the work is re-read instead of parked. */
+    wakeRevision?: number;
     reason: StoredSessionAdmissionBlock["reason"];
     sqlState: string | null;
   },
@@ -84518,6 +84571,20 @@ export async function blockSessionWorkBeforeAttemptClaim(
           )
           .limit(1);
         if (live) return { action: "stale", events: [] };
+        if (input.wakeRevision !== undefined) {
+          const [wake] = await tx
+            .select({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision })
+            .from(schema.sessionWorkflowWakeOutbox)
+            .where(
+              and(
+                eq(schema.sessionWorkflowWakeOutbox.workspaceId, workspaceId),
+                eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
+              ),
+            )
+            .limit(1);
+          if ((wake ? Number(wake.wakeRevision) : 0) !== input.wakeRevision)
+            return { action: "stale", events: [] };
+        }
         const now = new Date();
         const block = StoredSessionAdmissionBlock.parse({
           reason: input.reason,
@@ -84525,7 +84592,10 @@ export async function blockSessionWorkBeforeAttemptClaim(
           retryPolicy: "explicit_recheck",
           blockedAt: now.toISOString(),
           attemptId: input.attemptId,
-          fence: input.fence,
+          fence: {
+            lastSequence: input.fence.lastSequence,
+            controlVersion: input.fence.controlVersion,
+          },
           previousStatus: session.status as SessionStatus,
         });
         const publicBlock = projectSessionAdmissionBlock(block);
@@ -84567,6 +84637,175 @@ export async function blockSessionWorkBeforeAttemptClaim(
         return { action: "blocked", events: [mapEvent(event!)] };
       }),
   );
+}
+
+/** What changed that may fix a blocked chat's saved message. */
+export type SessionAdmissionAccessChange = "personal_resource" | "membership" | "machine";
+
+function admissionBlockFixedBy(
+  block: Pick<StoredSessionAdmissionBlock, "reason" | "sqlState">,
+  change: SessionAdmissionAccessChange,
+): boolean {
+  // A bare permission refusal carries no finer cause; any access change may fix it.
+  if (block.reason === "database_claim_rejected") return block.sqlState === "42501";
+  if (block.reason === "initiator_membership_required") return change === "membership";
+  return change === "personal_resource" || change === "machine";
+}
+
+export type ReleaseSessionAdmissionBlocksResult = {
+  released: Array<{ sessionId: string; events: SessionEvent[] }>;
+  nudged: string[];
+};
+
+/**
+ * Access changed (a grant was issued, membership restored, the chat moved
+ * machine). Let saved messages held by a matching admission block start by
+ * themselves: clear the block under the session's event-write lock and register
+ * a wake, so the workflow re-reads and claims once. The claim still enforces
+ * access, so a release that did not fix anything parks the work again; a
+ * paused, cancelled or edited chat is left alone. Listed sessions without a
+ * block still get a wake: their claim may be in flight against the old access,
+ * and the wake revision makes that claim's block stale instead of parking it.
+ */
+export async function releaseSessionAdmissionBlocksAfterAccessChange(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    change: SessionAdmissionAccessChange;
+    sessionIds?: readonly string[];
+  },
+): Promise<ReleaseSessionAdmissionBlocksResult> {
+  const result: ReleaseSessionAdmissionBlocksResult = { released: [], nudged: [] };
+  const listed = input.sessionIds ? [...new Set(input.sessionIds)] : null;
+  if (listed && listed.length === 0) return result;
+  // Workspace-wide changes also wake chats whose next message is queued and not
+  // yet claimed: a claim refused just before this change may record its block
+  // after this scan, and the wake makes that block stale so the claim retries.
+  const awaitingClaim = sql`(${schema.sessions.activeTurnId} is null and exists (
+    select 1 from ${schema.sessionTurns}
+    where ${schema.sessionTurns.workspaceId} = ${schema.sessions.workspaceId}
+      and ${schema.sessionTurns.sessionId} = ${schema.sessions.id}
+      and ${schema.sessionTurns.status} = 'queued'))`;
+  const candidates = await withWorkspaceSessionActivityRls(
+    db,
+    input.workspaceId,
+    async (scopedDb) =>
+      scopedDb
+        .select({ id: schema.sessions.id })
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.accountId, input.accountId),
+            listed
+              ? inArray(schema.sessions.id, listed)
+              : sql`(${schema.sessions.admissionBlock} is not null or ${awaitingClaim})`,
+          ),
+        )
+        .orderBy(sql`(${schema.sessions.admissionBlock} is null)`, asc(schema.sessions.id))
+        .limit(200),
+  );
+  for (const candidate of candidates) {
+    const outcome = await retrySessionActivityRls(
+      db,
+      input.workspaceId,
+      {
+        stage: "session_admission.release",
+        eventTypes: ["session.status.changed"],
+        maxAttempts: 3,
+      },
+      async (scopedDb) =>
+        scopedDb.transaction(async (tx) => {
+          const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            controlLock: "share",
+            sessionIds: [candidate.id],
+          });
+          const session = locks.sessions[0];
+          if (!session || session.accountId !== input.accountId) return null;
+          if (session.status === "cancelled" || session.status === "failed") return null;
+          const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
+          const block = session.admissionBlock;
+          if (!block) {
+            if (session.activeTurnId !== null) return null;
+            const [queued] = await tx
+              .select({ id: schema.sessionTurns.id })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, session.id),
+                  eq(schema.sessionTurns.status, "queued"),
+                ),
+              )
+              .limit(1);
+            if (!queued) return null;
+            await registerSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: session.id,
+              temporalWorkflowId: workflowId,
+              reason: "admission_access_changed",
+            });
+            return { kind: "nudged" as const };
+          }
+          if (!admissionBlockFixedBy(block, input.change)) return null;
+          // A paused chat keeps its block; Resume releases it when it runs.
+          const control = await evaluateSessionControl(
+            tx as unknown as Database,
+            input.workspaceId,
+            session.id,
+            { workspaceControl: locks.control ?? undefined },
+          );
+          if (control.state !== "active") return null;
+          const now = new Date();
+          const [event] = await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: session.id,
+                  sequence: session.lastSequence + 1,
+                  type: "session.status.changed",
+                  payload: { status: block.previousStatus, code: "admission_access_changed" },
+                },
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
+            .returning();
+          await tx
+            .update(schema.sessions)
+            .set({
+              admissionBlock: null,
+              status: block.previousStatus,
+              lastSequence: session.lastSequence + 1,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, session.id),
+              ),
+            );
+          await registerSessionWorkflowWakeInTransaction(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: session.id,
+            temporalWorkflowId: workflowId,
+            reason: "admission_access_changed",
+          });
+          return { kind: "released" as const, events: [mapEvent(event!)] };
+        }),
+    );
+    if (outcome?.kind === "released")
+      result.released.push({ sessionId: candidate.id, events: outcome.events });
+    else if (outcome?.kind === "nudged") result.nudged.push(candidate.id);
+  }
+  return result;
 }
 
 export type FailSessionWorkBeforeAttemptClaimInput = {

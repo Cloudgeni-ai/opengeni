@@ -155,7 +155,11 @@ const previewMethods = {
     return connection;
   },
   async getWorkspaceModelCatalog() {
-    return { models: previewModel ? [previewModel] : [] };
+    // A new organization starts on Free, which doesn't include own subscriptions.
+    return {
+      models: previewModel ? [previewModel] : [],
+      ownSubscriptionPlan: { key: "pro", label: "Pro", monthlyPriceMicros: 20_000_000 },
+    };
   },
   async getNewSessionDraft() {
     return {

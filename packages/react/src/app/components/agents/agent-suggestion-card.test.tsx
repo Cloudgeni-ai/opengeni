@@ -47,7 +47,6 @@ function suggestion(overrides: Partial<SessionAgentSuggestion>): SessionAgentSug
     description: "Checks invoices",
     avatar: { kind: "emoji", emoji: "🧾", hue: 60 },
     instructions: "Check each invoice.",
-    firstMessage: null,
     reason: "Three checks so far.",
     createdAt: "2026-11-02T10:00:00.000Z",
     ...overrides,

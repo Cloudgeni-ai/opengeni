@@ -1253,8 +1253,8 @@ Canonical: `packages/contracts/src/work-claims.ts`,
 ### 3.12 Usage allowances constrain debits, not authority
 
 Org admins set budgets; workspace admins split members. Counters permit
-overshoot, not reservations; shares may oversubscribe. Default-off
-`OPENGENI_USAGE_ALLOWANCES_ENABLED` gates producers until consumers enforce.
+overshoot, not reservations; shares may oversubscribe.
+`OPENGENI_USAGE_ALLOWANCES_ENABLED=false` (default `true`) opts out of new policies.
 Canonical: [`usage-allowances.md`](usage-allowances.md).
 
 Read-only authorization and counter projections do not mint write capabilities:
@@ -2389,11 +2389,13 @@ skip it. No hooks replay, provider creation, or manifest changes.
 Wiring: `apps/worker/src/sandbox-routing.ts` and
 `apps/worker/src/activities/agent-turn/sandbox-runtime.ts`.
 
-Bundled shell tools: every placement's shell has `rg` and `jq` from official
-release builds pinned by SHA-256 in
-`packages/runtime/src/sandbox/shell-tools-manifest.ts` (licence notices beside
-it). Their directory is appended to the end of PATH, so a system copy always
-wins, and nothing is downloaded when a command runs. The machine agent embeds
+Bundled shell tools: every placement's shell has `rg` and `jq` pinned by
+SHA-256 in `packages/runtime/src/sandbox/shell-tools-manifest.ts` (licence
+notices beside it): official release builds, except the Linux jq, a static musl
+build of the official jq source that `scripts/build-static-jq.sh` reproduces
+and `agent/vendor/jq/` holds, because jq's own Linux builds link glibc. Their
+directory is appended to the end of PATH, so a system copy always wins, and
+nothing is downloaded when a command runs. The machine agent embeds
 its own target's build (`agent/crates/opengeni-agent/src/shell_tools.rs`) and
 extends each command's PATH, covering compute sandboxes, selfhosted task
 containers, Connected Machines and run_on targets. For other managed backends

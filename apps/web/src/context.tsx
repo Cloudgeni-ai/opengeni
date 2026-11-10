@@ -188,6 +188,7 @@ export function RootRouteComponent() {
     (pathname === "/dev/composer-chrome" ||
       pathname === "/dev/composer-stack" ||
       pathname === "/dev/onboarding" ||
+      pathname === "/dev/own-subscription-plan" ||
       pathname === "/dev/session-timeline" ||
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =

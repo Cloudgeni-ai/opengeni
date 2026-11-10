@@ -1,7 +1,10 @@
-import { connectionServicePresentation } from "./connection-service-presentation";
+import {
+  connectionServicePresentation,
+  connectionServiceWording,
+} from "./connection-service-presentation";
 import { ConnectionCatalog } from "./connection-catalog";
 import { ConnectionLogo } from "./connection-logo";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { ConnectAccount, ConnectController, ConnectProvider } from "@opengeni/connect";
 import { useConnect } from "./hooks/use-connect";
 import { useOpenGeniText } from "./messages/runtime";
@@ -53,7 +56,16 @@ function ScopedChooser({
 }: ConnectChooserProps) {
   const t = useOpenGeniText();
   const view = useConnect(controller);
-  const [catalog, setCatalog] = useState<ConnectProvider[] | null>(null);
+  const [loaded, setCatalog] = useState<ConnectProvider[] | null>(null);
+  // Services carry the host's name wherever they are listed, searched or chosen.
+  const catalog = useMemo(
+    () =>
+      loaded?.map((entry) => {
+        const name = connectionServiceWording(t, entry.id).name;
+        return name ? { ...entry, label: name } : entry;
+      }) ?? null,
+    [loaded, t],
+  );
   const [accounts, setAccounts] = useState<ConnectAccount[]>([]);
   const [failed, setFailed] = useState(false);
   const [load, setLoad] = useState(0);
@@ -236,6 +248,7 @@ function ScopedChooser({
                             {
                               id: entry.id,
                               name: entry.label,
+                              description: connectionServiceWording(t, entry.id).description,
                               status: connected
                                 ? t("connectChooser.connected")
                                 : entry.readiness === "available"

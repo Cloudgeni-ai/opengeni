@@ -11,6 +11,7 @@
 //!     < audio.f32
 //! opengeni-speakers embed --models DIR --segments FILE < audio.f32
 //! opengeni-speakers align --models DIR --words FILE [--threads N] < audio.f32
+//! opengeni-speakers align-serve --models DIR [--threads N] [--sessions N]
 //! opengeni-speakers describe MODEL.onnx
 //! ```
 //!
@@ -37,7 +38,7 @@ use diarize::{Options, SAMPLE_RATE};
 use models::{Embedder, Result, Segmentation, normalized};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -51,7 +52,7 @@ fn parse_args() -> Result<Args> {
     let mut raw = std::env::args().skip(1);
     let command = raw
         .next()
-        .ok_or("usage: opengeni-speakers diarize|embed|align|describe ...")?;
+        .ok_or("usage: opengeni-speakers diarize|embed|align|align-serve|describe ...")?;
     let mut values = HashMap::new();
     let mut positional = Vec::new();
     while let Some(arg) = raw.next() {
@@ -382,30 +383,47 @@ struct AlignOutput {
     elapsed_ms: u64,
 }
 
-/// Word timings for a transcript that came without them.
-fn run_align(args: &Args) -> Result<String> {
-    let started = Instant::now();
-    let threads = args.threads(usize::MAX)?;
-    let file = args.values.get("words").ok_or("--words FILE is needed")?;
-    let words: Vec<String> = serde_json::from_slice(
-        &std::fs::read(file).map_err(|error| format!("reading {file}: {error}"))?,
-    )
-    .map_err(|error| format!("{file}: {error}"))?;
+/// The aligner's model and vocabulary, from `--models` or named directly.
+fn load_aligner(args: &Args, env: &ort::environment::Environment) -> Result<align::Aligner> {
+    load_aligner_with(args, env, args.threads(usize::MAX)?)
+}
+
+fn load_aligner_with(
+    args: &Args,
+    env: &ort::environment::Environment,
+    threads: usize,
+) -> Result<align::Aligner> {
     let model = args.model("alignment")?;
     let tokens = match args.values.get("tokens") {
         Some(path) => PathBuf::from(path),
         None => model.with_file_name("alignment-tokens.txt"),
     };
-    let env = ort::init()
+    align::Aligner::load(env, &model, &tokens, threads)
+}
+
+fn environment() -> Result<ort::environment::Environment> {
+    ort::init()
         .with_name("opengeni-speakers")
         .build()
-        .map_err(|e| e.to_string())?;
-    let mut aligner = align::Aligner::load(&env, &model, &tokens, threads)?;
+        .map_err(|e| e.to_string())
+}
+
+fn open(path: &str) -> Result<std::fs::File> {
+    std::fs::File::open(path).map_err(|error| format!("reading {path}: {error}"))
+}
+
+/// Word timings for a transcript that came without them.
+fn run_align(args: &Args) -> Result<String> {
+    let started = Instant::now();
+    let file = args.values.get("words").ok_or("--words FILE is needed")?;
+    let words: Vec<String> = serde_json::from_slice(
+        &std::fs::read(file).map_err(|error| format!("reading {file}: {error}"))?,
+    )
+    .map_err(|error| format!("{file}: {error}"))?;
+    let env = environment()?;
+    let aligner = load_aligner(args, &env)?;
     let result = match args.values.get("input") {
-        Some(path) => aligner.align(
-            std::fs::File::open(path).map_err(|error| format!("reading {path}: {error}"))?,
-            &words,
-        )?,
+        Some(path) => aligner.align(open(path)?, &words)?,
         None => aligner.align(std::io::stdin().lock(), &words)?,
     };
     let output = AlignOutput {
@@ -415,12 +433,146 @@ fn run_align(args: &Args) -> Result<String> {
     serde_json::to_string(&output).map_err(|e| e.to_string())
 }
 
+/// One request to `align-serve`: a transcript's words and the audio they
+/// were heard in, as 16 kHz mono f32 PCM: a file (`input`), or what a
+/// decoder writes to its stdout (`decode`, its command line), so no decoded
+/// copy of the audio is written to disk.
+#[derive(Deserialize)]
+struct AlignRequest {
+    words: Vec<String>,
+    input: Option<String>,
+    decode: Option<Vec<String>>,
+}
+
+fn align_request(aligner: &align::Aligner, request: AlignRequest) -> Result<align::Alignment> {
+    match (request.input, request.decode) {
+        (Some(path), None) => aligner.align(open(&path)?, &request.words),
+        (None, Some(command)) => {
+            let (program, arguments) = command.split_first().ok_or("decode: no command")?;
+            let mut child = std::process::Command::new(program)
+                .args(arguments)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .map_err(|error| format!("decode: {program}: {error}"))?;
+            let stdout = child.stdout.take().ok_or("decode: no stdout")?;
+            let mut stderr = child.stderr.take().ok_or("decode: no stderr")?;
+            let errors = std::thread::spawn(move || {
+                let mut text = String::new();
+                let _ = stderr.read_to_string(&mut text);
+                text
+            });
+            let aligned = aligner.align(stdout, &request.words);
+            // Reading stops early only on a failure; the decoder is not needed then.
+            if aligned.is_err() {
+                let _ = child.kill();
+            }
+            let status = child.wait().map_err(|error| format!("decode: {error}"))?;
+            let errors = errors.join().unwrap_or_default();
+            let aligned = aligned?;
+            if !status.success() {
+                let tail: String = errors.trim().chars().rev().take(400).collect();
+                let tail: String = tail.chars().rev().collect();
+                return Err(format!("the decoder failed ({status}): {tail}"));
+            }
+            Ok(aligned)
+        }
+        _ => Err("give either input or decode".into()),
+    }
+}
+
+/// The fewest threads an `align-serve` copy of the model gets.
+const SERVE_THREADS_PER_SESSION: usize = 4;
+
+/// Word timings for many transcripts from models loaded once, so a worker
+/// holds a fixed number of copies however many pieces it aligns. Each line
+/// on stdin is a JSON request `{"id", "words", "input" or "decode"}`; each
+/// answer is a JSON line with the same `id` and the alignment or an
+/// `error`, in the order they finish. `--sessions N` loads N copies that
+/// align N pieces at once, sharing the threads: one copy at a time keeps
+/// memory low, and a few copies get more from a large machine (4 copies of
+/// 4 threads align about 20% more than one of 16), up to one copy for each
+/// 4 threads. A `{"ready": true, "sessions": N}` line says how many copies
+/// are loaded. It ends when stdin does, after answering
+/// everything it was asked.
+fn run_align_serve(args: &Args) -> Result<String> {
+    let threads = args.threads(usize::MAX)?;
+    // More copies than a quarter of the threads only take memory.
+    let sessions = args
+        .get::<usize>("sessions")?
+        .unwrap_or(1)
+        .clamp(1, (threads / SERVE_THREADS_PER_SESSION).max(1));
+    let threads = (threads / sessions).max(1);
+    let env = environment()?;
+    let mut aligners = Vec::with_capacity(sessions);
+    for _ in 0..sessions {
+        aligners.push(load_aligner_with(args, &env, threads)?);
+    }
+    let stdout = std::sync::Mutex::new(std::io::stdout());
+    let answer = |line: serde_json::Value| {
+        if let Ok(mut out) = stdout.lock() {
+            // A closed stdout means the caller is gone; stdin ends next.
+            let _ = writeln!(out, "{line}").and_then(|()| out.flush());
+        }
+    };
+    answer(serde_json::json!({ "ready": true, "sessions": sessions }));
+    let (send, receive) = std::sync::mpsc::sync_channel::<(serde_json::Value, String)>(0);
+    let receive = std::sync::Mutex::new(receive);
+    std::thread::scope(|scope| {
+        for aligner in &aligners {
+            let (receive, answer) = (&receive, &answer);
+            scope.spawn(move || {
+                loop {
+                    let next = match receive.lock() {
+                        Ok(receiver) => receiver.recv(),
+                        Err(_) => return,
+                    };
+                    let Ok((id, line)) = next else { return };
+                    let started = Instant::now();
+                    let result = serde_json::from_str::<AlignRequest>(&line)
+                        .map_err(|error| format!("bad request: {error}"))
+                        .and_then(|request| align_request(aligner, request));
+                    answer(match result {
+                        Ok(result) => {
+                            let mut value = serde_json::to_value(AlignOutput {
+                                result,
+                                elapsed_ms: started.elapsed().as_millis() as u64,
+                            })
+                            .unwrap_or_default();
+                            value["id"] = id;
+                            value
+                        }
+                        Err(error) => serde_json::json!({ "id": id, "error": error }),
+                    });
+                }
+            });
+        }
+        for line in std::io::stdin().lock().lines() {
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let id = serde_json::from_str::<serde_json::Value>(&line)
+                .ok()
+                .and_then(|value| value.get("id").cloned())
+                .unwrap_or(serde_json::Value::Null);
+            if send.send((id, line)).is_err() {
+                break;
+            }
+        }
+        drop(send);
+    });
+    Ok(serde_json::json!({ "done": true }).to_string())
+}
+
 fn run() -> Result<String> {
     let args = parse_args()?;
     match args.command.as_str() {
         "diarize" => run_diarize(&args),
         "embed" => run_embed(&args),
         "align" => run_align(&args),
+        "align-serve" => run_align_serve(&args),
         "describe" => {
             let path = args
                 .positional

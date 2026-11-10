@@ -50,6 +50,10 @@ export type McpServerOption = {
   id: string;
   name: string;
   logoSrc?: string | null | undefined;
+  /** The catalog entry it comes from, when it isn't keyed by its server id (API integrations). */
+  capabilityId?: string | undefined;
+  /** The provider's domain, a last way to find its catalog logo. */
+  providerDomain?: string | undefined;
   detail?: string | undefined;
   connectionStatus?: "ready" | "connect" | "reconnect" | "unavailable" | "unknown" | undefined;
 };
@@ -835,12 +839,15 @@ export function enabledWorkspaceCapabilityMcpServers(
 /** One selectable local MCP surface per installed OpenAPI/GraphQL instance. */
 export function installedApiIntegrationMcpServers(
   integrations: ReadonlyArray<
-    Pick<ApiIntegrationInstallationSummary, "serverId" | "name" | "displayName">
+    Pick<ApiIntegrationInstallationSummary, "serverId" | "name" | "displayName"> &
+      Partial<Pick<ApiIntegrationInstallationSummary, "capabilityId" | "providerDomain">>
   >,
 ): McpServerOption[] {
   return integrations.map((integration) => ({
     id: integration.serverId,
     name: integration.displayName.trim() || integration.name,
+    ...(integration.capabilityId ? { capabilityId: integration.capabilityId } : {}),
+    ...(integration.providerDomain ? { providerDomain: integration.providerDomain } : {}),
   }));
 }
 

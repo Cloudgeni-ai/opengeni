@@ -1,5 +1,5 @@
 /**
- * Agent suggestions (`agent_suggest`, migration 1353): the card a chat shows
+ * Agent suggestions (`agent_suggest`, migration 1354): the card a chat shows
  * when its agent offers to make an agent of it, or points to an agent that
  * already does its work. Display state on the `sessions` row; it never makes
  * or changes an agent and never reaches the model. See docs/agents.md.
