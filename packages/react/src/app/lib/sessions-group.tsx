@@ -3,7 +3,7 @@
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
 import { t } from "./console-text";
-import { creatorIdentityKey, machineCreatorLabel } from "./creator-initials";
+import { creatorIdentityKey, creatorType, machineCreatorLabel } from "./creator-initials";
 import { formatWaitingSince } from "./format";
 import { awaitsPerson } from "./needs-you";
 import { sessionInputWait } from "./session-rail";
@@ -592,7 +592,13 @@ export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string,
     const key = sessionCreatorKey(session);
     // One API key's older subject-frozen and newer service-frozen sessions are
     // one creator; prefer a session that carries the key's name.
-    if (byKey.has(key) && !session.createdBy.label?.trim()) continue;
+    if (
+      byKey.has(key) &&
+      creatorType(session.createdBy) === "api_key" &&
+      !session.createdBy.label?.trim()
+    ) {
+      continue;
+    }
     byKey.set(key, {
       label: sessionCreatorLabel(session),
       kind: session.createdBy.kind,

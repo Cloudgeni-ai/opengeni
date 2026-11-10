@@ -33,11 +33,27 @@ export function creatorType(createdBy: Pick<CreatorRef, "kind" | "subjectId">): 
 }
 
 /**
- * The one creator a session belongs to. Keyed by subject id alone, so the
- * subject- and service-frozen sessions of one API key share a group.
+ * The one creator a session belongs to. An API key is keyed by its subject id
+ * alone, so its subject- and service-frozen sessions share a group; every other
+ * creator keeps its exact frozen kind, so a service can never join a person.
  */
-export function creatorIdentityKey(createdBy: Pick<CreatorRef, "subjectId">): string {
-  return createdBy.subjectId;
+export function creatorIdentityKey(createdBy: Pick<CreatorRef, "kind" | "subjectId">): string {
+  return createdBy.subjectId.startsWith(API_KEY_SUBJECT_PREFIX)
+    ? createdBy.subjectId
+    : `${createdBy.kind}:${createdBy.subjectId}`;
+}
+
+/**
+ * The creator to page a group by: an API key without a kind (both frozen
+ * kinds), everyone else by their exact frozen kind.
+ */
+export function creatorPageIdentity(createdBy: Pick<CreatorRef, "kind" | "subjectId">): {
+  kind?: CreatorRef["kind"];
+  subjectId: string;
+} {
+  return createdBy.subjectId.startsWith(API_KEY_SUBJECT_PREFIX)
+    ? { subjectId: createdBy.subjectId }
+    : { kind: createdBy.kind, subjectId: createdBy.subjectId };
 }
 
 /**

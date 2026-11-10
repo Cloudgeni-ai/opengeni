@@ -3,8 +3,10 @@ import { describe, expect, test } from "bun:test";
 import {
   creatorAnnouncement,
   creatorHue,
+  creatorIdentityKey,
   creatorInitials,
   creatorLabel,
+  creatorPageIdentity,
   creatorType,
   machineCreatorDisplay,
   machineCreatorLabel,
@@ -483,6 +485,19 @@ describe("creatorLabel", () => {
       "Nightly · Service",
     );
     expect(machineCreatorDisplay({ kind: "subject", subjectId: "user:x" })).toBeNull();
+  });
+
+  test("only API keys page and group across frozen kinds", () => {
+    const key = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
+    expect(creatorIdentityKey({ kind: "subject", subjectId: key })).toBe(key);
+    expect(creatorIdentityKey({ kind: "service", subjectId: key })).toBe(key);
+    expect(creatorPageIdentity({ kind: "service", subjectId: key })).toEqual({ subjectId: key });
+    expect(creatorIdentityKey({ kind: "subject", subjectId: "user:ada" })).toBe("subject:user:ada");
+    expect(creatorIdentityKey({ kind: "service", subjectId: "user:ada" })).toBe("service:user:ada");
+    expect(creatorPageIdentity({ kind: "subject", subjectId: "user:ada" })).toEqual({
+      kind: "subject",
+      subjectId: "user:ada",
+    });
   });
 });
 

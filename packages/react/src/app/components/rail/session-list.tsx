@@ -248,7 +248,7 @@ import {
   useCollapsedSessionSections,
   writeSessionBrowsePreferences,
 } from "../../lib/session-browse-preferences";
-import { railRowCreator } from "../../lib/creator-initials";
+import { creatorPageIdentity, railRowCreator } from "../../lib/creator-initials";
 import { formatWaitingSince } from "../../lib/format";
 import {
   sessionDescendantCountAria,
@@ -3328,7 +3328,7 @@ export function SessionList() {
         key: bucket.group,
         label: bucket.label,
         kind: "creator",
-        creator: { subjectId: creator.subjectId },
+        creator: creatorPageIdentity(creator),
       };
       const continuation = activeSessionContinuation(
         groupContinuationsRef.current.get(group.key) ?? emptySessionContinuation(pageGeneration),
@@ -3540,7 +3540,7 @@ export function SessionList() {
           key: bucket.group,
           label: bucket.label,
           kind: "creator",
-          creator: { subjectId: creator.subjectId },
+          creator: creatorPageIdentity(creator),
         }
       : null;
   };
@@ -3764,7 +3764,7 @@ export function SessionList() {
             kind: "creatorDiscovery",
             knownCreators: forest.grouped.flatMap((bucket) => {
               const creator = bucket.sessions[0]?.session.createdBy;
-              return creator ? [{ subjectId: creator.subjectId }] : [];
+              return creator ? [creatorPageIdentity(creator)] : [];
             }),
           },
           nextCursor,

@@ -98,7 +98,7 @@ describe("session browse projections", () => {
 
     expect(
       filterSessionsForBrowse([ada, scheduler], {
-        creator: "service:scheduler",
+        creator: "service:service:scheduler",
         dateField: "activity",
         dateRange: "any",
         now: NOW,
@@ -170,7 +170,7 @@ describe("session browse projections", () => {
     });
 
     const matchingWorkstream = filterSessionsForBrowse([manager, worker], {
-      creator: "user:ada",
+      creator: "subject:user:ada",
       dateField: "activity",
       dateRange: "any",
       hierarchical: true,
@@ -181,7 +181,7 @@ describe("session browse projections", () => {
     expect(sessionBrowseResultCount(matchingWorkstream, false)).toBe(2);
     expect(
       filterSessionsForBrowse([manager, worker], {
-        creator: "user:grace",
+        creator: "subject:user:grace",
         dateField: "activity",
         dateRange: "any",
         hierarchical: true,
@@ -197,13 +197,15 @@ describe("session browse projections", () => {
       parentSessionId: manager.id,
       createdBy: { kind: "subject", subjectId: "user:grace", label: "Grace Hopper" },
     });
-    const childCreator = "user:grace";
+    const childCreator = "subject:user:grace";
     const searchLabels = sessionCreatorLabelMap([manager, worker]);
     const hierarchyLabels = sessionCreatorLabelMap([manager]);
 
     expect(normalizeSessionBrowseCreator(childCreator, searchLabels, false)).toBe(childCreator);
     expect(normalizeSessionBrowseCreator(childCreator, hierarchyLabels, true)).toBeNull();
-    expect(normalizeSessionBrowseCreator("user:ada", hierarchyLabels, true)).toBe("user:ada");
+    expect(normalizeSessionBrowseCreator("subject:user:ada", hierarchyLabels, true)).toBe(
+      "subject:user:ada",
+    );
   });
 
   test("disambiguates duplicate frozen creator labels with opaque identities", () => {
@@ -217,8 +219,8 @@ describe("session browse projections", () => {
     });
 
     expect(sessionCreatorOptions([firstAlex, secondAlex])).toEqual([
-      { value: "tenant-a:alex", label: "Alex · Subject · tenant-a:alex" },
-      { value: "tenant-b:alex", label: "Alex · Subject · tenant-b:alex" },
+      { value: "subject:tenant-a:alex", label: "Alex · Subject · tenant-a:alex" },
+      { value: "subject:tenant-b:alex", label: "Alex · Subject · tenant-b:alex" },
     ]);
     expect(
       groupSessionsForBrowse([firstAlex, secondAlex], "creator", { now: NOW }).grouped.map(
@@ -229,11 +231,11 @@ describe("session browse projections", () => {
       ),
     ).toEqual([
       {
-        key: "creator:tenant-a:alex",
+        key: "creator:subject:tenant-a:alex",
         label: "Alex · Subject · tenant-a:alex",
       },
       {
-        key: "creator:tenant-b:alex",
+        key: "creator:subject:tenant-b:alex",
         label: "Alex · Subject · tenant-b:alex",
       },
     ]);
@@ -265,9 +267,33 @@ describe("session browse projections", () => {
         sessions: ["current", "legacy"],
       },
       // People keep the label frozen with the chat.
-      { key: "creator:user:davlet", label: "davlet@cloudgeni.ai", sessions: ["davlet"] },
+      { key: "creator:subject:user:davlet", label: "davlet@cloudgeni.ai", sessions: ["davlet"] },
     ]);
     expect(grouped[0]?.label).not.toMatch(/api_key:|service|subject/i);
+  });
+
+  test("a service never joins a person's group, even with the same subject id", () => {
+    const person = session({
+      id: "person",
+      createdBy: { kind: "subject", subjectId: "user:ada", label: "Ada" },
+    });
+    const impostor = session({
+      id: "impostor",
+      createdBy: { kind: "service", subjectId: "user:ada", label: "Ada" },
+    });
+    const all = [person, impostor];
+    expect(
+      groupSessionsForBrowse(all, "creator", {
+        now: NOW,
+        creatorLabels: sessionCreatorLabelMap(all),
+      }).grouped.map((group) => ({
+        key: group.group,
+        sessions: group.sessions.map((node) => node.session.id),
+      })),
+    ).toEqual([
+      { key: "creator:subject:user:ada", sessions: ["person"] },
+      { key: "creator:service:user:ada", sessions: ["impostor"] },
+    ]);
   });
 
   test("tells same-named API keys apart without showing their ids", () => {
@@ -305,7 +331,7 @@ describe("session browse projections", () => {
     const complete = [firstAlex, pinnedAlex];
     const creatorLabels = sessionCreatorLabelMap(complete);
     const groupedSubset = filterSessionsForBrowse(complete, {
-      creator: "tenant-a:alex",
+      creator: "subject:tenant-a:alex",
       dateField: "activity",
       dateRange: "any",
       now: NOW,
@@ -317,7 +343,7 @@ describe("session browse projections", () => {
       ),
     ).toEqual([
       {
-        key: "creator:tenant-a:alex",
+        key: "creator:subject:tenant-a:alex",
         label: "Alex · Subject · tenant-a:alex",
       },
     ]);
