@@ -214,7 +214,6 @@ import {
   GenerateVideoToolInput,
   GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
-  requestHumanInputToolParameters,
   type HumanInputQuestionFeatures,
   resolveAgentToolFamilies,
   resolveAgentMediaToolSurface,
@@ -3107,6 +3106,44 @@ function withHumanInputWireParameters<T extends { parameters: unknown }>(
 }
 
 /**
+ * What the Agents SDK parses a `request_human_input` call against before the
+ * tool's input guardrail runs: any JSON object. The SDK redacts every
+ * argument it cannot parse (Opengeni sets OPENAI_AGENTS_DONT_LOG_TOOL_DATA),
+ * hands the guardrail blank arguments and replaces its rejection with "Tool
+ * execution failed. Error details are redacted.", so the model could not
+ * learn what to fix. The guardrail validates the full contract instead and
+ * names each invalid field; turns run it before the approval pause
+ * (`preApprovalInputGuardrails`), so no invalid request reaches the person.
+ * The model-facing schema is set separately (`withHumanInputWireParameters`),
+ * so this changes nothing the model sees.
+ */
+const HumanInputSdkArguments = z.looseObject({});
+
+const HUMAN_INPUT_ISSUES_SHOWN = 5;
+
+/** A model-facing explanation of invalid `request_human_input` arguments. */
+export function humanInputArgumentsRejection(input: unknown): string | null {
+  const parsed = RequestHumanInputToolInput.safeParse(input);
+  if (parsed.success) return null;
+  const questionsText =
+    input !== null &&
+    typeof input === "object" &&
+    typeof (input as { questions?: unknown }).questions === "string";
+  const issues = parsed.error.issues.map(
+    (issue) => `${issue.path.map(String).join(".") || "arguments"}: ${issue.message}`,
+  );
+  const shown = issues.slice(0, HUMAN_INPUT_ISSUES_SHOWN);
+  if (issues.length > shown.length) shown.push(`and ${issues.length - shown.length} more`);
+  return [
+    "Nothing was asked: the request_human_input arguments do not match its schema.",
+    questionsText ? "questions must be an array of question objects, not JSON text." : null,
+    `Fix ${issues.length === 1 ? "this" : "these"} and call request_human_input again: ${shown.join("; ")}.`,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" ");
+}
+
+/**
  * The tool view the modular composer reads. An attempt that cannot install the
  * search router (see `lazyToolTransportFor`) has no tool search, so the
  * composer leaves out its guidance even when the host did not say so.
@@ -3920,7 +3957,8 @@ export function buildOpenGeniAgent(
           ]
             .filter((part): part is string => typeof part === "string")
             .join(" "),
-          parameters: requestHumanInputToolParameters(humanInputFeatures),
+          // Replaced on the wire by the feature schema; see HumanInputSdkArguments.
+          parameters: HumanInputSdkArguments,
           needsApproval: true,
           inputGuardrails: [
             {
@@ -3944,7 +3982,8 @@ export function buildOpenGeniAgent(
                 const parsed = RequestHumanInputToolInput.safeParse(input);
                 if (!parsed.success) {
                   return ToolGuardrailFunctionOutputFactory.rejectContent(
-                    "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
+                    humanInputArgumentsRejection(input) ??
+                      "Invalid request_human_input arguments. Call the tool again with an object matching its schema.",
                   );
                 }
                 const approvalRejection = secretApprovalQuestionRejection(parsed.data);
