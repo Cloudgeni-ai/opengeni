@@ -115,7 +115,7 @@ tower = { version = "0.5", default-features = false }
 # Rust mirror of the TS mint — the single-source token-verify contract, §10.5). A
 # pure-Rust impl so the musl static build needs no libsodium/OpenSSL.
 hmac = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 # Constant-time signature comparison (mirrors the TS constantTimeEqual).
 subtle = "2"
 
