@@ -23,6 +23,22 @@ Deployments without that mode keep both texts byte for byte.
 + … only in chats they start, on repositories they choose or all of theirs.   (All my repositories offered)
 ```
 
+Codemode's programmatic directive grows by 261 UTF-8 bytes (2,368 to 2,629),
+only where an attempt-scoped Codemode bearer is available. Its polling advice
+now explicitly applies within the live attempt: background processes retain
+their launching credentials, so delayed checks should wake the session and
+start a fresh command rather than reuse a sleeping script after the turn ends.
+Sessions without Codemode keep their prompt bytes. This is a static directive
+change; it introduces no per-request state, token renewal, history rewrite or
+automatic tool replay. The existing receipt/unknown-outcome guidance remains.
+
+The API's `agent_attempt_caller_stale` refusal now explains that the process's
+turn attempt is no longer active, says to stop retrying that process and start
+a fresh command in the current live turn, and warns to check receipts or actual
+state before resubmitting a possibly executed call. Its 403 status, typed
+reason and non-retryable outcome are unchanged; other authority failures keep
+their existing message. Clients already display the server's error message.
+
 A configured session without a sandbox or Connected Machine no longer gets
 text it cannot act on: editing files in the sandbox, publishing new files,
 workspace file links, sandbox paths, background-command acknowledgement and

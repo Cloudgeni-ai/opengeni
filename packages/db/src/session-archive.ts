@@ -662,14 +662,25 @@ export async function readSessionArchiveSessionRow(
 /**
  * Purge one bounded batch per call until every table is empty. Returns the
  * rows deleted in this call; zero means the purge is complete and recorded.
+ *
+ * Tables are purged in order. A call stops at the first table that still had
+ * a full batch and reports it as `nextTable`; passing that back as
+ * `fromTable` resumes there instead of calling every already-empty table
+ * before it again. The purge is only recorded complete after a call that
+ * starts at the first table and finds nothing in any table.
  */
 export async function purgeArchivedSessionContent(
   db: Database,
   scope: SessionArchiveScope,
-  input: { batchSize: number },
-): Promise<{ deleted: number; complete: boolean }> {
+  input: { batchSize: number; fromTable?: number },
+): Promise<{ deleted: number; complete: boolean; nextTable: number }> {
+  const fromTable = Math.min(
+    Math.max(Math.trunc(input.fromTable ?? 0), 0),
+    SESSION_ARCHIVE_PURGE_TABLES.length,
+  );
   let deleted = 0;
-  for (const table of SESSION_ARCHIVE_PURGE_TABLES) {
+  for (let index = fromTable; index < SESSION_ARCHIVE_PURGE_TABLES.length; index += 1) {
+    const table = SESSION_ARCHIVE_PURGE_TABLES[index]!;
     const count = await withRlsContext(
       db,
       { accountId: scope.accountId, workspaceId: scope.workspaceId },
@@ -684,9 +695,11 @@ export async function purgeArchivedSessionContent(
       },
     );
     deleted += count;
-    if (count >= input.batchSize) return { deleted, complete: false };
+    if (count >= input.batchSize) return { deleted, complete: false, nextTable: index };
   }
-  if (deleted > 0) return { deleted, complete: false };
+  // Rows were deleted, or tables before fromTable were skipped: one more pass
+  // over every table confirms nothing is left.
+  if (deleted > 0 || fromTable > 0) return { deleted, complete: false, nextTable: 0 };
   await withSessionActivityRlsContext(
     db,
     { accountId: scope.accountId, workspaceId: scope.workspaceId },
@@ -703,7 +716,7 @@ export async function purgeArchivedSessionContent(
           ),
         ),
   );
-  return { deleted, complete: true };
+  return { deleted, complete: true, nextTable: 0 };
 }
 
 export type SessionArchiveObjectDeletion = {
