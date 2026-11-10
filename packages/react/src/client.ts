@@ -179,6 +179,9 @@ type SessionClientMethods<Client extends ChatClient = OpenGeniClient> = Pick<
       | "getComputerInputPosture"
       | "getSessionModelAccount"
       | "resolveArtifactLink"
+      // Saved approval reviews; without them a card shows the call's own arguments.
+      | "getToolActionReview"
+      | "getToolReviewDetails"
     >
   >;
 
