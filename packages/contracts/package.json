@@ -374,7 +374,7 @@
   },
   "dependencies": {
     "@noble/hashes": "^1.8.0",
-    "entities": "^7.0.1",
+    "entities": "^9.0.0",
     "yaml": "2.9.0",
     "zod": "^4.2.1"
   },
