@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { htmlPageResponse } from "../http/html-page-security";
 import { z } from "zod";
 import { HTTPException } from "hono/http-exception";
 import type { ConnectAdvance, ConnectAttempt } from "@opengeni/contracts/connect";
@@ -379,9 +380,8 @@ export async function completeGitHubAppConnect(
       const home =
         deps.settings.webBaseUrl ??
         integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
-      return new Response(githubConnectFailureHtml("expired", `${home.replace(/\/+$/u, "")}/`), {
+      return htmlPageResponse(githubConnectFailureHtml("expired", `${home.replace(/\/+$/u, "")}/`), {
         status: 400,
-        headers: { "content-type": "text/html; charset=UTF-8" },
       });
     }
   }

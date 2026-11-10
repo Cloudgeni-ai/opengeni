@@ -16,6 +16,7 @@ import { containedPortal } from "../ui/portal-container";
 import { useRef, useState, type ReactNode, type RefObject } from "react";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import { useOpenGeniText } from "../messages/runtime";
+import { displayImageSrc } from "../lib/content-hosting";
 
 const DialogContainedPortal = containedPortal(Dialog.Portal);
 
@@ -104,7 +105,7 @@ function Mark({
       aria-hidden
     >
       {src && failed !== src ? (
-        <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(src)} />
+        <img src={displayImageSrc(src)} alt="" loading="lazy" decoding="async" onError={() => setFailed(src)} />
       ) : Icon ? (
         <Icon size={18} strokeWidth={1.75} />
       ) : (

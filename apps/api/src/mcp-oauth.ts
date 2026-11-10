@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { htmlPage } from "./http/html-page-security";
 import {
   ID_JAG_GRANT_PROFILE,
   JWT_BEARER_GRANT_TYPE,
@@ -294,12 +295,9 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
       await prepared.close();
     }
     const accounts = await consentAccountsForWorkspaces(deps, workspaces);
-    c.header(
-      "content-security-policy",
-      "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
-    );
     c.header("cache-control", "no-store");
-    return c.html(
+    return htmlPage(
+      c,
       renderMcpOAuthConsentPage({
         clientName: client.clientName ?? "MCP client",
         requestToken,
@@ -312,6 +310,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         })),
         selectedWorkspaceId: grant.workspaceId,
       }),
+      { formAction: "'self'" },
     );
   });
 
@@ -896,22 +895,14 @@ export function completeAuthorizationRedirect(c: Context, redirectTo: string) {
   // so the waiter never receives the code. Return 200 HTML that navigates
   // to the exact requested URI from script and Refresh.
   c.header("cache-control", "no-store");
-  c.header(
-    "content-security-policy",
-    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; frame-ancestors 'none'",
-  );
   c.header("refresh", `0;url=${redirectTo}`);
-  return c.html(renderMcpOAuthContinuePage(redirectTo));
+  return htmlPage(c, renderMcpOAuthContinuePage(redirectTo));
 }
 
 function oauthAuthorizeBrowserError(c: Context, message: string) {
   c.header("cache-control", "no-store");
   c.header("pragma", "no-cache");
-  c.header(
-    "content-security-policy",
-    "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'",
-  );
-  return c.html(renderMcpOAuthExpiredPage(message), 400);
+  return htmlPage(c, renderMcpOAuthExpiredPage(message), { status: 400 });
 }
 
 export type McpOAuthConsentAccount = {
@@ -959,7 +950,7 @@ export function renderMcpOAuthConsentPage(input: {
     label: consentWorkspaceLabel(workspace),
   }));
   const body = `<p class="lede"><strong>${escapeHtml(input.clientName)}</strong> wants MCP access to the organization and workspace you choose.</p>
-<form method="post" action="/oauth/authorize" onsubmit="var submitter=event.submitter;if(submitter&&submitter.name){var input=document.createElement('input');input.type='hidden';input.name=submitter.name;input.value=submitter.value;this.appendChild(input)}this.querySelectorAll('button').forEach(function(button){button.disabled=true})">
+<form id="mcp-oauth-consent" method="post" action="/oauth/authorize">
 <input type="hidden" name="request" value="${escapeHtml(input.requestToken)}">
 <label class="field"><span>Organization</span><select id="organization" name="organization" autocomplete="off">${accountOptions}</select></label>
 <label class="field"><span>Workspace</span><select id="workspace_id" name="workspace_id" autocomplete="off">${workspaceOptions}</select></label>
@@ -985,6 +976,17 @@ export function renderMcpOAuthConsentPage(input: {
     if (items.some(function (item) { return item.id === selected; })) workspace.value = selected;
   }
   account.addEventListener("change", sync);
+  document.getElementById("mcp-oauth-consent").addEventListener("submit", function (event) {
+    var submitter = event.submitter;
+    if (submitter && submitter.name) {
+      var input = document.createElement("input");
+      input.type = "hidden";
+      input.name = submitter.name;
+      input.value = submitter.value;
+      this.appendChild(input);
+    }
+    this.querySelectorAll("button").forEach(function (button) { button.disabled = true; });
+  });
 })();
 </script>`;
   return oauthDocument({

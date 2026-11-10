@@ -8,6 +8,18 @@ import {
   opengeniOfficeManifest,
 } from "./office-manifest";
 import { SETUP_ACCOUNT_PATH, SETUP_ACCOUNT_RESPONSE_HEADERS } from "./setup-account-token";
+import {
+  OFFICE_FRAME_ANCESTORS,
+  SAME_ORIGIN_HTML_FRAME_HOST_PATH,
+  buildContentSecurityPolicy,
+  contentHostingFor,
+  inlineScriptHashes,
+  loadContentSecuritySources,
+  sameOriginHtmlFrameHostResponse,
+  withContentHosting,
+  type ConsoleContentSecuritySources,
+  type PageKind,
+} from "./csp";
 
 /**
  * A chat share link's page: its address is the key to the conversation, so
@@ -39,9 +51,10 @@ const SHELL_SECURITY_HEADERS = {
   "x-content-type-options": "nosniff",
   "referrer-policy": "strict-origin-when-cross-origin",
 } as const;
-// Clickjacking defence. Products embed Opengeni through SDK components and
-// the desktop app loads the console top-level, so only the console itself
-// may frame its pages. Only framing is restricted; no script policy is set.
+// Clickjacking defence for responses that are not HTML pages (HTML pages get
+// the full policy from ./csp.ts, with the same framing rules). Products embed
+// Opengeni through SDK components and the desktop app loads the console
+// top-level, so only the console itself may frame its pages.
 const CONSOLE_FRAMING_HEADERS = {
   "content-security-policy": "frame-ancestors 'self'",
   "x-frame-options": "SAMEORIGIN",
@@ -49,19 +62,6 @@ const CONSOLE_FRAMING_HEADERS = {
 // The Excel add-in's pages under /office/ run inside Office on the web's
 // third-party frames, nested in Microsoft's hosts. X-Frame-Options cannot name
 // other origins, so these pages carry only the CSP list.
-const OFFICE_FRAME_ANCESTORS = [
-  "'self'",
-  "https://*.officeapps.live.com",
-  "https://*.office.com",
-  "https://*.office365.com",
-  "https://*.microsoft365.com",
-  "https://*.cloud.microsoft",
-  "https://*.sharepoint.com",
-  "https://onedrive.live.com",
-  "https://*.onedrive.live.com",
-  "https://teams.microsoft.com",
-  "https://*.teams.microsoft.com",
-] as const;
 const OFFICE_FRAMING_HEADERS = {
   "content-security-policy": `frame-ancestors ${OFFICE_FRAME_ANCESTORS.join(" ")}`,
 } as const;
@@ -111,9 +111,26 @@ export type WebHandlerOptions = {
    * `X-Robots-Tag: noindex, nofollow`. Off by default.
    */
   noindex?: boolean | undefined;
+  /**
+   * The deployment's external origins for the Content-Security-Policy (from
+   * the API, see ./csp.ts). Without it pages get the base policy, and
+   * agent-authored HTML uses the same-origin frame host.
+   */
+  contentSecurity?:
+    | {
+        current: () => ConsoleContentSecuritySources | null;
+        generation: () => number;
+        ready?: Promise<void>;
+      }
+    | undefined;
 };
 
-type RenderedShell = { html: Uint8Array<ArrayBuffer>; gzip: Uint8Array<ArrayBuffer> };
+type RenderedPage = {
+  html: Uint8Array<ArrayBuffer>;
+  gzip: Uint8Array<ArrayBuffer>;
+  policy: string;
+  generation: number;
+};
 
 // Root-relative content URLs in the link-preview tags a crawler dereferences.
 const LINK_PREVIEW_URL_META =
@@ -137,7 +154,10 @@ export function createWebHandler(
   if (options.publicOrigin !== undefined && !publicOrigin) {
     throw new Error("publicOrigin must be an absolute http(s) URL");
   }
-  let renderedShell: Promise<RenderedShell> | null = null;
+  const renderedPages = new Map<string, Promise<RenderedPage>>();
+  const contentSecurity = options.contentSecurity;
+  const currentSources = () => contentSecurity?.current() ?? null;
+  const sameOriginFrameHost = () => !currentSources()?.htmlFrameHost;
 
   return async function webHandler(request: Request): Promise<Response> {
     const response = await routeRequest(request);
@@ -149,6 +169,16 @@ export function createWebHandler(
     const url = new URL(request.url);
     if (url.pathname === DEMO_API_PREFIX || url.pathname.startsWith(`${DEMO_API_PREFIX}/`)) {
       return proxyDemoApi(request, url, options.demoApiProxy);
+    }
+    // The first page waits for the deployment's sources (bounded by the
+    // loader's own timeout), so it gets the deployment's policy.
+    if (contentSecurity?.ready) await contentSecurity.ready;
+    if (
+      url.pathname === SAME_ORIGIN_HTML_FRAME_HOST_PATH &&
+      (request.method === "GET" || request.method === "HEAD") &&
+      sameOriginFrameHost()
+    ) {
+      return withShellSecurityHeaders(url.pathname, sameOriginHtmlFrameHostResponse(request.method));
     }
     return withShellSecurityHeaders(url.pathname, await serveShell(request, url));
   }
@@ -195,6 +225,9 @@ export function createWebHandler(
     }
     const requestedFile = Bun.file(requestedPath);
     if (await requestedFile.exists()) {
+      if (extname(requestedPath) === ".html") {
+        return servePage(request, requestedPath, cacheControlFor(staticPath));
+      }
       return serveFile(request, requestedPath, cacheControlFor(staticPath));
     }
     const previousAsset = await findPreviousAsset(requestedPath);
@@ -247,24 +280,41 @@ export function createWebHandler(
     cacheControl: string,
     extraHeaders?: HeadersInit,
   ): Promise<Response> {
-    if (!publicOrigin) return serveFile(request, indexPath, cacheControl, extraHeaders);
-    if (!(await Bun.file(indexPath).exists())) {
+    return servePage(request, indexPath, cacheControl, extraHeaders);
+  }
+
+  /**
+   * An HTML page from the build: rendered once per policy generation with
+   * its content hosting and link-preview URLs, and sent with its policy,
+   * whose script hashes come from these exact bytes.
+   */
+  async function servePage(
+    request: Request,
+    path: string,
+    cacheControl: string,
+    extraHeaders?: HeadersInit,
+  ): Promise<Response> {
+    if (!(await Bun.file(path).exists())) {
       return new Response("Not Found", { status: 404 });
     }
-    // The built shell is immutable for the life of the process: render it once.
-    renderedShell ??= renderShell(indexPath, publicOrigin).catch((error: unknown) => {
-      renderedShell = null;
-      throw error;
-    });
-    const shell = await renderedShell;
+    const generation = contentSecurity?.generation() ?? 0;
+    let pending = renderedPages.get(path);
+    const cached = pending ? await pending.catch(() => null) : null;
+    if (!pending || !cached || cached.generation !== generation) {
+      pending = renderPage(path, generation);
+      renderedPages.set(path, pending);
+      pending.catch(() => renderedPages.delete(path));
+    }
+    const page = await pending;
     const gzip =
       !request.headers.has("range") &&
       acceptsEncoding(request.headers.get("accept-encoding"), "gzip");
-    const body = gzip ? shell.gzip : shell.html;
+    const body = gzip ? page.gzip : page.html;
     const headers = new Headers({
       ...Object.fromEntries(new Headers(extraHeaders)),
       "cache-control": cacheControl,
       "content-type": "text/html;charset=utf-8",
+      "content-security-policy": page.policy,
       vary: "Accept-Encoding",
     });
     if (gzip) headers.set("content-encoding", "gzip");
@@ -274,13 +324,30 @@ export function createWebHandler(
     }
     return new Response(body, { headers });
   }
-}
 
-async function renderShell(indexPath: string, origin: string): Promise<RenderedShell> {
-  const html = new TextEncoder().encode(
-    withAbsoluteLinkPreviewUrls(await Bun.file(indexPath).text(), origin),
-  );
-  return { html, gzip: Bun.gzipSync(html, { level: 9 }) };
+  async function renderPage(path: string, generation: number): Promise<RenderedPage> {
+    const pathname = `/${relative(distRoot, path).split(sep).join("/")}`;
+    const kind: PageKind = OFFICE_PAGE_PATH.test(pathname) ? "office" : "console";
+    const sources = currentSources();
+    let text = await Bun.file(path).text();
+    // The two app documents read their content hosting at boot.
+    if (path === indexPath || pathname === "/office/index.html") {
+      text = withContentHosting(text, contentHostingFor(sources, publicOrigin));
+    }
+    if (path === indexPath && publicOrigin) text = withAbsoluteLinkPreviewUrls(text, publicOrigin);
+    const html = new TextEncoder().encode(text);
+    return {
+      html,
+      gzip: Bun.gzipSync(html, { level: 9 }),
+      policy: buildContentSecurityPolicy({
+        kind,
+        publicOrigin,
+        sources,
+        scriptHashes: inlineScriptHashes(text),
+      }),
+      generation,
+    };
+  }
 }
 
 /** Resolves root-relative link-preview URLs in the app shell against `origin`. */
@@ -333,6 +400,23 @@ export function noindexFromEnvironment(
 ): boolean {
   const value = env[NOINDEX_ENV]?.trim().toLowerCase();
   return value === "true" || value === "1";
+}
+
+/**
+ * Where the web server reads the policy's external origins: the API inside
+ * the deployment (the Helm chart sets OPENGENI_DEMO_API_URL to the API
+ * service for the demo proxy), or the public API origin.
+ */
+export function contentSecurityApiUrlFromEnvironment(
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  const value =
+    env.OPENGENI_WEB_CONTENT_SECURITY_API_URL?.trim() ||
+    env.OPENGENI_DEMO_API_URL?.trim() ||
+    env.OPENGENI_PUBLIC_BASE_URL?.trim();
+  if (!value || !URL.canParse(value)) return undefined;
+  const url = new URL(value);
+  return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : undefined;
 }
 
 function withShellSecurityHeaders(pathname: string, response: Response): Response {
@@ -550,6 +634,9 @@ if (import.meta.main) {
       officePublisher: officeManifestPublisherFromEnvironment(),
       previousAssetRoots: previousAssetRootsFromEnvironment(),
       noindex: noindexFromEnvironment(),
+      contentSecurity: loadContentSecuritySources({
+        apiBaseUrl: contentSecurityApiUrlFromEnvironment(),
+      }),
     }),
   });
   // As a container's PID 1 the process gets no default SIGTERM action, so stop

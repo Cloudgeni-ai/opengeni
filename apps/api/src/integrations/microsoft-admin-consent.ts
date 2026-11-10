@@ -1,4 +1,5 @@
 import type { IntegrationDefinition } from "@opengeni/capabilities";
+import { htmlPageResponse } from "../http/html-page-security";
 import {
   MICROSOFT_ADMIN_CONSENT_STATE,
   microsoftAdminConsentUrl as adminConsentUrl,
@@ -87,12 +88,5 @@ export function microsoftAdminConsentResultPage(query: {
     ? "People in your organization can now connect their Microsoft 365 accounts. Ask them to connect again."
     : "Microsoft did not record an approval. Open the approval link again with a Microsoft 365 administrator account.";
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font-family:system-ui,-apple-system,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1.5rem;line-height:1.5;color:#1f2328}h1{font-size:1.4rem}</style></head><body><h1>${title}</h1><p>${body}</p><p>You can close this window.</p></body></html>`;
-  return new Response(html, {
-    status: granted ? 200 : 400,
-    headers: {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "no-store",
-      "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
-    },
-  });
+  return htmlPageResponse(html, { status: granted ? 200 : 400 });
 }

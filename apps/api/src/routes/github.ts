@@ -7,6 +7,7 @@ import {
   type AccessGrant,
   type GitHubInstallationBindingCandidate,
 } from "@opengeni/contracts";
+import { withHtmlPageSecurity } from "../http/html-page-security";
 import { PersonalGitHubConnectionMetadata } from "@opengeni/contracts/personal-github";
 import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import {
@@ -164,7 +165,14 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
       githubBrowserFailureStatus(failure, handledStatus) as ContentfulStatusCode,
     );
   };
-  for (const path of GITHUB_BROWSER_ROUTES) app.use(path, browserFailurePage);
+  // Outermost: every page these routes render (including the failure pages
+  // above) gets a policy that allows exactly its own inline style and script
+  // blocks; their forms submit back to the API.
+  const browserPageSecurity: MiddlewareHandler = async (c, next) => {
+    await next();
+    c.res = await withHtmlPageSecurity(c.res, { formAction: "'self'" });
+  };
+  for (const path of GITHUB_BROWSER_ROUTES) app.use(path, browserPageSecurity, browserFailurePage);
 
   app.get("/v1/workspaces/:workspaceId/github/app", async (c) => {
     const workspaceId = c.req.param("workspaceId");

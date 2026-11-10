@@ -3,6 +3,8 @@
 // other chat) can work in it live through `excel_run`.
 // It uses the published, scoped stylesheet, as any product embedding the
 // session app does.
+// Before anything renders or parses: the page's content hosting and Zod's JIT.
+import "../../src/lib/content-security-boot";
 import "@fontsource-variable/inter/wght.css";
 import "@fontsource-variable/inter/wght-italic.css";
 import "@fontsource-variable/jetbrains-mono/wght.css";
