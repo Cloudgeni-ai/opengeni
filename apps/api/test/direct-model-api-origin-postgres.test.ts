@@ -426,3 +426,52 @@ test("an internal (legacy) account's own sign-in stays app use on the direct mod
   expect((await usageDebits(person)).map((debit) => debit.usageOrigin)).toEqual(["app"]);
   expect((await balances(person)).credits).toBe(0);
 }, 180_000);
+
+test("streaming calls and the model list are API use for a person's own sign-in too", async () => {
+  if (!client || !shared) return;
+  const rt = runtime();
+  const person = await freePerson(rt);
+  const origins: Array<string | null | undefined> = [];
+  const refused = spyOn(core, "connectedSubscriptionsRefusedForOrigin");
+  // Record the origin the subscription filter sees; the offline fixture
+  // model is neither a subscription nor a full catalog entry.
+  refused.mockImplementation((_settings, origin) => {
+    origins.push(origin);
+    return false;
+  });
+  restores.push(refused, spyOn(core, "isWorkspaceModelAdmissible").mockReturnValue(true));
+  const stream = () =>
+    rt.app.fetch(
+      new Request(`${ORIGIN}/v1/workspaces/${person.workspaceId}/chat/completions`, {
+        method: "POST",
+        headers: { cookie: person.cookie, "content-type": "application/json" },
+        body: JSON.stringify({
+          model: MODEL,
+          stream: true,
+          messages: [{ role: "user", content: "Hello" }],
+        }),
+      }),
+    );
+
+  // Refused before any output: an ordinary JSON error, nothing dispatched.
+  const blocked = await stream();
+  expectAddCreditsRefusal({ status: blocked.status, body: await blocked.json() });
+  expect(rt.dispatch).not.toHaveBeenCalled();
+
+  await topUp(person, 3_000_000);
+  const streamed = await stream();
+  expect(streamed.status).toBe(200);
+  expect(await streamed.text()).toContain("data: [DONE]");
+  expect((await usageDebits(person)).map((debit) => debit.usageOrigin)).toEqual(["api"]);
+  expect((await balances(person)).plan).toBe(10_000_000);
+
+  // The model list hides what API use cannot use for the same sign-in.
+  const listed = await rt.app.request(`/v1/workspaces/${person.workspaceId}/models`, {
+    headers: { cookie: person.cookie },
+  });
+  expect(listed.status).toBe(200);
+  expect(((await listed.json()) as { data: Array<{ id: string }> }).data.map((m) => m.id)).toEqual([
+    MODEL,
+  ]);
+  expect(origins.at(-1)).toBe("api");
+}, 180_000);
