@@ -983,6 +983,14 @@ export function describeSubscriptionCoreConformance<Credential>(
     if (result.status !== "completed") throw new Error("placement world was not visible");
     const world = result.value;
     const binding = world.session.binding;
+    const providerConnections = world.connections.filter(
+      (connection) => connection.provider === providerId,
+    );
+    const catalogDecides =
+      upstreamModelId !== null &&
+      providerConnections.some(
+        (connection) => connection.observedModelSlugs?.includes(upstreamModelId) === true,
+      );
     return {
       ...world,
       session: {
@@ -996,18 +1004,17 @@ export function describeSubscriptionCoreConformance<Credential>(
         }),
       },
       settings: { ...world.settings, crossProviderFailover: false, fallbackOrder: {} },
-      connections: world.connections
-        .filter((connection) => connection.provider === providerId)
-        .map((connection) =>
-          upstreamModelId !== null && connection.observedModelSlugs != null
-            ? {
-                ...connection,
-                entitledModelIds: connection.observedModelSlugs.includes(upstreamModelId)
-                  ? [turn.productModelId]
-                  : [],
-              }
-            : connection,
-        ),
+      connections: providerConnections.map((connection) =>
+        // A fresh catalog decides only when some account lists the model.
+        catalogDecides && connection.observedModelSlugs != null
+          ? {
+              ...connection,
+              entitledModelIds: connection.observedModelSlugs.includes(upstreamModelId!)
+                ? [turn.productModelId]
+                : [],
+            }
+          : connection,
+      ),
     } satisfies PlacementInput;
   }
 
@@ -4817,16 +4824,61 @@ export function describeSubscriptionCoreConformance<Credential>(
       };
       await catalog(broad, [m0.upstreamModelId, m1.upstreamModelId]);
       await catalog(single, [m1.upstreamModelId]);
-      // No connection lists the third vendor's model: the turn waits.
-      const unserved = await runningTurn(org, { model: m2, frozenUpstreamModel: true });
-      expect(await placeChecked(unserved, new Date(), m2.upstreamModelId)).toMatchObject({
-        kind: "wait",
-      });
       // Only the connection whose catalog lists the model serves it.
       const served = await runningTurn(org, { model: m0, frozenUpstreamModel: true });
       expect(await placeChecked(served, new Date(), m0.upstreamModelId)).toMatchObject({
         kind: "run",
         connectionId: broad,
+      });
+    });
+
+    test("a model no fresh catalog lists runs on capacity and the provider's answer decides", async () => {
+      // A provider can hide a model from every account at once, for example
+      // when it gates the model above the client version this deployment
+      // presents. The catalog then cannot choose an account; the turn must
+      // not wait behind another account's unrelated reset.
+      const org = await organization();
+      const healthy = await sharedConnection(org, `healthy-${crypto.randomUUID()}`);
+      const exhausted = await sharedConnection(org, `exhausted-${crypto.randomUUID()}`);
+      const operations = subscriptionCoreOperations(provider);
+      const scope = {
+        kind: "workspace" as const,
+        accountId: org.accountId,
+        workspaceId: org.sharedWorkspaceId,
+        subjectId: org.ownerSubjectId,
+      };
+      const [row] = await admin()<{ refresh_generation: string }[]>`
+        select refresh_generation::text as refresh_generation from subscription_connections
+        where id = ${healthy}::uuid`;
+      // The healthy account's fresh catalog lists other models, not this one.
+      expect(
+        await operations.recordSubscriptionCoreModelCatalog(db(), scope, healthy, {
+          slugs: [m1.upstreamModelId],
+          refreshGeneration: Number(row!.refresh_generation),
+          observedAt: Date.now() - 1_000,
+        }),
+      ).toBe(true);
+      // The other account has no fresh catalog and is exhausted for days.
+      const resetAt = Date.now() + 4 * 24 * 60 * 60 * 1000;
+      await admin()`
+        insert into subscription_connection_quota (
+          account_id, connection_id, quota, observed_refresh_generation, revision, updated_at
+        ) values (
+          ${org.accountId}::uuid, ${exhausted}::uuid, ${admin().json({
+            windows: [
+              { id: "fixture_weekly", usedPercent: 100, resetsAt: resetAt, status: "exhausted" },
+            ],
+            modelCooldowns: {},
+            exhaustedUntil: resetAt,
+            exhaustedKind: "quota",
+            source: "refusal",
+          })}::jsonb, 1, 1, clock_timestamp()
+        )
+        on conflict (connection_id) do update set quota = excluded.quota`;
+      const hidden = await runningTurn(org, { model: m0, frozenUpstreamModel: true });
+      expect(await placeChecked(hidden, new Date(), m0.upstreamModelId)).toMatchObject({
+        kind: "run",
+        connectionId: healthy,
       });
     });
 
