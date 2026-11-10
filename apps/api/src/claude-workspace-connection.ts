@@ -3,19 +3,27 @@ import { requireEnvironmentEncryption } from "@opengeni/core";
 import { ClaudeSubscriptionCredential, type Settings } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 
+const ANTHROPIC_API_KEY_EMPTY_MESSAGE = "Enter an Anthropic API key.";
 const ANTHROPIC_API_KEY_MESSAGE =
   "Enter an Anthropic API key. Use Claude subscription for setup tokens.";
 const ANTHROPIC_ADMIN_KEY_MESSAGE =
   "This is an Anthropic Admin API key, which can't run models. Create an API key in the Anthropic Console and connect that instead.";
+const ANTHROPIC_API_KEY_INCOMPLETE_MESSAGE =
+  "This doesn't look like a complete Anthropic API key. Copy the full key from the Anthropic Console and paste it again.";
+
+const QUOTES = "\"'`\u2018\u2019\u201C\u201D";
+const WRAPPING_QUOTES = new RegExp(`^[${QUOTES}](.*)[${QUOTES}]$`, "u");
 
 /**
- * Clean up a pasted Anthropic API key. Keys never contain whitespace or
- * quotes, so a line break from a wrapped copy, invisible characters, or quotes
- * copied from an env file are removed instead of failing the connection.
+ * Clean up a pasted Anthropic API key. Keys never contain whitespace,
+ * invisible format characters, quotes or `=`, so an env-file line
+ * (`export ANTHROPIC_API_KEY="…"`), a line break from a wrapped copy,
+ * invisible characters and wrapping (smart) quotes are removed instead of
+ * failing the connection.
  */
 export function normalizeAnthropicApiKey(apiKey: string): string {
-  const compact = apiKey.replace(/[\s\u200B-\u200D\u2060\uFEFF]+/gu, "");
-  return compact.replace(/^(["'`])(.+)\1$/u, "$2");
+  const value = apiKey.trim().replace(/^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*/u, "");
+  return value.replace(/[\s\p{Cf}]+/gu, "").replace(WRAPPING_QUOTES, "$1");
 }
 
 /**
@@ -24,14 +32,19 @@ export function normalizeAnthropicApiKey(apiKey: string): string {
  * whether it works, and a rejected key surfaces at use. Only credentials that
  * clearly cannot run models through an API key are refused here: an empty
  * value, Claude subscription OAuth access/refresh tokens (`sk-ant-oat…`,
- * `sk-ant-ort…`) and Admin API keys (`sk-ant-admin…`).
+ * `sk-ant-ort…`), Admin API keys (`sk-ant-admin…`) and values with characters
+ * an HTTP header can never carry (such as `…` from a masked copy), which would
+ * otherwise fail at use before reaching Anthropic.
  */
 export function assertAnthropicApiKey(apiKey: string): string {
   const key = normalizeAnthropicApiKey(apiKey);
-  if (!key || /^sk-ant-o(?:at|rt)/iu.test(key))
+  if (!key) throw new HTTPException(422, { message: ANTHROPIC_API_KEY_EMPTY_MESSAGE });
+  if (/^sk-ant-o(?:at|rt)/iu.test(key))
     throw new HTTPException(422, { message: ANTHROPIC_API_KEY_MESSAGE });
   if (/^sk-ant-admin/iu.test(key))
     throw new HTTPException(422, { message: ANTHROPIC_ADMIN_KEY_MESSAGE });
+  if (/[^\x21-\x7E]/u.test(key))
+    throw new HTTPException(422, { message: ANTHROPIC_API_KEY_INCOMPLETE_MESSAGE });
   return key;
 }
 

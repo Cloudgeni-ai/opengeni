@@ -76,6 +76,8 @@ describe("organization Anthropic API key connection", () => {
       `${KEY.slice(0, 40)}\n${KEY.slice(40)}`,
       `"${KEY}"`,
       `${KEY.slice(0, 20)}\u200B${KEY.slice(20)}`,
+      `\u201C${KEY}\u201D`,
+      `export ANTHROPIC_API_KEY="${KEY}"`,
     ]) {
       const response = await put(pasted);
       expect(response.status).toBe(200);
@@ -103,6 +105,11 @@ describe("organization Anthropic API key connection", () => {
     ["setup token", "sk-ant-oat01-Synthetic_fixture", "Use Claude subscription for setup tokens."],
     ["OAuth refresh token", "sk-ant-ort01-Synthetic_fixture", "Use Claude subscription"],
     ["Admin API key", "sk-ant-admin01-Synthetic_fixture", "Admin API key, which can't run models"],
+    [
+      "masked copy",
+      "sk-ant-usr-Synthetic…fixture",
+      "doesn't look like a complete Anthropic API key",
+    ],
   ] as const)("refused with a plain reason: %s", async (_label, key, message) => {
     const response = await put(key);
     expect(response.status).toBe(422);

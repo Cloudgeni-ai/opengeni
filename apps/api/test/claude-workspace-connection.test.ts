@@ -88,6 +88,10 @@ test.each([
   ],
   ["env-file quotes", `"sk-ant-svc-${body}"`, `sk-ant-svc-${body}`],
   ["invisible characters", `\uFEFFsk-ant-usr-${body}\u200B`, `sk-ant-usr-${body}`],
+  ["direction mark", `\u200Esk-ant-usr-${body}`, `sk-ant-usr-${body}`],
+  ["smart quotes", `\u201Csk-ant-svc-${body}\u201D`, `sk-ant-svc-${body}`],
+  ["env-file line", `ANTHROPIC_API_KEY="sk-ant-usr-${body}"`, `sk-ant-usr-${body}`],
+  ["exported env line", `export ANTHROPIC_API_KEY = sk-ant-usr-${body}\n`, `sk-ant-usr-${body}`],
 ] as const)("Anthropic API key accepted: %s", (_label, pasted, stored) => {
   expect(assertAnthropicApiKey(pasted)).toBe(stored);
   expect(() =>
@@ -106,12 +110,15 @@ test.each([
   ).toEqual({ apiKey: stored });
 });
 test.each([
-  ["empty", "", "Use Claude subscription for setup tokens"],
-  ["whitespace only", " \n ", "Use Claude subscription for setup tokens"],
+  ["empty", "", "Enter an Anthropic API key."],
+  ["whitespace only", " \n ", "Enter an Anthropic API key."],
+  ["quotes only", '""', "Enter an Anthropic API key."],
   ["setup token", " sk-ant-oat01-token\n", "Use Claude subscription for setup tokens"],
+  ["setup token in smart quotes", "\u201Csk-ant-oat01-token\u201D", "Use Claude subscription"],
   ["setup token, upper case", "SK-ANT-OAT01-token", "Use Claude subscription for setup tokens"],
   ["OAuth refresh token", "sk-ant-ort01-token", "Use Claude subscription for setup tokens"],
   ["Admin API key", "sk-ant-admin01-key", "Admin API key, which can't run models"],
+  ["masked copy", "sk-ant-usr-AbC…xyz", "doesn't look like a complete Anthropic API key"],
 ] as const)("Anthropic API key refused: %s", (_label, refused, message) => {
   expect(() => assertAnthropicApiKey(refused)).toThrow(message);
   expect(() =>
