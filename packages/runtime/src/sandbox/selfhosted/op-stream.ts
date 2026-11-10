@@ -1799,6 +1799,16 @@ function lostToControlError(status: Pick<OpStatus, "lostReason">): SelfhostedCon
   });
 }
 
+/** Whether a read failed only because Opengeni already released the op's
+ *  output. A runner releases output only after Opengeni durably stored all of
+ *  it, so the stored command record holds the result, not the runner. */
+export function isReleasedOpError(error: unknown): boolean {
+  return (
+    error instanceof SelfhostedControlError &&
+    error.detail.lost_reason === String(OpLostReason.OP_LOST_REASON_RELEASED)
+  );
+}
+
 /** The runner's answer for op `opId` cancelled before it ever began (its
  *  tombstone): complete and cancelled, with no frame ever sent and no output
  *  record. A real exit always declares its output totals and digests and
