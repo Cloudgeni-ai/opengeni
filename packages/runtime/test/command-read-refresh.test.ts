@@ -620,7 +620,8 @@ test("a refresh the machine never answers cannot stretch command_wait past its w
   try {
     const result = await executeCommandReadWithRefresh({
       toolName: "command_wait",
-      args: { commandId, waitSeconds: 6 },
+      args: { commandId, waitSeconds: 1 },
+      minRefreshBudgetMs: 300,
       call: async (readArgs) => {
         waits.push(readArgs.waitSeconds);
         return receipt(false, ["retained"]);
@@ -633,8 +634,8 @@ test("a refresh the machine never answers cannot stretch command_wait past its w
         }),
     });
     const waited = Date.now() - started;
-    expect(waited).toBeGreaterThanOrEqual(5_500);
-    expect(waited).toBeLessThan(8_000);
+    expect(waited).toBeGreaterThanOrEqual(900);
+    expect(waited).toBeLessThan(2_500);
     // One read before the refresh, and one without waiting once the wait is spent.
     expect(waits).toEqual([0, 0]);
     expect(snapshot(result)).toMatchObject({
@@ -650,7 +651,7 @@ test("a refresh the machine never answers cannot stretch command_wait past its w
   } finally {
     process.off("unhandledRejection", onUnhandled);
   }
-}, 15_000);
+});
 
 test("a zero-second read still gives an answering refresh its few seconds", async () => {
   const calls: string[] = [];
@@ -670,4 +671,61 @@ test("a zero-second read still gives an answering refresh its few seconds", asyn
   expect(calls).toEqual(["api:0", "refresh", "api:0"]);
   expect(snapshot(result)).toMatchObject({ terminal: true, chunks: ["fresh"] });
   expect(snapshot(result).freshness).toBeUndefined();
+});
+
+test("several slow refreshes share one bound instead of each getting their own", async () => {
+  const ids = Array.from(
+    { length: 8 },
+    (_, index) => `6cfa95ae-29cc-48cb-9ab1-2613d15f1d${index.toString().padStart(2, "0")}`,
+  );
+  const refreshed: string[] = [];
+  const started = Date.now();
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandIds: ids, waitSeconds: 0 },
+    minRefreshBudgetMs: 500,
+    call: async () => ({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            commands: ids.map((id) => ({ commandId: id, terminal: false, chunks: [] })),
+          }),
+        },
+      ],
+    }),
+    refresh: async (id) => {
+      refreshed.push(id);
+      await Bun.sleep(200);
+      return true;
+    },
+  });
+  // Eight refreshes of 200 ms each would take 1.6 s; the shared bound ends them by 0.5 s.
+  expect(Date.now() - started).toBeLessThan(1_200);
+  expect(refreshed.length).toBeLessThan(ids.length);
+  // The commands the bound cut off are marked not fresh too, not only the one it caught.
+  const commands = snapshot(result).commands as { commandId: string; freshness?: unknown }[];
+  const stale = commands.filter((command) => command.freshness !== undefined);
+  expect(stale.map((command) => command.commandId)).toEqual(ids.slice(refreshed.length - 1));
+});
+
+test("cancelling a read stops waiting for a refresh the machine never answers", async () => {
+  const controller = new AbortController();
+  const reads: unknown[] = [];
+  setTimeout(() => controller.abort(), 100);
+  const started = Date.now();
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_wait",
+    args: { commandId, waitSeconds: 20 },
+    signal: controller.signal,
+    call: async (readArgs) => {
+      reads.push(readArgs.waitSeconds);
+      return receipt(false, ["retained"]);
+    },
+    refresh: async () => await new Promise<boolean>(() => undefined),
+  });
+  expect(Date.now() - started).toBeLessThan(1_000);
+  // No further read once cancelled.
+  expect(reads).toEqual([0]);
+  expect(snapshot(result)).toMatchObject({ terminal: false, chunks: ["retained"] });
 });

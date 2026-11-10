@@ -521,8 +521,9 @@ export const AGENT_UNRESPONSIVE_RECOVERY_DETAIL_KEY = "_agent_unresponsive_recov
  *  - `host_busy`: its host is busy with it, as handing it off to another host,
  *    and refuses to wake it for a short while, so no restart was made;
  *  - `host_unavailable`: a restart was asked for, but the control service
- *    refused it because the box's host cannot serve it now (unreachable, or
- *    the host's own agent restarting): the box was not restarted and runs on. */
+ *    answered that it cannot carry it out now (`503 unavailable`: the box's
+ *    host restarting its own agent, unreachable, or not answering once asked),
+ *    so it was probably, though not certainly, not restarted. */
 export type UnresponsiveAgentRecovery =
   | "restarted"
   | "restarting"

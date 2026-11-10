@@ -706,10 +706,10 @@ export async function recoverUnresponsiveComputeAgent(
         { type: "sandbox.operation.failed", payload: { name, error: errorText(restartError) } },
       ])
       .catch(() => undefined);
-    // The control service refused it for now because the box's host cannot
-    // serve it (unreachable, or its own agent starting or stopping): nothing
-    // was restarted, the box runs on, and it is the host that is not
-    // answering, not the box.
+    // The control service could not carry it out for now (`503 unavailable`):
+    // most often the box's host is restarting its own agent while the box
+    // runs on. A 503 does not prove nothing was restarted, so the words say
+    // "probably" and send the agent to check its commands first.
     return isComputeHostUnavailable(restartError) ? "host_unavailable" : "restart_failed";
   }
   await recovery
