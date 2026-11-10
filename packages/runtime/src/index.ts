@@ -2927,8 +2927,8 @@ export type BuildAgentOptions = {
    * Stores the run's repository Skill index durably (see
    * `PublishRepositorySkills`). Called once per run before the first model
    * request: with the index when discovery finishes, or null for a deferred
-   * index. Without it the run still shows a non-empty index after its
-   * history, but nothing keeps it.
+   * index. Without it no index is shown; the system prompt still says where
+   * repository skills live.
    */
   publishRepositorySkills?: PublishRepositorySkills;
   /**
@@ -4233,11 +4233,11 @@ export function buildOpenGeniAgent(
       ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
       publishRepositorySkills: async (index) => {
+        // Without a publisher nothing is stored, so nothing is shown: an
+        // index later turns do not load would change their request prefix.
         repositorySkillsContext.visible = options.publishRepositorySkills
           ? await options.publishRepositorySkills(index)
-          : index && !index.empty
-            ? index.text
-            : null;
+          : null;
       },
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }

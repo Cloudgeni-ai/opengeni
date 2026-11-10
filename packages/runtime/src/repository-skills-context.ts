@@ -68,7 +68,7 @@ export function repositorySkillsContextInputFilter(
     if (latestRepositorySkillsIndex(input) === visible) return modelData;
     if (built?.index !== visible) built = { index: visible, items: withIndex(visible) };
     const history = await built.items;
-    if (!history) return modelData;
+    if (!history) throw new Error("The run's history with its Repository skills index is missing");
     return { ...modelData, input: [...history, ...input.slice(historyLength)] };
   };
 }

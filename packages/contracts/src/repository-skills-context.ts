@@ -42,10 +42,20 @@ export function readRepositorySkillsContext(item: Record<string, unknown>): stri
           )
         ? item.content.map((part) => part.text).join("")
         : null;
-  const prefix = REPOSITORY_SKILLS_CONTEXT_PREFIX + GUIDANCE;
-  return content?.startsWith(prefix) && content.endsWith(REPOSITORY_SKILLS_CONTEXT_SUFFIX)
-    ? content.slice(prefix.length, -REPOSITORY_SKILLS_CONTEXT_SUFFIX.length)
-    : null;
+  // Items are recognized by their tags, so stored items stay readable if the
+  // guidance wording changes; only the current guidance is removed.
+  if (
+    !content?.startsWith(REPOSITORY_SKILLS_CONTEXT_PREFIX) ||
+    !content.endsWith(REPOSITORY_SKILLS_CONTEXT_SUFFIX) ||
+    content.length <
+      REPOSITORY_SKILLS_CONTEXT_PREFIX.length + REPOSITORY_SKILLS_CONTEXT_SUFFIX.length
+  )
+    return null;
+  const body = content.slice(
+    REPOSITORY_SKILLS_CONTEXT_PREFIX.length,
+    -REPOSITORY_SKILLS_CONTEXT_SUFFIX.length,
+  );
+  return body.startsWith(GUIDANCE) ? body.slice(GUIDANCE.length) : body;
 }
 
 /** The index text of the newest item, or null when there is none. */
