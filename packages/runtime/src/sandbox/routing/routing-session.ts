@@ -3792,8 +3792,7 @@ async function streamPlacementPrivateFile(
   input: ReturnType<typeof placementPrivateWrite>,
   backendKind: string,
 ): Promise<void> {
-  const exec = session.exec?.bind(session) ?? session.execCommand?.bind(session);
-  if (!exec || !session.writeStdin) {
+  if ((!session.exec && !session.execCommand) || !session.writeStdin) {
     throw new RoutingUnsupportedError("writePlacementPrivate", backendKind);
   }
   const bytes = typeof input.content === "string" ? Buffer.from(input.content) : input.content;
@@ -3840,6 +3839,9 @@ async function streamPlacementPrivateFile(
   const settled = await withNativeSynchronousCommandCollection(
     session as ChannelASession,
     async () => {
+      // Resolve the Start method inside the scope: some providers install
+      // their collection adapter (which wraps it) on first use.
+      const exec = session.exec?.bind(session) ?? session.execCommand!.bind(session);
       const started = await exec({
         cmd: command,
         ...(input.runAs ? { runAs: input.runAs } : {}),

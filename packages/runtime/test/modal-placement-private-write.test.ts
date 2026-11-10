@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
+import { readFile, rm } from "node:fs/promises";
 import { Manifest } from "@openai/agents/sandbox";
+import { UnixLocalSandboxClient } from "@openai/agents/sandbox/local";
 import { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
 import type { ModalRouterProviderCommand } from "@opengeni/contracts";
 import { SandboxChannelAService, type ChannelASession } from "../src/sandbox/channel-a";
@@ -88,6 +90,9 @@ function modalSession(control: Control) {
   ) as ChannelASession & { close(): Promise<void> };
   expect(sdk.writePlacementPrivate).toBeUndefined();
   expect(sdk.writeFile).toBeUndefined();
+  // Production installs this inside installOpenGeniModalSnapshotPolicy when
+  // the SDK profile is authenticated; this fixture has none, so it installs
+  // the same command session afterwards with a fake router control.
   installModalCommandSession(sdk, control);
   return { sdk, staged, nativeCommands };
 }
@@ -222,5 +227,28 @@ test("a large sandbox file export stages its upload authority and uploads from a
     expect(nativeCommands.some((cmd) => cmd.includes(`rm -f '${stagedPath}'`))).toBeTrue();
   } finally {
     await sdk.close();
+  }
+});
+
+test("staging is the first internal command on a fresh local sandbox session", async () => {
+  // Local and other SDK backends install their output collection on first
+  // use, so staging must also work before any other command has run.
+  const session = await new UnixLocalSandboxClient().create(new Manifest());
+  const path = `/tmp/opengeni-private/test-${crypto.randomUUID()}/upload.curl`;
+  const backend = { session, sandboxId: null, kind: "unix_local", activeEpoch: 0 };
+  const route = new RoutingSandboxSession({
+    defaultResolved: backend,
+    readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+    resolveActiveBackend: async () => backend,
+    beforeMutation: async () => {
+      throw new Error("placement-private staging is not a workspace mutation");
+    },
+  });
+  try {
+    await route.writePlacementPrivate({ path, content: "private\n", createParents: true });
+    expect(await readFile(path, "utf8")).toBe("private\n");
+  } finally {
+    await rm(path.slice(0, path.lastIndexOf("/")), { recursive: true, force: true });
+    await session.close();
   }
 });
