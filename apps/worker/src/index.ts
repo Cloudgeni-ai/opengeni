@@ -8,12 +8,13 @@ import {
   type Settings,
 } from "@opengeni/config";
 import {
-  assertRuntimeDatabasePosture,
+  assertRuntimeDatabaseReadiness,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
   databasePasswordFileOptions,
   databasePoolOptions,
   observeDatabaseCredentialEvents,
+  reportRuntimeDatabaseDegraded,
   getContextCompactionPendingSummary,
   markSessionWorkflowWakeDelivered,
   summarizeSessionRecoveryBacklog,
@@ -1026,9 +1027,14 @@ export async function createOpenGeniWorkerService(
 
     if (options.http !== false) {
       const readinessDb = options.http?.readinessDb ?? options.activityDependencies.db;
-      const databaseReady = dbReadyCheck(readinessDb, options.databasePosture, async () => {
-        await resolveCatalogSettings(readinessDb, settings);
-      });
+      const databaseReady = dbReadyCheck(
+        readinessDb,
+        options.databasePosture,
+        async () => {
+          await resolveCatalogSettings(readinessDb, settings);
+        },
+        reportRuntimeDatabaseDegraded(observability, "worker-readiness"),
+      );
       httpServer = startWorkerHttpServer({
         settings,
         observability,
@@ -1291,7 +1297,12 @@ export async function startWorker() {
   try {
     await retryStartupDependency(
       "PostgreSQL runtime posture",
-      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      () =>
+        assertRuntimeDatabaseReadiness(
+          dbClient.db,
+          databasePosture,
+          reportRuntimeDatabaseDegraded(observability, "worker-startup"),
+        ),
       { ...retryOptions, onRetry, shouldRetry: isRetryableRuntimeDatabaseStartupError },
     );
     bus = await retryStartupDependency(

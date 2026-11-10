@@ -3240,6 +3240,21 @@ const DECLARED_PRIVATE_ROUTINES = new Set<string>([
 ]);
 const RUNTIME_DEFINER_ROUTINE_NAMES = new Set<string>(RUNTIME_DEFINER_ROUTINES);
 const DEFERRED_PRIVATE_ROUTINE_NAMES = new Set<string>(DEFERRED_RUNTIME_PRIVATE_ROUTINES);
+
+/**
+ * Whether this binary requires runtime EXECUTE on a private routine: every
+ * declared one except owner-internal, retired and deferred routines. A retired
+ * routine still present is reported once, as retired (it is never granted
+ * again, so its missing EXECUTE is not a second finding).
+ */
+function runtimeRequiresPrivateRoutineExecute(name: string): boolean {
+  return (
+    DECLARED_PRIVATE_ROUTINES.has(name) &&
+    !OWNER_INTERNAL_PRIVATE_ROUTINES.has(name) &&
+    !RETIRED_PRIVATE_ROUTINES.has(name) &&
+    !DEFERRED_PRIVATE_ROUTINE_NAMES.has(name)
+  );
+}
 const DECLARED_TARGET_ROUTINES = new Set<string>([
   ...legacyRoutines.target,
   ...RETIRED_ROUTINE_ENTRIES.filter(({ schema }) => schema === "target").map(
@@ -6777,7 +6792,6 @@ export function evaluateRuntimeDatabasePosture(
         !routine.configuration?.some((value) => integrationSearchPaths.includes(value)))
     )
       violations.push("Teams wake trigger has unsafe execution, ownership or search path");
-    const ownerInternalRoutine = OWNER_INTERNAL_PRIVATE_ROUTINES.has(routine.name);
     if (
       ["sync_usage_maintenance_due()", "arm_usage_allowances_for_membership()"].includes(
         routine.name,
@@ -6850,15 +6864,7 @@ export function evaluateRuntimeDatabasePosture(
         `runtime or PUBLIC has forbidden EXECUTE on Skill cascade guard ${routine.name}`,
       );
     }
-    // A retired routine still present is reported once, as retired (it is
-    // never granted again, so its missing EXECUTE is not a second finding).
-    if (
-      DECLARED_PRIVATE_ROUTINES.has(routine.name) &&
-      !routine.execute &&
-      !ownerInternalRoutine &&
-      !RETIRED_PRIVATE_ROUTINES.has(routine.name) &&
-      !DEFERRED_PRIVATE_ROUTINE_NAMES.has(routine.name)
-    ) {
+    if (!routine.execute && runtimeRequiresPrivateRoutineExecute(routine.name)) {
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }
@@ -6937,9 +6943,190 @@ export async function assertRuntimeDatabasePosture(
   return posture;
 }
 
+/**
+ * Findings of {@link evaluateRuntimeDatabasePosture}, split by what they mean
+ * for a running process. Together they are exactly the strict findings.
+ *
+ * - `fatal`: unsafe or unknowable posture (excess or PUBLIC privileges, wrong
+ *   owner, search_path or RLS, forbidden roles or memberships, missing CONNECT
+ *   or schema USAGE, missing or ambiguous objects, failed shape checks).
+ * - `degraded`: findings caused only by the runtime role lacking an EXECUTE
+ *   grant that this binary's contract requires. Only the features behind those
+ *   routines fail (PostgreSQL refuses the call); nothing is exposed.
+ */
+export type RuntimeDatabasePostureFindings = {
+  fatal: string[];
+  degraded: string[];
+};
+
+function countFindings(findings: readonly string[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const finding of findings) counts.set(finding, (counts.get(finding) ?? 0) + 1);
+  return counts;
+}
+
+/**
+ * The posture with every EXECUTE grant the contract requires of the runtime
+ * role present: declared private routines it must execute, and the
+ * target-schema capabilities. Nothing else changes. Returns null when no such
+ * grant is missing.
+ */
+function withRequiredRuntimeExecuteGranted(
+  posture: RuntimeDatabasePosture,
+  options: RuntimeDatabasePostureOptions,
+): RuntimeDatabasePosture | null {
+  const targetCapabilities = new Set<string>(
+    options.targetSchemaCapabilityRoutines ?? RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
+  );
+  let changed = false;
+  const grant = <T extends RuntimeRoutinePosture>(routine: T, required: boolean): T => {
+    if (routine.execute || !required) return routine;
+    changed = true;
+    return { ...routine, execute: true };
+  };
+  const granted = {
+    ...posture,
+    privateRoutines: posture.privateRoutines.map((routine) =>
+      grant(routine, runtimeRequiresPrivateRoutineExecute(routine.name)),
+    ),
+    targetRoutines: posture.targetRoutines.map((routine) =>
+      grant(routine, targetCapabilities.has(routine.name)),
+    ),
+  };
+  return changed ? granted : null;
+}
+
+/**
+ * Classifies the strict findings for runtime startup and readiness. A finding
+ * is degraded only when granting the missing contract-required EXECUTE grants
+ * removes it and raises no finding the actual catalog does not already have
+ * (a grant that would expose another problem means the missing grant was
+ * hiding it, so everything stays fatal). This holds for every check, present
+ * and future, without tagging individual messages.
+ *
+ * Release and CI gates (the posture CLI, the compatibility workflow, the
+ * previous-binary checks) keep using {@link evaluateRuntimeDatabasePosture},
+ * where every finding fails.
+ */
+export function classifyRuntimeDatabasePosture(
+  posture: RuntimeDatabasePosture,
+  options: RuntimeDatabasePostureOptions,
+): RuntimeDatabasePostureFindings {
+  const findings = evaluateRuntimeDatabasePosture(posture, options);
+  if (findings.length === 0) return { fatal: [], degraded: [] };
+  const granted = withRequiredRuntimeExecuteGranted(posture, options);
+  if (!granted) return { fatal: findings, degraded: [] };
+  const strict = countFindings(findings);
+  const remaining = countFindings(evaluateRuntimeDatabasePosture(granted, options));
+  for (const [finding, count] of remaining) {
+    if (count > (strict.get(finding) ?? 0)) return { fatal: findings, degraded: [] };
+  }
+  const fatal: string[] = [];
+  const degraded: string[] = [];
+  for (const finding of findings) {
+    const count = remaining.get(finding) ?? 0;
+    if (count > 0) {
+      fatal.push(finding);
+      remaining.set(finding, count - 1);
+    } else {
+      degraded.push(finding);
+    }
+  }
+  return { fatal, degraded };
+}
+
+/** Receives the degraded findings of every runtime readiness inspection (empty when none). */
+export type RuntimeDatabaseDegradedListener = (degraded: readonly string[]) => void;
+
+/**
+ * The startup and readiness form of {@link assertRuntimeDatabasePosture}: it
+ * throws {@link RuntimeDatabasePostureError} with the fatal findings only.
+ * Degraded findings (a missing required EXECUTE grant) go to `onDegraded`
+ * and do not make the process unready: one withheld or revoked grant must not
+ * take every pod out of service for one feature.
+ */
+export async function assertRuntimeDatabaseReadiness(
+  db: Database,
+  options: RuntimeDatabasePostureOptions,
+  onDegraded?: RuntimeDatabaseDegradedListener,
+): Promise<{ posture: RuntimeDatabasePosture; degraded: string[] }> {
+  const posture = await inspectRuntimeDatabasePosture(db, options);
+  const { fatal, degraded } = classifyRuntimeDatabasePosture(posture, options);
+  try {
+    onDegraded?.(degraded);
+  } catch {
+    // Reporting is best effort; it never decides readiness.
+  }
+  if (fatal.length > 0) {
+    throw new RuntimeDatabasePostureError(fatal);
+  }
+  return { posture, degraded };
+}
+
+export type RuntimeDatabaseDegradedObserver = {
+  warn(message: string, attributes: Record<string, string | number | boolean>): void;
+  info(message: string, attributes: Record<string, string | number | boolean>): void;
+  setGauge(input: { name: string; help?: string; value: number }): void;
+};
+
+export const RUNTIME_DATABASE_DEGRADED_GAUGE = "opengeni_runtime_database_degraded_findings";
+/** A persisting degraded posture is logged again at most this often. */
+export const RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Reports degraded runtime posture: the gauge holds the number of degraded
+ * findings of the latest inspection; a structured warning names them when
+ * they change, and again at most every
+ * {@link RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS} while they persist; an
+ * info line records recovery.
+ */
+export function reportRuntimeDatabaseDegraded(
+  observability: RuntimeDatabaseDegradedObserver,
+  source: string,
+  options: { logIntervalMs?: number; now?: () => number } = {},
+): RuntimeDatabaseDegradedListener {
+  const interval = options.logIntervalMs ?? RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS;
+  const now = options.now ?? Date.now;
+  let last = "";
+  let loggedAt = 0;
+  return (degraded) => {
+    try {
+      observability.setGauge({
+        name: RUNTIME_DATABASE_DEGRADED_GAUGE,
+        help: "Runtime database posture findings that disable a feature (a missing required EXECUTE grant) without failing readiness, from the latest inspection.",
+        value: degraded.length,
+      });
+    } catch {
+      // Metrics are best effort.
+    }
+    const current = [...degraded].sort().join("; ");
+    const changed = current !== last;
+    const previous = last;
+    last = current;
+    if (!changed && (current === "" || now() - loggedAt < interval)) return;
+    loggedAt = now();
+    try {
+      if (current === "") {
+        observability.info("Runtime database posture is no longer degraded", {
+          source,
+          previousFindings: previous,
+        });
+      } else {
+        observability.warn(
+          "Runtime database posture is degraded: features that need these grants will fail; readiness is unaffected",
+          { source, findingCount: degraded.length, findings: current },
+        );
+      }
+    } catch {
+      // Logging is best effort.
+    }
+  };
+}
+
 export function runtimeDatabaseReadyCheck(
   db: Database,
   options: RuntimeDatabasePostureOptions,
+  onDegraded?: RuntimeDatabaseDegradedListener,
 ): () => Promise<void> {
   let inFlight: Promise<void> | undefined;
   return () => {
@@ -6949,7 +7136,7 @@ export function runtimeDatabaseReadyCheck(
     // next probe after it settles always runs a fresh inspection.
     if (inFlight) return inFlight;
     inFlight = (async () => {
-      await assertRuntimeDatabasePosture(db, options);
+      await assertRuntimeDatabaseReadiness(db, options, onDegraded);
     })().finally(() => {
       inFlight = undefined;
     });

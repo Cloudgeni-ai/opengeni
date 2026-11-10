@@ -16,7 +16,7 @@ import type {
   SessionAuthorizationPort,
 } from "@opengeni/contracts";
 import {
-  assertRuntimeDatabasePosture,
+  assertRuntimeDatabaseReadiness,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
   databasePasswordFileOptions,
@@ -25,6 +25,7 @@ import {
   defaultDatabasePreparedStatements,
   eventOccurrenceProducerKey,
   markSessionWorkflowWakeDelivered,
+  reportRuntimeDatabaseDegraded,
   runtimeDatabaseReadyCheck,
   type Database,
   type EventOccurrenceToStart,
@@ -563,7 +564,12 @@ export async function startApi(options: StartApiOptions = {}) {
     );
     await retryStartupDependency(
       "PostgreSQL runtime posture",
-      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      () =>
+        assertRuntimeDatabaseReadiness(
+          dbClient.db,
+          databasePosture,
+          reportRuntimeDatabaseDegraded(observability, "api-startup"),
+        ),
       { ...retryOptions, onRetry, shouldRetry: isRetryableRuntimeDatabaseStartupError },
     );
     const resolvedCatalog = await retryStartupDependency(
@@ -645,7 +651,11 @@ export async function startApi(options: StartApiOptions = {}) {
         : {}),
       observability,
       readinessChecks: {
-        db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture),
+        db: runtimeDatabaseReadyCheck(
+          dbClient.db,
+          databasePosture,
+          reportRuntimeDatabaseDegraded(observability, "api-readiness"),
+        ),
       },
     },
     { startBillingAutoTopUps: true },
