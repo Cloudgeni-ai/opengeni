@@ -779,7 +779,13 @@ async function installApi(page: Page, state: ReturnType<typeof fixtures>) {
       return json({ items: [], total: 0, nextOffset: null });
     if (path.endsWith("/plugins")) return json({ plugins: [] });
     if (path.endsWith("/github/app"))
-      return json({ configured: false, missing: [], installUrl: null });
+      return json({
+        configured: false,
+        status: "disabled",
+        missing: [],
+        installUrl: null,
+        installations: [],
+      });
     if (path.endsWith("/connections/github")) return json({ enabled: false, connection: null });
     if (path.endsWith("/feedback") || path.endsWith("/feedback/mine"))
       return json({ feedback: [], turns: [] });
