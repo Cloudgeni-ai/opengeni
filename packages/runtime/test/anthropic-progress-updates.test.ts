@@ -173,7 +173,7 @@ const expectedOutput = [
   },
 ];
 
-/** Output with its recorded replay binding removed (see anthropic-thinking-replay.test.ts). */
+/** Output with its recorded replay binding removed (see opaque-reasoning-replay-matrix.test.ts). */
 function withoutReplayOrigin(output: readonly unknown[]): unknown[] {
   return output.map((item: any) => {
     if (!item?.providerData?.[ARTIFACT_ORIGIN_KEY]) return item;

@@ -260,7 +260,10 @@ it is not a claim that a client-generated checkpoint preserves prefix binding.
 
 Every other change of binding is handled by one replay policy for opaque
 reasoning on every route (`opaque-reasoning-replay.ts`), the same one that keeps
-OpenAI `encrypted_content` with its issuing provider. A Claude signed thinking
+OpenAI `encrypted_content` with its issuing provider. On the direct API Claude
+now drops mismatched blocks itself; the policy keeps it from having to (a drop
+also discards every later thinking block) and keeps requests valid where
+`drop_block` is stripped or does not apply. A Claude signed thinking
 block records the binding it was issued under: the platform and account, the
 model and, for prefix-bound models, a digest of the system prompt (which a
 session can change between turns, for example when a turn adds a repository
