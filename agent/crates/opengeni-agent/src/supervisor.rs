@@ -6624,6 +6624,7 @@ mod tests {
                     credit_bytes: 1 << 20,
                     r#final: true,
                     attach_generation: 1,
+                    detach: false,
                 }
                 .encode_to_vec()
                 .into(),
@@ -8211,6 +8212,7 @@ mod tests {
                     credit_bytes: 1 << 20,
                     r#final: true,
                     attach_generation: 2,
+                    detach: false,
                 }
                 .encode_to_vec()
                 .into(),

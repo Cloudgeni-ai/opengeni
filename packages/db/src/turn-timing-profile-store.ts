@@ -92,11 +92,12 @@ const projectedPayload = sql`jsonb_strip_nulls(case e.type
     'id', e.payload->'id',
     'name', e.payload->'name',
     'toolFamily', e.payload->'toolFamily',
+    -- Postgres caps a regex repetition count at 255.
     'arguments', case when e.payload->>'name' = 'tool_invoke' then
       case jsonb_typeof(e.payload->'arguments')
         when 'object' then jsonb_build_object('name', e.payload->'arguments'->'name')
         when 'string' then jsonb_build_object('name', to_jsonb(substring(
-          e.payload->>'arguments' from '"name"\\s*:\\s*"([^"]{1,256})"')))
+          e.payload->>'arguments' from '"name"\\s*:\\s*"([^"]{1,255})"')))
       end end)
   when 'agent.toolCall.output' then jsonb_build_object(
     'id', e.payload->'id',
@@ -342,9 +343,19 @@ export async function recordMissingTurnTimingProfiles(
         after,
         limit: pageSize,
       });
-      const inputs = await loadTurnTimingInputs(scoped, input.workspaceId, turns);
       const recorded: RecordedTurnTimingProfile[] = [];
       let failed = 0;
+      let inputs: Awaited<ReturnType<typeof loadTurnTimingInputs>>;
+      try {
+        // A savepoint, so a page whose history cannot be read is skipped and
+        // the pass still moves on to the next page.
+        inputs = await scoped.transaction((savepoint) =>
+          loadTurnTimingInputs(savepoint as unknown as Database, input.workspaceId, turns),
+        );
+      } catch (error) {
+        for (const turn of turns) input.onError?.(error, turn.id);
+        return { turns, recorded, failed: turns.length };
+      }
       for (const { cursor: _cursor, ...turn } of turns) {
         try {
           const profile = computeTurnTimingProfile({ turn, ...inputs.get(turn.id)! });

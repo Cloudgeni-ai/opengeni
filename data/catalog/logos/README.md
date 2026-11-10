@@ -27,9 +27,11 @@ catalog, which is nominative use.
 - A generated letter placeholder (an SVG of shapes and at most three text
   characters, which integrations.sh serves for domains it has no mark for) is
   never vendored or imported; the product's own monogram is used instead.
-- A curated `logoSourceUrl: null` in `data/catalog/curated.json` suppresses the
-  logo entirely. Use it when a provider publishes no reusable mark, as with
-  Gmail and Mobbin today. That decision belongs in the overlay, never here.
+- A curated `logoSourceUrl: null` in `data/catalog/curated.json` keeps the
+  catalog from vendoring or fetching a logo for that row. Use it when no
+  reusable mark can be fetched, or when the product UI ships the mark itself,
+  as it does for Gmail, Google Drive and Google Calendar today. That decision
+  belongs in the overlay, never here.
 - The importer refuses an asset whose bytes no longer match its manifest digest,
   whose row moved to a different logo source, whose content type the
   catalog-asset route cannot serve, or, for SVG, that carries active content.

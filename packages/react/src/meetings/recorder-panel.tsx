@@ -200,6 +200,255 @@ function capturingWhat(recorder: MeetingRecorder, msg: OpenGeniText = defaultTex
     : msg("meetings.recorderPanel.recordingYourMicrophoneOnly");
 }
 
+/** The first track whose source went away while recording, or null. */
+export function lostTrack(
+  recorder: Pick<MeetingRecorder, "state" | "tracks">,
+): MeetingRecorder["tracks"][number] | null {
+  if (recorder.state !== "recording" && recorder.state !== "paused") return null;
+  return recorder.tracks.find((track) => track.lost) ?? null;
+}
+
+/** Whether every track's source went away, so nothing is being recorded. */
+export function nothingRecording(recorder: Pick<MeetingRecorder, "state" | "tracks">): boolean {
+  return (
+    recorder.state === "recording" &&
+    recorder.tracks.length > 0 &&
+    recorder.tracks.every((track) => track.lost)
+  );
+}
+
+/**
+ * What went missing, what happens next and what still records, as one line.
+ * It leads with whose voice is missing: the person's own (the microphone)
+ * or the call's (tab or computer audio). Paused, it says what resuming
+ * will record instead, since nothing records now.
+ */
+export function lostTrackText(
+  recorder: Pick<MeetingRecorder, "state" | "tracks" | "systemAudioKind">,
+  msg: OpenGeniText = defaultText,
+): string | null {
+  if (!lostTrack(recorder)) return null;
+  const kind = recorder.systemAudioKind;
+  // What needs the person first, then what comes back by itself.
+  const lost = recorder.tracks
+    .filter((track) => track.lost)
+    .sort((a, b) => (a.lost === "stopped" ? 0 : 1) - (b.lost === "stopped" ? 0 : 1));
+  const still = recorder.tracks.find((track) => !track.lost);
+  const paused = recorder.state === "paused";
+  if (!still || lost.length > 1) {
+    const reasons = sentence(
+      lost
+        .map((track) => lostReason(track, kind, msg))
+        .join(msg("meetings.recorderPanel.lostReasonJoin")),
+    );
+    return paused
+      ? msg("meetings.recorderPanel.pausedLostReasons", { reasons })
+      : msg("meetings.recorderPanel.nothingRecordingReasons", { reasons });
+  }
+  const track = lost[0]!;
+  const other = trackInSentence(still.source, kind, msg);
+  if (paused) {
+    return track.source === "microphone"
+      ? track.lost === "reconnecting"
+        ? msg("meetings.recorderPanel.pausedMicrophoneWaiting", { track: other })
+        : msg("meetings.recorderPanel.pausedMicrophoneOff", { track: other })
+      : kind === "desktop"
+        ? msg("meetings.recorderPanel.pausedComputerAudio", { track: other })
+        : msg("meetings.recorderPanel.pausedTabAudio", { track: other });
+  }
+  const what =
+    track.source === "microphone"
+      ? track.lost === "reconnecting"
+        ? msg("meetings.recorderPanel.lostMicrophoneWaiting")
+        : msg("meetings.recorderPanel.lostMicrophoneOff")
+      : kind === "desktop"
+        ? msg("meetings.recorderPanel.lostComputerAudio")
+        : msg("meetings.recorderPanel.lostTabAudio");
+  return msg("meetings.recorderPanel.lostTrackStillRecording", {
+    lost: what,
+    track: trackLabel(still.source, kind, msg),
+  });
+}
+
+/** Why one track records nothing, as a clause. */
+function lostReason(
+  track: MeetingRecorder["tracks"][number],
+  kind: MeetingRecorder["systemAudioKind"],
+  msg: OpenGeniText,
+): string {
+  if (track.source === "microphone") {
+    return track.lost === "reconnecting"
+      ? msg("meetings.recorderPanel.lostReasonMicrophoneWaiting")
+      : msg("meetings.recorderPanel.lostReasonMicrophoneOff");
+  }
+  return kind === "desktop"
+    ? msg("meetings.recorderPanel.lostReasonComputerAudio")
+    : msg("meetings.recorderPanel.lostReasonTabAudio");
+}
+
+/** A track's name inside a sentence: "your microphone", "tab audio". */
+function trackInSentence(
+  source: string,
+  kind: MeetingRecorder["systemAudioKind"],
+  msg: OpenGeniText,
+): string {
+  if (source === "microphone") return msg("meetings.recorderPanel.yourMicrophone");
+  return kind === "desktop"
+    ? msg("meetings.recorderPanel.computerAudioInSentence")
+    : msg("meetings.recorderPanel.tabAudioInSentence");
+}
+
+/** Start with a capital letter. */
+function sentence(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** What brings a stopped track back with a click, or null when it comes back by itself. */
+function reconnectLabel(
+  track: MeetingRecorder["tracks"][number],
+  systemAudioKind: MeetingRecorder["systemAudioKind"],
+  msg: OpenGeniText,
+): string | null {
+  if (track.lost !== "stopped") return null;
+  if (track.source === "microphone") return msg("meetings.recorderPanel.allowMicrophone");
+  return systemAudioKind === "desktop"
+    ? msg("meetings.recorderPanel.recordComputerAudioAgain")
+    : msg("meetings.recorderPanel.shareTabAgain");
+}
+
+/** How long "recording again" shows after a track comes back. */
+const RECOVERED_MILLISECONDS = 4_000;
+
+/** The label of a track that just came back, for a few seconds; otherwise null. */
+function useRecoveredTrack(recorder: MeetingRecorder, msg: OpenGeniText): string | null {
+  const [recovered, setRecovered] = useState<string | null>(null);
+  const previous = useRef(recorder.tracks);
+  const { tracks, systemAudioKind } = recorder;
+  const capturing = recorder.state === "recording" || recorder.state === "paused";
+  useEffect(() => {
+    const before = previous.current;
+    previous.current = tracks;
+    if (!capturing) return;
+    const back = tracks.find(
+      (track) =>
+        !track.lost &&
+        before.some((earlier) => earlier.trackNumber === track.trackNumber && earlier.lost),
+    );
+    if (back) setRecovered(trackLabel(back.source, systemAudioKind, msg));
+  }, [tracks, capturing, systemAudioKind, msg]);
+  useEffect(() => {
+    if (!recovered) return;
+    const timer = window.setTimeout(() => setRecovered(null), RECOVERED_MILLISECONDS);
+    return () => window.clearTimeout(timer);
+  }, [recovered]);
+  return capturing ? recovered : null;
+}
+
+/**
+ * The line under the meters. While a track's source is gone: a dot in the
+ * row's colour, what's missing, and the click that brings it back when it
+ * can't come back by itself; briefly, that it is back. Otherwise where the
+ * audio is (`quiet` shows that only when it is held up). A failed upload
+ * comes first, since then nothing reaches the server at all.
+ */
+function RecorderStatusLine({
+  recorder,
+  online,
+  stalled,
+  quiet = false,
+}: {
+  recorder: MeetingRecorder;
+  online: boolean;
+  stalled: boolean;
+  quiet?: boolean;
+}) {
+  const msg = useOpenGeniText();
+  const recovered = useRecoveredTrack(recorder, msg);
+  const [opening, setOpening] = useState(false);
+  const lost = recorder.upload?.failed ? null : lostTrack(recorder);
+  if (!lost) {
+    if (!recovered || recorder.upload?.failed) {
+      const line = quiet && !stalled ? null : uploadLine(recorder, online, msg);
+      if (!line) return null;
+      return (
+        <p
+          className={cn(
+            "mt-3 text-xs leading-4.5",
+            stalled ? "font-medium text-fg-label" : "text-fg-muted",
+          )}
+          aria-live="polite"
+        >
+          {line}
+        </p>
+      );
+    }
+    return (
+      <p
+        className="mt-3 flex items-center gap-2 text-xs leading-4.5 text-fg-muted"
+        aria-live="polite"
+      >
+        <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-status-success" />
+        {msg("meetings.recorderPanel.trackRecordingAgain", { track: recovered })}
+      </p>
+    );
+  }
+  // The one a click brings back: shared audio, or a microphone the browser turned off.
+  const stopped = recorder.tracks.find((track) => track.lost === "stopped");
+  const action = stopped ? reconnectLabel(stopped, recorder.systemAudioKind, msg) : null;
+  const reconnect = async () => {
+    if (!stopped) return;
+    setOpening(true);
+    try {
+      await recorder.reconnectTrack(stopped.trackNumber);
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      const text =
+        typeof code === "string"
+          ? recorderErrorText(
+              { code, message: errorMessageOf(error) } as Parameters<typeof recorderErrorText>[0],
+              recorder.systemAudioKind,
+              msg,
+            )
+          : null;
+      toast.error(text?.title ?? msg("meetings.recorderPanel.couldNotReconnect"), {
+        description: text?.body ?? errorMessageOf(error),
+      });
+    } finally {
+      setOpening(false);
+    }
+  };
+  return (
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+      <p
+        className="flex min-w-0 items-start gap-2 text-xs leading-4.5 font-medium text-fg-label"
+        aria-live="polite"
+      >
+        <span
+          aria-hidden="true"
+          className="mt-1.5 size-1.5 shrink-0 rounded-full bg-status-waiting"
+        />
+        <span>{lostTrackText(recorder, msg)}</span>
+      </p>
+      {action ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={opening}
+          onClick={() => void reconnect()}
+          className="shrink-0 pointer-coarse:h-11"
+        >
+          {action}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function errorMessageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /** True while audio is waiting on this device because the connection is down. */
 export function uploadStalled(recorder: MeetingRecorder, online: boolean): boolean {
   const upload = recorder.upload;
@@ -230,15 +479,24 @@ function LevelMeter({
   trackNumber,
   label,
   paused,
+  lost,
+  source,
+  systemAudioKind,
 }: {
   recorder: MeetingRecorder;
   trackNumber: number;
   label: string;
   paused: boolean;
+  source: string;
+  systemAudioKind: MeetingRecorder["systemAudioKind"];
+  /** Its device went away; the row says so instead of showing a level. */
+  lost: MeetingRecorder["tracks"][number]["lost"];
 }) {
+  const msg = useOpenGeniText();
   const barRef = useRef<HTMLSpanElement>(null);
   const levels = recorder.levels;
   useEffect(() => {
+    if (lost) return;
     let frame = 0;
     let smoothed = 0;
     const tick = () => {
@@ -250,21 +508,52 @@ function LevelMeter({
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [levels, trackNumber, paused]);
+  }, [levels, trackNumber, paused, lost]);
   return (
     // Label and bar are cells of the parent grid, so every label fits its
     // column and the bars line up.
     <div className="contents">
-      <span className="min-w-0 max-w-44 truncate text-xs leading-4 text-fg-muted" title={label}>
+      <span
+        className={cn(
+          "min-w-0 max-w-44 truncate text-xs leading-4",
+          lost ? "text-fg-label" : "text-fg-muted",
+        )}
+        title={label}
+      >
         {label}
       </span>
-      <span aria-hidden="true" className="relative h-1.5 overflow-hidden rounded-full bg-surface-2">
+      {lost ? (
+        <span className="flex min-w-0 items-center gap-1.5 text-xs leading-4 text-status-waiting">
+          {/* It pulses while it fixes itself; still, it needs the person. */}
+          <span
+            aria-hidden="true"
+            className={cn(
+              "size-1.5 shrink-0 rounded-full bg-status-waiting",
+              lost === "reconnecting" && "motion-safe:animate-pulse",
+            )}
+          />
+          <span className="truncate">
+            {lost === "reconnecting"
+              ? msg("meetings.recorderPanel.trackDisconnected")
+              : source === "microphone"
+                ? msg("meetings.recorderPanel.trackAccessOff")
+                : systemAudioKind === "desktop"
+                  ? msg("meetings.recorderPanel.trackStopped")
+                  : msg("meetings.recorderPanel.trackSharingEnded")}
+          </span>
+        </span>
+      ) : (
         <span
-          ref={barRef}
-          className="absolute inset-0 origin-left rounded-full bg-status-idle transition-transform duration-75 motion-reduce:transition-none"
-          style={{ transform: "scaleX(0.02)" }}
-        />
-      </span>
+          aria-hidden="true"
+          className="relative h-1.5 overflow-hidden rounded-full bg-surface-2"
+        >
+          <span
+            ref={barRef}
+            className="absolute inset-0 origin-left rounded-full bg-status-idle transition-transform duration-75 motion-reduce:transition-none"
+            style={{ transform: "scaleX(0.02)" }}
+          />
+        </span>
+      )}
     </div>
   );
 }
@@ -465,9 +754,18 @@ function RecorderLiveTranscript({
 }
 
 /** The pulsing dot, the state in a word and the clock of a recording under way. */
-function RecordingClock({ recorder, stalled }: { recorder: MeetingRecorder; stalled: boolean }) {
+function RecordingClock({
+  recorder,
+  stalled: offline,
+}: {
+  recorder: MeetingRecorder;
+  stalled: boolean;
+}) {
   const msg = useOpenGeniText();
   const paused = recorder.state === "paused";
+  // Every source went away: the clock runs on, but nothing is heard.
+  const silent = nothingRecording(recorder);
+  const stalled = offline || silent;
   return (
     <div className="flex min-w-0 items-center gap-3">
       <span className="relative flex size-3 shrink-0" aria-hidden="true">
@@ -492,9 +790,11 @@ function RecordingClock({ recorder, stalled }: { recorder: MeetingRecorder; stal
             ? msg("meetings.recorderPanel.finishing")
             : paused
               ? msg("meetings.recorderPanel.paused")
-              : stalled
-                ? msg("meetings.recorderPanel.recordingNotUploading")
-                : msg("meetings.recorderPanel.recording2")}
+              : silent
+                ? msg("meetings.recorderPanel.notRecording")
+                : stalled
+                  ? msg("meetings.recorderPanel.recordingNotUploading")
+                  : msg("meetings.recorderPanel.recording2")}
         </p>
         <p
           className="text-2xl leading-8 font-semibold tracking-[-0.5px] text-fg tabular-nums"
@@ -577,11 +877,7 @@ export function RecordingBar({
           <RecordingControls recorder={recorder} onStopped={onStopped} />
         </div>
       </div>
-      {stalled ? (
-        <p className="mt-3 text-xs leading-4.5 font-medium text-fg-label" aria-live="polite">
-          {uploadLine(recorder, online, msg)}
-        </p>
-      ) : null}
+      <RecorderStatusLine recorder={recorder} online={online} stalled={stalled} quiet />
     </section>
   );
 }
@@ -706,7 +1002,6 @@ function RecorderPanelContent({
   if (recorder && live) {
     const stalled = uploadStalled(recorder, online);
     const recordingId = recorder.recordingId;
-    const line = uploadLine(recorder, online, msg);
     return (
       <section
         aria-label={msg("meetings.recorderPanel.recording2")}
@@ -723,6 +1018,9 @@ function RecorderPanelContent({
                 trackNumber={track.trackNumber}
                 label={trackLabel(track.source, recorder.systemAudioKind, msg)}
                 paused={state === "paused"}
+                lost={track.lost}
+                source={track.source}
+                systemAudioKind={recorder.systemAudioKind}
               />
             ))}
           </div>
@@ -741,17 +1039,7 @@ function RecorderPanelContent({
             <RecordingControls recorder={recorder} onStopped={onStopped} />
           </div>
         </div>
-        {line ? (
-          <p
-            className={cn(
-              "mt-3 text-xs leading-4.5",
-              stalled ? "font-medium text-fg-label" : "text-fg-muted",
-            )}
-            aria-live="polite"
-          >
-            {line}
-          </p>
-        ) : null}
+        <RecorderStatusLine recorder={recorder} online={online} stalled={stalled} />
         <RecorderLiveTranscript recorder={recorder} viewerName={viewerName} />
       </section>
     );

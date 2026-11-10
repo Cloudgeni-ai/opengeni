@@ -86,9 +86,15 @@ describe("Microsoft approval dialog (local fixture)", () => {
       await page.waitForFunction(() => document.activeElement?.textContent === "Connect Teams");
       await page.goto(baseUrl + "/test/teams-approval.html?required=false");
       await page.getByRole("button", { name: "Connect Teams", exact: true }).click();
-      await page.getByText("Microsoft didn't grant access.", { exact: false }).waitFor();
-      expect(await page.getByText("If it asked for admin approval", { exact: false }).count()).toBe(
-        1,
+      await page.getByText("Microsoft didn't give access", { exact: false }).waitFor();
+      expect(
+        await page.getByText("If Microsoft said an admin has to approve", { exact: false }).count(),
+      ).toBe(1);
+      await page.getByRole("button", { name: "Copy message for IT" }).click();
+      const message = await page.evaluate(() => navigator.clipboard.readText());
+      expect(message).toContain("connect Microsoft Teams");
+      expect(message).toContain(
+        "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=fixture&scope=offline_access",
       );
     } finally {
       await context.close();

@@ -59,6 +59,9 @@ import {
   organizationMembershipHttpStatus,
   requireCanonicalLocalAccountAdministrator,
   updateExternalIdentityMembershipForRequest,
+  releaseAdmissionBlocksAfterAccessChange,
+  releaseMembershipBlocksInOrganization,
+  type AdmissionReleaseDependencies,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -130,6 +133,16 @@ const OrganizationId = z.string().uuid();
 const WorkspaceId = z.string().uuid();
 const MembershipId = z.string().uuid();
 const InvitationId = z.string().uuid();
+
+/** Start saved messages that waited on access, now rather than on the dispatcher's next pass. */
+function admissionReleaseDeps(deps: ApiRouteDeps): AdmissionReleaseDependencies {
+  return {
+    db: deps.db,
+    requestSessionWorkflowWakeDispatch: async () => {
+      await deps.workflowClient?.requestSessionWorkflowWakeDispatch();
+    },
+  };
+}
 
 // Organization keys administer settings, not another person's session contents.
 // The database independently fences current key authority, including on replay.
@@ -784,17 +797,22 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       );
       const payload = await parseBody(context, PutOrganizationWorkspaceMemberRequest);
       try {
-        return context.json(
-          OrganizationWorkspaceAccessMember.parse(
-            await putOrganizationWorkspaceMember(deps.db, {
-              organizationId,
-              workspaceId,
-              actorSubjectId: subjectId,
-              targetOrganizationMembershipId: membershipId,
-              access: payload,
-            }),
-          ),
+        const member = OrganizationWorkspaceAccessMember.parse(
+          await putOrganizationWorkspaceMember(deps.db, {
+            organizationId,
+            workspaceId,
+            actorSubjectId: subjectId,
+            targetOrganizationMembershipId: membershipId,
+            access: payload,
+          }),
         );
+        // Access to this workspace may be what that person's saved messages wait for.
+        await releaseAdmissionBlocksAfterAccessChange(admissionReleaseDeps(deps), {
+          accountId: organizationId,
+          workspaceId,
+          change: "membership",
+        });
+        return context.json(member);
       } catch (error) {
         return await rethrowMembershipErrorWithPlans(context, deps, error);
       }
@@ -1190,6 +1208,11 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         invitationId,
         expectedRevision: payload.expectedRevision,
       });
+      // A returning member's saved messages may be waiting for this.
+      await releaseMembershipBlocksInOrganization(admissionReleaseDeps(deps), {
+        accountId: invitation.organizationId,
+        personalWorkspaceId: result.membership.personalWorkspaceId,
+      });
       return context.json({
         invitation: OrganizationInvitation.parse(result.invitation),
         membership: OrganizationMember.parse(result.membership),
@@ -1301,17 +1324,23 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     const membershipId = parseId(MembershipId, context.req.param("membershipId"), "membership id");
     const payload = await parseBody(context, UpdateOrganizationMemberRequest);
     try {
-      return context.json(
-        OrganizationMember.parse(
-          await updateOrganizationMember(deps.db, {
-            organizationId,
-            actorSubjectId: subjectId,
-            operationId: payload.operationId,
-            membershipId,
-            transition: payload,
-          }),
-        ),
+      const member = OrganizationMember.parse(
+        await updateOrganizationMember(deps.db, {
+          organizationId,
+          actorSubjectId: subjectId,
+          operationId: payload.operationId,
+          membershipId,
+          transition: payload,
+        }),
       );
+      if (payload.kind === "reactivate") {
+        // Reactivated: their saved messages start by themselves.
+        await releaseMembershipBlocksInOrganization(admissionReleaseDeps(deps), {
+          accountId: organizationId,
+          personalWorkspaceId: member.personalWorkspaceId,
+        });
+      }
+      return context.json(member);
     } catch (error) {
       return await rethrowMembershipErrorWithPlans(context, deps, error);
     }

@@ -15818,6 +15818,7 @@
       "shape": {
         "$": "union=[\"type=authorize\",\"type=credentials\",\"type=none\",\"type=preview\",\"type=select_account\",\"type=select_resources\",\"type=wait\"]",
         "$|type=authorize": "object",
+        "$|type=authorize.organizationApprovalUrl": "string?",
         "$|type=authorize.type": "const!=[\"\\\"authorize\\\"\"]",
         "$|type=authorize.url": "string!",
         "$|type=credentials": "object",
@@ -19424,6 +19425,7 @@
     },
     "GoogleDriveTargetScope": {
       "io": [
+        "input",
         "output"
       ],
       "shape": {
@@ -26205,6 +26207,8 @@
         "$.source": "ref(RecordingTrackSource)!",
         "$.totalBytes": "integer!",
         "$.trackNumber": "integer!",
+        "$.unrecorded": "array!",
+        "$.unrecorded[]": "ref(RecordingUnrecordedStretch)",
         "$.video": "object! null",
         "$.video.frameCount": "integer!",
         "$.video.height": "integer!",
@@ -26389,6 +26393,16 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"region_restricted\\\"\",\"\\\"unpriced\\\"\"]"
+      }
+    },
+    "RecordingUnrecordedStretch": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.endMilliseconds": "integer! null",
+        "$.startMilliseconds": "integer!"
       }
     },
     "RecordingVoiceprintConsent": {
@@ -27303,7 +27317,20 @@
         "input"
       ],
       "shape": {
-        "$": "unknown"
+        "$": "object",
+        "$.destination": "ref(ConnectorDocumentDestinationSelection)?",
+        "$.expectedVersion": "integer?",
+        "$.idempotencyKey": "string!",
+        "$.readPolicy": "enum?=[\"\\\"allow\\\"\",\"\\\"ask\\\"\",\"\\\"block\\\"\"]",
+        "$.sources": "array!",
+        "$.sources[]": "object",
+        "$.sources[].driveId": "string! null",
+        "$.sources[].id": "string!",
+        "$.sources[].mimeType": "string!",
+        "$.sources[].name": "string!",
+        "$.syncCadence": "enum?=[\"\\\"daily\\\"\",\"\\\"hourly\\\"\",\"\\\"manual\\\"\"]",
+        "$.syncEnabled": "boolean?",
+        "$.targetScope": "ref(GoogleDriveTargetScope)?"
       }
     },
     "SaveNewSessionDraftRequest": {
@@ -38738,6 +38765,7 @@
       "RecorderPlatform": "type",
       "RecorderSnapshot": "type",
       "RecorderState": "type",
+      "RecorderTrackLoss": "type",
       "RECORDING_AUDIO_UPLOAD_PIECE_BYTES": "value",
       "RecordingChunk": "type",
       "RecordingChunkStore": "type",
@@ -40547,6 +40575,10 @@
       "desktopShortcutLabel": "value",
       "dictationErrorMessage": "value",
       "DictationModelChoice": "type",
+      "dictationWorkspace": "value",
+      "DictationWorkspace": "type",
+      "DictationWorkspaceChoice": "type",
+      "DictationWorkspaces": "type",
       "modifierName": "value",
       "profileName": "value",
       "sameDesktopShortcut": "value",
@@ -40820,11 +40852,13 @@
     "@opengeni/react/meetings-recorder": {
       "createMeetingRecorderStore": "value",
       "MeetingRecorder": "type",
+      "MeetingRecorderLostTrack": "type",
       "MeetingRecorderProvider": "value",
       "MeetingRecorderStore": "type",
       "MeetingRecorderStoreProvider": "value",
       "MeetingStartRequest": "type",
       "useMeetingRecorder": "value",
+      "useMeetingRecorderLostTrack": "value",
       "useMeetingRecorderState": "value",
       "usePendingMeetingStart": "value"
     },
@@ -41002,6 +41036,7 @@
       "groupLiveTurns": "value",
       "groupTranscriptTurns": "value",
       "ImportRecordingAudioInput": "type",
+      "interleaveUnrecordedMarks": "value",
       "languageName": "value",
       "LiveTranscriptLine": "type",
       "LiveTranscriptTurn": "type",
@@ -41020,11 +41055,16 @@
       "speakerIsNamed": "value",
       "tidyLiveText": "value",
       "tidyPartialText": "value",
+      "trackSpeakerName": "value",
       "transcribingText": "value",
       "transcriptErrorText": "value",
       "transcriptFixModel": "value",
+      "TranscriptItem": "type",
       "transcriptNeedsCredits": "value",
       "TranscriptTurn": "type",
+      "TranscriptUnrecordedMark": "type",
+      "transcriptUnrecordedMarks": "value",
+      "unrecordedMarkText": "value",
       "useLiveTranscript": "value",
       "UseLiveTranscriptOptions": "type",
       "UseLiveTranscriptResult": "type",

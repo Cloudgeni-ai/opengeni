@@ -63,12 +63,14 @@ import {
   getManagedSession,
   getNativeAppManagedSession,
   NATIVE_APP_CREDENTIAL_PREFIX,
+  requestCarriesManagedSignInCookie,
 } from "../managed-session";
 import type { ManagedAuthSessionAdapter } from "../managed-auth-session-sets";
 import type { UserPresenceRecorder } from "../user-presence";
-import { MissingPermissionRefusal } from "./permission-refusal";
+import { AuthenticationRequiredRefusal, MissingPermissionRefusal } from "./permission-refusal";
 import { serviceInitiatorFromHeaders } from "./service-initiator";
 import { rethrowExternalWorkspaceOperation } from "./external-membership-refusal";
+import { releaseAdmissionBlocksAfterAccessChange } from "../application/admission-release";
 
 export * from "./permission-refusal";
 import { sha256Hex } from "@opengeni/contracts/values";
@@ -796,9 +798,31 @@ export async function requireAccessContext(c: Context, deps: AccessDeps): Promis
   }
   const context = await pending;
   if (!context) {
-    throw new HTTPException(401, { message: "authentication required" });
+    throw await authenticationRequired(c, deps);
   }
   return context;
+}
+
+/**
+ * Why a request resolved to no one: it sent no credential at all, a sign-in
+ * cookie or app credential that is no longer valid, or another credential
+ * that was not accepted. Reads only what the request sent.
+ */
+async function authenticationRequired(
+  c: Context,
+  deps: AccessDeps,
+): Promise<AuthenticationRequiredRefusal> {
+  const bearer = bearerToken(c);
+  if (bearer) {
+    return new AuthenticationRequiredRefusal(
+      bearer.startsWith(NATIVE_APP_CREDENTIAL_PREFIX) ? "session_expired" : "credential_invalid",
+    );
+  }
+  return new AuthenticationRequiredRefusal(
+    (await requestCarriesManagedSignInCookie(c.req.raw, deps.managedAuth))
+      ? "session_expired"
+      : "session_missing",
+  );
 }
 
 export async function requireAccessGrant(
@@ -825,7 +849,7 @@ export async function requireFreshAccessGrant(
   readGrantsByRequest.delete(c.req.raw);
   const context = await resolveAccessContext(c, deps);
   if (!context) {
-    throw new HTTPException(401, { message: "authentication required" });
+    throw await authenticationRequired(c, deps);
   }
   return (await accessGrantAuthorization(context, deps, workspaceId, permission)).grant;
 }
@@ -1547,6 +1571,13 @@ async function provisionExternalMemberOnFirstUse(
         revocationWatermark: external.revocationWatermark,
       },
     );
+    if (outcome === "created") {
+      // A returning external member's saved messages may wait for this.
+      await releaseAdmissionBlocksAfterAccessChange(
+        { db: deps.db },
+        { accountId: external.identity.accountId, workspaceId, change: "membership" },
+      );
+    }
     // Removed after this request authenticated: the removal wins.
     return outcome !== "superseded";
   } catch (error) {
@@ -1636,7 +1667,7 @@ async function applyStatedMembership(
       )
         return;
       try {
-        await applyStatedExternalWorkspaceMembership(
+        const outcome = await applyStatedExternalWorkspaceMembership(
           deps.db,
           {
             organizationId: external.identity.accountId,
@@ -1649,6 +1680,13 @@ async function applyStatedMembership(
             revocationWatermark: stated.revocationWatermark,
           },
         );
+        if (outcome === "created") {
+          // The host stated a membership back: saved messages waiting for it start.
+          await releaseAdmissionBlocksAfterAccessChange(
+            { db: deps.db },
+            { accountId: external.identity.accountId, workspaceId, change: "membership" },
+          );
+        }
       } catch (error) {
         if (error instanceof StatedExternalMembershipLastAdminError)
           throw new HTTPException(409, { message: error.message, cause: error });
@@ -2126,7 +2164,10 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
       // A native app account: the person approved this device from a signed-in
       // browser, so it carries the same human authority as that browser.
       if (!deps.managedAuth) return null;
-      const session = await getNativeAppManagedSession(deps.managedAuth, bearer, deps.db);
+      const session = await getNativeAppManagedSession(deps.managedAuth, bearer, deps.db, {
+        request: c.req.raw,
+        appendSetCookie: (cookie) => c.header("set-cookie", cookie, { append: true }),
+      });
       if (!session?.user) return null;
       const context = await ensureManagedAccessForUser(deps.db, {
         userId: session.user.id,

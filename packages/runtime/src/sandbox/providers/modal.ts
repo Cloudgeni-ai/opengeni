@@ -4,6 +4,8 @@ import {
   type ModalSandboxSession,
   type ModalSandboxSessionState,
 } from "@openai/agents-extensions/sandbox/modal";
+import { imageOutputFromBytes } from "@openai/agents-core/sandbox/internal";
+import { posix } from "node:path";
 import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import {
@@ -167,6 +169,10 @@ type MutableModalSandboxSession = {
   cancelPendingExecCommand?: () => Promise<void>;
   readFile?: ChannelASession["readFile"];
   listDir?: ChannelASession["listDir"];
+  viewImage?: (args: { path: string; runAs?: string }) => Promise<unknown>;
+  // Pinned Agents Extensions 0.14.3: the adapter's own file read, the one its
+  // viewImage and readFile use after path validation.
+  readSandboxFile?: (path: string) => Promise<Uint8Array>;
   persistWorkspace?: (options?: ModalWorkspaceCaptureOptions) => Promise<Uint8Array>;
   writeStdin?: (args: {
     sessionId: number;
@@ -260,6 +266,33 @@ function installModalListDirCompatibility(session: MutableModalSandboxSession): 
         : entry.path,
       type: entry.type === "file" || entry.type === "dir" ? entry.type : "other",
     }));
+  };
+}
+
+/**
+ * `view_image` reads whatever the agent's own shell can read in the box, as it
+ * does on Connected Machine and compute sandboxes. The adapter's viewImage
+ * first confines the path to the manifest root (or a manifest path grant, which
+ * Modal create refuses), so an image the shell had just rendered to `/tmp` was
+ * refused with SandboxInvalidManifestPathError although the same box reads it.
+ * Resolve the path the way the shell does (absolute as given, relative from the
+ * workspace root, the shell's working directory) and read it with the
+ * adapter's own file read, which runs inside the box as the shell's user. That
+ * also drops the adapter's separate validation command, one round trip per
+ * image. A `runAs` read keeps the adapter's user-scoped path.
+ */
+function installModalShellPathViewImage(session: MutableModalSandboxSession): void {
+  if (typeof session.viewImage !== "function" || typeof session.readSandboxFile !== "function") {
+    return;
+  }
+  const viewImage = session.viewImage.bind(session);
+  session.viewImage = async (args) => {
+    const root = session.state?.manifest?.root;
+    if (args.runAs || !root?.startsWith("/") || typeof session.readSandboxFile !== "function") {
+      return await viewImage(args);
+    }
+    const path = posix.resolve(root, args.path.trim());
+    return imageOutputFromBytes(args.path, await session.readSandboxFile(path));
   };
 }
 
@@ -651,6 +684,7 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   installModalPendingExecCancellation(mutable);
   installModalSynchronousCommandCollection(mutable, () => mutable.sandbox);
   installModalListDirCompatibility(mutable);
+  installModalShellPathViewImage(mutable);
   if (
     mutable.modal?.cpClient &&
     mutable.modal.version &&

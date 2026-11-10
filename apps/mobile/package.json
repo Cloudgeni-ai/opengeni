@@ -58,7 +58,9 @@
   "overrides": {
     "decode-uri-component": "0.5.1",
     "linkify-it": "5.0.2",
-    "markdown-it": "14.3.1"
+    "markdown-it": "14.3.3",
+    "node-forge": "1.4.3",
+    "uuid": "11.1.1"
   },
   "expo": {
     "autolinking": {

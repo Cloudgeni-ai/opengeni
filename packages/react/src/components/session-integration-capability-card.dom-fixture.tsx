@@ -474,13 +474,16 @@ test("an organization that needs admin approval gets the approval link and can t
   await act(async () => {
     button(host, "Connect Outlook Mail")!.click();
   });
-  await until(() => !!button(host, "Try again"), "Try again");
+  // The help's own retry; the message for IT is the one primary action.
+  await until(() => !!button(host, "Try signing in again"), "Try signing in again");
+  expect(button(host, "Copy message for IT")).toBeTruthy();
+  expect(button(host, "Try again")).toBeUndefined();
   const link = host.querySelector<HTMLAnchorElement>(`a[href="${APPROVAL_URL}"]`);
   expect(link?.textContent).toBeTruthy();
   expect(host.textContent).toContain("Copy");
   afterSignIn = { state: "connected_but_incomplete", nextAction: { type: "none" } };
   await act(async () => {
-    button(host, "Try again")!.click();
+    button(host, "Try signing in again")!.click();
   });
   await until(() => connected(host), "complete");
   expect(begins).toHaveLength(2);

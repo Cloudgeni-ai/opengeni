@@ -9,6 +9,7 @@ import {
 } from "./personal-connection-approval";
 export { continueSessionWaitingWork, getSessionMachineAccess } from "./session-machine-access";
 export { canonicalSecretPermissions } from "./canonical-secret-permissions";
+import { agentInstructionsSql } from "./agents";
 import { listWorkspaceBackgroundCommandsInScope } from "./session-background-commands";
 import { automationRunPresentation } from "./automation-run-presentation";
 import { resolveSessionAppActionAuthority } from "./session-admin-access";
@@ -3412,6 +3413,30 @@ export async function listSharedWorkspacesForAccount(
   return await mapWorkspaceProjections(db, rows, async (row) =>
     mapWorkspace(row, await workspaceControlProjection(db, row.id), "shared"),
   );
+}
+
+/** Ids of the organization's shared workspaces, newest first; no projections. */
+export async function listOrganizationWorkspaceIds(
+  db: Database,
+  accountId: string,
+  limit = 200,
+): Promise<string[]> {
+  const rows = await withRlsContext(db, { accountId, workspaceId: null }, async (scopedDb) =>
+    scopedDb
+      .select({ id: schema.workspaces.id })
+      .from(schema.workspaces)
+      .where(
+        and(
+          eq(schema.workspaces.accountId, accountId),
+          sql`${schema.workspaces.id} in (
+            select workspace_id from list_organization_workspace_ids(${accountId}::uuid)
+          )`,
+        ),
+      )
+      .orderBy(desc(schema.workspaces.createdAt))
+      .limit(limit),
+  );
+  return rows.map((row) => row.id);
 }
 
 export async function countWorkspacesForAccount(db: Database, accountId: string): Promise<number> {
@@ -44555,7 +44580,7 @@ export async function readSessionAgentPrompt(
     ? await readBoundAgentRows<{ instructions: string }>(
         db,
         scope,
-        sql`select r.instructions
+        sql`select ${agentInstructionsSql("r")} as instructions
           from agent_revisions r
           join agents a on a.workspace_id = r.workspace_id and a.id = r.agent_id
           where r.workspace_id = ${input.workspaceId}::uuid
@@ -44595,7 +44620,7 @@ export async function ensureSessionAgentInstructions(
     ? await readBoundAgentRows<{ revision: number; instructions: string | null }>(
         db,
         input,
-        sql`select a.current_revision as revision, r.instructions
+        sql`select a.current_revision as revision, ${agentInstructionsSql("r")} as instructions
           from agents a
           left join agent_revisions r
             on r.workspace_id = a.workspace_id

@@ -173,8 +173,13 @@ test("a Microsoft organization that needs admin approval gets a link for its adm
       retryable: true,
     },
   });
-  expect(required).toContain("Send this link to your Microsoft 365 admin");
+  expect(required).toContain("Your IT needs to approve Opengeni first");
+  expect(required).toContain("Copy message for IT");
   expect(required).toContain("Copy approval link");
+  expect(required).toContain("Open approval link");
+  // The ready-made message carries the exact approval link.
+  expect(required).toContain(`could you approve it with this link?`.replace("could", "Could"));
+  expect(required).toContain(link.replaceAll("&", "&amp;"));
   expect(required).not.toContain("Connection setup could not continue");
   expect(required).not.toContain("Personal connection");
   expect(required).not.toContain("<ol>");
@@ -187,7 +192,9 @@ test("a Microsoft organization that needs admin approval gets a link for its adm
       retryable: true,
     },
   });
-  expect(declined).toContain("If it asked for admin approval");
+  expect(declined).toContain("Microsoft didn&#x27;t give access");
+  expect(declined).toContain("If Microsoft said an admin has to approve Opengeni");
+  expect(declined).toContain("Copy message for IT");
   const other = await render({ type: "none" }, "cancelled", {
     error: {
       code: "provider_denied",
@@ -195,7 +202,8 @@ test("a Microsoft organization that needs admin approval gets a link for its adm
       retryable: false,
     },
   });
-  expect(other).not.toContain("Admin approval link");
+  expect(other).not.toContain("Open approval link");
+  expect(other).not.toContain("Copy message for IT");
 });
 
 test("GitHub account selection explains how a non-owner requests an organization install", async () => {

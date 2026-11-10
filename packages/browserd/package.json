@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/browserd",
-  "version": "0.4.25",
+  "version": "0.4.26",
   "private": true,
   "description": "Placement-resident browser controller for Opengeni: launches and drives managed Chrome over CDP.",
   "license": "Apache-2.0",
@@ -19,7 +19,7 @@
     "@opengeni/interaction": "workspace:*",
     "@trycua/cua-driver": "0.37.0",
     "ws": "8.21.1",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",

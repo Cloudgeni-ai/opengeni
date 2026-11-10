@@ -1,9 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql as drizzleSql, type SQL } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import { rawRows } from "../src/database";
+import { LOSSLESS_CONTENT_CODEC_VERSION, toPostgresLosslessJson } from "../src/lossless-json";
+import * as schema from "../src/schema";
 import {
   SESSION_ARCHIVE_EXPORT_TABLES,
+  SESSION_ARCHIVE_PURGED_EVENT_TYPES,
   SESSION_ARCHIVE_PURGE_TABLES,
   SessionArchivedError,
   abandonSessionArchive,
@@ -25,6 +30,7 @@ import {
   readSessionArchiveTranscriptEvents,
   readSessionEventStorageGapEnd,
   sessionArchiveExportSql,
+  sessionArchiveTranscriptEvent,
   setSessionKeepLive,
   submitHumanPromptInTransaction,
   withRlsContext,
@@ -504,7 +510,132 @@ describe("idle-session archive lifecycle", () => {
     expect(items.map((row) => row.id)).toEqual([evidenceItem]);
     expect(await countRows("session_pending_tool_calls", scope)).toBe(0);
   }, 120_000);
+
+  test("purge resumes at the table in progress and leaves exactly what restarting from the first table leaves", async () => {
+    const restarted = await archivedSessionWithBulkContent();
+    const resumed = await archivedSessionWithBulkContent();
+    const before = await purgeTableCounts(resumed);
+    let calls = 0;
+    const wire = postgres(shared.appUrl, {
+      max: 1,
+      debug: (_connection, query) => {
+        if (query.includes("purge_archived_session_content")) calls += 1;
+      },
+    });
+    const observed = drizzle(wire, { schema }) as unknown as Database;
+    try {
+      // Every step starting again at the first table.
+      let step = await purgeArchivedSessionContent(observed, restarted, { batchSize: 2 });
+      while (!step.complete)
+        step = await purgeArchivedSessionContent(observed, restarted, { batchSize: 2 });
+      const restartCalls = calls;
+      calls = 0;
+      // Every step resuming at the table the previous step left unfinished.
+      step = await purgeArchivedSessionContent(observed, resumed, { batchSize: 2 });
+      while (!step.complete)
+        step = await purgeArchivedSessionContent(observed, resumed, {
+          batchSize: 2,
+          fromTable: step.nextTable,
+        });
+      const resumeCalls = calls;
+
+      expect(await remainingContent(resumed)).toEqual(await remainingContent(restarted));
+      const after = await purgeTableCounts(resumed);
+      // One call per full batch and one that finds the table short, for each
+      // table once, then one confirming pass over every table.
+      const expected =
+        SESSION_ARCHIVE_PURGE_TABLES.reduce(
+          (sum, table) => sum + Math.floor((before[table]! - after[table]!) / 2) + 1,
+          0,
+        ) + SESSION_ARCHIVE_PURGE_TABLES.length;
+      expect(resumeCalls).toBe(expected);
+      expect(restartCalls).toBeGreaterThan(resumeCalls);
+      for (const scope of [restarted, resumed]) {
+        const [row] = await shared.admin`select content_archive_purged_at from sessions
+          where id = ${scope.sessionId}`;
+        expect(row!.content_archive_purged_at).not.toBeNull();
+      }
+    } finally {
+      await wire.end();
+    }
+  }, 120_000);
 });
+
+/**
+ * An archived session with several purge batches in most tables, plus rows
+ * the purge keeps: a scheduled run's evidence update and the item it delivered.
+ */
+async function archivedSessionWithBulkContent(): Promise<SessionArchiveScope> {
+  const { scope } = await idleSession();
+  const [turn] = await shared.admin`select id from session_turns
+    where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId} limit 1`;
+  const json = shared.admin.json;
+  await shared.admin.begin(async (sql) => {
+    await sql`set local session_replication_role = replica`;
+    const items: string[] = [];
+    for (let position = 20; position < 33; position += 1) {
+      const id = crypto.randomUUID();
+      items.push(id);
+      await sql`insert into session_history_items
+        (id, account_id, workspace_id, session_id, turn_id, position, item, created_at, active)
+        values (${id}, ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, ${turn!.id},
+          ${position}, ${json({ type: "message", role: "user", position })}, now(), true)`;
+    }
+    // Five ordinary delivered updates, then the scheduled run's evidence.
+    for (const [index, itemId] of items.slice(0, 6).entries()) {
+      const id = crypto.randomUUID();
+      const evidence = index === 5;
+      await sql`insert into session_system_updates
+        (id, account_id, workspace_id, session_id, kind, source_id, dedupe_key, summary, payload,
+          state, delivered_history_item_id, scheduled_task_run_id)
+        values (${id}, ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId},
+          ${evidence ? "scheduled_occurrence" : "agent_message"}, ${id}, ${`update-${index}`},
+          'update', ${json({ index })}, 'delivered', ${itemId},
+          ${evidence ? crypto.randomUUID() : null})`;
+    }
+    for (let index = 0; index < 9; index += 1) {
+      const digest = new Bun.CryptoHasher("sha256").update(`blob-${index}`).digest("hex");
+      await sql`insert into session_content_blobs (account_id, workspace_id, session_id, digest, value)
+        values (${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, ${digest},
+          ${json({ text: `blob ${index}` })})`;
+    }
+    await sql`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+      select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
+        case when n % 4 = 0 then 'agent.message.completed' else 'agent.message.delta' end,
+        jsonb_build_object('n', n)
+      from (select max(sequence) as last from session_events
+        where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
+        generate_series(1, 15) n`;
+  });
+  const keys = [`archive/${scope.sessionId}/bundle`, `archive/${scope.sessionId}/transcript`];
+  expect(
+    await beginSessionArchive(client.db, scope, { idleSeconds: IDLE_SECONDS, objectKeys: keys }),
+  ).toBe(true);
+  expect(await completeSessionArchive(client.db, scope, manifest(keys))).toBe(true);
+  return scope;
+}
+
+async function purgeTableCounts(scope: SessionArchiveScope): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  for (const table of SESSION_ARCHIVE_PURGE_TABLES) counts[table] = await countRows(table, scope);
+  return counts;
+}
+
+/** Every purge table's remaining rows, by the columns two identical fixtures share. */
+async function remainingContent(scope: SessionArchiveScope) {
+  const where = { workspace: scope.workspaceId, session: scope.sessionId };
+  return {
+    counts: await purgeTableCounts(scope),
+    events: await shared.admin`select sequence, type from session_events
+      where workspace_id = ${where.workspace} and session_id = ${where.session} order by sequence`,
+    items: await shared.admin`select position, item from session_history_items
+      where workspace_id = ${where.workspace} and session_id = ${where.session} order by position`,
+    updates: await shared.admin`select kind, dedupe_key, payload from session_system_updates
+      where workspace_id = ${where.workspace} and session_id = ${where.session} order by dedupe_key`,
+    blobs: await shared.admin`select digest from session_content_blobs
+      where workspace_id = ${where.workspace} and session_id = ${where.session} order by digest`,
+  };
+}
 
 describe("idle-session archive export reads", () => {
   test("every foreign key into a purged table is checked by an index seek", async () => {
@@ -755,6 +886,85 @@ describe("idle-session archive export reads", () => {
       expect(String(failure)).toContain("the session changed while archiving");
     } finally {
       await exporter.close();
+    }
+  }, 120_000);
+
+  test("transcript events made from exported event rows equal the transcript read in every time zone", async () => {
+    const { scope } = await idleSession();
+    const [turn] = await shared.admin`select id, execution_generation from session_turns
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId} limit 1`;
+    const kept = [
+      "agent.message.completed",
+      "turn.completed",
+      "user.message",
+      "agent.toolCall.created",
+    ];
+    const types = [...SESSION_ARCHIVE_PURGED_EVENT_TYPES, ...kept];
+    // Stored the way the lossless codec stores what PostgreSQL text cannot hold.
+    const encoded = toPostgresLosslessJson({
+      text: "nul \u0000, lone \ud800 and \u2028 survive",
+      nested: { big: 2 ** 64, list: [1.5, -0, "x"], __proto__x: true },
+    });
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      // 3,000 events across the bundle's 200-row pages and the old transcript's
+      // 500-event pages, with times across a daylight-saving change, whole
+      // seconds, and microseconds the millisecond Date truncates.
+      await sql`insert into session_events (account_id, workspace_id, session_id, sequence, type,
+          payload, payload_codec_version, occurred_at, client_event_id, turn_id, turn_generation,
+          turn_association)
+        select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
+          (${types}::text[])[1 + n % ${types.length}],
+          case when n % 7 = 0 then ${sql.json(encoded as never)}::jsonb
+            else jsonb_build_object('text', 'event ' || n, 'n', n, 'quote', '"\\', 'emoji', '🧪') end,
+          case when n % 7 = 0 then ${LOSSLESS_CONTENT_CODEC_VERSION}::int end,
+          case when n % 50 = 0
+            then date_trunc('second', timestamptz '2025-10-26 00:20:00+00' + n * interval '2.3456789 seconds')
+            when n % 50 = 1 then timestamptz '2025-10-26 00:59:59.999999+00'
+            else timestamptz '2025-10-26 00:20:00+00' + n * interval '2.3456789 seconds' end,
+          case when n % 3 = 0 then 'client-' || n end,
+          case when n % 2 = 0 then ${turn!.id}::uuid end,
+          case when n % 2 = 0 then ${turn!.execution_generation}::int end,
+          case when n % 2 = 0 then 'current' end
+        from (select max(sequence) as last from session_events
+          where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
+          generate_series(1, 3000) n`;
+    });
+
+    for (const timeZone of [
+      "UTC",
+      "Europe/Oslo",
+      "Asia/Kolkata",
+      "America/St_Johns",
+      "Pacific/Chatham",
+    ]) {
+      const wire = postgres(shared.appUrl, { max: 1, connection: { TimeZone: timeZone } });
+      const db = drizzle(wire, { schema }) as unknown as Database;
+      try {
+        const [setting] = await wire`select current_setting('TimeZone') as zone`;
+        expect(setting!.zone).toBe(timeZone);
+        const read: string[] = [];
+        for (let afterSequence = 0; ;) {
+          const page = await readSessionArchiveTranscriptEvents(db, scope, {
+            afterSequence,
+            limit: 500,
+          });
+          for (const event of page) read.push(JSON.stringify({ event }));
+          if (page.length < 500) break;
+          afterSequence = page.at(-1)!.sequence;
+        }
+        const derived: string[] = [];
+        for (const rows of await exportAll(db, scope, exportSpec("session_events"), 200)) {
+          for (const row of rows) {
+            const event = sessionArchiveTranscriptEvent(row);
+            if (event) derived.push(JSON.stringify({ event }));
+          }
+        }
+        expect(read.length).toBeGreaterThan(500);
+        expect(derived).toEqual(read);
+      } finally {
+        await wire.end();
+      }
     }
   }, 120_000);
 });

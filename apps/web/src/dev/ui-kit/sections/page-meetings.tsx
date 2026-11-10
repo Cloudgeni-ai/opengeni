@@ -26,6 +26,8 @@ type View = "list" | "meeting" | "settings";
 const TRANSCRIBING_RECORDING_ID = "0c1d2e3f-4a5b-4c6d-8e7f-a0b1c2d3e4f5";
 type RecorderMode = "idle" | "recording" | "paused" | "offline" | "stopped" | "denied";
 type LivePreview = "off" | "on" | "reconnecting" | "unavailable";
+/** A track whose device went away mid-recording: the microphone waiting for one, or shared audio that ended. */
+type LostTrack = "none" | "microphone" | "system" | "microphone-stopped" | "both";
 /** An earlier meeting this device still holds audio of, while the recorder is idle. */
 type BackgroundUpload = "none" | "uploading" | "failed";
 
@@ -74,6 +76,7 @@ function fakeRecorder(
   audio: "desktop" | "display",
   preview: LivePreview = "off",
   background: BackgroundUpload = "none",
+  lost: LostTrack = "none",
 ): MeetingRecorder {
   const live = mode === "recording" || mode === "paused" || mode === "offline";
   // Just stopped: the last few seconds of audio are on their way, so it reads Transcribing.
@@ -99,11 +102,17 @@ function fakeRecorder(
             trackNumber: 0,
             source: "microphone",
             label: "MacBook Pro Microphone",
+            ...(lost === "microphone" || lost === "both"
+              ? { lost: "reconnecting" as const }
+              : lost === "microphone-stopped"
+                ? { lost: "stopped" as const }
+                : {}),
           },
           {
             trackNumber: 1,
             source: "system",
             label: audio === "desktop" ? "Computer audio" : "Meet tab",
+            ...(lost === "system" || lost === "both" ? { lost: "stopped" as const } : {}),
           },
         ]
       : [],
@@ -153,6 +162,7 @@ function fakeRecorder(
     stop: async () => {},
     discard: async () => {},
     rename: async () => {},
+    reconnectTrack: async () => {},
     importAudio: async () => LIVE_RECORDING_ID,
     levels: () => {
       const t = Date.now() / 180;
@@ -202,6 +212,11 @@ export default function PageMeetingsSection() {
   // ?upload=elsewhere: the meeting in progress has no live preview, so its
   // audio is only on the device that recorded it.
   const elsewhereAudio = initial.get("upload") === "elsewhere";
+  // ?gaps=on: the ready meeting's microphone was unplugged for a while, and
+  // tab sharing ended before the meeting did. ?gaps=all: both tracks went
+  // silent together. ?gaps=long: the microphone dropped an hour in.
+  const gapsParam = initial.get("gaps");
+  const gaps = gapsParam === "on" || gapsParam === "all" || gapsParam === "long";
   const fixture = useMemo(() => {
     const base = createMeetingsFixture({
       state: data,
@@ -210,7 +225,7 @@ export default function PageMeetingsSection() {
       creditsOnly,
       subscription,
     });
-    if (!failure && !elsewhereAudio) return base;
+    if (!failure && !elsewhereAudio && !gaps) return base;
     const getRecording: typeof base.client.getRecording = async (workspaceId, id) => {
       const recording = await base.client.getRecording(workspaceId, id);
       if (elsewhereAudio && id === LIVE_RECORDING_ID) {
@@ -220,12 +235,49 @@ export default function PageMeetingsSection() {
           tracks: recording.tracks.map((track) => ({ ...track, live: null })),
         };
       }
+      if (gaps && id === base.readyId) {
+        if (gapsParam === "long") {
+          return {
+            ...recording,
+            durationMilliseconds: 3_910_000,
+            tracks: recording.tracks.map((track) => ({
+              ...track,
+              unrecorded:
+                track.source === "microphone"
+                  ? [{ startMilliseconds: 3_759_000, endMilliseconds: null }]
+                  : [],
+            })),
+          };
+        }
+        return {
+          ...recording,
+          tracks: recording.tracks.map((track) => ({
+            ...track,
+            unrecorded:
+              gapsParam === "all"
+                ? [{ startMilliseconds: 46_000, endMilliseconds: 68_000 }]
+                : track.source === "microphone"
+                  ? [{ startMilliseconds: 46_000, endMilliseconds: 68_000 }]
+                  : [{ startMilliseconds: 148_000, endMilliseconds: null }],
+          })),
+        };
+      }
       return failure && recording.transcript && id === FAILED_RECORDING_ID
         ? { ...recording, transcript: { ...recording.transcript, errorCode: failure } }
         : recording;
     };
     return { ...base, client: { ...base.client, getRecording } };
-  }, [data, pinned, failure, otherWorkspaces, creditsOnly, subscription, elsewhereAudio]);
+  }, [
+    data,
+    pinned,
+    failure,
+    otherWorkspaces,
+    creditsOnly,
+    subscription,
+    elsewhereAudio,
+    gaps,
+    gapsParam,
+  ]);
   const store = useMemo(() => createMeetingRecorderStore(), []);
   const [startedAt] = useState(() => Date.now() - 754_000);
   // ?audio=desktop previews the desktop app, which records other apps' audio.
@@ -235,15 +287,17 @@ export default function PageMeetingsSection() {
   const uploadParam = initial.get("upload");
   const background: BackgroundUpload =
     uploadParam === "uploading" || uploadParam === "failed" ? uploadParam : "none";
+  // ?lost=microphone|microphone-stopped|system|both: a track's device went away while recording.
+  const lost = (initial.get("lost") as LostTrack | null) ?? "none";
   useEffect(() => {
-    store.set(fakeRecorder(mode, startedAt, audio, preview, background));
+    store.set(fakeRecorder(mode, startedAt, audio, preview, background, lost));
     if (mode !== "recording") return;
     const timer = window.setInterval(
-      () => store.set(fakeRecorder(mode, startedAt, audio, preview, background)),
+      () => store.set(fakeRecorder(mode, startedAt, audio, preview, background, lost)),
       250,
     );
     return () => window.clearInterval(timer);
-  }, [mode, startedAt, store, audio, preview, background]);
+  }, [mode, startedAt, store, audio, preview, background, lost]);
   // ?open=live opens the meeting in progress: recorded here while the recorder
   // records, or elsewhere while it is idle. ?open=failed opens the one whose
   // transcript failed, ?open=transcribing the long one still transcribing,

@@ -191,7 +191,8 @@ archived by a person qualifies when all of these hold for the idle period:
    - `transcript.jsonl.zst`: a header, then the readable timeline as public
      `SessionEvent` objects (`{"event": ...}`), then a footer. This is the
      stable, documented readable section and does not require Opengeni's
-     internal tables to interpret.
+     internal tables to interpret. It is made from the event rows the bundle
+     export reads, so kept events are not read a second time.
 3. The manifest (object keys, sizes, SHA-256 digests, row counts) is recorded
    and the state becomes `archived`.
 4. Only then are the bulky tables purged in bounded batches: realtime entries,
@@ -200,6 +201,9 @@ archived by a person qualifies when all of these hold for the idle period:
    executing session or a debugger needs (streamed fragments, model-request
    telemetry, update bookkeeping, startup phases, credential selection and
    late-rejected events).
+   Each step resumes at the table the previous step left unfinished, and the
+   purge is recorded complete only after one pass over every table finds
+   nothing left.
    Every foreign key into these tables has an index led by its key columns,
    so the check each deleted row fires is an index seek rather than a scan of
    the referencing table across all workspaces (enforced by

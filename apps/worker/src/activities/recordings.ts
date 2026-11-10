@@ -51,6 +51,7 @@ import {
   completeRecordingAudioExpiry,
   completeRecordingTranscriptVersion,
   failRecordingTranscriptVersion,
+  fillRecordingUnrecordedStretches,
   getRecordingTrackPreparedObject,
   getRecording,
   getWorkspace,
@@ -829,6 +830,11 @@ export function createRecordingActivities(
     });
     if (!leased) return { outcome: "skipped" };
     const job = leased;
+    // A meeting finalized before tracks kept where they have no audio gets
+    // them now, so its transcript can show where a voice is missing.
+    if (job.recording.purpose === "meeting") {
+      await fillRecordingUnrecordedStretches(db, { ...actor, recordingId: input.recordingId });
+    }
     // The whole transcript, retries included, has a time budget scaled to the
     // audio's length. Past it the version fails as timed_out, with a retry,
     // instead of reading Transcribing for as long as attempts keep starting.
@@ -2486,6 +2492,8 @@ export function createRecordingActivities(
     const due = await listUncompactedRecordingTracks(db, {
       keptSuffix: KEPT_AUDIO_SUFFIX,
     });
+    // Null while the inventory's runtime grant is withheld (1240, 1283).
+    if (due === null) return result;
     result.found = due.length;
     for (const item of due) {
       if (Date.now() >= deadline) break;
