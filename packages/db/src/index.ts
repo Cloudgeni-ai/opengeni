@@ -35964,13 +35964,20 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
 
 /**
  * Whether a failed session's failure already belongs to an agent rather than a
- * person: the newest terminal notice its parent holds about it reports that
- * failure and was consumed, either claimed into a parent turn (`delivered`) or
- * read whole through a tool (`superseded`). The parent agent then owns the
- * follow-up (retry, restart or replace), so the rail does not ask a person to
- * review it. A root session, a notice still pending (its parent paused, gone or
- * not yet run), or one cancelled with its parent stays unhandled, so a failure
- * nobody took on keeps its red marker. Viewer-independent by design.
+ * person. The check is bound to the failure episode itself: the newest terminal
+ * outbox row the child wrote for its parent (committed in the same transaction
+ * as the failure) must be a failure, and the parent's copy of that exact notice
+ * (same dedupe key) must have been claimed into a parent turn (`delivered`).
+ * The parent agent then owns the follow-up (retry, restart or replace), so the
+ * rail does not ask a person to review it.
+ *
+ * Everything else stays unhandled, so a failure nobody took on keeps its red
+ * marker: a root session; a notice not yet delivered, still pending (parent
+ * paused or not yet run), dropped because the parent was cancelled or archived,
+ * or settled without the parent seeing it (`superseded`, `cancelled`,
+ * `failed`); and a child that finished another turn after that notice (for
+ * example one retired without a new notice), whose newer failure is not the
+ * one the parent saw. Viewer-independent by design.
  */
 function sessionFailureHandledByParentSql(
   workspaceId: string,
@@ -35978,14 +35985,32 @@ function sessionFailureHandledByParentSql(
   parentSessionId: SQL,
 ): SQL {
   return sql`(${parentSessionId} is not null and coalesce((
-    select notice.state in ('delivered', 'superseded')
-      and notice.payload ->> 'status' = 'failed'
-    from ${schema.sessionSystemUpdates} notice
-    where notice.workspace_id = ${workspaceId}
-      and notice.session_id = ${parentSessionId}
-      and notice.kind = 'child_terminal_result'
-      and notice.source_id = (${sessionId})::text
-    order by notice.created_at desc, notice.id desc
+    select episode.classification = 'failure'
+      and exists (
+        select 1
+        from ${schema.sessionSystemUpdates} notice
+        where notice.workspace_id = ${workspaceId}
+          and notice.session_id = ${parentSessionId}
+          and notice.dedupe_key = episode.dedupe_key
+          and notice.state = 'delivered'
+      )
+      and not exists (
+        select 1
+        from ${schema.sessionTurns} later
+        where later.workspace_id = ${workspaceId}
+          and later.session_id = ${sessionId}
+          and later.finished_at is not null
+          and later.finished_at > episode.created_at
+          -- The failed turn's own notice is keyed by that turn (see
+          -- enqueueFailedChildOutboxForTurnTx); any other turn is newer work.
+          and episode.dedupe_key <> ('child-completion:' || (${sessionId})::text || ':turn:' || later.id::text)
+      )
+    from ${schema.sessionSystemUpdateOutbox} episode
+    where episode.workspace_id = ${workspaceId}
+      and episode.source_session_id = ${sessionId}
+      and episode.target_session_id = ${parentSessionId}
+      and episode.kind = 'child_terminal_result'
+    order by episode.created_at desc, episode.id desc
     limit 1
   ), false))`;
 }

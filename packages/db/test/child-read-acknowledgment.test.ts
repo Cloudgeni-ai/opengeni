@@ -1404,6 +1404,73 @@ describe("child read acknowledgment on parent consumption", () => {
     });
   });
 
+  /** A parent that consumed its child's first failure; the child is retried. */
+  async function consumedFailureThenRetry(grant: Grant) {
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleFailed(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    await settleIdle(grant, parent);
+    await enqueueHumanTurn(grant, parent.session.id);
+    expect((await claim(grant, parent.session.id)).action).toBe("claimed");
+    expect(
+      (await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id))
+        .childFailureHandled,
+    ).toBe(true);
+    await enqueueHumanTurn(grant, child.session.id);
+    const retried = await claim(grant, child.session.id);
+    if (retried.action !== "claimed") throw new Error("child retry was not claimed");
+    return { parent, child, retried };
+  }
+
+  test("a new failure not yet delivered to the parent never inherits the old verdict", async () => {
+    const grant = await workspace();
+    const { parent, child, retried } = await consumedFailureThenRetry(grant);
+    await settleFailed(grant, {
+      session: child.session,
+      turn: retried.turn,
+      attemptId: retried.attemptId,
+    });
+    // The new failure's notice is still in the outbox (delivery not yet run or
+    // erroring); the earlier delivered failure must not decide this one.
+    expect(
+      await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id),
+    ).toMatchObject({ unreadFailedDescendants: 1, projectFailed: 1, childFailureHandled: false });
+  });
+
+  test("a failure notice settled without the parent seeing it stays the person's", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleFailed(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    for (const state of ["superseded", "cancelled", "failed"]) {
+      await shared.admin`
+        update session_system_updates set state = ${state}
+        where session_id = ${parent.session.id} and source_id = ${child.session.id}
+          and kind = 'child_terminal_result'`;
+      expect(
+        await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id),
+      ).toMatchObject({ unreadFailedDescendants: 1, childFailureHandled: false });
+    }
+  });
+
+  test("a later turn the parent never heard about reopens the failure", async () => {
+    const grant = await workspace();
+    const { parent, child, retried } = await consumedFailureThenRetry(grant);
+    // Operator retirement shape: the retried turn ends failed without writing
+    // a new notice for the parent.
+    await shared.admin`
+      update session_turns set status = 'failed', active_attempt_id = null,
+        finished_at = clock_timestamp(), updated_at = clock_timestamp()
+      where id = ${retried.turn.id}`;
+    await shared.admin`update sessions set status = 'failed' where id = ${child.session.id}`;
+    expect(
+      (await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id))
+        .childFailureHandled,
+    ).toBe(false);
+  });
+
   test("an acknowledgment already ahead of the consumed child is never regressed", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { message: "orchestrate" });

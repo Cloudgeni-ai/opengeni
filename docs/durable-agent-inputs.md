@@ -441,23 +441,30 @@ resolved. A failed lifecycle remains visible inside the session, while the
 rail's red failure-attention marker is viewer-specific and appears only while
 that failed session's latest event is unread. Parent tree projections expose a
 separate `unreadFailedDescendants` count so an acknowledged historical failure
-does not color every ancestor forever.
-
-A failure the parent agent consumed is that agent's to follow up, so it never
-asks a person through an ancestor at all. A failed session is
-`failureHandled` when the newest `child_terminal_result` its parent holds about
-it reports the failure and is `delivered` (claimed into a parent turn) or
-`superseded` (read whole through a tool). Such a session is left out of every
-ancestor's `unreadFailedDescendants` and `unreadDescendants`, project and Site
-totals and Needs you, even when it logs a late event such as a workspace capture
-after the acknowledgment. The rule is viewer-independent: it holds for members
-whose personal state the claim never acknowledged. A root session, a notice
-still pending (its parent paused, gone or not yet run) or a cancelled one stays
-unhandled, and a retried child that fails again has a new pending notice, so it
-asks again until its parent takes that failure. The session's own row keeps its
-own unread state. The fence is monotone: a human who has
+does not color every ancestor forever. The fence is monotone: a human who has
 already read further, or a racing claim that observed a later sequence, is
 never regressed.
+
+A failure the parent agent took is that agent's to follow up, so it never asks
+a person through an ancestor. A failed session is `failureHandled` when it is
+bound to the failure episode the parent saw: the newest `child_terminal_result`
+outbox row the child wrote for its parent (committed with the failure) is a
+failure, the parent's copy of that same notice (same dedupe key) is
+`delivered`, meaning claimed into a parent turn (if that turn later fails, the
+parent's own failure surfaces instead), and the child has finished no other
+turn since. Such a session is left out of every ancestor's
+`unreadFailedDescendants` and `unreadDescendants`, project and Site totals, and
+the flat child list in Needs you, even when it logs a late event such as a
+workspace capture after the acknowledgment. Its own row, when expanded, shows
+as unread rather than failed. The rule is viewer-independent: it holds for
+members whose personal state the claim never acknowledged.
+
+Everything else stays unhandled and keeps its red marker: a root session; a
+failure whose notice has not been delivered yet, is still pending (its parent
+paused or not yet run), was dropped because the parent was cancelled or
+archived, or was settled without the parent seeing it (`superseded`,
+`cancelled` or `failed`); and a child that ran another turn afterwards, such as
+a retried child that fails again, until its parent takes that failure too.
 
 Monotonicity has one consequence worth stating plainly: an explicit mark-unread
 is **not** sticky against a later consumption. Marking a child unread, then
