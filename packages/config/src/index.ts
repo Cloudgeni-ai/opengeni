@@ -5068,8 +5068,9 @@ function opperCapabilities(input: {
  * `opperModels` (database mode).
  */
 /**
- * Default automatic-compaction threshold for Claude Opus 5.5 on every route.
- * Workspaces can still choose another threshold per model.
+ * Default automatic-compaction threshold for Claude Opus 5.5 on every route,
+ * also used for Claude Fable 5.2. Workspaces can still choose another
+ * threshold per model.
  */
 export const OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT = 300_000;
 
@@ -5605,9 +5606,12 @@ export const reviewedModelListPricing: Record<string, ModelPricingScheduleV1> = 
   // https://platform.claude.com/docs/en/about-claude/pricing (2026-10-08).
   // Opus/Sonnet 5.5 cache reads are 5%, unlike the older models' 10%; none of these
   // models has a long-context premium.
+  // Fable 5.2: https://platform.claude.com/docs/en/models/fable-5-2/overview
+  // (2026-11-09); its cache reads are 2.5% of input.
   ...Object.fromEntries(
     (
       [
+        ["claude-fable-5-2", 8_000_000, 200_000, 10_000_000, 40_000_000],
         ["claude-opus-5-5", 4_000_000, 200_000, 5_000_000, 20_000_000],
         ["claude-sonnet-5-5", 2_000_000, 100_000, 2_500_000, 10_000_000],
         ["claude-opus-5", 5_000_000, 500_000, 6_250_000, 25_000_000],
@@ -13724,6 +13728,7 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
   >
 > = Object.fromEntries([
   ...[
+    ["claude-fable-5-2", "high"],
     ["claude-opus-5-5", "medium"],
     ["claude-sonnet-5-5", "medium"],
     ["claude-haiku-5-5", "medium"],
@@ -13738,12 +13743,20 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       defaultEffort,
       contextWindowTokens: 1_000_000,
       maxOutputTokens: 128_000,
+      // Fable 5.2 binds its thinking to the exact earlier prefix on every
+      // account and writes progress updates between tool calls.
+      // https://platform.claude.com/docs/en/models/fable-5-2/migration-guide
       prefixBoundThinking:
-        id === "claude-opus-5-5" || id === "claude-sonnet-5-5" || id === "claude-haiku-5-5",
-      ...(id === "claude-opus-5-5" || id === "claude-sonnet-5-5" ? { progressUpdates: true } : {}),
+        id === "claude-fable-5-2" ||
+        id === "claude-opus-5-5" ||
+        id === "claude-sonnet-5-5" ||
+        id === "claude-haiku-5-5",
+      ...(id === "claude-fable-5-2" || id === "claude-opus-5-5" || id === "claude-sonnet-5-5"
+        ? { progressUpdates: true }
+        : {}),
       ...(id === "claude-haiku-5-5"
         ? { autoCompactTokenLimit: 95_000 }
-        : id === "claude-opus-5-5"
+        : id === "claude-opus-5-5" || id === "claude-fable-5-2"
           ? { autoCompactTokenLimit: OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT }
           : {}),
     },
@@ -13843,13 +13856,15 @@ export function withClaudeConnectionCatalog(
           upstreamModelId: model.upstreamModelId,
           label:
             model.label ??
-            (model.upstreamModelId === "claude-opus-5-5"
-              ? "Claude Opus 5.5"
-              : model.upstreamModelId === "claude-sonnet-5-5"
-                ? "Claude Sonnet 5.5"
-                : model.upstreamModelId === "claude-haiku-5-5"
-                  ? "Claude Haiku 5.5"
-                  : model.upstreamModelId),
+            (model.upstreamModelId === "claude-fable-5-2"
+              ? "Claude Fable 5.2"
+              : model.upstreamModelId === "claude-opus-5-5"
+                ? "Claude Opus 5.5"
+                : model.upstreamModelId === "claude-sonnet-5-5"
+                  ? "Claude Sonnet 5.5"
+                  : model.upstreamModelId === "claude-haiku-5-5"
+                    ? "Claude Haiku 5.5"
+                    : model.upstreamModelId),
           reasoningEffort: adaptiveThinking,
           // Claude's server-side web search runs on every Claude route (API
           // key and subscription) under the deployment's web search switch.
