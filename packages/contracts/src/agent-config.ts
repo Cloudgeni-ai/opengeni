@@ -1343,7 +1343,7 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
   // capabilities, identity and renderer, as when the agent is omitted.
   if (
     parentConfig &&
-    request.guidance !== undefined &&
+    guidanceChanges &&
     request.capabilities === undefined &&
     request.identity === undefined &&
     request.renderer === undefined

@@ -194,7 +194,9 @@ export function startSupportDesk(): SupportDesk {
       } | null;
       if (!message?.method)
         return Response.json(
-          { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } },
+          message
+            ? { jsonrpc: "2.0", id: null, error: { code: -32600, message: "invalid request" } }
+            : { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } },
           { status: 400 },
         );
       if (message.id === undefined) return new Response(null, { status: 202 });

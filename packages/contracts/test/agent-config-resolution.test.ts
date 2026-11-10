@@ -832,6 +832,10 @@ describe("guidance", () => {
     const legacy = { kind: "legacy" as const, ceiling: parentConfig.capabilities };
     expect(resolve({ parent: legacy, request: { guidance: "full" } }).config).toBeNull();
     expect(resolve({ request: { guidance: "full" } }).config!.source).toBe("deployment_default");
+    // Combined with another field, "full" still resolves exactly as if it were omitted.
+    expect(resolve({ parent, request: { instructions: "x", guidance: "full" } })).toEqual(
+      resolve({ parent, request: { instructions: "x" } }),
+    );
   });
 
   test("a mid-session update sets, keeps, or clears it", () => {
