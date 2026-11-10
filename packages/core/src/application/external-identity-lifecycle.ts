@@ -7,6 +7,7 @@ import {
   requireAccessContext,
   type AccessDeps,
 } from "../access";
+import { releaseMembershipBlocksInOrganization } from "./admission-release";
 
 /** Host service administration is separate from asUser and native-cookie
  * administration. The database rechecks the live key and exact external target
@@ -38,11 +39,19 @@ export async function updateExternalIdentityMembershipForRequest(
   const parsed = UpdateExternalIdentityMembershipRequest.safeParse(input);
   if (!parsed.success)
     throw new HTTPException(422, { message: "invalid external identity transition" });
-  return updateOrganizationMember(deps.db, {
+  const member = await updateOrganizationMember(deps.db, {
     organizationId,
     membershipId,
     actorSubjectId: access.subjectId,
     operationId: parsed.data.operationId,
     transition: parsed.data,
   });
+  if (parsed.data.kind === "reactivate") {
+    // Reactivated by the host: their saved messages start by themselves.
+    await releaseMembershipBlocksInOrganization(
+      { db: deps.db },
+      { accountId: organizationId, personalWorkspaceId: member.personalWorkspaceId },
+    );
+  }
+  return member;
 }
