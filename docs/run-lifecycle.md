@@ -436,8 +436,10 @@ connection, titles the session.
 
 `OpenGeniRuntime.generateSessionTitle` is a rolling-compatible optional seam.
 Older or custom runtimes that do not implement it retain the prior attempt-local
-`set_session_title` tool plus one-shot model instruction, so an embedding host
-does not silently lose automatic naming during an upgrade. That compatibility
+`set_session_title` tool plus a one-shot title request, so an embedding host
+does not silently lose automatic naming during an upgrade. That request rides in
+the turn's operational notice, a history item stored where it was sent, never in
+the system prompt, which must stay identical across turns and requests. That compatibility
 path remains serialized; the production runtime takes the parallel path. Neither
 path runs on the managed OpenRouter free route.
 

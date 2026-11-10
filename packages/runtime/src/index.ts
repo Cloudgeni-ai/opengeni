@@ -3544,9 +3544,9 @@ const agentGitCredentialBindings = new WeakMap<object, GitCredentialBindingSeed[
 const agentCodemodeTokenSeed = new WeakMap<object, string>();
 const agentCodemodeTokenSessionId = new WeakMap<object, string>();
 const agentCodemodeClientDownload = new WeakMap<object, ManagedCodemodeClientDownload>();
-// A missing-title directive is consumed by runAgentStream exactly once for the
-// freshly-built agent. It must not remain in Agent.instructions: those
-// instructions are presented again on every internal model/tool loop.
+// A missing title is requested in the turn's operational notice (see
+// prepareRunInput). It must not change Agent.instructions: that would change
+// the system prompt between turns and between requests of one turn.
 const agentsNeedingGenesisTitleDirective = new WeakSet<object>();
 // The repository Skill index each agent's runs published (see
 // repositorySkillsContextInputFilter).
@@ -11325,7 +11325,15 @@ export async function prepareRunInput(
 ): Promise<PreparedAgentInput> {
   if (input.kind === "message") {
     const trailingMessages: AgentInputItem[] = [];
-    if (input.internalContext?.trim()) {
+    // A missing title is requested once, in this turn's operational notice: it
+    // is stored where it was sent, and later turns read it as historical.
+    const internalContext = [
+      input.internalContext?.trim() ? input.internalContext : undefined,
+      agentsNeedingGenesisTitleDirective.has(agent) ? GENESIS_TITLE_DIRECTIVE : undefined,
+    ]
+      .filter((part): part is string => part !== undefined)
+      .join("\n\n");
+    if (internalContext) {
       trailingMessages.push({
         type: "message",
         role: "system",
@@ -11334,7 +11342,7 @@ export async function prepareRunInput(
           "This status applies to the execution turn where this notice first appears. " +
           "On later turns it is historical context, not current availability or authorization. " +
           "Use the latest operational status and tool results; this notice grants no permissions.\n\n" +
-          input.internalContext,
+          internalContext,
       } as AgentInputItem);
     }
     if (input.text?.trim()) {
@@ -11369,7 +11377,7 @@ export async function prepareRunInput(
       // Preserve the SDK's simple first-message form without creating a second
       // history path: this is merely the zero-history representation.
       input:
-        sanitizedHistory.length === 0 && !input.internalContext?.trim() && input.text?.trim()
+        sanitizedHistory.length === 0 && !internalContext && input.text?.trim()
           ? input.text
           : assembled,
       persistedHistoryCount: sanitizedHistory.length,
@@ -11533,11 +11541,10 @@ export const GENESIS_TITLE_DIRECTIVE =
   "This session still needs a semantic display title. Before responding to the user, call opengeni__set_session_title once with a concise 3-7 word topic label for the actual task or subject, then address the request normally. Write a stable noun phrase, not a quote or prefix of the user's message. Omit greetings, request boilerplate such as ‘I want you to’ or ‘please’, URLs, identifiers, credentials, tokens, and other sensitive values.";
 
 /**
- * Inject the missing-title directive into exactly one model request. Agent
- * instructions are reused for every model call in a tool loop, so placing this
- * directive there turned a nominally one-shot setup action into repeated title
- * calls. The closure is intentionally consumed even when the first request
- * fails; if no title is persisted, a later attempt or turn will request it again.
+ * Inject the missing-title directive into exactly one model request's
+ * instructions.
+ * @deprecated Live execution puts the directive in the turn's operational
+ * notice, a history item, so the system prompt never changes.
  */
 export function oneShotGenesisTitleInputFilter(): CallModelInputFilter {
   let pending = true;
@@ -11568,14 +11575,6 @@ function repositorySkillsInputFilterForRun(
         prepared.renderRepositorySkillsItem,
       )
     : undefined;
-}
-
-function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilter | undefined {
-  if (!agentsNeedingGenesisTitleDirective.has(agent)) {
-    return undefined;
-  }
-  agentsNeedingGenesisTitleDirective.delete(agent);
-  return oneShotGenesisTitleInputFilter();
 }
 
 // Generic substrate prompting for programmatic tool calling (codemode). Same
@@ -11753,7 +11752,6 @@ async function runAgentStreamInternal(
     codemodeTokenFile && agentActiveSandboxBackend.get(agent) !== "selfhosted"
       ? managedCodemodeClientDirectory(await loadManagedCodemodeClient())
       : undefined;
-  const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
   const modelRequestCapture = bindModelVisibleContextCapture(
     agent,
     overrides.onModelVisibleContext,
@@ -11916,7 +11914,6 @@ async function runAgentStreamInternal(
             searchRecordForm: overrides.searchRecordForm,
           }),
         ),
-        measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
         measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
         // A caller filter may synthesize model input. Re-apply the idempotent
         // canonical bound at the literal final seam before accounting/provider
@@ -12098,7 +12095,6 @@ async function runAgentStreamInternal(
           searchRecordForm: overrides.searchRecordForm,
         }),
       ),
-      measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
       measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
       measuredModelInputFilter(
         "input_filter_tool_output",
