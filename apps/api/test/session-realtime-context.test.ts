@@ -175,7 +175,11 @@ describe("ordinary-session realtime context projection", () => {
     expect(projected[0]).toEqual({ role: "user", text: "Durable request." });
     // A user-role item is speech the provider may delegate to the agent.
     expect(projected[1]).toMatchObject({ role: "developer" });
-    expect(projected[1]?.text).toContain("Remain completely silent when this session starts.");
+    expect(projected[1]?.text).toContain("is not a new user message");
+    // A call the agent placed opens with speakable session context; the
+    // continuity rule must leave room for it rather than demand silence.
+    expect(projected[1]?.text).not.toContain("Remain completely silent");
+    expect(projected[1]?.text).toContain("such as a call you placed being answered");
     expect(projected[1]?.text).toContain("USER: What happened?");
     expect(projected[1]?.text).toContain("ASSISTANT: I delegated the check.");
   });

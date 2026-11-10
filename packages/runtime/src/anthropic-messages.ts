@@ -1490,24 +1490,34 @@ export class AnthropicMessagesModel implements Model {
     headers.set("content-type", "application/json");
     headers.set("accept", stream ? "text/event-stream" : "application/json");
     headers.set("anthropic-version", "2023-06-01");
-    // A portable checkpoint (including a standalone tool-less summary request)
-    // rewrites the prefix. Image-policy upgrades can do so too. Keep signed
-    // blocks verbatim and use the provider's explicit invalid-block reset, never
-    // strip signatures ourselves. Retained checkpoints/images make this choice
-    // reproducible after worker/model-instance restarts. A summary request that
-    // reuses the prepared ordinary prefix keeps its thinking mode unchanged (the
-    // mode is part of the cache key) and only opts its existing thinking into
-    // the reset, in case the checkpoint history differs from what was sent.
-    // Every other binding change is handled by our own replay policy, which
-    // works on every Claude transport (opaque-reasoning-replay).
-    const preparedCompaction =
-      request.modelSettings.providerData?.opengeni_compaction_prefix === "prepared";
+    // Prefix-bound thinking blocks are valid only after the exact prefix they
+    // were created with, and that prefix legitimately changes between
+    // requests: a portable checkpoint (including a standalone tool-less
+    // summary request) or an image-policy upgrade rewrites history, and the
+    // system prompt follows live workspace state (for example the repository
+    // Skills index after a branch checkout). Without the provider's explicit
+    // reset Claude rejects the whole request, and every retry, with HTTP 400.
+    // Keep signed blocks verbatim and let the provider drop only the blocks the
+    // changed prefix invalidated (reported as thinkingBlocksDropped); never
+    // strip signatures ourselves. An unchanged prefix drops nothing. Every
+    // request that already asks for thinking opts in, so the setting never
+    // flips inside a conversation; a request without thinking is moved into it
+    // only while its input carries a checkpoint summary or a resized image, and
+    // never when it forces a tool (Claude refuses thinking with a forced tool).
+    // A summary request that reuses the prepared ordinary prefix therefore
+    // keeps its thinking mode unchanged (the mode is part of the cache key).
+    // Where drop_block is unavailable (a gateway that strips it) or does not
+    // apply (another model, account or platform), our own replay policy still
+    // keeps every request valid (opaque-reasoning-replay).
     const resetsPrefix =
       projection.resized ||
       request.modelSettings.providerData?.opengeni_portable_compaction === true ||
-      (Array.isArray(request.input) && request.input.some(isCompactionSummary)) ||
-      (preparedCompaction && Boolean(body.thinking));
-    if (claudeNativeModelProfile(this.model)?.prefixBoundThinking && resetsPrefix) {
+      (Array.isArray(request.input) && request.input.some(isCompactionSummary));
+    const forcesTool = body.tool_choice?.type === "any" || body.tool_choice?.type === "tool";
+    if (
+      claudeNativeModelProfile(this.model)?.prefixBoundThinking &&
+      (Boolean(body.thinking) || (resetsPrefix && !forcesTool))
+    ) {
       body.thinking = {
         type: "adaptive",
         display: "summarized",

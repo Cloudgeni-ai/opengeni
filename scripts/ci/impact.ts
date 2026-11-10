@@ -791,6 +791,7 @@ function fullPlan(
       "format",
       "workspace-billing",
       "docs-refs",
+      "doc-snippets",
       "generated-fonts",
       "public-hygiene",
       // A migration ordinal that protected main has meanwhile assigned to
@@ -892,7 +893,15 @@ export function createImpactPlan(
       exampleBuildProjects: [],
       // The subscription contract is a document, so a docs-only change to it
       // must still be checked against the tests that claim its requirements.
-      guards: ["format", "docs-refs", "generated-fonts", "public-hygiene", "subscription-contract"],
+      guards: [
+        "format",
+        "docs-refs",
+        // Docs samples are typechecked against the SDK they describe.
+        "doc-snippets",
+        "generated-fonts",
+        "public-hygiene",
+        "subscription-contract",
+      ],
       reasons: changedFiles.map((path) => ({
         path,
         reason: "documentation-only change",
@@ -1020,6 +1029,8 @@ export function createImpactPlan(
     "format",
     "workspace-billing",
     "docs-refs",
+    // Any SDK or React change can break a docs sample; the check takes seconds.
+    "doc-snippets",
     "generated-fonts",
     "public-hygiene",
     // Not gated on `packages/db/drizzle/`: the case this exists for is a NEW

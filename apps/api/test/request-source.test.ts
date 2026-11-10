@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import {
   apiRequestBindingsForTransportPeer,
   replaceTrustedClientAddressHeader,
+  requestSourceNetwork,
   requestSourceRateLimitKey,
   TRUSTED_CLIENT_ADDRESS_HEADER,
   trustedRequestSourceAddress,
@@ -191,5 +192,29 @@ describe("trusted client address header", () => {
     expect(
       await stamped({ path: "/v1/auth/sign-in/email", stamp: true, supplied: "192.0.2.55" }),
     ).toBeNull();
+  });
+});
+
+describe("requestSourceNetwork", () => {
+  test("one client is an IPv4 address or an IPv6 /64; prefixes are /24 and /48; unknown is null", () => {
+    expect(requestSourceNetwork("192.0.2.77")).toEqual({
+      exact: "192.0.2.77",
+      prefix: "192.0.2.0/24",
+    });
+    expect(requestSourceNetwork("::ffff:192.0.2.77")).toEqual({
+      exact: "192.0.2.77",
+      prefix: "192.0.2.0/24",
+    });
+    expect(requestSourceNetwork("2001:db8:12:34::1")).toEqual({
+      exact: "2001:db8:12:34::/64",
+      prefix: "2001:db8:12::/48",
+    });
+    // Rotating within one /64 is the same client.
+    expect(requestSourceNetwork("2001:DB8:12:34:abcd::99")).toEqual(
+      requestSourceNetwork("2001:db8:12:34::1"),
+    );
+    expect(requestSourceNetwork("2001:db8:12:35::1")?.exact).toBe("2001:db8:12:35::/64");
+    expect(requestSourceNetwork(UNKNOWN_REQUEST_SOURCE_ADDRESS)).toBeNull();
+    expect(requestSourceNetwork("not-an-address")).toBeNull();
   });
 });

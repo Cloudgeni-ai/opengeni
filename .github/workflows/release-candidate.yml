@@ -58,7 +58,7 @@ jobs:
   candidate:
     name: Build immutable release candidate
     needs: [admission, artifact-runtime]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     environment: public-release
     if: ${{ vars.RELEASE_ENABLED == 'true' }}
