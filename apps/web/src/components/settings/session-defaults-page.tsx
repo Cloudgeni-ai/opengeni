@@ -129,13 +129,17 @@ export function SessionDefaultsPage({
     const nextIdentity = identityChanged
       ? trimmed || null
       : (saved.defaults?.identity ?? undefined);
-    const next: WorkspaceAgentDefaults | null = openGeniDefaults
-      ? null
-      : {
-          capabilities: capabilitiesRequest(draft),
-          ...(nextIdentity !== undefined ? { identity: nextIdentity } : {}),
-          ...(saved.defaults?.renderer ? { renderer: saved.defaults.renderer } : {}),
-        };
+    // Guidance is set through the API; this page keeps a saved lean default.
+    const savedGuidance = saved.defaults?.guidance;
+    const next: WorkspaceAgentDefaults | null =
+      openGeniDefaults && !savedGuidance
+        ? null
+        : {
+            capabilities: capabilitiesRequest(draft),
+            ...(nextIdentity !== undefined ? { identity: nextIdentity } : {}),
+            ...(saved.defaults?.renderer ? { renderer: saved.defaults.renderer } : {}),
+            ...(savedGuidance ? { guidance: savedGuidance } : {}),
+          };
     if (capabilitiesChanged) {
       try {
         await context.client.updateWorkspaceSettings(workspaceId, { sessionAgentDefaults: next });

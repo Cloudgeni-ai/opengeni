@@ -76,6 +76,30 @@ Put facts about the current page in the message's `modelContext`, not in instruc
 - `"opengeni"` for `OpenGeniChat` and `SessionConversation`: files, artifacts, and visuals render inline.
 - `"markdown"` for your own chat UI, Slack, or email. The chat facade uses it by default.
 
+## Guidance
+
+`guidance` sets how much of Opengeni's general working guidance the system prompt carries.
+
+- `"full"` (the default): everything, written for open-ended and long-running work.
+- `"lean"`: for short conversations where a person reads and answers each reply, such as a support or booking assistant. It cuts an embedded `capabilities: "none"` session without a sandbox from about 2,750 to about 960 system-prompt tokens per call (measured without tool search).
+
+```ts
+agent: {
+  identity: "You are Acme Travel's booking assistant.",
+  instructions: "Never change a booking without the traveller's explicit yes.",
+  capabilities: "none",
+  guidance: "lean",
+}
+```
+
+Lean keeps the identity, the precedence rule, when to act and when to ask, the authorization limits, destructive-action care, times to the minute, how to treat new messages, and the compaction rule (any long conversation can be compacted). Your `identity`, `instructions`, workspace rules and every tool's own guidance stay as they are, including waiting, tool search and background-command guidance when the session has those tools. Tools, permissions and refusals don't change.
+
+It leaves out personality and writing-style detail, progress updates, final-answer formatting, the verification rule, and the autonomy and persistence guidance: how to handle diagnose and build requests, keep going after a failure, pick a default when a step is blocked, and design before building.
+
+Don't use `"lean"` for agents that work on their own for many steps: goals, schedules, coding in a sandbox, research, or workers you start from another agent. Those rely on the guidance it leaves out. If your product has its own writing style or answer format, put it in `instructions`.
+
+Child sessions inherit `guidance` and can set their own; setting only `guidance` doesn't change a child's tools. The settings page keeps a lean workspace default when an admin edits other defaults. `getSessionModelContext` shows the exact instructions a session receives.
+
 ## Where it goes
 
 <CodeGroup>

@@ -41,11 +41,18 @@ export function observeEvents(
   events: SessionEvent[],
 ): Pick<
   SessionObservation,
-  "turnOutputs" | "finalAnswer" | "toolCalls" | "eventTypes" | "humanInputRequests" | "usage"
+  | "turnOutputs"
+  | "finalAnswer"
+  | "toolCalls"
+  | "eventTypes"
+  | "humanInputRequests"
+  | "usage"
+  | "turnFailures"
 > {
   const toolCalls: ToolCallRecord[] = [];
   const byId = new Map<string, ToolCallRecord>();
   const turnOutputs: string[] = [];
+  const turnFailures: string[] = [];
   const eventTypes: Record<string, number> = {};
   const usage: UsageTotals = {
     modelCalls: 0,
@@ -98,6 +105,10 @@ export function observeEvents(
         turnOutputs.push(typeof payload.output === "string" ? payload.output : "");
         break;
       }
+      case "turn.failed": {
+        turnFailures.push(JSON.stringify(payload).slice(0, 1000));
+        break;
+      }
       case "session.humanInput.requested": {
         humanInputRequests += 1;
         break;
@@ -122,6 +133,7 @@ export function observeEvents(
     eventTypes,
     humanInputRequests,
     usage,
+    turnFailures,
   };
 }
 

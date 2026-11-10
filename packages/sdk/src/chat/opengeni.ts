@@ -268,6 +268,9 @@ export class OpenGeni {
             create.agent?.identity !== undefined ? create.agent.identity : options.agent?.identity,
           instructions: create.agent?.instructions ?? options.agent?.instructions,
           renderer: create.agent?.renderer ?? options.agent?.renderer ?? "markdown",
+          ...((create.agent?.guidance ?? options.agent?.guidance) !== undefined
+            ? { guidance: create.agent?.guidance ?? options.agent?.guidance }
+            : {}),
         },
         ...(context !== undefined ? { modelContext: context } : {}),
         ...messagePolicy(send),

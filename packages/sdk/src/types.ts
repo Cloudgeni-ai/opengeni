@@ -11841,6 +11841,17 @@ export type AgentCapabilities =
 
 export type AgentRenderer = "opengeni" | "markdown";
 
+/**
+ * How much of Opengeni's general behavior guidance the system prompt carries.
+ * `"full"` (default): everything, for open-ended and long-running work.
+ * `"lean"`: for short conversations a person answers turn by turn, such as
+ * support or booking assistants. It keeps identity, precedence, authorization
+ * limits, destructive-action care, compaction and the guidance of tools the
+ * session has, and drops autonomy, progress-update and final-answer detail.
+ * Tools, permissions and refusals are unchanged.
+ */
+export type AgentGuidance = "full" | "lean";
+
 export type AgentConfigRequest = {
   capabilities?: AgentCapabilities | undefined;
   /** Replaces only Opengeni's identity lines (max 8,000 chars); null = default identity. */
@@ -11848,6 +11859,8 @@ export type AgentConfigRequest = {
   /** Alias of the session `instructions` field. */
   instructions?: string | undefined;
   renderer?: AgentRenderer | undefined;
+  /** `"lean"` trims general guidance for short conversations; omitted keeps the current value. */
+  guidance?: AgentGuidance | undefined;
   /** Vaults this session may use (input only); intersected with the parent's policy. */
   vaultPolicy?: VaultPolicy | undefined;
 };
@@ -11859,6 +11872,7 @@ export type WorkspaceAgentDefaults = {
   capabilities?: AgentCapabilities | undefined;
   identity?: string | null | undefined;
   renderer?: AgentRenderer | undefined;
+  guidance?: AgentGuidance | undefined;
 };
 
 export type ResolvedAgentCapabilities = {
@@ -11890,6 +11904,8 @@ export type ResolvedAgentConfig = {
   unavailableReasons?: Partial<Record<AgentCapabilityId, string>> | undefined;
   identity: string | null;
   renderer: AgentRenderer;
+  /** `"lean"` when set; absent means full guidance. */
+  guidance?: "lean" | undefined;
   source:
     | "request"
     | "workspace_default"

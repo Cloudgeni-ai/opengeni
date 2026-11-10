@@ -930,6 +930,7 @@ function buildSessionCreateToolInput(
       identity: z4.string().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS).nullable().optional(),
       instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
       renderer: z4.enum(["opengeni", "markdown"]).optional(),
+      guidance: z4.enum(["full", "lean"]).optional(),
     })
     .strict()
     .optional()

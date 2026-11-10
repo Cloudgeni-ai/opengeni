@@ -71,9 +71,22 @@ export type TlsMcpServer = {
 export function startTlsTestMcpServer(
   options: Parameters<typeof startTestMcpServer>[0] = {},
 ): TlsMcpServer {
-  ensureEvalTlsMaterial();
   const inner = startTestMcpServer(options);
-  const upstream = new URL(inner.url);
+  const proxy = startTlsProxy(inner.url);
+  return {
+    url: proxy.url,
+    calls: inner.calls,
+    close: () => {
+      proxy.close();
+      inner.close();
+    },
+  };
+}
+
+/** Fronts a plain-HTTP loopback MCP server with the eval's TLS certificate. */
+export function startTlsProxy(upstreamUrl: string): { url: string; close: () => void } {
+  ensureEvalTlsMaterial();
+  const upstream = new URL(upstreamUrl);
   const proxy = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -94,10 +107,6 @@ export function startTlsTestMcpServer(
   });
   return {
     url: `https://127.0.0.1:${proxy.port}/mcp`,
-    calls: inner.calls,
-    close: () => {
-      proxy.stop(true);
-      inner.close();
-    },
+    close: () => proxy.stop(true),
   };
 }

@@ -1,6 +1,7 @@
 import {
   blocks,
   hasSandbox,
+  leanGuidance,
   sentences,
   toolAvailable,
   toolSearchAvailable,
@@ -48,6 +49,30 @@ const WAITING_MONITORING =
   "When monitoring requires timed checks, use the available recurring-monitoring or session-wait mechanism at that meaningful cadence rather than ritual polling.";
 
 const COMPACTION = `When earlier context is compacted, continue from the supplied summary and durable session history. Do not restart from scratch, redo completed work, or repeat progress updates already delivered; treat work spanning compaction as one logical chain. Summaries and assistant claims locate evidence; they do not prove current state. Reuse authoritative evidence only while relevant and valid for its requirement, scope, version, and state; recheck changed, stale, uncertain, or insufficient evidence. Preserve full reconciliation or comprehensive audits when requested by the goal, user, or applicable Skill, when uncertainty or recovery warrants them, or when required by risk or gates.`;
+
+/** Lean compaction: the same continuation rule without audit and reconciliation detail. */
+const LEAN_COMPACTION =
+  "When earlier context is compacted, continue from the supplied summary and durable session history without restarting, redoing completed work, or repeating what you already told the user. Summaries locate evidence; they do not prove current state, so recheck anything that may have changed before relying on it.";
+
+/** Lean: how to treat a new message, without in-flight work and status-report detail. */
+function leanNewMessages(context: AgentPromptContext): string {
+  const { subagents } = context.capabilities;
+  const commands = hasSandbox(context);
+  const inFlightExamples =
+    subagents && commands
+      ? "(a child, a command, or a timed recheck)"
+      : subagents
+        ? "(a child or a timed recheck)"
+        : commands
+          ? "(a command or a timed recheck)"
+          : "(a timed recheck)";
+  return sentences(
+    "When the user sends a new message while you work, decide whether it replaces the active request or adds to it, and handle it accordingly.",
+    toolAvailable(context, "wait_for_input") &&
+      `If work you already started is still in flight ${inFlightExamples}, call \`wait_for_input\` with the answer in its \`reply\`, so its result resumes you.`,
+    'Treat "thanks", "nice", and similar replies as acknowledgement, not approval of a next step.',
+  );
+}
 
 /** The goal completion audit survives compaction; rendered only with goals. */
 const COMPACTION_GOAL_AUDITS =
@@ -134,6 +159,8 @@ export function renderRuntimeMechanics(context: AgentPromptContext): string {
   const monitoring =
     (context.capabilities.schedules || context.capabilities.subagents) && WAITING_MONITORING;
   const waiting = waitForInput ? sentences(WAITING, monitoring) : monitoring;
+  const lean = leanGuidance(context);
+  const compaction = lean ? LEAN_COMPACTION : COMPACTION;
   return blocks(
     "# Runtime mechanics",
     toolSearch && "## Tool discovery",
@@ -147,11 +174,11 @@ export function renderRuntimeMechanics(context: AgentPromptContext): string {
         "Discovery never grants authority, and remembered tool names must still resolve against the current authorized catalog.",
       ),
     "## New messages while you work",
-    newMessages(context),
+    lean ? leanNewMessages(context) : newMessages(context),
     waiting && "## Waiting",
     waiting,
     "## Compaction",
-    context.capabilities.goals ? `${COMPACTION} ${COMPACTION_GOAL_AUDITS}` : COMPACTION,
+    context.capabilities.goals ? `${compaction} ${COMPACTION_GOAL_AUDITS}` : compaction,
     // command_read/command_wait exist only with attached compute.
     hasSandbox(context) && "## Background commands",
     hasSandbox(context) && backgroundCommands(context),

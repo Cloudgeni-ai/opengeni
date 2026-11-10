@@ -1,4 +1,5 @@
 import type {
+  AgentGuidance,
   AgentPromptModuleId,
   AgentRenderer,
   FirstPartyMcpToolName,
@@ -104,7 +105,18 @@ export type AgentPromptContext = {
   toolAvailability?: AgentPromptToolAvailability | undefined;
   /** Deployment prompt experiments; omitted renders the default prompt byte for byte. */
   experiments?: AgentPromptExperiments | undefined;
+  /**
+   * The agent configuration's `guidance`. `lean` renders the short base
+   * behavior and runtime mechanics for conversational sessions; omitted or
+   * `full` renders the default prompt byte for byte.
+   */
+  guidance?: AgentGuidance | undefined;
 };
+
+/** The session asked for lean guidance. */
+export function leanGuidance(context: AgentPromptContext): boolean {
+  return context.guidance === "lean";
+}
 
 /** Opt-in prompt variants for A/B evaluation, set from deployment settings. */
 export type AgentPromptExperiments = {

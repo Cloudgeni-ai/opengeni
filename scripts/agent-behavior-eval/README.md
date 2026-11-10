@@ -36,6 +36,21 @@ bun run eval:behavior -- --list     # scenarios and variants
 bun run eval:behavior -- --help
 ```
 
+To compare default and lean guidance for an embedded, customer-facing assistant
+without a sandbox (product identity, `capabilities: "none"`, markdown renderer,
+`sandboxBackend: "none"`):
+
+```bash
+bun run eval:behavior -- --variants embedded-full,embedded-lean --repeats 3
+```
+
+These variants run the conversational scenarios only, including five support
+conversations (`r`–`v`) against a fake booking desk (`support-mcp.ts`): an
+ambiguous cancellation, a clear change, a refund above the product's policy
+limit, an irreversible account deletion, and a lookup followed by "thanks".
+Variants without a scenario list (`legacy`, `modular-all`) now run `r`–`v` too,
+so their totals are not comparable with runs from before these scenarios existed.
+
 Credentials: `--env-file <path>` (or `OPENGENI_EVAL_ENV_FILE`), otherwise
 `./.env`, then the main checkout's `.env`. Only `OPENGENI_OPENAI_*` and
 `OPENGENI_AZURE_OPENAI_*` keys are read; values are never logged. Defaults:
@@ -43,6 +58,13 @@ agent `gpt-5.6-luna` (reasoning `medium`), judge `gpt-5.6-sol` (reasoning `low`)
 An env file exporting `F598_AZURE_OPENAI_API_KEY` / `F598_AZURE_OPENAI_BASE_URL`
 (the secrets-overhaul localstack `keys/cloud.env`) maps onto the built-in Azure
 provider; pass the deployment names, for example `--model gpt-6-sol --judge-model gpt-6-sol`.
+
+To run another Gateway model as the agent, add a `gatewayModels` entry to
+`OPENGENI_MANAGED_MODELS_JSON` whose `productId` contains a `/` (for example
+`eval/claude-sonnet-5.5` for upstream `anthropic/claude-sonnet-5.5`), list it in
+`OPENGENI_GATEWAY_MODELS`, give it a price in `OPENGENI_MODEL_PRICING_JSON` when the
+code catalog has none, and pass `--model eval/claude-sonnet-5.5`. With only a Gateway
+key, `--judge-model` takes the Gateway's upstream id (for example `anthropic/claude-opus-5.5`).
 
 Behind a TLS-intercepting proxy, run with the proxy variables unset
 (`env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy …`) or make sure

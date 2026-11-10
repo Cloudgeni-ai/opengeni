@@ -92,6 +92,7 @@ type AgentConfigRequest = {
   identity?: string | null; // who the agent is; null = workspace default, then Opengeni's
   instructions?: string;    // alias of the session `instructions` field
   renderer?: "opengeni" | "markdown";
+  guidance?: "full" | "lean"; // lean: short conversational sessions; default full
 };
 ```
 
@@ -283,15 +284,29 @@ Two additions the legacy text lacked, both shipped in the modular composer
 2. **Renderer.** `sandbox:` and `artifact:` links only render in Opengeni's React
    timeline. The session declares its client renderer (`opengeni` or `markdown`);
    with `markdown`, link-syntax rules and inline visuals are omitted and the agent
-   uses ordinary Markdown links. This is the only behavior option. The chat
-   facade and Slack tasks default to `markdown`.
+   uses ordinary Markdown links. The chat facade and Slack tasks default to
+   `markdown`.
+3. **Guidance.** `full` (default, stored as an absent field) renders base
+   behavior and runtime mechanics unchanged. `lean` is for short conversations a
+   person answers turn by turn (support, booking): base behavior keeps
+   precedence, authorization limits and when to ask, destructive-action care and
+   the tool-tied clauses (web sources, `privacy_facts`, setup cards, learning
+   policy, the external-commitment rule); runtime mechanics keeps tool discovery, a short new-message rule,
+   waiting and background commands when their tools exist, and a short
+   compaction rule. Personality, writing style, effort, progress updates, final
+   answer, verification and autonomy and persistence detail are left out.
+   Capability modules and every other layer are identical. A top-level session
+   takes the request's value, else the workspace default; a child takes the
+   request's value, else its parent's, and guidance alone never changes its
+   capabilities. `"full"` counts only where it overrides an inherited or default
+   `lean`. Updates keep it when omitted. User docs: `docs-site/integrate/configure-the-agent.mdx` (Guidance).
 
 Resulting tiers:
 
 | Tier | Controlled by |
 | --- | --- |
 | Identity | Opengeni default, then deployment, workspace, session (each replaces) |
-| Base behavior and runtime mechanics | Opengeni, always on |
+| Base behavior and runtime mechanics | Opengeni, always on; `guidance: "lean"` selects the short form |
 | Capability modules | derived from resolved capabilities and attached resources |
 | Instructions and context | session `instructions` (append, with precedence over base behavior), `modelContext`, goal snapshot, date |
 

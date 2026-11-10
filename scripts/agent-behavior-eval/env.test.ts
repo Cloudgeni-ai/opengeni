@@ -12,6 +12,7 @@ describe("model env selection", () => {
           "OPENGENI_VERCEL_AI_GATEWAY_API_KEY=c",
           "OPENGENI_GATEWAY_MODELS=kimi-k3",
           'OPENGENI_MANAGED_MODELS_JSON={"gatewayModels":[]}',
+          "OPENGENI_MODEL_PRICING_JSON={}",
           "CLOUDGENI_GITHUB_TOKEN=never",
           "OPENGENI_DATABASE_URL=never",
         ].join("\n"),
@@ -21,6 +22,7 @@ describe("model env selection", () => {
       "OPENGENI_AZURE_OPENAI_BASE_URL",
       "OPENGENI_GATEWAY_MODELS",
       "OPENGENI_MANAGED_MODELS_JSON",
+      "OPENGENI_MODEL_PRICING_JSON",
       "OPENGENI_OPENAI_API_KEY",
       "OPENGENI_VERCEL_AI_GATEWAY_API_KEY",
     ]);
