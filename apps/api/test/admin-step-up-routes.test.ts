@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createsSharedConnection, matchAdminRoute } from "../src/auth/admin-step-up";
+import { canonicalId, createsSharedConnection, matchAdminRoute } from "../src/auth/admin-step-up";
 
 const ORG = "/v1/organizations/0e3c7a3e-4f5f-4a43-9a0b-6c3b7b0f6c1a";
 const WS = "/v1/workspaces/7c1b6e24-6a8c-4bd8-8d55-0b2b1f0a9e77";
@@ -57,6 +57,19 @@ describe("admin step-up routes", () => {
     ] as const) {
       expect(matchAdminRoute(method, path), `${method} ${path}`).not.toBeNull();
     }
+  });
+
+  test("ids are compared in their canonical form", () => {
+    const id = CONNECTION_ID;
+    for (const written of [id.toUpperCase(), id.replaceAll("-", ""), `{${id}}`]) {
+      expect(canonicalId(written)).toBe(id);
+      expect(matchAdminRoute("DELETE", `${WS}/connections/${written}`)?.connectionId).toBe(id);
+    }
+    expect(
+      matchAdminRoute("PATCH", WS.toUpperCase().replace("/V1/WORKSPACES", "/v1/workspaces"))
+        ?.workspaceId,
+    ).toBe(WS.split("/").at(-1));
+    expect(canonicalId("not-a-uuid")).toBe("not-a-uuid");
   });
 
   test("creating a personal key is checked; using or revoking one is not", () => {

@@ -3,6 +3,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import type { AccessContext } from "@opengeni/contracts";
 import {
   hasPermission,
+  holdsOrganizationAdministration,
   managedBrowserSessionForAccessContext,
   requireAccessContext,
 } from "@opengeni/core";
@@ -47,6 +48,17 @@ type AdminRoute = {
 const UUID =
   "\\{?[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}\\}?";
 const ORG = "/v1/organizations/(?<organizationId>[^/]+)";
+const UUID_DIGITS =
+  /^\{?([0-9a-f]{8})-?([0-9a-f]{4})-?([0-9a-f]{4})-?([0-9a-f]{4})-?([0-9a-f]{12})\}?$/iu;
+
+/**
+ * An id in the one form grants and rows carry it (lowercase, hyphenated), so
+ * an id written differently in the path compares equal. Anything else as is.
+ */
+export function canonicalId(value: string): string {
+  const parts = UUID_DIGITS.exec(value);
+  return parts ? parts.slice(1).join("-").toLowerCase() : value;
+}
 const WS = `/v1/workspaces/(?<workspaceId>${UUID})`;
 const CONNECTION = `(?<connectionId>${UUID})`;
 const route = (scope: Scope, source: string, options: Partial<AdminRoute> = {}): AdminRoute => ({
@@ -115,9 +127,9 @@ export function matchAdminRoute(
     const groups = match.groups ?? {};
     return {
       route: candidate,
-      ...(groups.organizationId ? { organizationId: groups.organizationId } : {}),
-      ...(groups.workspaceId ? { workspaceId: groups.workspaceId } : {}),
-      ...(groups.connectionId ? { connectionId: groups.connectionId } : {}),
+      ...(groups.organizationId ? { organizationId: canonicalId(groups.organizationId) } : {}),
+      ...(groups.workspaceId ? { workspaceId: canonicalId(groups.workspaceId) } : {}),
+      ...(groups.connectionId ? { connectionId: canonicalId(groups.connectionId) } : {}),
     };
   }
   return null;
@@ -142,16 +154,21 @@ async function rows<T>(
 
 /**
  * Mark this browser session as confirmed with a passkey, for as long as it
- * lasts. Only the person's own live session is marked.
+ * lasts. Only the person's own live session is marked; false when there is
+ * none (signed out or expired meanwhile).
  */
 export async function recordAdminStepUp(
   deps: Pick<ApiRouteDeps, "db">,
   input: { authUserId: string; authSessionId: string },
-): Promise<void> {
-  await deps.db.execute(sql`
-    update auth_sessions set mfa_verified_at = clock_timestamp()
+): Promise<boolean> {
+  const marked = await rows<{ id: string }>(
+    deps,
+    sql`update auth_sessions set mfa_verified_at = clock_timestamp()
     where id = ${input.authSessionId} and user_id = ${input.authUserId}
-      and expires_at > clock_timestamp()`);
+      and expires_at > clock_timestamp()
+    returning id`,
+  );
+  return marked.length > 0;
 }
 
 /** Whether this browser session is live and was confirmed with a passkey. */
@@ -176,12 +193,11 @@ async function hasPasskey(deps: Pick<ApiRouteDeps, "db">, authUserId: string): P
   return found?.present === true;
 }
 
-type PersonAccess = Pick<AccessContext, "accountGrants" | "workspaceGrants">;
 type StepUpPerson = {
   authUserId: string;
   authSessionId: string;
-  /** Their membership grants (a browser session is never narrowed). */
-  access: PersonAccess;
+  /** The request's own access: a browser session is never narrowed. */
+  access: AccessContext;
 };
 
 /**
@@ -213,9 +229,11 @@ async function jsonBody(c: Context): Promise<Record<string, unknown> | null> {
 /** Every organization this billing request could name, as the routes read it. */
 async function billingAccountIds(c: Context, context: AccessContext): Promise<string[]> {
   const body = await jsonBody(c);
-  return [c.req.query("accountId"), body?.accountId, context.defaultAccountId].filter(
-    (candidate): candidate is string => typeof candidate === "string" && candidate.length > 0,
-  );
+  return [c.req.query("accountId"), body?.accountId, context.defaultAccountId]
+    .filter(
+      (candidate): candidate is string => typeof candidate === "string" && candidate.length > 0,
+    )
+    .map(canonicalId);
 }
 
 /**
@@ -253,16 +271,9 @@ async function changesSharedConnection(
   }
 }
 
-/** An owner or admin of this organization (by role, or a literal admin grant). */
-function organizationAdmin(access: PersonAccess, accountId: string | undefined): boolean {
-  const grant = access.accountGrants.find((candidate) => candidate.accountId === accountId);
-  if (!grant) return false;
-  return (
-    grant.role === "owner" ||
-    grant.role === "admin" ||
-    grant.permissions.includes("account:admin") ||
-    grant.permissions.includes("members:manage")
-  );
+/** An owner or admin of this organization, as the organization routes decide it. */
+function organizationAdmin(access: AccessContext, accountId: string | undefined): boolean {
+  return accountId !== undefined && holdsOrganizationAdministration(access, accountId);
 }
 
 /**
@@ -272,7 +283,7 @@ function organizationAdmin(access: PersonAccess, accountId: string | undefined):
  */
 async function administersInOrganization(
   deps: ApiRouteDeps,
-  access: PersonAccess,
+  access: AccessContext,
   organizationId: string | undefined,
 ): Promise<boolean> {
   if (!organizationId) return false;
@@ -364,6 +375,13 @@ async function administers(
  * with ADMIN_PASSKEY_STEP_UP_REQUIRED and whether they have a passkey to use.
  */
 export function adminStepUpGuard(deps: ApiRouteDeps): MiddlewareHandler {
+  if (deps.settings.adminPasskeyStepUp === "required" && !adminStepUpEnforced(deps)) {
+    // Required, but passkey sign-in isn't offered here (not managed, another
+    // session-set mode, or passkeys unavailable): nothing can be confirmed.
+    console.warn("admin_passkey_step_up_not_enforced", {
+      reason: "OPENGENI_ADMIN_PASSKEY_STEP_UP=required, but passkey sign-in is not offered",
+    });
+  }
   return async function adminStepUpMiddleware(c, next) {
     if (!adminStepUpEnforced(deps)) return await next();
     // The decoded path Hono routes on, so an escaped path can't route to an

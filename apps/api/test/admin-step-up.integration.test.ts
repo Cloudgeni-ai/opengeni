@@ -14,7 +14,7 @@ import { WORKSPACE_ADMIN_ROLE_PERMISSIONS } from "@opengeni/contracts/api-key-de
 import { stampDelegatedHumanAuthorization, type ManagedEmailTransport } from "@opengeni/core";
 import { createManagedAuth, hashManagedAuthPassword } from "../src/auth/managed-auth";
 import { createApp } from "../src/app";
-import { matchAdminRoute } from "../src/auth/admin-step-up";
+import { matchAdminRoute, recordAdminStepUp } from "../src/auth/admin-step-up";
 import { createBetterAuthSessionAdapter } from "../src/auth/managed-auth-session-adapter";
 import {
   createSoftwarePasskey,
@@ -285,8 +285,33 @@ describe("admin passkey step-up", () => {
     expect(await stepUpCode(await rename(rt, other, organization))).toBe(
       ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
     );
+    // A ceremony started in one session can't confirm another.
+    const started = await call(rt, "POST", "/v1/auth/passkey/step-up/options", owner.cookie);
+    const ceremony = (await started.json()) as { challengeId: string; options: never };
+    const elsewhere = await call(rt, "POST", "/v1/auth/passkey/step-up", other, {
+      challengeId: ceremony.challengeId,
+      response: softwarePasskeyAssertion(owner.passkey, ceremony.options, { origin: ORIGIN }),
+    });
+    expect(elsewhere.status).toBe(422);
+    expect(await stepUpCode(await rename(rt, other, organization))).toBe(
+      ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
+    );
+    // An expired session is never marked.
+    await admin`update auth_sessions set expires_at = now() - interval '1 second'
+      where token = ${sessionToken(other)}`;
+    const [expired] = await admin<{ id: string }[]>`
+      select id from auth_sessions where token = ${sessionToken(other)}`;
+    expect(
+      await recordAdminStepUp({ db: client.db } as never, {
+        authUserId: owner.userId,
+        authSessionId: expired!.id,
+      }),
+    ).toBe(false);
     // Signing out deletes the session row, and its mark with it.
     const token = sessionToken(owner.cookie);
+    expect(
+      await admin`select 1 from auth_sessions where token = ${token} and mfa_verified_at is not null`,
+    ).toHaveLength(1);
     const signedOut = await rt.app.request("/v1/auth/sign-out", {
       method: "POST",
       headers: { origin: ORIGIN, "sec-fetch-site": "same-origin", cookie: owner.cookie },
@@ -548,15 +573,17 @@ describe("admin passkey step-up", () => {
     expect(
       await stepUpCode(await createPersonalKey(rt, workspaceAdmin.cookie, organization.id)),
     ).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
-    // In their browser too.
-    const inBrowser = await call(
-      rt,
-      "POST",
-      `/v1/workspaces/${workspaceId}/connections`,
-      workspaceAdmin.cookie,
-      JSON.parse(body),
-    );
-    expect(await stepUpCode(inBrowser)).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
+    // In their browser they are asked, also with the id written differently.
+    for (const id of [workspaceId, workspaceId.toUpperCase(), `{${workspaceId}}`]) {
+      const inBrowser = await call(
+        rt,
+        "POST",
+        `/v1/workspaces/${id}/connections`,
+        workspaceAdmin.cookie,
+        JSON.parse(body),
+      );
+      expect(await stepUpCode(inBrowser), id).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
+    }
   }, 120_000);
 
   test("no admin route is answered before the guard runs", () => {

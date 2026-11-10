@@ -13,7 +13,7 @@ import { getManagedSession, type ApiRouteDeps } from "@opengeni/core";
 import { nestedPostgresSqlState } from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
-import { adminStepUpEnforced, recordAdminStepUp } from "../auth/admin-step-up";
+import { recordAdminStepUp } from "../auth/admin-step-up";
 import { runManagedAuthProvider } from "../auth/managed-auth-attempt-context";
 import { managedAuthSessionCookieHeaders } from "../auth/managed-auth-session-adapter";
 import {
@@ -166,10 +166,10 @@ async function signInVerifiedPerson(
     return refusal(403, "PASSKEY_SIGN_IN_REFUSED", "This account can't sign in right now");
   }
   // A session signed in with a passkey is confirmed with one for its whole
-  // life. Best effort: failing to mark it only means a prompt later, never no
-  // sign-in.
-  if (typeof session.id === "string" && adminStepUpEnforced(deps)) {
-    await recordAdminStepUp(deps, { authUserId, authSessionId: session.id }).catch(() => {});
+  // life, also if the step-up is turned on later. Best effort: failing to mark
+  // it only means a prompt later, never no sign-in.
+  if (typeof session.id === "string") {
+    await recordAdminStepUp(deps, { authUserId, authSessionId: session.id }).catch(() => false);
   }
   for (const cookie of await managedAuthSessionCookieHeaders(
     auth,
@@ -280,6 +280,7 @@ export function registerManagedPasskeyRoutes(
         ManagedPasskeyCeremony.parse(
           await startManagedPasskeyStepUp(deps.managedAuth!, relyingParty, {
             userId: person.authUserId,
+            authSessionId: person.authSessionId,
             allow,
           }),
         ),
@@ -304,10 +305,14 @@ export function registerManagedPasskeyRoutes(
       const proven = await verifyManagedPasskeySignIn(deps.db, ceremony, request.response);
       // The passkey, the ceremony and this browser session must all be the
       // same person's.
-      if (ceremony.userId !== person.authUserId || proven.authUserId !== person.authUserId) {
+      if (
+        ceremony.userId !== person.authUserId ||
+        ceremony.authSessionId !== person.authSessionId ||
+        proven.authUserId !== person.authUserId
+      ) {
         return refusal(422, "PASSKEY_NOT_VERIFIED", "The passkey could not be verified");
       }
-      await recordAdminStepUp(deps, person);
+      if (!(await recordAdminStepUp(deps, person))) return notSignedIn();
       return context.json(ManagedPasskeyStepUpResponse.parse({ confirmed: true }));
     } catch (error) {
       return passkeyRefusal(error);

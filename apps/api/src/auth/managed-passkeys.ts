@@ -73,6 +73,8 @@ const StoredCeremony = z
     origin: z.string().url(),
     rpId: z.string().min(1),
     userId: z.string().min(1).optional(),
+    /** A step-up: the browser session it confirms. */
+    authSessionId: z.string().min(1).optional(),
     name: z.string().min(1).max(80).optional(),
     signupChallengeVerified: z.boolean().optional(),
   })
@@ -222,7 +224,11 @@ export async function startManagedPasskeySignIn(
 export async function startManagedPasskeyStepUp(
   auth: ManagedAuth,
   relyingParty: { origin: string; rpId: string },
-  input: { userId: string; allow: { credentialId: string; transports: string[] }[] },
+  input: {
+    userId: string;
+    authSessionId: string;
+    allow: { credentialId: string; transports: string[] }[];
+  },
 ): Promise<{ challengeId: string; options: Record<string, unknown> }> {
   const options = await generateAuthenticationOptions({
     rpID: relyingParty.rpId,
@@ -239,6 +245,7 @@ export async function startManagedPasskeyStepUp(
     challenge: options.challenge,
     ...relyingParty,
     userId: input.userId,
+    authSessionId: input.authSessionId,
   });
   return { challengeId, options: options as unknown as Record<string, unknown> };
 }
