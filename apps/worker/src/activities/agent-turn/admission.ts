@@ -60,8 +60,9 @@ export class TurnAdmissionRefusedError extends Error {
 
 /**
  * The host's entitlements port refused the run. Its reason is the host's free
- * text, so it never becomes the `turn.failed` message; a claimed turn stops on
- * it like a credits stop, as it does between model calls.
+ * text, so it is not used as a `turn.failed` message. A claimed turn stops on
+ * it like a credits stop, as it does between model calls, and the reason is
+ * the stop's `detail` either way.
  */
 export class HostEntitlementDeniedError extends Error {
   constructor(message: string) {
@@ -493,9 +494,10 @@ export async function ensureRunAllowed(
   // read does, so the mid-stream budget valve (`ensureRunAllowedBetweenModelCalls`)
   // wraps it in a `BudgetExhaustedError` and pauses identically — the valve never
   // learns whether the deny came from the local ledger or the host meter. The host's
-  // reason is free text, so it is a `HostEntitlementDeniedError`, never the
-  // `turn.failed` message (a claimed turn stops on it like a credits stop); the
-  // local fixed refusals throw `TurnAdmissionRefusedError`.
+  // reason is free text, so it is a `HostEntitlementDeniedError`, not used as a
+  // `turn.failed` message (a claimed turn stops on it like a credits stop, with
+  // the reason as `detail`); the local fixed refusals throw
+  // `TurnAdmissionRefusedError`.
   //
   // This is an admission READ only; it records NO usage (metering stays the sole,
   // idempotency-keyed writer at recordModelUsageAndDebitCredits), so a PULL host meter
