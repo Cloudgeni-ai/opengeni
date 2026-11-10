@@ -496,7 +496,9 @@ describe("idle-session archive worker", () => {
     ).toEqual([]);
     // The transcript lists every kept event, appended ones included, exactly as
     // a read of the kept events (which stay live) does.
-    const text = new TextDecoder().decode(zstdDecompressSync(objects.get(manifest.transcript.key)!));
+    const text = new TextDecoder().decode(
+      zstdDecompressSync(objects.get(manifest.transcript.key)!),
+    );
     const after = await rereadTranscript(scope);
     expect(after.events).toBe(before.events + 600);
     expect(text).toBe(after.text);
