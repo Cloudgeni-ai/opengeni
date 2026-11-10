@@ -69,7 +69,7 @@
     "@opengeni/tool-gateway": "workspace:*",
     "@opengeni/vaults": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
-    "hono": "^4.12.18",
+    "hono": "^4.13.17",
     "zod": "^4.2.1"
   },
   "devDependencies": {
