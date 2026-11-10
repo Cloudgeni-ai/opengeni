@@ -31208,6 +31208,7 @@
         "$.accountOwnerLabel": "string?",
         "$.actionDigest": "string!",
         "$.approveLabel": "string!",
+        "$.approveLabelCode": "enum?=[\"\\\"allow\\\"\",\"\\\"approve_action\\\"\"]",
         "$.approvedBy": "enum?=[\"\\\"account_owner\\\"\",\"\\\"you\\\"\"]",
         "$.availableActions": "array!",
         "$.availableActions[]": "enum=[\"\\\"approve\\\"\",\"\\\"reject\\\"\"]",
@@ -31221,6 +31222,7 @@
         "$.id": "string!",
         "$.moreFields": "integer!",
         "$.reason": "string!",
+        "$.reasonCode": "ref(ToolReviewReasonCode)?",
         "$.revision": "string!",
         "$.samples": "array?",
         "$.samples[]": "object",
@@ -31232,6 +31234,7 @@
         "$.selectionKind": "enum?=[\"\\\"messages\\\"\",\"\\\"threads\\\"\"]",
         "$.status": "ref(ToolReviewStatus)!",
         "$.title": "string!",
+        "$.toolName": "string?",
         "$.updatedAt": "string!",
         "$.version": "const!=[\"1\"]"
       }
@@ -31923,12 +31926,22 @@
       ],
       "shape": {
         "$": "object",
+        "$.booleanValue": "boolean?",
         "$.count": "integer?",
+        "$.key": "string?",
         "$.label": "string!",
         "$.path": "string!",
         "$.preview": "string!",
         "$.protected": "boolean?",
         "$.truncated": "boolean!"
+      }
+    },
+    "ToolReviewReasonCode": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"asks_by_default\\\"\",\"\\\"asks_by_setting\\\"\",\"\\\"blocked_by_conflict\\\"\",\"\\\"blocked_by_default\\\"\",\"\\\"blocked_by_setting\\\"\"]"
       }
     },
     "ToolReviewStatus": {
