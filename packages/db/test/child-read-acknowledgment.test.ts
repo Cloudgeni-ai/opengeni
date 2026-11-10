@@ -1289,6 +1289,111 @@ describe("child read acknowledgment on parent consumption", () => {
     });
   });
 
+  /** What the rail shows `subjectId` about one parent's failed child. */
+  async function failureAttention(grant: Grant, subjectId: string, parentId: string, childId: string) {
+    const listed = await listSessionsForSubject(client.db, grant.workspaceId, {
+      subjectId,
+      parentSessionId: null,
+      includeTotals: true,
+    });
+    const child = await getSessionForSubject(client.db, grant.workspaceId, childId, subjectId);
+    return {
+      unreadFailedDescendants: listed.sessions.find((session) => session.id === parentId)
+        ?.treeStats?.unreadFailedDescendants,
+      projectFailed: listed.totals?.groups.reduce((sum, group) => sum + group.failed, 0),
+      childUnread: child?.unread,
+      childFailureHandled: child?.failureHandled ?? false,
+    };
+  }
+
+  test("a failure its parent agent consumed stays the agent's after later events and for every member", async () => {
+    const grant = await workspace();
+    const other = await member(grant);
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleFailed(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    await settleIdle(grant, parent);
+    // Until the parent agent takes the failure, every member is asked to look.
+    for (const subjectId of [grant.subjectId, other]) {
+      expect(
+        await failureAttention(grant, subjectId, parent.session.id, child.session.id),
+      ).toEqual({
+        unreadFailedDescendants: 1,
+        projectFailed: 1,
+        childUnread: true,
+        childFailureHandled: false,
+      });
+    }
+
+    await enqueueHumanTurn(grant, parent.session.id);
+    expect((await claim(grant, parent.session.id)).action).toBe("claimed");
+    // Staging incident shape: the failed child's workspace capture lands as a
+    // meaningful `workspace.revision.degraded` seconds after the parent's claim
+    // acknowledged the failure, so the child reads unread again.
+    await appendSessionEvents(client.db, grant.workspaceId, child.session.id, [
+      {
+        type: "workspace.revision.degraded",
+        payload: { reason: "repository_discovery_command_failed" },
+      },
+    ]);
+    // Read state is unchanged (the new event is unread, and the other member
+    // never read anything), but the failure no longer asks anyone for review.
+    for (const subjectId of [grant.subjectId, other]) {
+      expect(
+        await failureAttention(grant, subjectId, parent.session.id, child.session.id),
+      ).toEqual({
+        unreadFailedDescendants: 0,
+        projectFailed: 0,
+        childUnread: true,
+        childFailureHandled: true,
+      });
+    }
+    const listed = await listSessionsForSubject(client.db, grant.workspaceId, {
+      subjectId: other,
+      parentSessionId: null,
+    });
+    expect(
+      listed.sessions.find((session) => session.id === parent.session.id)?.treeStats,
+    ).toMatchObject({ failedDescendants: 1, unreadFailedDescendants: 0 });
+  });
+
+  test("a new failure the parent has not taken yet asks again", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleFailed(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    await settleIdle(grant, parent);
+    await enqueueHumanTurn(grant, parent.session.id);
+    const parentTurn = await claim(grant, parent.session.id);
+    expect(parentTurn.action).toBe("claimed");
+    expect(
+      (await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id))
+        .childFailureHandled,
+    ).toBe(true);
+
+    // The child is prompted again and fails again; its new notice is pending
+    // on the parent, so this failure is nobody's yet.
+    await enqueueHumanTurn(grant, child.session.id);
+    const retried = await claim(grant, child.session.id);
+    if (retried.action !== "claimed") throw new Error("child retry was not claimed");
+    await settleFailed(grant, {
+      session: child.session,
+      turn: retried.turn,
+      attemptId: retried.attemptId,
+    });
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    expect(
+      await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id),
+    ).toEqual({
+      unreadFailedDescendants: 1,
+      projectFailed: 1,
+      childUnread: true,
+      childFailureHandled: false,
+    });
+  });
+
   test("an acknowledgment already ahead of the consumed child is never regressed", async () => {
     const grant = await workspace();
     const parent = await startSession(grant, { message: "orchestrate" });

@@ -9586,6 +9586,11 @@ export const sessionSystemUpdates = pgTable(
     pendingKindSource: index("session_system_updates_pending_kind_source_idx")
       .on(table.workspaceId, table.sessionId, table.kind, table.sourceId)
       .where(sql`${table.state} = 'pending'`),
+    // The newest terminal notice a parent holds about one child, which decides
+    // whether that child's failure is already the parent agent's (migration 1355).
+    childTerminalSource: index("session_system_updates_child_terminal_source_idx")
+      .on(table.workspaceId, table.sessionId, table.sourceId, table.createdAt, table.id)
+      .where(sql`${table.kind} = 'child_terminal_result'`),
     pendingTerminalRepair: index("session_system_updates_pending_terminal_repair_idx")
       .on(table.workspaceId, table.sessionId, table.sourceId, table.dedupeKey)
       .where(sql`${table.state} = 'pending' and ${table.kind} = 'child_terminal_result'`),

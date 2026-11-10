@@ -164,9 +164,10 @@ function ownRailStatusCounts(
     attention: awaitsPerson(session) ? 1 : 0,
     attentionSince: awaitsPerson(session) ? (session.requiresActionSince ?? null) : null,
     // Failed is a review signal in the rail, not a permanent copy of the
-    // lifecycle badge. Opening the session (or a parent agent consuming its
-    // result) acknowledges the failure together with the unread frontier.
-    failed: session.status === "failed" && session.unread ? 1 : 0,
+    // lifecycle badge. Opening the session acknowledges the failure together
+    // with the unread frontier; a failure its parent agent consumed is that
+    // agent's to handle and never asks the person (`failureHandled`).
+    failed: needsFailureReview(session) ? 1 : 0,
     active:
       hasActiveEffectiveControl(session) &&
       (session.status === "running" || session.status === "recovering")
@@ -182,6 +183,17 @@ function ownRailStatusCounts(
     unread: session.unread ? 1 : 0,
     activeWork: session.activelyWorking ? 1 : 0,
   };
+}
+
+/**
+ * A failed session the person should still review: unread, and its failure not
+ * consumed by a parent agent. Matches the server's
+ * `treeStats.unreadFailedDescendants`.
+ */
+export function needsFailureReview(
+  session: Pick<Session, "status" | "unread" | "failureHandled">,
+): boolean {
+  return session.status === "failed" && Boolean(session.unread) && !session.failureHandled;
 }
 
 /**
@@ -1221,7 +1233,7 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
     pausedWork: hasPausedWork(node.session) ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
-    unreadFailed: status === "failed" && node.session.unread ? 1 : 0,
+    unreadFailed: needsFailureReview(node.session) ? 1 : 0,
     unread: node.session.unread ? 1 : 0,
     activeWork: node.session.activelyWorking ? 1 : 0,
   };

@@ -175,7 +175,8 @@ export function applySessionAttentionProjections<T extends Session>(
 
     const unreadDelta = Number(projected.unread) - Number(source.unread);
     if (unreadDelta === 0) continue;
-    const failedDelta = source.status === "failed" ? unreadDelta : 0;
+    // A failure its parent agent consumed was never counted for the person.
+    const failedDelta = source.status === "failed" && !source.failureHandled ? unreadDelta : 0;
     const visited = new Set<string>([sessionId]);
     let parentSessionId = source.parentSessionId;
     while (parentSessionId && !visited.has(parentSessionId)) {
