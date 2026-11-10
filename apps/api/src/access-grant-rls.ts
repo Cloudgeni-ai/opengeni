@@ -9,9 +9,11 @@ import {
 } from "@opengeni/core";
 import {
   ambientBillingOrigin,
+  billingOriginOverride,
   freezeAgentLearningPolicy,
   getSlackPrivateSessionOwnerSubjectId,
   readTurnBillingOrigin,
+  withBillingOriginOverride,
   withSessionRlsActorContext,
   withCreditDebitAttribution,
   type CreditDebitAttribution,
@@ -120,6 +122,20 @@ export async function billingOriginForAccessGrant(
     grant.accountId,
     ambientBillingOrigin() ?? billingOriginForGrant(grant),
   );
+}
+
+/**
+ * Run a direct model API call (the OpenAI-compatible endpoint) as API use,
+ * whatever credential signed it: a person's own sign-in (browser session or
+ * native app credential) pays from credits only, like an API key. Two callers
+ * keep the origin they already have: an agent attempt (its chat's origin)
+ * and a trusted in-process dispatcher's stamp (an agent's app action keeps
+ * its chat's origin). Internal (legacy) accounts stay app
+ * (`fundedBillingOrigin`).
+ */
+export function asDirectModelApiUse<T>(grant: AccessGrant, work: () => Promise<T>): Promise<T> {
+  if (grant.principalKind === "agent_attempt" || billingOriginOverride()) return work();
+  return withBillingOriginOverride("api", work);
 }
 
 /**

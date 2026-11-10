@@ -613,17 +613,18 @@ export function personalConnectionDelegationsFromParent(input: {
     // repositories, so the child can use the github_personal tools too.
     if (requestedGitHub.length === 0 && !allRepositoriesAccess) return [];
     const repositories = requestedGitHub.map((resource) => {
+      // The ref is only which branch the child checks out; the repository
+      // and its access are the authority.
       const parent = snapshot.repositories.find(
         (candidate) =>
           candidate.repositoryId === resource.repositoryId &&
-          candidate.canonicalUrl === resource.uri &&
-          candidate.ref === resource.ref,
+          candidate.canonicalUrl === resource.uri,
       );
       if (resource.credentialBindingId !== snapshot.credentialBindingId) {
         throw new Error("agent-created personal GitHub repository exceeds parent authority");
       }
       if (parent && (resource.access !== "write" || parent.access === "write")) {
-        return { ...parent, access: resource.access };
+        return { ...parent, ref: resource.ref, access: resource.access };
       }
       // Not covered by the parent's own list: All my repositories decides.
       if (

@@ -27,6 +27,13 @@ describe("turn failure class", () => {
       "context_limit",
     );
     expect(turnFailureClass({ ...base, reason: "something odd" })).toBe("other");
+    expect(
+      turnFailureClass({
+        ...base,
+        reason:
+          "400 The encrypted content gAAA...aiQ= could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
+      }),
+    ).toBe("model_history");
     expect(turnFailureClass({ ...base, reason: "something odd", sandboxStartFailed: true })).toBe(
       "sandbox",
     );
