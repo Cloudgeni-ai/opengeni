@@ -28,6 +28,7 @@ import {
 } from "./sandbox-setup-notices";
 export { queueSandboxSetupNotice, takeSandboxSetupNotices } from "./sandbox-setup-notices";
 import {
+  isRetryableSetupFileWriteFailure,
   SOFT_SETUP_FAILURE_NOTICE_PREFIX,
   softFailingSetupHooks,
   softSetupFailureNotice,
@@ -479,6 +480,7 @@ import {
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 
 import { z } from "zod";
@@ -14268,11 +14270,51 @@ function gitCredentialBindingSeedExportPrefix(bindings: GitCredentialBindingSeed
     .join("\n");
 }
 
+const GIT_BROKER_CREDENTIAL_DELIVERY_FAILED = "Sandbox could not receive the Git broker credential";
+const GIT_BROKER_SEED_WRITE_RETRY_DELAYS_MS = [200, 1_000];
+const GIT_BROKER_DELIVERY_CAUSE_MAX_CHARS = 300;
+
+/**
+ * A private Git broker credential could not be written into the box. The
+ * message names the underlying failure with every broker bearer redacted, and
+ * `cause` keeps the original error, so setup can tell a full disk (fails softly
+ * with a notice) or an unanswered machine agent (recovered or replaced by the
+ * worker) from other failures.
+ */
+export class GitBrokerCredentialDeliveryError extends Error {
+  override readonly name = "GitBrokerCredentialDeliveryError";
+
+  constructor(detail: string, cause: unknown) {
+    super(
+      detail
+        ? `${GIT_BROKER_CREDENTIAL_DELIVERY_FAILED}: ${detail}`
+        : GIT_BROKER_CREDENTIAL_DELIVERY_FAILED,
+      { cause },
+    );
+  }
+}
+
+function redactGitBrokerCredentialDetail(
+  error: unknown,
+  bindings: GitCredentialBindingSeed[],
+): string {
+  let detail = errorMessage(error);
+  for (const binding of bindings) {
+    for (const secret of [binding.token, ...binding.token.split("\n")]) {
+      if (secret.length >= 4) detail = detail.split(secret).join("[redacted]");
+    }
+  }
+  detail = detail.replace(/\s+/g, " ").trim();
+  return detail.length > GIT_BROKER_DELIVERY_CAUSE_MAX_CHARS
+    ? `${detail.slice(0, GIT_BROKER_DELIVERY_CAUSE_MAX_CHARS)}…`
+    : detail;
+}
+
 async function stageGitHttpBrokerBindingSeeds(
   session: GitCredentialTokenWriterSession,
   bindings: GitCredentialBindingSeed[],
   runAs?: string,
-  options: { ghGatewayKit?: boolean } = {},
+  options: { ghGatewayKit?: boolean; retryDelaysMs?: readonly number[] } = {},
 ): Promise<{
   editor: ReturnType<NonNullable<GitCredentialTokenWriterSession["createEditor"]>> | null;
   staged: StagedGitCredentialBindingSeed[];
@@ -14292,27 +14334,46 @@ async function stageGitHttpBrokerBindingSeeds(
     : Promise.resolve<string | null>(null);
   const staged: StagedGitCredentialBindingSeed[] = [];
   const cleanupEligible: StagedGitCredentialBindingSeed[] = [];
+  const retryDelaysMs = options.retryDelaysMs ?? GIT_BROKER_SEED_WRITE_RETRY_DELAYS_MS;
   try {
     for (const binding of brokered) {
       const bindingHash = gitCredentialBindingHash(binding.credentialBindingId);
-      const path = `/workspace/.opengeni/git-broker-seeds/${randomUUID()}`;
-      const candidate = { bindingHash, path };
       const diff = binding.token
         .split("\n")
         .map((line) => `+${line}`)
         .join("\n");
-      // A routed editor write can take effect remotely and still reject if its
-      // response is lost. Register the random path for best-effort cleanup
-      // before awaiting, but expose it to the token command only after success.
-      cleanupEligible.push(candidate);
-      await editor.createFile({ type: "create_file", path, diff });
-      staged.push(candidate);
+      for (let attempt = 0; ; attempt += 1) {
+        // A fresh random path per attempt: a routed editor write can take
+        // effect remotely and still reject if its response is lost. Register
+        // the path for best-effort cleanup before awaiting, but expose it to
+        // the token command only after success.
+        const candidate = { bindingHash, path: `${GIT_BROKER_SEED_ROOT}/${randomUUID()}` };
+        cleanupEligible.push(candidate);
+        try {
+          await editor.createFile({ type: "create_file", path: candidate.path, diff });
+          staged.push(candidate);
+          break;
+        } catch (error) {
+          const delayMs = retryDelaysMs[attempt];
+          if (delayMs === undefined || !isRetryableSetupFileWriteFailure(error)) throw error;
+          console.warn(
+            `[opengeni] Git broker credential write failed (attempt ${attempt + 1}); retrying: ${redactGitBrokerCredentialDetail(error, brokered)}`,
+          );
+          // The abandoned attempt may still have landed: remove it now, since
+          // a later successful attempt hands only its own path onward.
+          await cleanupStagedGitCredentialSeeds(editor, [candidate]);
+          cleanupEligible.splice(cleanupEligible.indexOf(candidate), 1);
+          await delay(delayMs);
+        }
+      }
     }
     return { editor, staged, ghGatewayKit: await ghGatewayKit };
-  } catch {
+  } catch (error) {
     const kit = await ghGatewayKit;
     await cleanupStagedGitCredentialSeeds(editor, cleanupEligible, kit);
-    throw new Error("Sandbox could not receive the Git broker credential");
+    const detail = redactGitBrokerCredentialDetail(error, brokered);
+    console.warn(`[opengeni] ${GIT_BROKER_CREDENTIAL_DELIVERY_FAILED}: ${detail}`);
+    throw new GitBrokerCredentialDeliveryError(detail, error);
   }
 }
 
