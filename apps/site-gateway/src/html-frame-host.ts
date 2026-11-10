@@ -38,7 +38,10 @@ export function handleHtmlFrameHost(
     "X-Robots-Tag": "noindex",
   });
   if (options.hsts) headers.set("Strict-Transport-Security", "max-age=31536000");
-  if (url.pathname !== HTML_FRAME_HOST_PATH || (request.method !== "GET" && request.method !== "HEAD")) {
+  if (
+    url.pathname !== HTML_FRAME_HOST_PATH ||
+    (request.method !== "GET" && request.method !== "HEAD")
+  ) {
     headers.set("Content-Type", "text/plain; charset=utf-8");
     headers.set("Cache-Control", "no-store");
     headers.set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");

@@ -2087,9 +2087,51 @@ from the previous builds' assets listed in `OPENGENI_WEB_PREVIOUS_ASSET_ROOTS`
 [Web assets across rollouts](#web-assets-across-rollouts). Every shell response carries
 `X-Content-Type-Options: nosniff` and `Referrer-Policy:
 strict-origin-when-cross-origin` (the setup-account page keeps its stricter
-`no-referrer`). The server deliberately sets no `X-Frame-Options`,
-`frame-ancestors`, or other CSP, because the console supports embedding. The
-API compresses JSON responses and leaves SSE and other streaming transports
+`no-referrer`).
+
+### Console Content-Security-Policy
+
+Every HTML page the web server serves carries an enforced
+`Content-Security-Policy` built in `apps/web/src/csp.ts`. Its fixed part is
+`default-src 'self'`; `script-src 'self' 'wasm-unsafe-eval'` plus the sha256
+hash of each inline script in the exact bytes served (hashed when the page is
+rendered, so they never drift from the build); `object-src 'none'`;
+`base-uri 'self'`; `form-action 'self'`; `frame-ancestors 'self'` (Office's
+hosts for the Excel add-in pages under `/office/`, which also get
+`https://appsforoffice.microsoft.com` and Office's other script hosts);
+`img-src`/`media-src 'self' data: blob:`; `font-src 'self' data:`;
+`worker-src`/`child-src 'self' blob:`; and `style-src 'self' 'unsafe-inline'`
+(see the comment in `csp.ts`: style attributes set through markup by the
+terminal, diff, toast and Radix libraries and highlighted code cannot be
+allowed by hash). No directive ever contains `*` or a bare scheme such as
+`https:`. Other responses keep `frame-ancestors 'self'` and
+`X-Frame-Options: SAMEORIGIN` (none on `/office/`).
+
+The deployment-specific hosts come from the API's public
+`GET /v1/config/content-security`, derived from existing API settings:
+the object storage origin of signed URLs, the API origin when it differs from
+the console's, the relay and Modal tunnel sockets, Turnstile when the sign-up
+challenge is on, PostHog/Reo/GA4 when analytics is configured, Google and
+GitHub avatar hosts when those sign-ins are configured, catalog model logo
+hosts, `https://github.com` in `form-action` outside platform-managed mode
+(the GitHub App manifest form), and the HTML frame host
+`https://og.<sites domain>`. The web server reads it from
+`OPENGENI_WEB_CONTENT_SECURITY_API_URL`, else `OPENGENI_DEMO_API_URL` (the
+in-cluster API service the Helm chart already sets), else
+`OPENGENI_PUBLIC_BASE_URL`; it waits up to five seconds for the first answer
+before serving pages, then refreshes every five minutes. No new Helm value is
+needed.
+
+Agent-authored HTML (chat visualizations, HTML artifacts and Sites in the
+console) does not run under the console policy: it renders in an
+opaque-origin sandboxed frame of the HTML frame host page
+(`/_og/html-frame`), which the Sites gateway serves on `og.<sites domain>`
+(deploy the gateway with or before a web release that uses it) and the web
+server serves on the console origin when there is no Sites domain. Images
+from hosts the policy does not list load through the API's signed-in image
+proxy `GET /v1/image-proxy?url=`.
+
+The API compresses JSON responses and leaves SSE and other streaming transports
 uncompressed.
 
 Set `OPENGENI_WEB_NOINDEX=true` on a deployment search engines should not

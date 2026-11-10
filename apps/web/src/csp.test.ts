@@ -68,7 +68,11 @@ describe("console Content-Security-Policy", () => {
     const response = await handler(new Request("https://app.opengeni.ai/sign-in"));
     const html = await response.text();
     const policy = directives(response.headers.get("content-security-policy")!);
-    const inline = [...html.matchAll(/<script(?![^>]*\bsrc=)(?![^>]*type="application\/json")[^>]*>([\s\S]*?)<\/script>/gu)];
+    const inline = [
+      ...html.matchAll(
+        /<script(?![^>]*\bsrc=)(?![^>]*type="application\/json")[^>]*>([\s\S]*?)<\/script>/gu,
+      ),
+    ];
     expect(inline.length).toBeGreaterThan(0);
     for (const [, body] of inline) {
       const hash = `'sha256-${createHash("sha256").update(body!).digest("base64")}'`;
@@ -105,7 +109,11 @@ describe("console Content-Security-Policy", () => {
     ]);
     for (const [name, values] of policy) {
       for (const value of values) {
-        expect({ name, value, exact: value === "data:" || value === "blob:" || isExactSource(value) }).toEqual({
+        expect({
+          name,
+          value,
+          exact: value === "data:" || value === "blob:" || isExactSource(value),
+        }).toEqual({
           name,
           value,
           exact: true,
@@ -198,8 +206,8 @@ describe("console Content-Security-Policy", () => {
       contentSecurityApiUrlFromEnvironment({ OPENGENI_PUBLIC_BASE_URL: "https://app.opengeni.ai" }),
     ).toBe("https://app.opengeni.ai/");
     expect(contentSecurityApiUrlFromEnvironment({})).toBeUndefined();
-    expect(buildContentSecurityPolicy({ kind: "console", sources: null, scriptHashes: [] })).toContain(
-      "default-src 'self'",
-    );
+    expect(
+      buildContentSecurityPolicy({ kind: "console", sources: null, scriptHashes: [] }),
+    ).toContain("default-src 'self'");
   });
 });

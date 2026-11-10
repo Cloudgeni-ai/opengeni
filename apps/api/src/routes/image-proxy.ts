@@ -152,7 +152,8 @@ export function registerImageProxyRoutes(
         if (![301, 302, 303, 307, 308].includes(response.status)) break;
         const location = response.headers.get("location");
         await response.body?.cancel().catch(() => undefined);
-        if (!location || hop >= IMAGE_PROXY_MAX_REDIRECTS) refuse(502, "the image redirects too often");
+        if (!location || hop >= IMAGE_PROXY_MAX_REDIRECTS)
+          refuse(502, "the image redirects too often");
         url = upstreamUrl(new URL(location, url).toString());
       }
       if (!response.ok) {
@@ -172,7 +173,7 @@ export function registerImageProxyRoutes(
     }
     const type = sniffRasterImage(bytes);
     if (!type) refuse(415, "not a supported image");
-    return new Response(bytes, {
+    return new Response(bytes as Uint8Array<ArrayBuffer>, {
       status: 200,
       headers: {
         "content-type": type.contentType,

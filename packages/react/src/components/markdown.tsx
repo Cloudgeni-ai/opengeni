@@ -580,7 +580,14 @@ function MarkdownImage({ src, alt }: ComponentPropsWithoutRef<"img">) {
         {alt || t("markdown.image")} {t("markdown.previewUnavailable")}
       </span>
     );
-  return <img src={displayImageSrc(src)} alt={alt ?? ""} loading="lazy" className="my-3 max-w-full rounded-og-md" />;
+  return (
+    <img
+      src={displayImageSrc(src)}
+      alt={alt ?? ""}
+      loading="lazy"
+      className="my-3 max-w-full rounded-og-md"
+    />
+  );
 }
 
 // Link hrefs stay as authored: Opengeni object links and host renderers need

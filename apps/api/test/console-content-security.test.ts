@@ -5,7 +5,7 @@ import { createApp } from "../src/app";
 import { consoleContentSecuritySources } from "../src/http/console-content-security";
 
 const storage = (base: string) => ({
-  createGetUrl: async ({ key }: { key: string }) => `${base}/container/${key}?sig=x`,
+  createGetUrl: async ({ key }: { key: string }) => ({ url: `${base}/container/${key}?sig=x` }),
 });
 
 function allSources(result: Awaited<ReturnType<typeof consoleContentSecuritySources>>) {
@@ -25,7 +25,7 @@ describe("console Content-Security-Policy sources", () => {
         managedAuthGoogleClientId: "google",
         managedAuthGithubClientId: "github",
       } as never),
-      objectStorage: storage("https://acct.blob.core.windows.net"),
+      objectStorage: storage("https://acct.blob.core.windows.net") as never,
     });
     expect(result.directives["connect-src"]).toContain("https://acct.blob.core.windows.net");
     expect(result.directives["img-src"]).toContain("https://acct.blob.core.windows.net");

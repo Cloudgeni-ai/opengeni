@@ -56,10 +56,7 @@ import {
 import { useAppContext } from "../../app-context";
 import { HTML_FRAME_STILL_POLICY } from "@opengeni/contracts/html-frame-host";
 import { useContentHosting } from "../../../lib/content-hosting";
-import {
-  htmlFrameHostSrc,
-  useHtmlFrameHost,
-} from "../../../components/artifacts/html-frame-host";
+import { htmlFrameHostSrc, useHtmlFrameHost } from "../../../components/artifacts/html-frame-host";
 import { hasWorkspacePermission } from "../../lib/permissions";
 import { invalidateArtifactCatalog } from "../../lib/use-artifact-catalog";
 import { useDuplicateSite } from "../../lib/use-duplicate-site";

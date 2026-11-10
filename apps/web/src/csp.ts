@@ -40,7 +40,12 @@ export type ConsoleContentSecuritySources = {
   imageProxyPath: string;
 };
 
-type ApiDirective = "connect-src" | "img-src" | "media-src" | "script-src" | "frame-src"
+type ApiDirective =
+  | "connect-src"
+  | "img-src"
+  | "media-src"
+  | "script-src"
+  | "frame-src"
   | "form-action";
 
 export const CONTENT_SECURITY_PATH = "/v1/config/content-security";
@@ -140,8 +145,7 @@ export function buildContentSecurityPolicy(input: ConsolePolicyInput): string {
   const policy = basePolicy();
   const add = (directive: Directive, values: readonly string[]) => {
     for (const value of values)
-      if (isExactSource(value) && !policy[directive].includes(value))
-        policy[directive].push(value);
+      if (isExactSource(value) && !policy[directive].includes(value)) policy[directive].push(value);
   };
   add("script-src", input.scriptHashes);
   const self = input.publicOrigin ? safeOrigin(input.publicOrigin) : null;
@@ -183,7 +187,8 @@ export function contentHostingFor(
 }
 
 const INLINE_SCRIPT = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/giu;
-const NON_JAVASCRIPT_TYPE = /\btype\s*=\s*["']?(?!module\b|text\/javascript\b|application\/javascript\b)[^"'\s>]+/iu;
+const NON_JAVASCRIPT_TYPE =
+  /\btype\s*=\s*["']?(?!module\b|text\/javascript\b|application\/javascript\b)[^"'\s>]+/iu;
 
 /** `'sha256-…'` sources for every inline JavaScript block in `html`. */
 export function inlineScriptHashes(html: string): string[] {
@@ -191,7 +196,9 @@ export function inlineScriptHashes(html: string): string[] {
   for (const match of html.matchAll(INLINE_SCRIPT)) {
     const attributes = match[1] ?? "";
     if (/\bsrc\s*=/iu.test(attributes) || NON_JAVASCRIPT_TYPE.test(attributes)) continue;
-    const digest = createHash("sha256").update(match[2] ?? "", "utf8").digest("base64");
+    const digest = createHash("sha256")
+      .update(match[2] ?? "", "utf8")
+      .digest("base64");
     hashes.add(`'sha256-${digest}'`);
   }
   return [...hashes].sort();
@@ -253,7 +260,8 @@ export function parseContentSecuritySources(value: unknown): ConsoleContentSecur
     );
   }
   const htmlFrameHost =
-    typeof record.htmlFrameHost === "string" && safeOrigin(record.htmlFrameHost) === record.htmlFrameHost
+    typeof record.htmlFrameHost === "string" &&
+    safeOrigin(record.htmlFrameHost) === record.htmlFrameHost
       ? record.htmlFrameHost
       : null;
   const imageProxyPath =

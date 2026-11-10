@@ -380,9 +380,12 @@ export async function completeGitHubAppConnect(
       const home =
         deps.settings.webBaseUrl ??
         integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
-      return htmlPageResponse(githubConnectFailureHtml("expired", `${home.replace(/\/+$/u, "")}/`), {
-        status: 400,
-      });
+      return htmlPageResponse(
+        githubConnectFailureHtml("expired", `${home.replace(/\/+$/u, "")}/`),
+        {
+          status: 400,
+        },
+      );
     }
   }
   return new Response(null, { status: 302, headers: { Location: destination! } });

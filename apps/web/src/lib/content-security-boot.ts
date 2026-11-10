@@ -9,18 +9,6 @@ import {
 export const CONTENT_HOSTING_ELEMENT_ID = "opengeni-content-hosting";
 
 /**
- * Zod compiles object parsers with `new Function` after probing whether the
- * page allows it. The console's policy has no 'unsafe-eval', so the probe only
- * produces a `securitypolicyviolation`; skip it (and the compiled path) with
- * Zod's shared global configuration, which every Zod copy on the page reads.
- */
-export function disableZodJit(target: typeof globalThis = globalThis): void {
-  const holder = target as { __zod_globalConfig?: { jitless?: boolean } };
-  holder.__zod_globalConfig ??= {};
-  holder.__zod_globalConfig.jitless = true;
-}
-
-/**
  * The content hosting the web server wrote into the page, matching its
  * policy: the HTML frame host, and which image origins load directly. A page
  * without it (the Vite dev server, a static host) keeps the defaults.
@@ -53,7 +41,6 @@ export function readContentHosting(document: Document): ContentHostingConfig | n
 }
 
 if (typeof window !== "undefined" && typeof document !== "undefined") {
-  disableZodJit();
   const config = readContentHosting(document);
   if (config) configureContentHosting(config);
 }

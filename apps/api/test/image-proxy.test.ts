@@ -123,7 +123,9 @@ describe("image proxy", () => {
       { "internal.example.com": "10.0.0.7" },
     );
     expect((await toPrivate.get("https://public.example.com/a.png")).status).toBe(403);
-    expect(toPrivate.fetched.map((entry) => entry.url)).toEqual(["https://public.example.com/a.png"]);
+    expect(toPrivate.fetched.map((entry) => entry.url)).toEqual([
+      "https://public.example.com/a.png",
+    ]);
 
     const toHttp = proxy((url) =>
       url.endsWith("/start")
@@ -159,7 +161,7 @@ describe("image proxy", () => {
       const { get } = proxy(() => new Response(body, { headers: { "content-type": "image/png" } }));
       const response = await get("https://images.example.com/x.png");
       expect(response.status).toBe(415);
-      expect(response.headers.get("content-type")).not.toContain("image/");
+      expect(response.headers.get("content-type") ?? "").not.toContain("image/");
     }
     expect(sniffRasterImage(SVG)).toBeNull();
     expect(sniffRasterImage(PNG)?.contentType).toBe("image/png");
@@ -187,15 +189,19 @@ describe("image proxy", () => {
   });
 
   test("refuses Authorization headers and rate limits each person", async () => {
-    const { get, fetched } = proxy(() => new Response(PNG), {}, {
-      limiter: new PublicSetupRateLimiter({
-        globalCapacity: 100,
-        globalRefillPerSecond: 0,
-        clientCapacity: 2,
-        clientRefillPerSecond: 0,
-        maxClientKeys: 10,
-      }),
-    });
+    const { get, fetched } = proxy(
+      () => new Response(PNG),
+      {},
+      {
+        limiter: new PublicSetupRateLimiter({
+          globalCapacity: 100,
+          globalRefillPerSecond: 0,
+          clientCapacity: 2,
+          clientRefillPerSecond: 0,
+          maxClientKeys: 10,
+        }),
+      },
+    );
     expect((await get("https://images.example.com/a", { authorization: "Bearer k" })).status).toBe(
       403,
     );
@@ -217,8 +223,9 @@ describe("image proxy", () => {
       `http://localhost/v1/image-proxy?url=${encodeURIComponent("https://images.example.com/a.png")}`,
     );
     expect(response.status).toBe(401);
-    expect(
+    // GET only.
+    expect([404, 405]).toContain(
       (await app.request("http://localhost/v1/image-proxy?url=x", { method: "POST" })).status,
-    ).toBe(404);
+    );
   });
 });

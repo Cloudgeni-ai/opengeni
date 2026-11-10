@@ -26,7 +26,9 @@ function hashSource(content: string): string {
 function isExecutableScript(attributes: string): boolean {
   if (/\bsrc\s*=/iu.test(attributes)) return false;
   const type = /\btype\s*=\s*["']?([^"'\s>]+)/iu.exec(attributes)?.[1]?.toLowerCase();
-  return !type || type === "module" || type === "text/javascript" || type === "application/javascript";
+  return (
+    !type || type === "module" || type === "text/javascript" || type === "application/javascript"
+  );
 }
 
 /** The policy for one rendered page, hashing its inline blocks. */

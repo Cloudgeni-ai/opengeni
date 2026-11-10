@@ -178,7 +178,10 @@ export function createWebHandler(
       (request.method === "GET" || request.method === "HEAD") &&
       sameOriginFrameHost()
     ) {
-      return withShellSecurityHeaders(url.pathname, sameOriginHtmlFrameHostResponse(request.method));
+      return withShellSecurityHeaders(
+        url.pathname,
+        sameOriginHtmlFrameHostResponse(request.method),
+      );
     }
     return withShellSecurityHeaders(url.pathname, await serveShell(request, url));
   }

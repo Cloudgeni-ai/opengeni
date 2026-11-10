@@ -6,10 +6,7 @@ import {
   HTML_FRAME_HOST_VERSION,
 } from "@opengeni/contracts/html-frame-host";
 import { configureContentHosting, displayImageSrc } from "../src/lib/content-hosting";
-import {
-  htmlFrameHostSrc,
-  useHtmlFrameHost,
-} from "../src/components/artifacts/html-frame-host";
+import { htmlFrameHostSrc, useHtmlFrameHost } from "../src/components/artifacts/html-frame-host";
 import { PublishedHtmlArtifactFrame } from "../src/components/artifacts/published-html-artifact-frame";
 import { actRun, registerDom, renderComponent, renderHook } from "./render-hook";
 
@@ -47,7 +44,11 @@ test("images load directly only from listed, same-origin or inline sources", () 
 });
 
 test("the frame host address names the embedding page as its parent", () => {
+  (window as unknown as { happyDOM: { setURL(url: string): void } }).happyDOM.setURL(
+    "https://app.example.com/workspaces/w",
+  );
   const origin = window.location.origin;
+  expect(origin).toBe("https://app.example.com");
   expect(htmlFrameHostSrc(null)).toBeNull();
   expect(htmlFrameHostSrc("https://og.example.site")).toBe(
     `https://og.example.site/_og/html-frame?parent=${encodeURIComponent(origin)}`,

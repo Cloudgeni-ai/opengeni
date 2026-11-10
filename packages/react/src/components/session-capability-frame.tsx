@@ -105,7 +105,13 @@ function Mark({
       aria-hidden
     >
       {src && failed !== src ? (
-        <img src={displayImageSrc(src)} alt="" loading="lazy" decoding="async" onError={() => setFailed(src)} />
+        <img
+          src={displayImageSrc(src)}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onError={() => setFailed(src)}
+        />
       ) : Icon ? (
         <Icon size={18} strokeWidth={1.75} />
       ) : (

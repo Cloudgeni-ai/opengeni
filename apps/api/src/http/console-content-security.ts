@@ -1,4 +1,4 @@
-import { configuredModels, type Settings } from "@opengeni/config";
+import { configuredModels, sandboxBackendServed, type Settings } from "@opengeni/config";
 import { sitesHtmlFrameHostOrigin } from "@opengeni/contracts/html-frame-host";
 import { normalizeSitesDomain } from "@opengeni/contracts";
 import type { ObjectStorage } from "@opengeni/storage";
@@ -91,7 +91,8 @@ export async function consoleContentSecuritySources(
   // Terminal, desktop and port sockets.
   const relay = httpsOrHttpOrigin(settings.selfhostedRelayUrl, ["https:", "http:", "wss:", "ws:"]);
   if (relay) add(["connect-src"], httpOriginOf(relay), webSocketOrigin(relay));
-  if (settings.sandboxBackend === "modal") add(["connect-src"], ...MODAL_TUNNEL_HOSTS);
+  // Any served backend counts, not only the default: a session may pick one.
+  if (sandboxBackendServed(settings, "modal")) add(["connect-src"], ...MODAL_TUNNEL_HOSTS);
 
   // Sign-up challenge (Cloudflare Turnstile): its script and its frame.
   if (settings.signupChallengeEnabled && settings.signupChallengeSiteKey) {
