@@ -1,5 +1,48 @@
 # @opengeni/runtime
 
+## 6.14.0
+
+### Minor Changes
+
+- ec9cfe4: Distinguish proven customer-provider failures from platform failures in operational metrics, including an OpenRouter account restricted to its own provider keys (on turns, compaction requests and model calls), an OpenRouter key refused at the credit or budget limit the customer set on it, model calls on the workspace's direct and organization compatible connections, Vercel AI Gateway credit, budget and payment-verification refusals, and compaction requests refused for exhausted provider quota. Preserve unknown, generic 404 and malformed-request failures in platform reliability signals.
+
+### Patch Changes
+
+- 4664732: Dependencies with known vulnerabilities are upgraded to fixed releases: `hono` 4.13.17 (`@opengeni/core`), `zod` 4.6.7 (`@opengeni/runtime`) and `katex` 0.18.11 (`@opengeni/react`). Behavior is unchanged.
+- 537656b: Claude Fable 5.2 now runs on Claude subscriptions. Anthropic refused it with HTTP 400 because subscription requests presented Claude Code 2.1.285, and Fable 5.2 needs 2.1.290 or newer. Fable 5.2 requests now present Claude Code 2.1.321 (Agent SDK 0.3.321). Every other model keeps 2.1.285, so the billing block at the start of sessions that are already running never changes and their prompt cache stays intact.
+- 68b9dc4: A command's output is no longer streamed to nobody after the call that launched or read it returns. `OpAck` gains `detach`: the consumer stops following the operation, and agent 0.1.159 stops sending its frames while the command keeps running and its output stays retained for the next read. Previously the departing consumer granted unlimited credit, so every yielded launch or read made the agent push the command's entire retained output over the machine's single shared output connection, delaying other commands' output and completion by minutes on a slower link. Older agents keep the previous behavior.
+
+  A `command_read` or `command_wait` that refreshes a background command whose result Opengeni had just stored and released no longer fails with "the runner reported it lost": it reads the stored result.
+
+- c243348: When an agent calls `request_human_input` with arguments that don't match its schema (for example `questions` sent as JSON text, or `confirm` on a question without exactly two options), it now gets back which fields are wrong and why, and can correct the call. Before, it only saw "Tool execution failed. Error details are redacted." The tool definition the model sees is unchanged.
+- c7ba98b: On Modal sandboxes, `view_image` now reads any file the agent's own shell can read, such as a page `pdftoppm` just rendered to `/tmp`, the same as on Connected Machine and compute sandboxes. Paths resolve the way the shell resolves them (absolute as given, relative from the workspace root) and are read with the box's own file read, which also removes one validation round trip per image. A path the SDK refuses on a caller-addressed file operation is now counted as `outcome="rejected"` in `opengeni_sandbox_operations_total` instead of `failed`, so it no longer trips the sandbox operation failure-ratio alert.
+- cbb6761: Configured agents without a sandbox or Connected Machine no longer receive instructions they cannot act on: editing or publishing sandbox files, workspace file links, sandbox paths, background-command acknowledgement and sandbox CLI lists. Site guidance stays, since Sites are created from inline HTML. The verification rule names a goal and its completion audit only when goals are on, so a session with compute but without goals also gets the shorter rule; sessions with goals and a sandbox or Connected Machine keep their exact prompt.
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [e33947d]
+- Updated dependencies [dd11dad]
+- Updated dependencies [ec9cfe4]
+- Updated dependencies [68b9dc4]
+- Updated dependencies [91320a4]
+- Updated dependencies [c7ba98b]
+- Updated dependencies [5628a56]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/sdk@6.14.0
+  - @opengeni/config@6.14.0
+  - @opengeni/observability@6.14.0
+  - @opengeni/agent-proto@6.14.0
+  - @opengeni/capabilities@6.14.0
+  - @opengeni/codemode@6.14.0
+  - @opengeni/codex@6.14.0
+  - @opengeni/decisions@6.14.0
+  - @opengeni/interaction@6.14.0
+  - @opengeni/tool-gateway@6.14.0
+  - @opengeni/vaults@6.14.0
+  - @opengeni/jev@6.14.0
+  - @opengeni/network@6.14.0
+  - @opengeni/xai-subscription@6.14.0
+
 ## 6.13.0
 
 ### Patch Changes

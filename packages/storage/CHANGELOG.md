@@ -1,5 +1,20 @@
 # @opengeni/storage
 
+## 6.14.0
+
+### Patch Changes
+
+- 936423e: Archiving a session now writes its readable transcript from the event rows the bundle export already read, instead of reading every kept event from the database a second time. The transcript reads exactly as before. A compressed JSON lines file that fails while its producer is busy elsewhere now fails the producer's next write instead of waiting forever, and no longer leaves an unhandled rejection behind.
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [e33947d]
+- Updated dependencies [dd11dad]
+- Updated dependencies [91320a4]
+- Updated dependencies [5628a56]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/config@6.14.0
+
 ## 6.13.0
 
 ### Patch Changes

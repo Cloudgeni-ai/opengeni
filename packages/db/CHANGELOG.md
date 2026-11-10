@@ -1,5 +1,42 @@
 # @opengeni/db
 
+## 6.14.0
+
+### Minor Changes
+
+- c976c87: Agents have one text, their Instructions: First message is gone from the agent editor, the agent page, export, `bot_template_save` and the docs. The editor is icon, name, what it helps with, Instructions, Remember across chats and who can use it. Starting a chat with an agent (`?agent=`, or an older `?botTemplateId=` link) selects it and leaves the composer as it is.
+
+  Nothing is dropped or migrated. Every read joins an existing First message after the Instructions as its own paragraph, led by "When a chat starts:" so one-time setup stays for the start of a chat (`agentInstructionsWithFirstMessage` in `@opengeni/contracts`, `agentInstructionsSql` in `@opengeni/db`), so the editor, the API, Slack and a chat's agent layer all see the same text, and a chat with such an agent now follows it as part of its Instructions. The next change to the agent stores the joined text with an empty First message, unless the two together pass the 20,000-character limit, when both are kept as they were; the editor then saves other changes and asks to shorten the Instructions only when they are edited. The legacy `bot_templates` and `slack_agents` rows copy what is stored, never a cut text, so an older server writing them back during a rollout loses nothing. `Agent.firstMessage` is always empty and `hasFirstMessage` false; the fields stay for older clients. `firstMessage` on create and update, `bot_template_save`'s `firstMessage` and `setupInstructions`, and `/bot-templates` `setupInstructions` are still accepted and become Instructions. `/bot-templates` lists only agents made as templates, with their Instructions as `setupInstructions`. The `first_message` column stays.
+
+  The agent icon picker opens on the emoji choices and colours, also for a new agent with no icon yet. Browsing the tabs or a colour chooses nothing; picking an emoji, icon or letters makes it the icon, in the colour browsed. Before, it showed only the Emoji, Icon and Letters tabs until one was clicked.
+
+  "Remember across chats" is a switch in the agent form, and new agents start with it on: from the app form (including Make this an agent) and from a chat's `bot_template_save`, which now also creates the agent's Memory collection and reports in its result's `memory.status` whether that collection is `ready`, `pending_review`, `learning_off` or `not_saved`, with a note for the person. Saving the agent in the app sets up a missing collection. Agents made from a Slack proposal already started with Memory on. Existing agents keep their setting, and `CreateAgentRequest.memoryEnabled` still defaults to off when the API caller omits it.
+
+### Patch Changes
+
+- 23964f7: More access fixes now start a blocked chat's saved message by themselves. These are a reactivated organization member (by an admin or through external identity reactivation), an accepted invitation, an organization admin's workspace access grant, external first-use and stated memberships, explicit external member onboarding, and Slack access approval. A restored organization membership releases saved messages in every workspace of that organization (`releaseMembershipBlocksInOrganization` in `@opengeni/core`, `listOrganizationWorkspaceIds` in `@opengeni/db`). As before, each message starts exactly once, and a paused chat waits until it is resumed.
+- 936423e: Archiving a session now writes its readable transcript from the event rows the bundle export already read, instead of reading every kept event from the database a second time. The transcript reads exactly as before. A compressed JSON lines file that fails while its producer is busy elsewhere now fails the producer's next write instead of waiting forever, and no longer leaves an unhandled rejection behind.
+- f80cd7a: Releases can roll out over the production binary again. Migration 1283 withholds the runtime grant on the inventory of meeting tracks not yet kept compact, because the binary in production rejects that grant on a routine it does not know. Until a later release grants it again, existing meetings' audio stays as it is; new meetings are still kept compact.
+- c472500: A meeting transcript now says where a track recorded nothing, such as "Ingrid's microphone wasn't recording from 17:39 to 45:35. Everyone else was still recorded." Before, a microphone that was unplugged or tab sharing that ended left a voice missing with no explanation, so the transcript looked like it had skipped speech. Each track's new `unrecorded` field lists those stretches. The server works them out from the chunks' start times when a recording is finalized (migration 1353 adds the column). Older meetings get them the next time they are transcribed. Stretches under two seconds are ignored. The web and phone transcripts show a quiet line where each one starts, naming the person when the track carries one named voice and saying "Nothing was recorded" where every track was silent at once; no turn runs across one. `@opengeni/react/recordings` exports `transcriptUnrecordedMarks`, `interleaveUnrecordedMarks`, `trackSpeakerName` and `unrecordedMarkText` for embedders that render their own transcript, and `groupTranscriptTurns` takes the times no turn may run across.
+- 0b65ea4: Turn timing profiles: a router (`tool_invoke`) call whose arguments were stored as a JSON string made the profile query fail with an invalid regular expression, so the sweep skipped the rest of that workspace. The pattern now stays within PostgreSQL's limit, and a page of turns whose history cannot be read is reported and skipped while the pass moves on.
+- Updated dependencies [c976c87]
+- Updated dependencies [6ae0528]
+- Updated dependencies [e33947d]
+- Updated dependencies [dd11dad]
+- Updated dependencies [ec9cfe4]
+- Updated dependencies [91320a4]
+- Updated dependencies [c7ba98b]
+- Updated dependencies [5628a56]
+- Updated dependencies [c472500]
+  - @opengeni/contracts@6.14.0
+  - @opengeni/config@6.14.0
+  - @opengeni/observability@6.14.0
+  - @opengeni/codemode@6.14.0
+  - @opengeni/codex@6.14.0
+  - @opengeni/network@6.14.0
+  - @opengeni/subscriptions@6.14.0
+  - @opengeni/xai-subscription@6.14.0
+
 ## 6.13.0
 
 ### Patch Changes

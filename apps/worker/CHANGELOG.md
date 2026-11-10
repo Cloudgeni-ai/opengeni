@@ -1,5 +1,58 @@
 # @opengeni/worker-bundle
 
+## 6.14.0
+
+### Patch Changes
+
+- 936423e: Archiving a session now writes its readable transcript from the event rows the bundle export already read, instead of reading every kept event from the database a second time. The transcript reads exactly as before. A compressed JSON lines file that fails while its producer is busy elsewhere now fails the producer's next write instead of waiting forever, and no longer leaves an unhandled rejection behind.
+- f80cd7a: Releases can roll out over the production binary again. Migration 1283 withholds the runtime grant on the inventory of meeting tracks not yet kept compact, because the binary in production rejects that grant on a routine it does not know. Until a later release grants it again, existing meetings' audio stays as it is; new meetings are still kept compact.
+- ce94cda: A turn refused at admission now says why in `turn.failed` instead of "Activity task failed". This covers fixed refusal messages such as a connected subscription used for API work, missing workspace or API credits, a paid plan or paid credit being required, and a monthly agent-run or token limit being reached. These refusals now throw `TurnAdmissionRefusedError`, which the workflow lists as a diagnosable turn failure. The refusal policy itself is unchanged.
+- Updated dependencies [23964f7]
+- Updated dependencies [c976c87]
+- Updated dependencies [936423e]
+- Updated dependencies [6ae0528]
+- Updated dependencies [4664732]
+- Updated dependencies [e33947d]
+- Updated dependencies [537656b]
+- Updated dependencies [dd11dad]
+- Updated dependencies [ec9cfe4]
+- Updated dependencies [68b9dc4]
+- Updated dependencies [c243348]
+- Updated dependencies [91320a4]
+- Updated dependencies [c7ba98b]
+- Updated dependencies [cbb6761]
+- Updated dependencies [f80cd7a]
+- Updated dependencies [5628a56]
+- Updated dependencies [c472500]
+- Updated dependencies [0b65ea4]
+  - @opengeni/db@6.14.0
+  - @opengeni/core@6.14.0
+  - @opengeni/contracts@6.14.0
+  - @opengeni/sdk@6.14.0
+  - @opengeni/storage@6.14.0
+  - @opengeni/config@6.14.0
+  - @opengeni/runtime@6.14.0
+  - @opengeni/observability@6.14.0
+  - @opengeni/agent-proto@6.14.0
+  - @opengeni/documents@6.14.0
+  - @opengeni/events@6.14.0
+  - @opengeni/capabilities@6.14.0
+  - @opengeni/codemode@6.14.0
+  - @opengeni/codex@6.14.0
+  - @opengeni/decisions@6.14.0
+  - @opengeni/github@6.14.0
+  - @opengeni/interaction@6.14.0
+  - @opengeni/tool-gateway@6.14.0
+  - @opengeni/vaults@6.14.0
+  - @opengeni/vaults-bitwarden@6.14.0
+  - @opengeni/vaults-keeper@6.14.0
+  - @opengeni/vaults-onepassword@6.14.0
+  - @opengeni/vaults-protonpass@6.14.0
+  - @opengeni/jev@6.14.0
+  - @opengeni/network@6.14.0
+  - @opengeni/subscriptions@6.14.0
+  - @opengeni/xai-subscription@6.14.0
+
 ## 6.13.0
 
 ### Patch Changes

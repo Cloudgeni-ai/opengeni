@@ -1,5 +1,73 @@
 # @opengeni/api-router
 
+## 6.14.0
+
+### Minor Changes
+
+- c976c87: Agents have one text, their Instructions: First message is gone from the agent editor, the agent page, export, `bot_template_save` and the docs. The editor is icon, name, what it helps with, Instructions, Remember across chats and who can use it. Starting a chat with an agent (`?agent=`, or an older `?botTemplateId=` link) selects it and leaves the composer as it is.
+
+  Nothing is dropped or migrated. Every read joins an existing First message after the Instructions as its own paragraph, led by "When a chat starts:" so one-time setup stays for the start of a chat (`agentInstructionsWithFirstMessage` in `@opengeni/contracts`, `agentInstructionsSql` in `@opengeni/db`), so the editor, the API, Slack and a chat's agent layer all see the same text, and a chat with such an agent now follows it as part of its Instructions. The next change to the agent stores the joined text with an empty First message, unless the two together pass the 20,000-character limit, when both are kept as they were; the editor then saves other changes and asks to shorten the Instructions only when they are edited. The legacy `bot_templates` and `slack_agents` rows copy what is stored, never a cut text, so an older server writing them back during a rollout loses nothing. `Agent.firstMessage` is always empty and `hasFirstMessage` false; the fields stay for older clients. `firstMessage` on create and update, `bot_template_save`'s `firstMessage` and `setupInstructions`, and `/bot-templates` `setupInstructions` are still accepted and become Instructions. `/bot-templates` lists only agents made as templates, with their Instructions as `setupInstructions`. The `first_message` column stays.
+
+  The agent icon picker opens on the emoji choices and colours, also for a new agent with no icon yet. Browsing the tabs or a colour chooses nothing; picking an emoji, icon or letters makes it the icon, in the colour browsed. Before, it showed only the Emoji, Icon and Letters tabs until one was clicked.
+
+  "Remember across chats" is a switch in the agent form, and new agents start with it on: from the app form (including Make this an agent) and from a chat's `bot_template_save`, which now also creates the agent's Memory collection and reports in its result's `memory.status` whether that collection is `ready`, `pending_review`, `learning_off` or `not_saved`, with a note for the person. Saving the agent in the app sets up a missing collection. Agents made from a Slack proposal already started with Memory on. Existing agents keep their setting, and `CreateAgentRequest.memoryEnabled` still defaults to off when the API caller omits it.
+
+### Patch Changes
+
+- 23964f7: More access fixes now start a blocked chat's saved message by themselves. These are a reactivated organization member (by an admin or through external identity reactivation), an accepted invitation, an organization admin's workspace access grant, external first-use and stated memberships, explicit external member onboarding, and Slack access approval. A restored organization membership releases saved messages in every workspace of that organization (`releaseMembershipBlocksInOrganization` in `@opengeni/core`, `listOrganizationWorkspaceIds` in `@opengeni/db`). As before, each message starts exactly once, and a paused chat waits until it is resumed.
+- 6ae0528: Managed sign-in now allows at most 100 password attempts per account per hour (20 from one address), down from up to 200. New passwords found in the Have I Been Pwned breach corpus are refused at sign-up, password reset, password change and invited-user account setup; only a five-character hash prefix leaves the API, the check is on outside local and test environments by default (`OPENGENI_MANAGED_AUTH_BREACHED_PASSWORD_CHECK` overrides it), and an unreachable lookup never blocks anyone. Better Auth log lines no longer carry request bodies, links, tokens or email addresses. Delegated access tokens (`ogd_`) that would stay valid for more than 24 hours are refused.
+- dd11dad: Connecting a Microsoft work account (Outlook Mail, Outlook Calendar and other Microsoft Graph connections) no longer ends in a generic failure when the person's organization requires an admin to approve the app. When Microsoft returns a consent error (AADSTS65001, AADSTS90094, `consent_required`, `access_denied`), the connect card and setup dialog explain that their IT must approve the app once, with an organization-wide admin-consent link to copy or open and a ready-made message for IT. A sign-in that never came back (the person stayed on Microsoft's "Need admin approval" page or closed it) is remembered in the browser, and the same help appears the next time they open that connection. All wording comes from `connectSetup.*` messages (`organizationApprovalRequiredTitle`, `itMessageWithLink`, `copyMessageForIt` and others), so host apps can replace it through `messages` on `OpenGeniProvider` or `OpenGeniMessagesProvider`. The admin-consent result page now also works for approvals returning through `/v1/integrations/oauth/callback`.
+- 91320a4: A page whose sign-in is gone now stops instead of polling on. A request refused because its sign-in expired, was revoked or its cookie lapsed answers HTTP 401 `unauthenticated` with `details.code` `session_missing` (no sign-in sent) or `session_expired` (a sign-in cookie or app credential that no longer signs anyone in); another credential that is not accepted, such as an API key, is `credential_invalid`. Route-rejection metrics and logs carry the same reason instead of `unclassified`. The web app hears the first such refusal, confirms with the session read, and leaves the signed-in app at once, so its polling and streams stop and the sign-in page shows; inside the desktop app the window's sign-in is renewed and the page reloads.
+
+  The desktop app also stops its window being signed out while the app stays signed in. Its window shares the device's session, which is renewed at most once a day by whichever request comes first. When that was one of the app's own requests (it polls the inbox, also right after the computer wakes), the renewal never reached the window's cookie, so the cookie lapsed a week after it was last set. The app now sends its own requests with the window's cookies, and a request that renews the session returns the renewed window cookie with it.
+
+  `@opengeni/contracts` adds `AUTHENTICATION_REQUIRED_REASONS`, `AuthenticationRequiredReason` and `isSignInLostRejection`. `@opengeni/core` adds `AuthenticationRequiredRefusal`. The app state's host can pass `subscribeSignInLost`.
+
+- 5628a56: The Microsoft Teams bot names itself with the configured Teams app name, `OPENGENI_TEAMS_APP_NAME` (default `Opengeni`, at most 30 characters), the same variable the app package generator uses for `name.short`. It appears in the welcome, help, the connect welcome and reminder, the not-available and not-turned-on notices and the AI notice on a new task; text about the Opengeni service and accounts is unchanged. The app package's full description and command descriptions also name the bot by that app name, keeping Opengeni for the service, accounts and workspace. The package generator also accepts a full app name, `OPENGENI_TEAMS_APP_FULL_NAME` (at most 100 characters), for `name.full`, which defaults to the short name. Existing deployments and packages are unchanged.
+- Updated dependencies [23964f7]
+- Updated dependencies [c976c87]
+- Updated dependencies [936423e]
+- Updated dependencies [6ae0528]
+- Updated dependencies [4664732]
+- Updated dependencies [e33947d]
+- Updated dependencies [537656b]
+- Updated dependencies [dd11dad]
+- Updated dependencies [ec9cfe4]
+- Updated dependencies [68b9dc4]
+- Updated dependencies [c243348]
+- Updated dependencies [91320a4]
+- Updated dependencies [c7ba98b]
+- Updated dependencies [cbb6761]
+- Updated dependencies [f80cd7a]
+- Updated dependencies [5628a56]
+- Updated dependencies [c472500]
+- Updated dependencies [0b65ea4]
+  - @opengeni/db@6.14.0
+  - @opengeni/core@6.14.0
+  - @opengeni/contracts@6.14.0
+  - @opengeni/storage@6.14.0
+  - @opengeni/config@6.14.0
+  - @opengeni/runtime@6.14.0
+  - @opengeni/observability@6.14.0
+  - @opengeni/agent-proto@6.14.0
+  - @opengeni/documents@6.14.0
+  - @opengeni/events@6.14.0
+  - @opengeni/artifact-tool@6.14.0
+  - @opengeni/capabilities@6.14.0
+  - @opengeni/codemode@6.14.0
+  - @opengeni/codex@6.14.0
+  - @opengeni/decisions@6.14.0
+  - @opengeni/github@6.14.0
+  - @opengeni/interaction@6.14.0
+  - @opengeni/tool-gateway@6.14.0
+  - @opengeni/vaults@6.14.0
+  - @opengeni/vaults-bitwarden@6.14.0
+  - @opengeni/vaults-keeper@6.14.0
+  - @opengeni/vaults-onepassword@6.14.0
+  - @opengeni/vaults-protonpass@6.14.0
+  - @opengeni/network@6.14.0
+  - @opengeni/xai-subscription@6.14.0
+
 ## 6.13.0
 
 ### Patch Changes
