@@ -1759,15 +1759,22 @@ function transientTransportCode(error: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Closed provider codes of a safety refusal: the provider judged this
+ * request's content. Claude reports one with HTTP 200 (`stop_reason:
+ * "refusal"`), others with a 400 or a failed response.
+ */
+export const PROVIDER_SAFETY_REFUSAL_CODE =
+  /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy|misalignment_policy_violation)$/;
+
 function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
   if (error instanceof ResponsesStreamingTerminalError) {
     return error.category === "safety" ? error.detail : undefined;
   }
   return collectErrorStrings(error).find(
     (value) =>
-      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy|misalignment_policy_violation)$/.test(
-        value,
-      ) || /\bthis request was blocked by our safety systems\b/i.test(value),
+      PROVIDER_SAFETY_REFUSAL_CODE.test(value) ||
+      /\bthis request was blocked by our safety systems\b/i.test(value),
   );
 }
 
