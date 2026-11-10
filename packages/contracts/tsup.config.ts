@@ -90,6 +90,7 @@ export default defineConfig({
     "src/mcp-elicitation.ts",
     "src/mcp-elicitation-model.ts",
     "src/machine-access.ts",
+    "src/encrypted-reasoning-refusal.ts",
   ],
   format: ["esm"],
   target: "es2022",

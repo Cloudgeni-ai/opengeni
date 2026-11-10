@@ -68,14 +68,23 @@ runs:
         if [ "${PLAYWRIGHT_ONLY_SHELL}" = "true" ]; then
           slug="${slug}-shell"
         fi
+        # Playwright downloads a different build per OS release (WebKit for
+        # Ubuntu 24.04 links ICU 74, the 26.04 build links ICU 78), so the
+        # cache must never cross releases: a build restored onto another
+        # release counts as installed and then cannot start.
+        platform="${RUNNER_OS}"
+        if [ -r /etc/os-release ]; then
+          platform="${RUNNER_OS}-$(. /etc/os-release && printf '%s-%s' "${ID:-unknown}" "${VERSION_ID:-unknown}")"
+        fi
         echo "version=${version}" >> "$GITHUB_OUTPUT"
         echo "slug=${slug}" >> "$GITHUB_OUTPUT"
-        echo "key=playwright-${RUNNER_OS}-${version}-${slug}" >> "$GITHUB_OUTPUT"
+        echo "key=playwright-${platform}-${version}-${slug}" >> "$GITHUB_OUTPUT"
 
-    # Keyed on the exact resolved Playwright version and browser set. A miss
-    # only costs today's behaviour; a hit removes the download that drives the
-    # entire hang tail. No restore-keys: a partial restore of another browser
-    # set would re-download anyway and could not be saved under this key.
+    # Keyed on the OS release, the exact resolved Playwright version and the
+    # browser set. A miss only costs today's behaviour; a hit removes the
+    # download that drives the entire hang tail. No restore-keys: a partial
+    # restore of another browser set would re-download anyway and could not be
+    # saved under this key.
     #
     # Split restore/save rather than `actions/cache`, whose post step is
     # `post-if: success()`. With the combined action a bounded failure never

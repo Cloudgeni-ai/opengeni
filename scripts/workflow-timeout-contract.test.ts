@@ -355,6 +355,9 @@ describe("workflow timeout contract", () => {
     expect(actionSource).toContain("actions/cache/restore@");
     expect(actionSource).toContain("actions/cache/save@");
     expect(actionSource).toContain("rm -rf ~/.cache/ms-playwright/__dirlock");
+    // Browser builds differ per OS release, so the cache key must name it.
+    expect(actionSource).toContain(". /etc/os-release");
+    expect(actionSource).toContain('echo "key=playwright-${platform}-${version}-${slug}"');
 
     const action = Bun.YAML.parse(actionSource) as {
       runs: { steps: Array<{ name?: string; run?: string }> };

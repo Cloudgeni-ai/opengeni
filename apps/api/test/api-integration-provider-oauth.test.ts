@@ -5,7 +5,9 @@ import {
   MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
   MICROSOFT_TEAMS_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+  MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,
   MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+  MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION,
 } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import {
@@ -1950,6 +1952,9 @@ describe("API Integration provider OAuth", () => {
         expect(begun.status).toBe(200);
         const attempt = await begun.json();
         const signIn = new URL(attempt.nextAction.url);
+        // The sign-in step already carries the organization's approval link,
+        // for a person who never comes back from Microsoft's approval page.
+        const offered = new URL(attempt.nextAction.organizationApprovalUrl);
         const query = new URLSearchParams({
           error: returned.error,
           state: signIn.searchParams.get("state")!,
@@ -1976,6 +1981,32 @@ describe("API Integration provider OAuth", () => {
         expect(link.searchParams.get("redirect_uri")).toBe(signIn.searchParams.get("redirect_uri"));
         expect(link.searchParams.get("state")).toBe("microsoft_admin_consent");
         expect(link.searchParams.get("scope")).not.toContain("offline_access");
+        // One approval covers every Microsoft service of the app in this
+        // workspace, so adding Calendar after Mail needs no second approval.
+        const approved = link.searchParams.get("scope")!.split(" ");
+        for (const service of [
+          MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+          MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+          MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+        ])
+          for (const scope of service.authentication.scopes)
+            if (scope !== "offline_access")
+              expect(approved, returned.name).toContain(`https://graph.microsoft.com/${scope}`);
+        // Teams is not offered in this workspace, so IT isn't asked for it.
+        const offeredServices = [
+          MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+          MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+          MICROSOFT_OUTLOOK_CONTACTS_INTEGRATION_DEFINITION,
+          MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+          MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION,
+        ].flatMap((service) => service.authentication.scopes);
+        const teamsOnly = MICROSOFT_TEAMS_INTEGRATION_DEFINITION.authentication.scopes.filter(
+          (scope) => !offeredServices.includes(scope),
+        );
+        expect(teamsOnly.length).toBeGreaterThan(0);
+        for (const scope of teamsOnly)
+          expect(approved).not.toContain(`https://graph.microsoft.com/${scope}`);
+        expect(link.toString(), returned.name).toBe(offered.toString());
         // The approval link never carries the sign-in's signed state.
         expect(current.error.message).not.toContain(signIn.searchParams.get("state")!);
       }

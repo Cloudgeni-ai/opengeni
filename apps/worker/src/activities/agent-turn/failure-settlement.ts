@@ -536,7 +536,11 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
-      control.turnRecoveryCause = "sandbox";
+      // A swap or detach moved the active sandbox mid-turn: continuing on the
+      // new route is the designed boundary, not a fault. Only a home backend
+      // that still needs recovery is a sandbox problem.
+      control.turnRecoveryCause =
+        routeTransitionCode === "home_backend_recovery_pending" ? "sandbox" : "route_change";
       control.activityError = error;
       return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
