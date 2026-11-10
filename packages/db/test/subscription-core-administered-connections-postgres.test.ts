@@ -993,6 +993,73 @@ describe("the organization's personal-connections rule (owner scope)", () => {
     expect(await call({ expected: 2 })).toEqual(refused);
     expect(await quotaRevision(personal)).toBe(2);
   });
+
+  test("an owner's refresh persists through the shared refresh writer with the plan, only on the owner's own begin", async () => {
+    const org = await organization();
+    const personal = await personalConnection(org, "own-plan");
+    const other = await member(org);
+    const args = (subjectId: string, workspaceId: string) =>
+      sql`${FAKE_API_KEY_PROVIDER}, ${org.accountId}::uuid, ${workspaceId}::uuid,
+        ${subjectId}, ${personal}::uuid`;
+    const refresh = (input: {
+      subjectId: string;
+      workspaceId: string;
+      begin: boolean;
+      plan: string | null;
+    }) =>
+      withRlsContext(
+        client.db,
+        { accountId: org.accountId, workspaceId: input.workspaceId },
+        async (tx) => {
+          await setSubjectRlsContext(tx, input.subjectId);
+          const begun = input.begin
+            ? await rawRows<{ refresh_generation: number | string }>(
+                tx,
+                sql`select refresh_generation
+                  from opengeni_private.begin_subscription_core_owned_connection_refresh(
+                    ${args(input.subjectId, input.workspaceId)})`,
+              )
+            : [];
+          // Outside a chat turn: no session and no turn.
+          const [persisted] = await rawRows<{ persisted: boolean }>(
+            tx,
+            sql`select opengeni_private.persist_subscription_core_refresh_with_plan(
+              ${FAKE_API_KEY_PROVIDER}, ${org.accountId}::uuid, ${input.workspaceId}::uuid,
+              null::uuid, null::uuid, ${personal}::uuid,
+              ${Number(begun[0]?.refresh_generation ?? 1)}::bigint, ${credential("sk-own-plan-2")},
+              null::timestamptz, now(), ${input.plan}
+            ) as persisted`,
+          );
+          return persisted?.persisted === true;
+        },
+      );
+    const stored = async () =>
+      (
+        await shared.admin<{ plan_type: string | null; generation: number }[]>`
+          select plan_type, refresh_generation::int as generation
+          from subscription_connections where id = ${personal}::uuid`
+      )[0];
+    const owner = { subjectId: org.ownerSubjectId, workspaceId: org.personalWorkspaceId };
+
+    // No authorization minted, or another member's begin: nothing is written.
+    expect(await refresh({ ...owner, begin: false, plan: "team" })).toBe(false);
+    expect(
+      await refresh({
+        subjectId: other.subjectId,
+        workspaceId: other.personalWorkspaceId,
+        begin: true,
+        plan: "team",
+      }),
+    ).toBe(false);
+    expect(await stored()).toEqual({ plan_type: null, generation: 1 });
+
+    // The owner's begin admits exactly one write, which records the plan.
+    expect(await refresh({ ...owner, begin: true, plan: "team" })).toBe(true);
+    expect(await stored()).toEqual({ plan_type: "team", generation: 2 });
+    // A token that reports no plan keeps the recorded one.
+    expect(await refresh({ ...owner, begin: true, plan: null })).toBe(true);
+    expect(await stored()).toEqual({ plan_type: "team", generation: 3 });
+  });
 });
 
 describe("refresh writers and request custody of both scopes", () => {

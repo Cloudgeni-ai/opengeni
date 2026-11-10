@@ -779,13 +779,28 @@ export async function persistSubscriptionCoreRefresh(
  * (M3 PR 2a). Same one-shot authorization, advisory lock and
  * refresh-generation compare-and-swap; a NULL plan keeps the recorded plan,
  * and a changed plan clears the connection's model cooldowns.
+ *
+ * Every refresh path persists through it (migration 1354): a chat turn's
+ * refresh names its session and turn and consumes the authorization
+ * begin_subscription_core_refresh minted; a refresh outside a turn
+ * (operations, usage reads, administered connections) passes null for both
+ * and consumes the one begin_subscription_core_connection_refresh or
+ * begin_subscription_core_owned_connection_refresh minted.
  */
 export async function persistSubscriptionCoreRefreshWithPlan(
   db: Database,
-  input: Parameters<typeof persistSubscriptionCoreRefresh>[1] & { planType: string | null },
+  input: Omit<Parameters<typeof persistSubscriptionCoreRefresh>[1], "sessionId" | "turnId"> & {
+    /** The chat turn's session and turn; both null for a refresh outside a turn. */
+    sessionId: string | null;
+    turnId: string | null;
+    planType: string | null;
+  },
 ): Promise<boolean> {
   subscriptionCoreProvider(input.provider);
   assertPositiveGeneration(input.expectedRefreshGeneration);
+  if ((input.sessionId === null) !== (input.turnId === null)) {
+    throw new Error("A subscription refresh names both its session and turn, or neither");
+  }
   const trimmed = input.planType?.trim() ?? "";
   const planType = /^[A-Za-z0-9_.-]{1,64}$/.test(trimmed) ? trimmed : null;
   const [row] = await rawRows<{ persisted: boolean }>(

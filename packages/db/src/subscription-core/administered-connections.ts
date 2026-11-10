@@ -367,17 +367,14 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
                 }
               : null;
           },
-          // The 0707 refresh writers, on the capability `begin` minted.
-          async persist(tx, input) {
-            const [persisted] = await rawRows<{ persisted: boolean }>(
+          // The shared refresh writers, on the capability `begin` minted.
+          persist(tx, input) {
+            return operations().persistSubscriptionCoreConnectionRefresh(
               tx,
-              sql`select opengeni_private.persist_subscription_core_connection_refresh(${tenant},
-                ${input.refreshGeneration}::bigint, ${input.credentialEncrypted},
-                ${input.expiresAt?.toISOString() ?? null}::timestamptz,
-                ${input.refreshedAt.toISOString()}::timestamptz
-              ) as persisted`,
+              { accountId: scope.accountId, workspaceId: scope.workspaceId },
+              connectionId,
+              input,
             );
-            return persisted?.persisted === true;
           },
           async fail(tx, input) {
             const [marked] = await rawRows<{ marked: boolean }>(
