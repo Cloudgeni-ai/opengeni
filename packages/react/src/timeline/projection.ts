@@ -4106,6 +4106,7 @@ function approvalActionsOf(
     if (!id) continue;
     const display = asRecord(record.display);
     const title = stringValue(display.title).trim();
+    const toolName = stringValue(display.toolName).trim();
     // Beside the display, which stays the strict shape every client parses.
     const facts = (Array.isArray(record.targetFacts) ? record.targetFacts : [])
       .slice(0, 12)
@@ -4114,7 +4115,12 @@ function approvalActionsOf(
         value: stringValue(asRecord(fact).value).trim(),
       }))
       .filter((fact) => fact.label && fact.value);
-    actions.push({ id, title: title || null, ...(facts.length > 0 ? { facts } : {}) });
+    actions.push({
+      id,
+      title: title || null,
+      ...(toolName ? { toolName } : {}),
+      ...(facts.length > 0 ? { facts } : {}),
+    });
   }
   return actions;
 }

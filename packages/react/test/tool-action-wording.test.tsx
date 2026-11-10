@@ -7,6 +7,7 @@ import {
   type OpenGeniMessages,
 } from "../src/messages/runtime";
 import { toolDisplayName } from "../src/timeline/tool-display-name";
+import { noticeDisplayText } from "../src/timeline/notice-presentation";
 import { wordedToolActionReview } from "../src/tool-action-wording";
 import { flush, registerDom, renderComponent, type RenderedComponent } from "./render-hook";
 
@@ -25,6 +26,7 @@ const NORWEGIAN: OpenGeniMessages = {
   "toolField.subject": "Emne",
   "toolField.isReminderOn": "Påminnelse",
   "toolActionReview.yes": "Ja",
+  "timeline.noticePresentation.youApprovedTitle": "Du godkjente «{title}».",
 };
 
 const saved: ToolActionReview = {
@@ -184,4 +186,26 @@ test("the same host title names the step in the chat and the pending approval", 
   // The approval list gives its own approve word; it is kept.
   expect(pending.approveLabel).toBe("Godkjenn");
   expect(pending.fields.map((field) => field.label)).toEqual(["Body"]);
+});
+
+test("the history line after a decision names the action in the host's words", () => {
+  const notice = {
+    text: "Approval needed",
+    approval: true as const,
+    resolvedAt: "2026-01-01T00:01:00Z",
+    approvalActions: [
+      {
+        id: "approval-1",
+        title: "Create a calendar event",
+        toolName: "me_calendar_createevents",
+        decision: "approve" as const,
+      },
+    ],
+  };
+  expect(noticeDisplayText(createOpenGeniText({ messages: NORWEGIAN }), notice)).toBe(
+    "Du godkjente «Opprett en kalenderavtale».",
+  );
+  expect(noticeDisplayText(createOpenGeniText(), notice)).toBe(
+    "You approved “Create a calendar event”.",
+  );
 });
