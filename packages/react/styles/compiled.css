@@ -16284,25 +16284,122 @@
   margin-top: 24px;
   padding-top: 24px;
 }
-:where(.og-root).og-connect-setup .og-connect-setup-approval,:where(.og-root) .og-connect-setup .og-connect-setup-approval {
+:where(.og-root).og-connect-setup-approval,:where(.og-root) .og-connect-setup-approval {
   display: grid;
-  gap: 20px;
+  gap: 16px;
+  min-width: 0;
 }
-:where(.og-root).og-connect-setup .og-connect-setup-approval-actions,:where(.og-root) .og-connect-setup .og-connect-setup-approval-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: center;
+:where(.og-root).og-connect-setup-approval-note,:where(.og-root) .og-connect-setup-approval-note {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--og-color-border,#888);
+  border-radius: 10px;
+  background: var(--og-color-surface-1,transparent);
+  font-size: 13px;
+  line-height: 1.55;
 }
-:where(.og-root).og-connect-setup .og-connect-setup-approval-actions button,:where(.og-root) .og-connect-setup .og-connect-setup-approval-actions button {
-  min-height: 44px;
+:where(.og-root).og-connect-setup-approval-copy,:where(.og-root) .og-connect-setup-approval-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
-:where(.og-root).og-connect-setup .og-connect-setup-approval-actions .og-connect-setup-secondary,:where(.og-root) .og-connect-setup .og-connect-setup-approval-actions .og-connect-setup-secondary {
-  border-color: transparent;
-  background: transparent;
-  padding-inline: 0;
+:where(.og-root).og-connect-setup-approval-copy p,:where(.og-root) .og-connect-setup-approval-copy p {
+  margin: 0;
+}
+:where(.og-root).og-connect-setup-approval-title,:where(.og-root) .og-connect-setup-approval-title {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--og-color-fg,inherit);
+}
+:where(.og-root).og-connect-setup-approval-note .og-connect-setup-approval-title,:where(.og-root) .og-connect-setup-approval-note .og-connect-setup-approval-title {
+  font-size: 13px;
+}
+:where(.og-root).og-connect-setup-approval-copy .og-connect-setup-description,:where(.og-root) .og-connect-setup-approval-copy .og-connect-setup-description {
+  color: var(--og-color-fg-muted,inherit);
+  font-size: 13px;
+  line-height: 1.55;
+}
+:where(.og-root).og-connect-setup-approval-message,:where(.og-root) .og-connect-setup-approval-message {
+  min-width: 0;
+  font-size: 13px;
+}
+:where(.og-root).og-connect-setup-approval-message summary,:where(.og-root) .og-connect-setup-approval-message summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--og-color-fg-muted,inherit);
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+:where(.og-root).og-connect-setup-approval-message summary:focus-visible,:where(.og-root) .og-connect-setup-approval-message summary:focus-visible {
+  outline: 2px solid var(--og-color-accent,currentColor);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+:where(.og-root).og-connect-setup-approval-message p,:where(.og-root) .og-connect-setup-approval-message p {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--og-color-surface-2,transparent);
+  color: var(--og-color-fg,inherit);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+  user-select: text;
+}
+:where(.og-root).og-connect-setup-approval-actions,:where(.og-root) .og-connect-setup-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  align-items: center;
+  min-width: 0;
+}
+:where(.og-root).og-connect-setup-approval-actions .og-connect-setup-primary,:where(.og-root) .og-connect-setup-approval-actions .og-connect-setup-primary {
+  flex: 1 0 100%;
+  min-height: 44px;
+  margin-bottom: 4px;
+}
+:where(.og-root):is(.og-connect-setup-approval,.og-connect-setup-approval-note) .og-connect-setup-approval-button,:where(.og-root) :is(.og-connect-setup-approval,.og-connect-setup-approval-note) .og-connect-setup-approval-button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--og-color-border,#888);
+  border-radius: 8px;
+  background: var(--og-color-surface-2,transparent);
+  color: var(--og-color-fg,inherit);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+:where(.og-root):is(.og-connect-setup-approval,.og-connect-setup-approval-note) .og-connect-setup-approval-action,:where(.og-root) :is(.og-connect-setup-approval,.og-connect-setup-approval-note) .og-connect-setup-approval-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--og-color-fg,inherit);
+  font: inherit;
+  font-size: 13px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+:where(.og-root):is(.og-connect-setup-approval,.og-connect-setup-approval-note) :is(.og-connect-setup-approval-action,.og-connect-setup-approval-button):disabled,:where(.og-root) :is(.og-connect-setup-approval,.og-connect-setup-approval-note) :is(.og-connect-setup-approval-action,.og-connect-setup-approval-button):disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+:where(.og-root):is(.og-connect-setup-approval,.og-connect-setup-approval-note) :is(.og-connect-setup-approval-action,.og-connect-setup-approval-button):focus-visible,:where(.og-root) :is(.og-connect-setup-approval,.og-connect-setup-approval-note) :is(.og-connect-setup-approval-action,.og-connect-setup-approval-button):focus-visible {
+  outline: 2px solid var(--og-color-accent,currentColor);
+  outline-offset: 2px;
+}
+@media (pointer:coarse) {
+  :where(.og-root):is(.og-connect-setup-approval,.og-connect-setup-approval-note) :is(.og-connect-setup-approval-action,.og-connect-setup-approval-button),:where(.og-root) :is(.og-connect-setup-approval,.og-connect-setup-approval-note) :is(.og-connect-setup-approval-action,.og-connect-setup-approval-button) {
+    min-height: 44px;
+  }
 }
 :where(.og-root).og-tc-overlay,:where(.og-root) .og-tc-overlay {
   position: fixed;

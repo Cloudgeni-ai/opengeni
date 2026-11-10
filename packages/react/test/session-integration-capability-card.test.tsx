@@ -53,7 +53,7 @@ afterEach(() => {
 });
 
 /** A Connect backend whose attempt waits for sign-in until `finish()`. */
-function backend() {
+function backend(signInUrl = "https://login.example.com/authorize") {
   const definitionId = "microsoft-outlook-mail";
   let revision = 0;
   let current: Record<string, unknown> | null = null;
@@ -89,8 +89,7 @@ function backend() {
     ],
     accounts: async () => [],
     pending: async () => [],
-    begin: async () =>
-      attempt({ nextAction: { type: "authorize", url: "https://login.example.com/authorize" } }),
+    begin: async () => attempt({ nextAction: { type: "authorize", url: signInUrl } }),
     recover: async () => structuredClone(current),
     get: async () => structuredClone(current),
     advance: async () => structuredClone(current),
@@ -302,4 +301,52 @@ test("a SharePoint setup card shows the SharePoint mark and name, not a letter",
     /class="og-session-capability-logo"[^>]*><img [^>]*src="[^"]*sharepoint[^"]*"/,
   );
   expect(html).toContain("Connect SharePoint");
+});
+
+test("a work sign-in the person gave up on offers IT approval help, here and in the next chat", async () => {
+  localStorage.clear();
+  const microsoft =
+    "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=app-1" +
+    "&redirect_uri=https%3A%2F%2Fapi.example.com%2Fcallback&scope=offline_access%20Mail.ReadWrite";
+  const fake = backend(microsoft);
+  const first = mountWithRealScheduling(card(fake.client));
+  try {
+    await startSignIn();
+    // Microsoft's "Need admin approval" page: the person stops waiting.
+    button("Cancel")!.click();
+    await waitFor(
+      () => text().includes("Didn't get to finish signing in?"),
+      "Stopping on the provider's page offered no approval help",
+    );
+    expect(button("Copy message for IT")).toBeDefined();
+  } finally {
+    await first.unmount();
+  }
+  // Another chat later: the card checks the earlier attempt and explains
+  // before the person tries again.
+  const next = mountWithRealScheduling(card(fake.client));
+  try {
+    await waitFor(
+      () => text().includes("Didn't get to finish signing in?"),
+      "The next visit did not offer the approval help",
+    );
+    expect(button("Copy message for IT")).toBeDefined();
+    expect(button("Try signing in again")).toBeDefined();
+  } finally {
+    await next.unmount();
+  }
+  // Approved and connected from somewhere else: nothing left to explain.
+  fake.finish();
+  const after = mountWithRealScheduling(card(fake.client));
+  try {
+    await waitFor(
+      () => text().includes("Your account is connected"),
+      "The card did not show the connected account",
+    );
+    expect(text()).not.toContain("Didn't get to finish signing in?");
+    expect(localStorage.length).toBe(0);
+  } finally {
+    await after.unmount();
+    localStorage.clear();
+  }
 });
