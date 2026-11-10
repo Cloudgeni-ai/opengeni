@@ -137,7 +137,7 @@ export function registerAgentCallTools(input: RegisterAgentCallToolsInput): void
       let member = false;
       let who = "The person";
       if (recipient) {
-        const found = await requireMember(deps, grant.workspaceId, recipient);
+        const found = await requireMember(deps, grant, recipient);
         if (found.subjectId !== owner.subjectId) {
           callee = found.subjectId;
           member = true;

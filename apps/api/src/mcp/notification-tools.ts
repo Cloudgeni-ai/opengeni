@@ -22,7 +22,7 @@ import {
   SessionNotificationWithdrawnPayload,
   type AccessGrant,
 } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { hasPermission, type ApiRouteDeps } from "@opengeni/core";
 import {
   countWebhookDeliveriesForEvent,
   dismissInboxNotification,
@@ -115,21 +115,29 @@ export async function resolveMember(
   return byName.length === 1 ? toMember(byName[0]!) : null;
 }
 
-/** A failed lookup must give the agent exact recipients it can retry with. */
+/**
+ * A failed lookup gives the agent exact recipients it can retry with, when its
+ * grant may already read the workspace's members (`workspace:read`, like the
+ * member-list API). A narrower grant keeps the plain refusal.
+ */
 export async function requireMember(
   deps: ApiRouteDeps,
-  workspaceId: string,
+  grant: Pick<AccessGrant, "workspaceId" | "permissions">,
   recipient: string,
 ): Promise<Member> {
-  const member = await resolveMember(deps, workspaceId, recipient);
+  const member = await resolveMember(deps, grant.workspaceId, recipient);
   if (member) return member;
-  const members = await listWorkspaceMembers(deps.db, workspaceId);
+  const unresolved = `${recipient} is not a member of this workspace (or the name matches more than one member).`;
+  if (!hasPermission(grant.permissions, "workspace:read")) {
+    throw new Error(`${unresolved} Use their email.`);
+  }
+  const members = await listWorkspaceMembers(deps.db, grant.workspaceId);
   const choices = members.map(
     (each) =>
       `- ${JSON.stringify(each.subjectLabel?.trim() || each.subjectId)}: recipient=${JSON.stringify(each.subjectId)}`,
   );
   throw new Error(
-    `${recipient} is not a member of this workspace (or the name matches more than one member). ` +
+    `${unresolved} ` +
       "Retry with the exact recipient ID of the intended member below.\n" +
       (choices.length > 0
         ? `Workspace members:\n${choices.join("\n")}`
@@ -244,7 +252,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
             "This session works for no person, so it cannot notify other members of the workspace.",
           );
         }
-        member = await requireMember(deps, grant.workspaceId, recipient);
+        member = await requireMember(deps, grant, recipient);
         if (member.subjectId === owner.subjectId) {
           member = null;
         } else if (

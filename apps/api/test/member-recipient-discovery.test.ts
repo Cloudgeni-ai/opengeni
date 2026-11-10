@@ -14,6 +14,8 @@ const member = (subjectId: string, subjectLabel: string | null): Members[number]
   createdAt: "2026-01-01T00:00:00.000Z",
 });
 let members: Members = [];
+const readGrant = { workspaceId, permissions: ["workspace:read", "sessions:control"] } as never;
+let grantPermissions: string[] = ["workspace:read", "sessions:control"];
 let authorized = true;
 let owner: { subjectId: string } | null = { subjectId: "user:ada" };
 const lookups: string[] = [];
@@ -60,6 +62,7 @@ const { registerAgentCallTools } = await import("../src/mcp/agent-call-tools");
 afterAll(() => mock.restore());
 beforeEach(() => {
   members = [member("user:ada", "Ada"), member("user:bea", "bea.account@example.test")];
+  grantPermissions = ["workspace:read", "sessions:control"];
   authorized = true;
   owner = { subjectId: "user:ada" };
   lookups.length = 0;
@@ -77,7 +80,7 @@ function tools() {
       },
     } as never,
     deps,
-    grant: { workspaceId, permissions: ["sessions:control"], permissionMode: "explicit" } as never,
+    grant: { workspaceId, permissions: grantPermissions, permissionMode: "explicit" } as never,
     sessionId: "00000000-0000-4000-8000-000000000002",
     authorize: async () => {
       if (!authorized) throw new Error("Unauthorized");
@@ -133,7 +136,7 @@ describe("member recipient discovery", () => {
           '- "Bea Smith": recipient="user:other-bea"',
       );
       for (const each of members) {
-        expect(await requireMember(deps, workspaceId, each.subjectId)).toEqual({
+        expect(await requireMember(deps, readGrant, each.subjectId)).toEqual({
           subjectId: each.subjectId,
           label: "Bea Smith",
         });
@@ -150,12 +153,27 @@ describe("member recipient discovery", () => {
       await expect(call(name, "Nobody")).rejects.toThrow("works for no person");
       expect(lookups).toEqual([]);
     });
+
+    test(`${name} lists members only for a grant that may read them`, async () => {
+      grantPermissions = ["sessions:control"];
+      const call = tools();
+      const refusal = call(name, "Bea");
+      await expect(refusal).rejects.toThrow(
+        "Bea is not a member of this workspace (or the name matches more than one member). Use their email.",
+      );
+      await expect(refusal).rejects.not.toThrow("Workspace members");
+      expect(lookups.every((scope) => scope === workspaceId)).toBe(true);
+      // The exact email still resolves without discovery.
+      if (name === "notify_user") {
+        await expect(call(name, "bea.account@example.test")).rejects.toThrow("hasn't allowed");
+      }
+    });
   }
 
   test("preserves exact ID, case-insensitive full label and account email matching", async () => {
     members[1] = member("user:bea", "Bea Smith");
     for (const recipient of [" user:bea ", " BEA SMITH ", "BEA.ACCOUNT@example.test"]) {
-      expect(await requireMember(deps, workspaceId, recipient)).toEqual({
+      expect(await requireMember(deps, readGrant, recipient)).toEqual({
         subjectId: "user:bea",
         label: "Bea Smith",
       });
@@ -171,25 +189,25 @@ describe("member recipient discovery", () => {
       member("user:two", " "),
       member("external:three", 'A\n"B"'),
     ];
-    await expect(requireMember(deps, workspaceId, "Nobody")).rejects.toThrow(
+    await expect(requireMember(deps, readGrant, "Nobody")).rejects.toThrow(
       'Workspace members:\n- "user:one": recipient="user:one"\n' +
         '- "user:two": recipient="user:two"\n- "A\\n\\"B\\"": recipient="external:three"',
     );
-    expect(await requireMember(deps, workspaceId, "external:three")).toMatchObject({
+    expect(await requireMember(deps, readGrant, "external:three")).toMatchObject({
       subjectId: "external:three",
     });
   });
 
   test("an empty workspace gives an explicit empty result", async () => {
     members = [];
-    await expect(requireMember(deps, workspaceId, "Nobody")).rejects.toThrow(
+    await expect(requireMember(deps, readGrant, "Nobody")).rejects.toThrow(
       "No workspace members are available.",
     );
   });
 
   test("lists every member, including the last member of a large workspace", async () => {
     members = Array.from({ length: 500 }, (_, index) => member(`user:${index}`, `Member ${index}`));
-    await expect(requireMember(deps, workspaceId, "Nobody")).rejects.toThrow(
+    await expect(requireMember(deps, readGrant, "Nobody")).rejects.toThrow(
       '- "Member 499": recipient="user:499"',
     );
   });
