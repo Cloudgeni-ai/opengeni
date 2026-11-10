@@ -92,6 +92,15 @@ test.each([
   ["smart quotes", `\u201Csk-ant-svc-${body}\u201D`, `sk-ant-svc-${body}`],
   ["env-file line", `ANTHROPIC_API_KEY="sk-ant-usr-${body}"`, `sk-ant-usr-${body}`],
   ["exported env line", `export ANTHROPIC_API_KEY = sk-ant-usr-${body}\n`, `sk-ant-usr-${body}`],
+  [
+    "invisible character before env line",
+    `\u200BANTHROPIC_API_KEY=sk-ant-usr-${body}`,
+    `sk-ant-usr-${body}`,
+  ],
+  ["one-sided quote", `"sk-ant-usr-${body}`, `sk-ant-usr-${body}`],
+  ["YAML line", `anthropic_api_key: 'sk-ant-svc-${body}'`, `sk-ant-svc-${body}`],
+  ["header line", `x-api-key: sk-ant-usr-${body}`, `sk-ant-usr-${body}`],
+  ["bearer prefix", `Bearer sk-ant-api03-${body}`, `sk-ant-api03-${body}`],
 ] as const)("Anthropic API key accepted: %s", (_label, pasted, stored) => {
   expect(assertAnthropicApiKey(pasted)).toBe(stored);
   expect(() =>

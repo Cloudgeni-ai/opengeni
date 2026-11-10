@@ -12,18 +12,25 @@ const ANTHROPIC_API_KEY_INCOMPLETE_MESSAGE =
   "This doesn't look like a complete Anthropic API key. Copy the full key from the Anthropic Console and paste it again.";
 
 const QUOTES = "\"'`\u2018\u2019\u201C\u201D";
-const WRAPPING_QUOTES = new RegExp(`^[${QUOTES}](.*)[${QUOTES}]$`, "u");
+const LEADING_QUOTES = new RegExp(`^[${QUOTES}]+`, "u");
+const TRAILING_QUOTES = new RegExp(`[${QUOTES}]+$`, "u");
 
 /**
  * Clean up a pasted Anthropic API key. Keys never contain whitespace,
- * invisible format characters, quotes or `=`, so an env-file line
- * (`export ANTHROPIC_API_KEY="…"`), a line break from a wrapped copy,
- * invisible characters and wrapping (smart) quotes are removed instead of
- * failing the connection.
+ * invisible format characters or quotes, so invisible characters, an env-file
+ * line (`export ANTHROPIC_API_KEY="…"`), a line break from a wrapped copy,
+ * (smart) quotes at either end and any label before `sk-ant-` (`Bearer `,
+ * `x-api-key: `) are removed instead of failing the connection.
  */
 export function normalizeAnthropicApiKey(apiKey: string): string {
-  const value = apiKey.trim().replace(/^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*/u, "");
-  return value.replace(/[\s\p{Cf}]+/gu, "").replace(WRAPPING_QUOTES, "$1");
+  let value = apiKey
+    .replace(/\p{Cf}+/gu, "")
+    .trim()
+    .replace(/^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*/u, "")
+    .replace(/\s+/gu, "");
+  const start = value.search(/sk-ant-/iu);
+  if (start > 0) value = value.slice(start);
+  return value.replace(LEADING_QUOTES, "").replace(TRAILING_QUOTES, "");
 }
 
 /**
