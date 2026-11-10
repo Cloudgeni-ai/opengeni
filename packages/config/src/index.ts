@@ -2351,9 +2351,9 @@ const SettingsSchema = z.object({
     .min(1)
     .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
-  // Owners and admins confirm admin changes with a recent passkey (CASA
-  // 3.3.1). Off by default so a deployment turns it on once its admins have
-  // passkeys; applies only where passkey sign-in is offered.
+  // Owners and admins confirm admin changes in a browser session confirmed
+  // with a passkey (CASA 3.3.1). Off by default; production sets required.
+  // Applies only where passkey sign-in is offered.
   adminPasskeyStepUp: z.enum(["off", "required"]).default("off"),
   // URL schemes the native app may receive its sign-in code on
   // (`<scheme>://auth/callback`). A host shipping its own build of the app

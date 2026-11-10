@@ -263,64 +263,23 @@ const delegatedHumanRequests = new WeakMap<Request, DelegatedHumanAuthorization>
 const delegatedHumanContexts = new WeakMap<AccessContext, DelegatedHumanAuthorization>();
 /** Exact-workspace proofs for external users (see stampWorkspacePersonAuthorization). */
 const workspaceExternalPersonProofs = new WeakSet<DelegatedHumanAuthorization>();
-/** Contexts resolved from an approved native app credential (also canonical managed). */
-const nativeAppContexts = new WeakSet<AccessContext>();
 /** The verified Better Auth session id behind a canonical managed-cookie context. */
 const managedCookieSessionIds = new WeakMap<AccessContext, string>();
-/**
- * For an agent or personal key acting as a person: that person's own live
- * access before the key's narrowing. Describes who they are, never what this
- * request may do.
- */
-const delegatedHumanLiveContexts = new WeakMap<AccessContext, AccessContext>();
-
-export type ManagedPersonForAccessContext = {
-  /** The person's Better Auth user id (the subject without its `user:` prefix). */
-  authUserId: string;
-  /**
-   * The person's own organization and workspace grants (their membership
-   * roles), not narrowed by an agent's or key's access setting: who they are,
-   * never what this request may do.
-   */
-  personAccess: Pick<AccessContext, "accountGrants" | "workspaceGrants">;
-  /**
-   * How the person is present: signed in in this browser session (with its
-   * id), through an approved native app, or through an agent or personal API
-   * key acting as them.
-   */
-  via:
-    | { kind: "browser_session"; authSessionId: string }
-    | { kind: "native_app" }
-    | { kind: "acting_for_person" };
-};
 
 /**
- * The Opengeni person this resolved request acts as, from how the resolver
- * actually authenticated it, never from request headers. Null for
- * organization and workspace API keys, services, host-signed delegation,
- * external people and local installs.
+ * The person signed in in this browser session, with the session's id, from
+ * how access resolution actually authenticated the request (never from
+ * request headers). Null for an approved native app, an agent or API key
+ * acting as a person, organization and workspace API keys, services,
+ * host-signed delegation, external people and local installs.
  */
-export function managedPersonForAccessContext(
+export function managedBrowserSessionForAccessContext(
   context: AccessContext,
-): ManagedPersonForAccessContext | null {
+): { authUserId: string; authSessionId: string } | null {
   if (context.mode !== "managed" || !context.subjectId.startsWith("user:")) return null;
-  const authUserId = context.subjectId.slice("user:".length);
-  if (nativeAppContexts.has(context))
-    return { authUserId, personAccess: context, via: { kind: "native_app" } };
   const authSessionId = managedCookieSessionIds.get(context);
-  if (canonicalManagedCookieContexts.has(context) && authSessionId)
-    return { authUserId, personAccess: context, via: { kind: "browser_session", authSessionId } };
-  const delegated = delegatedHumanContexts.get(context);
-  const live = delegatedHumanLiveContexts.get(context);
-  if (
-    delegated &&
-    live &&
-    live.subjectId === context.subjectId &&
-    !workspaceExternalPersonProofs.has(delegated) &&
-    delegated.subjectId === context.subjectId
-  )
-    return { authUserId, personAccess: live, via: { kind: "acting_for_person" } };
-  return null;
+  if (!canonicalManagedCookieContexts.has(context) || !authSessionId) return null;
+  return { authUserId: context.subjectId.slice("user:".length), authSessionId };
 }
 const delegatedHumanProfileSchema = z.object({
   id: z.string(),
@@ -2237,7 +2196,6 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
-      nativeAppContexts.add(context);
       markAppCredentialGrants(context);
       recordUserPresence(c, deps, context.subjectId);
       return context;
@@ -2458,7 +2416,6 @@ async function resolveDelegatedHumanAccessContext(
   Object.freeze(context);
   delegatedHumanContexts.set(context, proof);
   delegatedHumanProfiles.set(context, Object.freeze(profile));
-  delegatedHumanLiveContexts.set(context, live);
   return context;
 }
 

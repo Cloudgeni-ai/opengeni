@@ -78,7 +78,7 @@ export function AdminStepUpDialog({
       size="sm"
       leading={<KeyRoundIcon aria-hidden />}
       title="Confirm it's you"
-      description="Use your passkey to change admin settings. You won't be asked again for a few minutes."
+      description="Use your passkey to change admin settings. You won't be asked again until you sign out."
       submitLabel="Use passkey"
       pendingLabel="Waiting for your passkey…"
       error={error}

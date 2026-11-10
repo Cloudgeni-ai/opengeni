@@ -30,9 +30,7 @@ export async function adminStepUpRequested(response: Response): Promise<AdminSte
   if (response.status !== 403) return null;
   try {
     const body = (await response.clone().json()) as {
-      error?: {
-        details?: { code?: unknown; passkeyRegistered?: unknown; browserRequired?: unknown };
-      };
+      error?: { details?: { code?: unknown; passkeyRegistered?: unknown } };
     };
     const details = body.error?.details;
     if (details?.code !== ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE) return null;

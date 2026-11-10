@@ -13,11 +13,7 @@ import { getManagedSession, type ApiRouteDeps } from "@opengeni/core";
 import { nestedPostgresSqlState } from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
-import {
-  ADMIN_STEP_UP_WINDOW_MS,
-  adminStepUpEnforced,
-  recordAdminStepUp,
-} from "../auth/admin-step-up";
+import { adminStepUpEnforced, recordAdminStepUp } from "../auth/admin-step-up";
 import { runManagedAuthProvider } from "../auth/managed-auth-attempt-context";
 import { managedAuthSessionCookieHeaders } from "../auth/managed-auth-session-adapter";
 import {
@@ -169,8 +165,9 @@ async function signInVerifiedPerson(
   if (!session?.token) {
     return refusal(403, "PASSKEY_SIGN_IN_REFUSED", "This account can't sign in right now");
   }
-  // Signing in with a passkey also counts as confirming it's them. Best
-  // effort: failing to record it only means a prompt later, never no sign-in.
+  // A session signed in with a passkey is confirmed with one for its whole
+  // life. Best effort: failing to mark it only means a prompt later, never no
+  // sign-in.
   if (typeof session.id === "string" && adminStepUpEnforced(deps)) {
     await recordAdminStepUp(deps, { authUserId, authSessionId: session.id }).catch(() => {});
   }
@@ -238,7 +235,7 @@ export function registerManagedPasskeyRoutes(
   });
 
   // Admin step-up: the signed-in person confirms it's them with one of their
-  // own passkeys, in this browser session.
+  // own passkeys, which marks this browser session until it ends.
   const signedInBrowserPerson = async (context: Context) => {
     if (context.req.header("authorization") !== undefined) return null;
     const session = await getManagedSession(context, deps.managedAuth!, {
@@ -311,12 +308,7 @@ export function registerManagedPasskeyRoutes(
         return refusal(422, "PASSKEY_NOT_VERIFIED", "The passkey could not be verified");
       }
       await recordAdminStepUp(deps, person);
-      return context.json(
-        ManagedPasskeyStepUpResponse.parse({
-          confirmed: true,
-          expiresAt: new Date(Date.now() + ADMIN_STEP_UP_WINDOW_MS).toISOString(),
-        }),
-      );
+      return context.json(ManagedPasskeyStepUpResponse.parse({ confirmed: true }));
     } catch (error) {
       return passkeyRefusal(error);
     }

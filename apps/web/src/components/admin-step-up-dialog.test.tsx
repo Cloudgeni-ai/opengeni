@@ -120,6 +120,8 @@ describe("AdminStepUpDialog", () => {
     );
     await flush();
     expect(view.container.querySelector("h2")?.textContent).toBe("Confirm it's you");
+    // Once per session, not every few minutes.
+    expect(view.container.textContent).toContain("You won't be asked again until you sign out.");
     await view.click("Use passkey");
     expect((await change).status).toBe(200);
     expect(confirmations).toBe(1);

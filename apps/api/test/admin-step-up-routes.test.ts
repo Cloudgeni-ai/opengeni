@@ -59,11 +59,21 @@ describe("admin step-up routes", () => {
     }
   });
 
+  test("creating a personal key is checked; using or revoking one is not", () => {
+    expect(matchAdminRoute("POST", `${ORG}/personal-api-keys`)?.route.scope).toBe(
+      "personal_api_key",
+    );
+    expect(matchAdminRoute("POST", `${ORG}/personal-api-keys/`)?.organizationId).toBe(
+      ORG.split("/").at(-1),
+    );
+    expect(matchAdminRoute("PATCH", `${ORG}/personal-api-keys`)).toBeNull();
+  });
+
   test("leaves reads, a person's own keys and everyday work alone", () => {
     for (const [method, path] of [
       ["GET", ORG],
       ["GET", `${ORG}/members`],
-      ["POST", `${ORG}/personal-api-keys`],
+      ["GET", `${ORG}/personal-api-keys`],
       ["DELETE", `${ORG}/personal-api-keys/abc`],
       ["POST", `${ORG}/external-identities/lookup`],
       ["POST", "/v1/organizations"],

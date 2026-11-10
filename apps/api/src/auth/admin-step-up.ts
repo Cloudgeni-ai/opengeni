@@ -1,8 +1,11 @@
-import { randomUUID } from "node:crypto";
 import { ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE } from "@opengeni/contracts/managed-sign-in-methods";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { AccessContext } from "@opengeni/contracts";
-import { hasPermission, managedPersonForAccessContext, requireAccessContext } from "@opengeni/core";
+import {
+  hasPermission,
+  managedBrowserSessionForAccessContext,
+  requireAccessContext,
+} from "@opengeni/core";
 import { getConnectionMetadata, getWorkspace, withAccountRls } from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import type { Context, MiddlewareHandler } from "hono";
@@ -11,20 +14,26 @@ import { managedPasskeySignInOffered } from "../routes/managed-passkeys";
 
 /* ----------------------------------------------------------------------------
    Admin step-up (CASA 3.3.1). An organization owner or admin, or a workspace
-   admin, changing admin settings must have used a passkey in the last ten
-   minutes: in this browser session, or, for an agent, native app or personal
-   API key acting as them, in any of their sessions. Normal members, personal
-   workspaces and programmatic organization or workspace API keys are not
-   affected; those keep their own permission checks. Reads never need it.
+   admin, changing admin settings in a browser must be in a session confirmed
+   with a passkey: signed in with one, or confirmed with one once in it. The
+   mark is on the session row (auth_sessions.mfa_verified_at), so it lasts as
+   long as the session and goes with it on sign-out or revocation. Creating a
+   personal API key is gated the same way for such an admin.
+
+   Only browser sessions are asked. An approved native app, and an agent or
+   personal API key acting as the person, act under the person's existing
+   authority; organization and workspace API keys, services and delegation
+   keep their own permission checks. Normal members, personal workspaces and
+   reads never need it.
    -------------------------------------------------------------------------- */
 
-export const ADMIN_STEP_UP_WINDOW_MS = 10 * 60_000;
-const STEP_UP_IDENTIFIER_PREFIX = "opengeni-admin-step-up:";
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-type Scope = "organization" | "workspace" | "billing";
+type Scope = "organization" | "workspace" | "billing" | "personal_api_key";
 type AdminRoute = {
   scope: Scope;
+  /** Only these methods (default: every mutation). */
+  methods?: readonly string[];
   pattern: RegExp;
   /**
    * Only a shared (workspace or organization) connection is an admin setting:
@@ -84,6 +93,8 @@ export const ADMIN_ROUTES: readonly AdminRoute[] = [
     shared: "existing",
   }),
   route("billing", "/v1/billing/(?:checkout|portal|alerts|subscription/.+|auto-top-up(?:/.*)?)"),
+  // Creating a key that acts as an admin; using or revoking one isn't asked.
+  route("personal_api_key", `${ORG}/personal-api-keys`, { methods: ["POST"] }),
 ];
 
 export function matchAdminRoute(
@@ -95,8 +106,10 @@ export function matchAdminRoute(
   workspaceId?: string;
   connectionId?: string;
 } | null {
-  if (!MUTATING_METHODS.has(method.toUpperCase())) return null;
+  const verb = method.toUpperCase();
+  if (!MUTATING_METHODS.has(verb)) return null;
   for (const candidate of ADMIN_ROUTES) {
+    if (candidate.methods && !candidate.methods.includes(verb)) continue;
     const match = candidate.pattern.exec(pathname);
     if (!match) continue;
     const groups = match.groups ?? {};
@@ -128,47 +141,31 @@ async function rows<T>(
 }
 
 /**
- * Record that this person just used a passkey in this browser session. Stored
- * as a plain identifier (a person and session id, no secret) so it can be
- * looked up per person; the person's lapsed records are removed meanwhile.
+ * Mark this browser session as confirmed with a passkey, for as long as it
+ * lasts. Only the person's own live session is marked.
  */
 export async function recordAdminStepUp(
   deps: Pick<ApiRouteDeps, "db">,
   input: { authUserId: string; authSessionId: string },
 ): Promise<void> {
-  const prefix = `${STEP_UP_IDENTIFIER_PREFIX}${input.authUserId}:`;
   await deps.db.execute(sql`
-    with lapsed as (
-      delete from auth_verifications
-      where starts_with(identifier, ${prefix}) and expires_at <= clock_timestamp()
-    )
-    insert into auth_verifications (id, identifier, value, expires_at)
-    values (${randomUUID()}, ${`${prefix}${input.authSessionId}`}, 'passkey',
-      clock_timestamp() + make_interval(secs => ${ADMIN_STEP_UP_WINDOW_MS / 1000}))`);
+    update auth_sessions set mfa_verified_at = clock_timestamp()
+    where id = ${input.authSessionId} and user_id = ${input.authUserId}
+      and expires_at > clock_timestamp()`);
 }
 
-/**
- * Whether this person used a passkey within the window: in this browser
- * session when one is named, otherwise in any of their sessions still signed in.
- */
-export async function hasRecentAdminStepUp(
+/** Whether this browser session is live and was confirmed with a passkey. */
+export async function adminStepUpVerified(
   deps: Pick<ApiRouteDeps, "db">,
-  input: { authUserId: string; authSessionId: string | null },
+  input: { authUserId: string; authSessionId: string },
 ): Promise<boolean> {
-  const prefix = `${STEP_UP_IDENTIFIER_PREFIX}${input.authUserId}:`;
-  const [found] = await rows<{ fresh: boolean }>(
+  const [found] = await rows<{ verified: boolean }>(
     deps,
-    input.authSessionId
-      ? sql`select exists(select 1 from auth_verifications
-          where identifier = ${`${prefix}${input.authSessionId}`}
-          and expires_at > clock_timestamp()) as fresh`
-      : sql`select exists(select 1 from auth_verifications
-          v join auth_sessions s on s.user_id = ${input.authUserId}
-            and v.identifier = ${prefix} || s.id
-          where s.expires_at > clock_timestamp()
-          and v.expires_at > clock_timestamp()) as fresh`,
+    sql`select exists(select 1 from auth_sessions
+      where id = ${input.authSessionId} and user_id = ${input.authUserId}
+      and expires_at > clock_timestamp() and mfa_verified_at is not null) as verified`,
   );
-  return found?.fresh === true;
+  return found?.verified === true;
 }
 
 async function hasPasskey(deps: Pick<ApiRouteDeps, "db">, authUserId: string): Promise<boolean> {
@@ -182,26 +179,20 @@ async function hasPasskey(deps: Pick<ApiRouteDeps, "db">, authUserId: string): P
 type PersonAccess = Pick<AccessContext, "accountGrants" | "workspaceGrants">;
 type StepUpPerson = {
   authUserId: string;
-  authSessionId: string | null;
-  /** Their own membership grants, not an agent's or key's narrowed copy. */
+  authSessionId: string;
+  /** Their membership grants (a browser session is never narrowed). */
   access: PersonAccess;
 };
 
 /**
- * The person behind this request, from how access resolution authenticated
- * it: their browser session, or (any of their sessions) an approved native
- * app or an agent or personal API key acting as them. Null for organization
- * and workspace API keys, services, host-signed delegation, external people
- * and anyone not signed in (the route refuses that itself).
+ * The person signed in in this browser session, or null for every other
+ * caller: an approved native app, an agent or API key acting as a person,
+ * organization and workspace API keys, services, host-signed delegation,
+ * external people and anyone not signed in (the route refuses that itself).
  */
 function stepUpPerson(context: AccessContext): StepUpPerson | null {
-  const person = managedPersonForAccessContext(context);
-  if (!person) return null;
-  return {
-    authUserId: person.authUserId,
-    authSessionId: person.via.kind === "browser_session" ? person.via.authSessionId : null,
-    access: person.personAccess,
-  };
+  const session = managedBrowserSessionForAccessContext(context);
+  return session ? { ...session, access: context } : null;
 }
 
 /** The body as JSON, whatever its content type (routes parse it regardless). */
@@ -275,6 +266,39 @@ function organizationAdmin(access: PersonAccess, accountId: string | undefined):
 }
 
 /**
+ * Whether the person is an owner or admin of this organization, or an admin
+ * of one of its shared workspaces. Every person administers their own
+ * personal workspace, so the workspace's kind is read, not assumed.
+ */
+async function administersInOrganization(
+  deps: ApiRouteDeps,
+  access: PersonAccess,
+  organizationId: string | undefined,
+): Promise<boolean> {
+  if (!organizationId) return false;
+  if (organizationAdmin(access, organizationId)) return true;
+  const adminOf = access.workspaceGrants.filter(
+    (grant) =>
+      grant.accountId === organizationId &&
+      hasPermission(grant.permissions, "workspace:admin", grant.permissionMode),
+  );
+  if (adminOf.length === 0) return false;
+  try {
+    return await withAccountRls(deps.db, organizationId, async (tx) => {
+      for (const grant of adminOf) {
+        const workspace = await getWorkspace(tx, grant.workspaceId);
+        if (workspace && workspace.accountId === organizationId && workspace.kind !== "personal")
+          return true;
+      }
+      return false;
+    });
+  } catch {
+    // Can't tell: ask, rather than let a failed lookup skip the check.
+    return true;
+  }
+}
+
+/**
  * Whether the person administers what this request changes: an owner or
  * admin of its organization, or an admin of its shared workspace. A personal
  * workspace is the person's own, never an admin setting. Decided from the
@@ -288,6 +312,9 @@ async function administers(
   matched: NonNullable<ReturnType<typeof matchAdminRoute>>,
 ): Promise<boolean> {
   const access = person.access;
+  if (matched.route.scope === "personal_api_key") {
+    return administersInOrganization(deps, access, matched.organizationId);
+  }
   if (matched.route.scope === "billing") {
     const accountIds = await billingAccountIds(c, context);
     return accountIds.some((accountId) => organizationAdmin(access, accountId));
@@ -333,8 +360,8 @@ async function administers(
 }
 
 /**
- * Refuse an admin change by a person who hasn't used a passkey recently, with
- * ADMIN_PASSKEY_STEP_UP_REQUIRED and whether they have a passkey to use.
+ * Refuse an admin change from a browser session not confirmed with a passkey,
+ * with ADMIN_PASSKEY_STEP_UP_REQUIRED and whether they have a passkey to use.
  */
 export function adminStepUpGuard(deps: ApiRouteDeps): MiddlewareHandler {
   return async function adminStepUpMiddleware(c, next) {
@@ -352,7 +379,7 @@ export function adminStepUpGuard(deps: ApiRouteDeps): MiddlewareHandler {
     }
     const person = stepUpPerson(context);
     if (!person || !(await administers(c, deps, context, person, matched))) return await next();
-    if (await hasRecentAdminStepUp(deps, person)) return await next();
+    if (await adminStepUpVerified(deps, person)) return await next();
     const passkeyRegistered = await hasPasskey(deps, person.authUserId);
     throw new ApiHttpError(403, {
       code: "forbidden",
@@ -362,7 +389,6 @@ export function adminStepUpGuard(deps: ApiRouteDeps): MiddlewareHandler {
       details: {
         code: ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
         passkeyRegistered,
-        browserRequired: person.authSessionId === null,
       },
       retryable: false,
     });
