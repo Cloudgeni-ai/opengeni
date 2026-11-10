@@ -38581,11 +38581,15 @@ export async function getSessionForSubject(
       throw new Error(`Session event cursor invariant failed for session ${sessionId}`);
     }
     // mapSessionWithControl projects the effective policy below, once.
+    const handledFailure = (
+      await sessionIdsWithHandledFailure(scopedDb, workspaceId, [row.session])
+    ).has(sessionId);
     const [session] = await withCurrentSessionInputWait(scopedDb, workspaceId, [
       {
         ...row.session,
         lastSequence: row.cursor.lastSequence,
         meaningfulSequence: row.cursor.lastMeaningfulSequence,
+        ...(handledFailure ? { failureHandled: true } : {}),
       },
     ]);
     if (!session) throw new Error(`Session event cursor missing for session ${sessionId}`);
