@@ -58,6 +58,18 @@ export class TurnAdmissionRefusedError extends Error {
   }
 }
 
+/**
+ * The host's entitlements port refused the run. Its reason is the host's free
+ * text, so it never becomes the `turn.failed` message; a claimed turn stops on
+ * it like a credits stop, as it does between model calls.
+ */
+export class HostEntitlementDeniedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HostEntitlementDeniedError";
+  }
+}
+
 export class WorkspaceHumanInputDisabledError extends Error {
   constructor(kind: "resume" | "interruption") {
     super(`Workspace policy rejects structured human-input ${kind}`);
@@ -481,8 +493,9 @@ export async function ensureRunAllowed(
   // read does, so the mid-stream budget valve (`ensureRunAllowedBetweenModelCalls`)
   // wraps it in a `BudgetExhaustedError` and pauses identically — the valve never
   // learns whether the deny came from the local ledger or the host meter. The host's
-  // reason is free text, so it stays a plain Error (shown only as the generic turn
-  // failure); the local fixed refusals throw `TurnAdmissionRefusedError`.
+  // reason is free text, so it is a `HostEntitlementDeniedError`, never the
+  // `turn.failed` message (a claimed turn stops on it like a credits stop); the
+  // local fixed refusals throw `TurnAdmissionRefusedError`.
   //
   // This is an admission READ only; it records NO usage (metering stays the sole,
   // idempotency-keyed writer at recordModelUsageAndDebitCredits), so a PULL host meter
@@ -499,7 +512,7 @@ export async function ensureRunAllowed(
       quantity: 1,
     });
     if (!decision.allowed) {
-      throw new Error(decision.reason || "insufficient workspace credits");
+      throw new HostEntitlementDeniedError(decision.reason || "insufficient workspace credits");
     }
   } else if (
     chargesOpenGeniCredits &&

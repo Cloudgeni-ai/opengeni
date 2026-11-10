@@ -698,13 +698,29 @@ export async function runTurnStreamAttempt(
       const reducedSave = await (async () =>
         await readSandboxReducedSave(db, input.workspaceId, input.sessionId))().catch(() => null);
       const workspaceSaveNote = reducedSave ? reducedWorkspaceSaveNote(reducedSave) : undefined;
-      // A managed sandbox stopped (or lost) since the model's last output was
-      // or will be replaced from its saved /workspace alone; say so before the
-      // model relies on anything else. Optional: never fails a turn.
+      // A managed sandbox stopped (or lost) since the model's last output is
+      // replaced from its saved /workspace: say so once, before the model
+      // relies on anything outside it. Not for compaction maintenance, which
+      // writes no model output. Optional: never fails a turn.
       const stopBackend = activeSandboxBackend ?? groupBoxBackend;
       const unseenStop =
-        stopBackend !== "none" && stopBackend !== "selfhosted"
-          ? await readUnseenSandboxStop(db, input.workspaceId, input.sessionId).catch(() => null)
+        stopBackend !== "none" &&
+        stopBackend !== "selfhosted" &&
+        stopBackend !== "local" &&
+        turn.source !== "compaction"
+          ? await readUnseenSandboxStop(db, input.workspaceId, input.sessionId).catch(
+              (error: unknown) => {
+                try {
+                  observability.warn?.("sandbox stop notice read failed", {
+                    ...safeErrorDiagnostic(error),
+                    origin: "worker",
+                  });
+                } catch {
+                  // Diagnostics only.
+                }
+                return null;
+              },
+            )
           : null;
       const sandboxStopNote = unseenStop ? unseenSandboxStopNote(unseenStop) : undefined;
       const prepared = await turnInput(db, runtime, agent, trigger, {

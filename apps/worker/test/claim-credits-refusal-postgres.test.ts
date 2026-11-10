@@ -100,7 +100,10 @@ function scriptedRuntime(scripted: ScriptedModel): OpenGeniRuntime {
   };
 }
 
-async function runTurnWithoutCredits(ctx: Awaited<ReturnType<typeof startSession>>) {
+async function runTurnWithoutCredits(
+  ctx: Awaited<ReturnType<typeof startSession>>,
+  entitlements?: { admitRun: () => Promise<{ allowed: boolean; reason?: string }> },
+) {
   const balance = spyOn(opengeniDb, "getSpendableCreditBalance").mockResolvedValue({
     accountId: ctx.accountId,
     balanceMicros: 0,
@@ -120,6 +123,7 @@ async function runTurnWithoutCredits(ctx: Awaited<ReturnType<typeof startSession
       db: app.db,
       bus: new MemoryEventBus(),
       runtime: scriptedRuntime(scripted),
+      ...(entitlements ? { entitlements: entitlements as never } : {}),
     });
     const result = await activities.runAgentTurn({
       accountId: ctx.accountId,
@@ -153,5 +157,23 @@ test("a turn claimed without credits stops as a credits stop and leaves the sess
   });
   expect(await getSession(app.db, ctx.workspaceId, ctx.sessionId)).toMatchObject({
     status: "idle",
+  });
+});
+
+test("a host's entitlements deny at claim stops the same way, keeping the session idle", async () => {
+  const ctx = await startSession();
+  const { result, calls } = await runTurnWithoutCredits(ctx, {
+    admitRun: async () => ({ allowed: false, reason: "The plan's usage is used up" }),
+  });
+  expect(result.status).toBe("idle");
+  expect(calls).toBe(0);
+  const timeline = await listSessionEvents(app.db, ctx.workspaceId, ctx.sessionId, {
+    after: 0,
+    limit: 200,
+  });
+  expect(timeline.some((event) => event.type === "turn.failed")).toBe(false);
+  expect(timeline.find((event) => event.type === "turn.completed")?.payload).toMatchObject({
+    segmentLimit: "budget_exhausted",
+    detail: "The plan's usage is used up",
   });
 });

@@ -16,11 +16,13 @@ export type UnseenSandboxStop = {
  * model's own last output in the chat (a tool call or a completed message).
  *
  * Only the workspace is saved and restored across such a stop: files outside
- * it and running programs are gone, so the model has to be told before it
- * relies on them. Comparing with the model's own last output delivers that
- * once, whenever the next inference is prepared and whether or not the
- * replacement box already exists: a later inference has produced output after
- * the stop and no longer sees it. Read-only; uses the per-type sequence index.
+ * it and running programs may be gone, so the model is told before it relies
+ * on them. Comparing with the model's own last output delivers that once, when
+ * the next turn attempt prepares its input, whether or not the replacement box
+ * already exists. A box found lost during an attempt, after its input was
+ * prepared, is not covered: the attempt's later output hides it. A Connected
+ * Machine's drain (`providerStopped: false`) stops nothing and is skipped.
+ * Read-only; uses the per-type sequence index.
  */
 export async function readUnseenSandboxStop(
   db: Database,
@@ -40,6 +42,7 @@ export async function readUnseenSandboxStop(
         where workspace_id = ${workspaceId}
           and session_id = ${sessionId}
           and type in ('sandbox.box.terminated', 'sandbox.box.lost')
+          and coalesce(payload ->> 'providerStopped', 'true') <> 'false'
         order by sequence desc
         limit 1
       ) stop

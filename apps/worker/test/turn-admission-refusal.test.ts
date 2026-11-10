@@ -155,7 +155,7 @@ describe("fixed turn admission refusals", () => {
       } as never),
     );
     expect(error).not.toBeInstanceOf(TurnAdmissionRefusedError);
-    expect((error as Error).name).toBe("Error");
+    expect((error as Error).name).toBe("HostEntitlementDeniedError");
     expect(workflowFailureMessage(asRunAgentTurnFailure(error as Error))).toBe(
       "Activity task failed",
     );

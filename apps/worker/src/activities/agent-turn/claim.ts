@@ -74,6 +74,7 @@ import {
   AllowanceExhaustedError,
   SessionUsageLimitReachedError,
   TurnAdmissionRefusedError,
+  HostEntitlementDeniedError,
   sessionUsageLimitStopEvents,
   type AllowanceRefusal,
 } from "./admission";
@@ -651,7 +652,10 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       recordSessionUsageLimitEvent(observability, "claim", "reached");
     } else if (error instanceof AllowanceExhaustedError) {
       allowanceRefusal = error.refusal;
-    } else if (error instanceof TurnAdmissionRefusedError && error.creditsExhausted) {
+    } else if (
+      (error instanceof TurnAdmissionRefusedError && error.creditsExhausted) ||
+      error instanceof HostEntitlementDeniedError
+    ) {
       creditsRefusal = error.message;
     } else if (sessionUsageCustodyPending(error)) {
       // An earlier single call's receipt is still owed: wait, not a failure.

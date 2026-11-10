@@ -113,3 +113,22 @@ test("a lost box is reported as lost, and only the latest stop counts", async ()
   await append([{ type: "sandbox.box.lost", payload: { sandboxId: "sb-gone" } }]);
   expect(await read()).toMatchObject({ kind: "lost", reason: null });
 }, 60_000);
+
+test("a Connected Machine's drain is not reported as a stop", async () => {
+  if (!client) return;
+  const { append, read } = await chat();
+  await append([toolCall("call-1")]);
+  const [managedStop] = await append([idleStop]);
+  await append([
+    {
+      type: "sandbox.box.terminated",
+      payload: { ...idleStop.payload, instanceId: "machine", providerStopped: false },
+    },
+  ]);
+  // The machine kept running; the earlier managed stop is still the news.
+  expect(await read()).toEqual({
+    kind: "stopped",
+    at: new Date(managedStop!.occurredAt).toISOString(),
+    reason: "idle",
+  });
+}, 60_000);

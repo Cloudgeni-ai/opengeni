@@ -48,8 +48,6 @@ export const sandboxModule: AgentPromptModule = {
         "Do not chain shell commands with separators like `echo \"====\";` or `printf '---'`; they make the output noisy for the user.",
         "Exercise caution when escaping text for exec_command calls - backticks and `$()` passed to shell command input will still execute. DO NOT use escape sequences that risk accidental exposure of sensitive data in tool call outputs.",
         "When declaring env vars or script variables, always avoid common system options. Never repurpose `$HOME` or `$home`. Instead, use a task-specific variable name.",
-        context.resources.managedSandbox &&
-          "In a managed sandbox, only `/workspace` is kept when an idle sandbox is stopped and later restored; files elsewhere, such as in `/tmp`, and running programs are not. Keep tools and files you may need again under `/workspace`.",
       ),
       "## File editing constraints",
       "Use `apply_patch` for local file edits. Do not create or edit files with `cat` or other shell write tricks. Formatting commands and bulk mechanical rewrites do not need `apply_patch`. Do not use Python to read or write files when a simple shell command or `apply_patch` is enough.",

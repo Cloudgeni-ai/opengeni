@@ -1,19 +1,5 @@
 # Modular prompt changelog
 
-A managed sandbox keeps only `/workspace` when it is stopped while idle and
-restored later. The base sandbox line tells agents to put runtimes they install
-for their own checks "in a temporary directory outside" the project, which in a
-managed sandbox means `/tmp`, so an agent that waited for a person's answer lost
-its runtime and found out only from failing commands. The "Working in the
-sandbox" list now gains one bullet, only with a managed sandbox (a Connected
-Machine keeps `/tmp`): +228 bytes (about 50 tokens) for managed-sandbox
-sessions, unchanged otherwise. The per-stop facts (time, reason) travel as a
-turn note, not in the instructions, so the cached prefix is unchanged.
-
-```text
-+ - In a managed sandbox, only `/workspace` is kept when an idle sandbox is stopped and later restored; files elsewhere, such as in `/tmp`, and running programs are not. Keep tools and files you may need again under `/workspace`.   (managed sandbox only)
-```
-
 A configured session without a sandbox or Connected Machine no longer gets
 text it cannot act on: editing files in the sandbox, publishing new files,
 workspace file links, sandbox paths, background-command acknowledgement and

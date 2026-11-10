@@ -1022,9 +1022,10 @@ export function reducedWorkspaceSaveNote(save: {
 }
 
 /** Turn notice after the chat's managed sandbox stopped since the model's last
- * output: its replacement starts from the saved /workspace alone, so anything
- * else the model set up is gone, and it would otherwise find out only from
- * failing commands. */
+ * output: its replacement starts from the saved /workspace, so what the model
+ * set up elsewhere may be gone, and it would otherwise find out only from
+ * failing commands. One factual sentence: whether /workspace itself came back
+ * from an older save is told by the existing restore notices. */
 export function unseenSandboxStopNote(stop: {
   kind: "stopped" | "lost";
   at: string;
@@ -1038,9 +1039,9 @@ export function unseenSandboxStopNote(stop: {
     stop.kind === "lost"
       ? `stopped unexpectedly${when}`
       : stop.reason === "idle"
-        ? `was stopped${when} because it was idle`
+        ? `was stopped for being idle${when}`
         : `was stopped${when}`;
-  return `Sandbox note: this chat's sandbox ${what}; commands now run in a replacement restored from its saved /workspace. Only /workspace is kept: files elsewhere (such as /tmp), tools installed outside /workspace, and programs or background commands that were running are gone. Recreate what you still need before relying on it.`;
+  return `Sandbox note: this chat's sandbox ${what}, after your last action; files outside /workspace and programs that were running may be gone.`;
 }
 
 async function openSuffixMessageInput(
