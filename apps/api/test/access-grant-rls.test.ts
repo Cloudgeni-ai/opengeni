@@ -6,7 +6,11 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HTTPException } from "hono/http-exception";
-import { alongsideAuthorization, withAccessGrantSessionRlsContext } from "../src/access-grant-rls";
+import {
+  alongsideAuthorization,
+  requireLiveAgentAttemptGrant,
+  withAccessGrantSessionRlsContext,
+} from "../src/access-grant-rls";
 import { ApiHttpError } from "../src/http/api-error";
 import { httpRejectionFactsFromEnvelope } from "../src/http/rejection-telemetry";
 
@@ -179,7 +183,12 @@ describe("access-grant session RLS context", () => {
     expect(caught).toBeInstanceOf(ApiHttpError);
     const error = caught as ApiHttpError;
     expect(error.status).toBe(403);
-    expect(error.message).toBe("agent attempt authority is invalid");
+    expect(error.message).toContain("turn attempt that is no longer active");
+    expect(error.message).toContain("Stop retrying this process");
+    expect(error.message).toContain("start a fresh command from the current live turn");
+    expect(error.message).toContain("check its existing receipt or actual state");
+    expect(error.retryable).toBe(false);
+    expect(error.outcomeUnknown).toBe(false);
     expect(error.details).toEqual({ code: "agent_attempt_caller_stale" });
     expect(
       httpRejectionFactsFromEnvelope(
@@ -189,6 +198,33 @@ describe("access-grant session RLS context", () => {
     ).toBe("agent_attempt_caller_stale");
     expect(context).not.toHaveBeenCalled();
   });
+
+  test.each(["caller_stale", "revoked", "forbidden", "not_found"] as const)(
+    "the lightweight attempt gate preserves the typed %s refusal and only explains stale attempts",
+    async (reason) => {
+      spyOn(core, "requireLiveAgentAttemptAuthorization").mockRejectedValue(
+        new core.SessionAuthorizationDeniedError(reason),
+      );
+      const error = await requireLiveAgentAttemptGrant(
+        { db: {} } as never,
+        grant({ principalKind: "agent_attempt", metadata: { sessionId } }),
+      ).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ApiHttpError);
+      expect(error).toMatchObject({
+        status: 403,
+        code: "forbidden",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { code: `agent_attempt_${reason}` },
+      });
+      if (reason === "caller_stale") {
+        expect((error as Error).message).toContain("turn attempt that is no longer active");
+        expect((error as Error).message).toContain("start a fresh command");
+      } else {
+        expect((error as Error).message).toBe("agent attempt authority is invalid");
+      }
+    },
+  );
   test("reads the claimed attempt's learning policy while the liveness check runs", async () => {
     spyOn(db, "withSessionRlsActorContext").mockImplementation(async (_actor, fn) => fn());
     const attemptId = "55555555-5555-4555-8555-555555555555";
