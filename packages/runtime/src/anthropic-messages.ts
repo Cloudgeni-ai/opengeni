@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
 import { AnthropicRequestError } from "./anthropic-request-error";
-import { isCompactionSummary, isUserMessage } from "./context-compaction";
+import { isCompactionSummary } from "./context-compaction";
 import {
   ANTHROPIC_IMAGE_MAX_ENCODED_BYTES,
   ANTHROPIC_REQUEST_MAX_BYTES,
@@ -175,29 +175,55 @@ export function claudeReplayScope(
 }
 
 /**
- * The reply in progress (everything after the last user message) keeps its
- * signed thinking native whatever binding it records: the system prompt can
- * legitimately differ between requests of one turn (a one-shot directive on
- * its first request), Claude accepts that, and text in place of the turn's
- * thinking would turn thinking off for the rest of the turn. Only earlier
- * turns follow the binding check; a refusal is still caught by the retry.
+ * Signed thinking in earlier turns goes back natively only under the binding
+ * it was issued with (`claudeReplayScope`); elsewhere it becomes readable
+ * historical text, exactly as another provider's reasoning does. The turn
+ * boundary is the one Claude sees: the last user message that is not only
+ * tool results (a machine-origin continuation has its own). The reply in
+ * progress keeps its thinking native whatever binding it records: the system
+ * prompt can legitimately differ between requests of one turn (a one-shot
+ * directive on its first request), Claude accepts that, and text in place of
+ * the turn's thinking would turn thinking off for the rest of the turn. A
+ * refusal is still caught by the retry.
  */
-function inProgressThinkingNative(
-  input: Array<Record<string, unknown>>,
+function replayEarlierThinkingUnderBinding(
+  messages: Message[],
+  origins: ReadonlyMap<string, string>,
   scope: string,
-): Array<Record<string, unknown>> {
-  let start = input.length;
-  while (start > 0 && !isUserMessage(input[start - 1])) start -= 1;
-  let changed = false;
-  const projected = input.map((raw, index) => {
-    if (index < start) return raw;
-    const origin = claudeSignedThinkingBlock(raw) ? artifactOrigin(raw) : undefined;
-    if (origin === undefined || origin === scope) return raw;
-    changed = true;
-    const { [ARTIFACT_ORIGIN_KEY]: _origin, ...providerData } = object(raw.providerData);
-    return { ...raw, providerData };
+): void {
+  if (!origins.size) return;
+  let turnStart = -1;
+  messages.forEach((message, index) => {
+    if (message.role === "user" && message.content.some((block) => block.type !== "tool_result"))
+      turnStart = index;
   });
-  return changed ? projected : input;
+  for (const message of messages.slice(0, Math.max(turnStart, 0))) {
+    if (message.role !== "assistant") continue;
+    message.content = message.content.map((block) => {
+      const fingerprint = claudeThinkingFingerprint(block);
+      const origin = fingerprint ? origins.get(fingerprint) : undefined;
+      if (origin === undefined || origin === scope) return block;
+      return {
+        type: "text",
+        text: historicalReasoningText(
+          block.type === "thinking" ? String(block.thinking ?? "") : "",
+        ),
+      };
+    });
+  }
+}
+
+/** The binding recorded on each signed thinking block of a request's history. */
+function recordedThinkingOrigins(input: ModelRequest["input"]): Map<string, string> {
+  const origins = new Map<string, string>();
+  if (typeof input === "string") return origins;
+  for (const raw of input as unknown[]) {
+    const item = object(raw);
+    const block = claudeSignedThinkingBlock(item);
+    const origin = block ? artifactOrigin(item) : undefined;
+    if (block && origin !== undefined) origins.set(claudeThinkingFingerprint(block)!, origin);
+  }
+  return origins;
 }
 
 /** Fingerprints of the signed thinking blocks a request body sends natively. */
@@ -887,20 +913,12 @@ export function buildAnthropicRequest(
             fingerprint !== null &&
             (replayAsText?.has(fingerprint) === true || remembered?.(fingerprint) === true)
         : undefined;
-  const scope = claudeReplayScope(request, model, provider);
   const input =
     typeof request.input === "string"
       ? request.input
-      : (projectHistoryForProvider(
-          inProgressThinkingNative(request.input as Array<Record<string, unknown>>, scope),
-          "anthropic-messages",
-          {
-            artifactScope: scope,
-            ...(isRefused
-              ? { isRejectedArtifact: (item) => isRefused(opaqueReasoningFingerprint(item)) }
-              : {}),
-          },
-        ) as ModelRequest["input"]);
+      : (projectHistoryForProvider(request.input, "anthropic-messages", {
+          isRejectedArtifact: (item) => isRefused?.(opaqueReasoningFingerprint(item)) === true,
+        }) as ModelRequest["input"]);
   const webSearch = request.tools.some(isHostedWebSearchTool);
   let messages = anthropicMessages(input, {
     // Plain history replays earlier searches as readable facts, never as
@@ -930,6 +948,11 @@ export function buildAnthropicRequest(
   while (messages[0]?.role === "system") system.push(...messages.shift()!.content);
   if (!messages.length) throw new AnthropicProtocolError("Claude requires a conversation message");
   messages = placeConversationSystems(messages);
+  replayEarlierThinkingUnderBinding(
+    messages,
+    recordedThinkingOrigins(request.input),
+    claudeReplayScope(request, model, provider),
+  );
   const tools: Json[] = request.tools.map((tool) => {
     // Claude's own server-side search, at the agent's tool position so the
     // tools prefix is identical on every request of the conversation.

@@ -608,6 +608,34 @@ describe("the fallback chain always ends in a successful request", () => {
       expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([reasoningBlock(second)]);
     });
 
+  for (const streamed of [false, true])
+    test(`machine-input turns start a turn too, as Claude sees them (stream=${streamed})`, async () => {
+      const platform = claudePlatform({ streamed });
+      const model = new AnthropicMessagesModel(
+        claudeProvider(API),
+        "claude-opus-5-5",
+        platform.fetch,
+      );
+      const machineInput = (content: string) => ({ type: "message", role: "system", content });
+      const first = await run(model, request([user("Start the work.")], BASE_SYSTEM), streamed);
+      const history: Item[] = [
+        user("Start the work."),
+        ...persisted(first),
+        machineInput("Goal continuation."),
+      ];
+      const second = await run(model, request(history, BASE_SYSTEM), streamed);
+      history.push(...persisted(second), machineInput("Goal continuation."));
+      // A repository Skill is added before the next continuation turn.
+      await run(model, request(history, WITH_NEW_SKILL), streamed);
+      expect(platform.sent.map(({ refused }) => refused)).toEqual([false, false, false]);
+      expect(thinkingBlocks(platform.sent[1]!.body)).toEqual([reasoningBlock(first)]);
+      expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([]);
+      for (const thought of ["Reasoning 1.", "Reasoning 2."])
+        expect(JSON.stringify(platform.sent[2]!.body.messages)).toContain(
+          `${HISTORICAL}${thought}`,
+        );
+    });
+
   test("redacted thinking stored before bindings follows the same chain", async () => {
     const platform = claudePlatform({ streamed: false });
     const model = new AnthropicMessagesModel(

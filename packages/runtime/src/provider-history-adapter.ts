@@ -34,16 +34,17 @@ export type ProviderHistoryOptions = {
    */
   searchRecordForm?: SearchRecordForm;
   /**
-   * The binding this Responses or Claude request has (see
-   * opaque-reasoning-replay). Opaque reasoning (`encrypted_content`, or a
-   * Claude thinking signature) recorded under another binding, or that
-   * `isRejectedArtifact` reports, reaches it only as readable historical text:
-   * only its issuer can verify it, under the binding it was issued with. The
-   * origin record ({@link ARTIFACT_ORIGIN_KEY}) is removed from every item, so
-   * the issuer receives exactly the item it returned.
+   * The provider that receives this Responses request (see
+   * opaque-reasoning-replay). Opaque reasoning (its `encrypted_content`)
+   * that another provider issued, or that `isRejectedArtifact` reports,
+   * reaches it only as readable historical text: only the issuing provider
+   * can decrypt it. The origin record ({@link ARTIFACT_ORIGIN_KEY}) is removed
+   * from every item, so the issuing provider receives exactly the item it
+   * returned. Claude checks its finer binding on the wire, where it knows
+   * Claude's turn boundaries (`buildAnthropicRequest`).
    */
   artifactScope?: string;
-  /** True for an opaque item this provider already refused to decrypt. */
+  /** True for an opaque item (ciphertext or a Claude signature) this provider refused. */
   isRejectedArtifact?: (item: Record<string, unknown>) => boolean;
 };
 
@@ -305,11 +306,13 @@ function scopedOpaqueArtifact(
   options: ProviderHistoryOptions,
 ): Record<string, unknown> | undefined {
   const scope = options.artifactScope;
-  if (scope === undefined || item.type !== "reasoning") return undefined;
+  if (item.type !== "reasoning" || (scope === undefined && !options.isRejectedArtifact))
+    return undefined;
   const origin = artifactOrigin(item);
   if (
     opaqueReasoningCiphertext(item) &&
-    ((origin !== undefined && origin !== scope) || options.isRejectedArtifact?.(item) === true)
+    ((scope !== undefined && origin !== undefined && origin !== scope) ||
+      options.isRejectedArtifact?.(item) === true)
   )
     return memoized(foreignArtifactProjections, item, () =>
       historicalReasoningMessage(reasoningSummaryText(item)),
