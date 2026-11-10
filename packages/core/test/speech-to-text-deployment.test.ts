@@ -808,7 +808,7 @@ describe("a provider out of credit", () => {
     expect(result).toMatchObject({ text: "Hello", providerId: "second" });
   });
 
-  test("a subscription out of credit may fall back; any other refusal stays final", async () => {
+  test("SUB-FAIL-10: a subscription out of credit may fall back; any other refusal stays final", async () => {
     const refusal = (status: number, body: unknown) =>
       coreTranscriptionResult(Response.json(body, { status })).then(
         () => null,
@@ -822,7 +822,7 @@ describe("a provider out of credit", () => {
     expect(refused?.fallbackSafe).toBe(false);
   });
 
-  test("a provider out of credit is tried last for a while, and still tried when alone", async () => {
+  test("SUB-FAIL-10: a provider out of credit is tried last for a while, and still tried when alone", async () => {
     const settings = testSettings({ voiceInputProviderOrder: "openai" });
     let clock = Date.parse("2026-11-10T08:00:00Z");
     const calls: string[] = [];

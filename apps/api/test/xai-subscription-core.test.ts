@@ -245,7 +245,7 @@ describe("SuperGrok transcription on the shared core", () => {
     await expect(transcribe()).rejects.toMatchObject({ code: "unavailable", fallbackSafe: false });
   });
 
-  test("core: a subscription out of credit says so, and the next provider may hear it", async () => {
+  test("SUB-FAIL-10: core: a subscription out of credit says so, and the next provider may hear it", async () => {
     upstream = async () =>
       Response.json(
         {
