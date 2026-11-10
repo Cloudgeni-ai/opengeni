@@ -1248,6 +1248,9 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
+        {...(item.retriedAttempt
+          ? { accessibilityLabel: t("messageTimeline.attemptFailedRetried") }
+          : {})}
         onPress={() => setOpen((value) => !value)}
         style={{ paddingVertical: 4 }}
       >
@@ -1255,6 +1258,11 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
           <View style={{ transform: [{ rotate: open ? "90deg" : "0deg" }] }}>
             <Icon name="chevron-right" size={14} color={c["fg-muted"]} />
           </View>
+          {item.retriedAttempt ? (
+            <View
+              style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: c["status-failed"] }}
+            />
+          ) : null}
           <Text style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: c["fg-muted"] }}>
             {item.retriedAttempt
               ? t("messageTimeline.attemptFailedRetried")

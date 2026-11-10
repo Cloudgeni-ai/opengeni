@@ -3179,6 +3179,14 @@ function SessionChatPane(props: {
   const canChooseRecoveryModel = !modelPickerDisabled;
   // An own-key or API stop names its one fix; no model choice or free credit fixes it.
   const stopRefusal = props.creditExhausted ? props.creditRefusal : null;
+  // The failure events the banner presents, which the timeline then doesn't repeat.
+  const bannerFailureIds = useMemo(
+    () =>
+      props.failure
+        ? bannerFailureEventIds(props.events, props.failure, props.creditExhausted)
+        : undefined,
+    [props.events, props.failure, props.creditExhausted],
+  );
   // Free credit can still cover other models after this model's credit ran out.
   const creditGap =
     props.creditExhausted && !stopRefusal
@@ -3190,19 +3198,31 @@ function SessionChatPane(props: {
   // Shown while the banner chunk loads or if it fails. On the free model the
   // generic daily-limit line then gives way to the free-model copy; that brief
   // text change keeps the free-model copy out of the direct session bundle.
-  const failureFallback = props.failure ? (
+  // The timeline leaves this failure's text to the banner, so the fallback
+  // keeps the recorded text reachable too.
+  const fallbackCopy = props.failure
+    ? failedSessionCopy(
+        props.failure,
+        props.creditExhausted && !props.failure.structuralSandboxFailure,
+        Boolean(composerPolicy && composerPolicy.model !== props.session.model),
+        canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
+        creditGap,
+        stopRefusal,
+      )
+    : null;
+  const failureFallback = fallbackCopy ? (
     <div role="alert" className={cn("mx-auto my-2 w-full max-w-3xl text-sm text-fg-muted", gutter)}>
-      {failureFallbackReason(
-        failedSessionCopy(
-          props.failure,
-          props.creditExhausted && !props.failure.structuralSandboxFailure,
-          Boolean(composerPolicy && composerPolicy.model !== props.session.model),
-          canChooseRecoveryModel && !props.failure.structuralSandboxFailure,
-          creditGap,
-          stopRefusal,
-        ),
-        canBuyCredits,
-      )}
+      {failureFallbackReason(fallbackCopy, canBuyCredits)}
+      {fallbackCopy.detail ? (
+        <details className="mt-1 text-xs">
+          <summary className="cursor-pointer select-none text-fg-subtle hover:text-fg-muted">
+            Details
+          </summary>
+          <p className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-2xs">
+            {fallbackCopy.detail}
+          </p>
+        </details>
+      ) : null}
     </div>
   ) : null;
   const model = composerPolicy?.model ?? props.session.model;
@@ -4275,15 +4295,7 @@ function SessionChatPane(props: {
                           }}
                           renderMessageSender={renderMessageSender}
                           allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
-                          presentedFailureEventIds={
-                            failureRecovery && props.failure
-                              ? bannerFailureEventIds(
-                                  props.events,
-                                  props.failure,
-                                  props.creditExhausted,
-                                )
-                              : undefined
-                          }
+                          presentedFailureEventIds={failureRecovery ? bannerFailureIds : undefined}
                           trailingState={
                             <>
                               {/* Recovery follows the failed request, only in the latest history window.

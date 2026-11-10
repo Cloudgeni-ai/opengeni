@@ -249,6 +249,8 @@ export function failedSessionCopy(
       reason: recorded || MACHINE_ACCESS_REQUIRED,
       unavailableModel: false,
       machineAccess: true,
+      // The owner's Allow headline names the machine instead of this text.
+      ...(diagnostic ? { detail: diagnostic } : {}),
     };
   }
   if (code === "codex_request_rejected") {

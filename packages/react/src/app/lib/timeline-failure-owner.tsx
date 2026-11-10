@@ -6,28 +6,27 @@ import type { TimelineItem } from "../../timeline";
  * `MessageTimeline`'s `presentedFailureEventIds`, so the timeline does not
  * repeat what the banner says next to its actions. That is the failure
  * itself, and for a credit stop the turn end it stopped (a credit stop can
- * end a turn as nominally completed, with no failure event).
+ * end a turn as nominally completed, with no failure event). For a credit
+ * stop the banner speaks only about credits, so an older failure that the
+ * session summary still names is not presented and keeps its own text.
  */
 export function bannerFailureEventIds(
   events: readonly SessionEvent[],
   failure: { failureEventId?: string | null | undefined },
   creditExhausted: boolean | undefined,
 ): string[] {
-  const ids = failure.failureEventId ? [failure.failureEventId] : [];
-  if (creditExhausted) {
-    let last: SessionEvent | undefined;
-    for (const event of events) {
-      if (
-        (event.type === "turn.completed" ||
-          event.type === "turn.failed" ||
-          event.type === "turn.cancelled") &&
-        (!last || event.sequence > last.sequence)
-      )
-        last = event;
-    }
-    if (last && !ids.includes(last.id)) ids.push(last.id);
+  if (!creditExhausted) return failure.failureEventId ? [failure.failureEventId] : [];
+  let last: SessionEvent | undefined;
+  for (const event of events) {
+    if (
+      (event.type === "turn.completed" ||
+        event.type === "turn.failed" ||
+        event.type === "turn.cancelled") &&
+      (!last || event.sequence > last.sequence)
+    )
+      last = event;
   }
-  return ids;
+  return last ? [last.id] : [];
 }
 
 /**
@@ -35,11 +34,14 @@ export function bannerFailureEventIds(
  * the failed-session banner need not repeat its headline and Details.
  * Presentation only: retry, billing and sandbox recovery keep their owners.
  *
- * The proof is item identity, never wording: the failure event's own notice,
- * or a failed compaction landmark with diagnostics from the same attempt as the
- * failure's own turn end. Retry reopens the same logical turn, so a landmark
- * before that turn's previous settlement belongs to an older failure. A
- * cleared or paged view that omits the failure proves nothing.
+ * The proof is item identity, never wording: the failure's own usage-limit
+ * row, or a failed compaction landmark with diagnostics from the same attempt
+ * as the failure's own turn end. Both are purpose-built rows the timeline
+ * keeps while the banner presents the failure. The failure's plain notice is
+ * no proof: the timeline leaves it out while the banner shows the failure
+ * (`bannerFailureEventIds`). Retry reopens the same logical turn, so a
+ * landmark before that turn's previous settlement belongs to an older
+ * failure. A cleared or paged view that omits the failure proves nothing.
  */
 export function timelineShowsFailure(
   items: readonly TimelineItem[],
@@ -47,7 +49,13 @@ export function timelineShowsFailure(
 ): boolean {
   const { failureEventId, turnId } = failure;
   if (!failureEventId) return false;
-  if (items.some((item) => item.kind === "notice" && item.id === failureEventId)) return true;
+  if (
+    items.some(
+      (item) =>
+        item.kind === "notice" && item.allowance && item.id === `${failureEventId}-allowance`,
+    )
+  )
+    return true;
   if (!turnId) return false;
   // `buildTimeline` keys a failure's turn end by its event id.
   const end = items.findIndex(

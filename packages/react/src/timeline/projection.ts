@@ -279,6 +279,9 @@ export function buildTimeline(
   // (a recheck, a new message, a pause) ends them.
   let openAdmissionBlocks: SessionStatusItem[] = [];
   const presentationFailures = new Map<string | null, SessionStatusItem[]>();
+  // Failure notices of turns that failed before any work, by turn. A Retry
+  // turns them into quiet "retried" steps, like a failed attempt with work.
+  const noWorkFailureNotices = new Map<string, NoticeItem[]>();
   let presentationTurnId: string | null = null;
   const rememberPresentationWait = (
     item: NoticeItem | SessionStatusItem,
@@ -1649,6 +1652,10 @@ export function buildTimeline(
               item.resolvedAt = event.occurredAt;
             }
             presentationFailures.delete(turnId);
+            for (const notice of noWorkFailureNotices.get(turnId) ?? []) {
+              notice.retriedAttempt = true;
+            }
+            noWorkFailureNotices.delete(turnId);
           }
         }
         break;
@@ -1955,7 +1962,7 @@ export function buildTimeline(
         if (allowance) {
           allowanceNotice(event, turnId);
         } else if (!hadActivity && !landmark) {
-          items.push({
+          const notice: NoticeItem = {
             kind: "notice",
             id: event.id,
             tone: "failed",
@@ -1964,7 +1971,10 @@ export function buildTimeline(
               ? { details: { label: t("timeline.projection.details"), value: failure.detail } }
               : {}),
             occurredAt: event.occurredAt,
-          });
+          };
+          items.push(notice);
+          if (turnId !== null)
+            noWorkFailureNotices.set(turnId, [...(noWorkFailureNotices.get(turnId) ?? []), notice]);
         }
         break;
       }
@@ -3039,6 +3049,7 @@ function withoutPresentedFailureText(
       item.kind === "notice" &&
       item.tone === "failed" &&
       ids.has(item.id) &&
+      !item.retriedAttempt &&
       !item.allowance &&
       !item.sessionUsageLimit &&
       !item.learningRefusal

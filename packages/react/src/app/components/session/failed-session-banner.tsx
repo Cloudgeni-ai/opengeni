@@ -91,9 +91,9 @@ export function FailedSessionBanner({
     | Omit<SandboxRecoveryActionsProps, "structuralFailure" | "children" | "retryActions">
     | undefined;
   /**
-   * The timeline above already shows this exact failure with its Details
-   * (see `timelineShowsFailure`). A compaction failure then keeps only its
-   * recovery actions here instead of a second headline and Details.
+   * The timeline above already shows this exact failure in its own row (see
+   * `timelineShowsFailure`: a compaction landmark or a usage-limit row). The
+   * banner then keeps only its recovery actions instead of a second headline.
    */
   shownInTimeline?: boolean | undefined;
   /**
@@ -184,7 +184,12 @@ export function FailedSessionBanner({
     (!(unavailableModel || retryUnhelpful) || modelChanged || actions.retryInput) ? (
     <FailedSessionActions {...trackedActions} />
   ) : null;
-  if (shownInTimeline && compaction && !structuralFailure) {
+  // Only these failure kinds have a purpose-built timeline row to step back for.
+  if (
+    shownInTimeline &&
+    (compaction || failure.failureCode === "allowance_exhausted") &&
+    !structuralFailure
+  ) {
     const recovery = sandboxRecovery ? (
       <SandboxRecoveryActions
         {...sandboxRecovery}
@@ -219,7 +224,7 @@ export function FailedSessionBanner({
           />
           {headline}
         </span>
-        {detail ? (
+        {detail && detail.replace(/\s+/g, " ").trim() !== headline ? (
           <details className="group min-w-0 max-w-full text-xs open:basis-full">
             <summary className="cursor-pointer select-none text-fg-subtle hover:text-fg-muted">
               Details

@@ -200,6 +200,53 @@ describe("a failure is shown once", () => {
     expect(workRows(groups)[0]!.failureText).toBeUndefined();
     expect(bannerFailureEventIds(events, { failureEventId: null }, false)).toEqual([]);
   });
+
+  test("a retried attempt that failed before any work is a quiet step too", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Go" }, null),
+      event("turn.started", {}),
+      event("turn.failed", { error: ERROR, detail: DETAIL }),
+      event("session.status.changed", { status: "failed" }),
+      event("turn.recovery.requested", { reason: "human_retry" }),
+      event("session.status.changed", { status: "running" }),
+      event("turn.failed", { error: ERROR, detail: DETAIL }),
+      event("session.status.changed", { status: "failed" }),
+    ];
+    const finalId = events[6]!.id;
+    const notices = flatten(
+      groupTimeline(t, buildTimeline(t, events), {
+        readableTurns: true,
+        presentedFailureEventIds: [finalId],
+      }),
+    ).filter((item) => item.kind === "notice");
+    // The first attempt stays reachable as one quiet step; the banner has the current one.
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toMatchObject({ id: events[2]!.id, retriedAttempt: true });
+  });
+
+  test("an older failure in the same chat keeps its own text", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "First" }, null),
+      ...attempt(),
+      event("turn.failed", { error: "OLDER FAILURE", detail: "older detail" }),
+      event("session.status.changed", { status: "failed" }),
+      event("user.message", { text: "Second" }, null),
+      ...attempt().map((e) => ({ ...e, turnId: "turn-2" })),
+      { ...event("turn.failed", { error: ERROR, detail: DETAIL }), turnId: "turn-2" },
+      { ...event("session.status.changed", { status: "failed" }), turnId: "turn-2" },
+    ];
+    const finalId = events.filter((e) => e.type === "turn.failed").at(-1)!.id;
+    const items = buildTimeline(t, events);
+    for (const readableTurns of [true, false]) {
+      const shown = JSON.stringify(
+        groupTimeline(t, items, { readableTurns, presentedFailureEventIds: [finalId] }),
+      );
+      expect(shown).toContain("OLDER FAILURE");
+      expect(shown).not.toContain(ERROR);
+    }
+  });
 });
 
 describe("the rendered timeline (web and the desktop app)", () => {
