@@ -954,7 +954,12 @@ describe("createSessionProxyHandler", () => {
         new Request(`${PRODUCT}/api/opengeni/v1/workspaces/${WORKSPACE_ID}/files/uploads`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ filename: "a.txt", contentType: "text/plain", sizeBytes: 1, ...body }),
+          body: JSON.stringify({
+            filename: "a.txt",
+            contentType: "text/plain",
+            sizeBytes: 1,
+            ...body,
+          }),
         }),
       );
     const scopeSent = async (

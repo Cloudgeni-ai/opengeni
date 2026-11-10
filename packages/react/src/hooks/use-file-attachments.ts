@@ -17,7 +17,7 @@ export type UseFileAttachmentsOptions = EmbeddedFileAttachmentClientOverride<Cha
    * bypasses it.
    */
   /** Retain original uploads in the chat owner’s personal scope when private. */
-  scope?: "workspace" | "personal";
+  scope?: "workspace" | "personal" | undefined;
   pasteFilter?: ((file: File) => boolean) | undefined;
 };
 

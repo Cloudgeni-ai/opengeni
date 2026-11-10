@@ -482,7 +482,10 @@ const UPLOAD_MEMBER_PERMISSIONS: Array<(typeof FIRST_USE_PERMISSIONS)[number]> =
 ];
 
 test("a private chat's uploads through the proxy are the uploader's alone; shared chats keep workspace files", async () => {
-  const f = await fixture(true, { memberPermissions: UPLOAD_MEMBER_PERMISSIONS, objectStorage: true });
+  const f = await fixture(true, {
+    memberPermissions: UPLOAD_MEMBER_PERMISSIONS,
+    objectStorage: true,
+  });
   const otherUser = f.service.asUser(f.other.externalId, { source: f.source });
   const ownerUser = f.service.asUser(f.owner.externalId, { source: f.source });
   // What older stock UIs and custom browsers send: no scope.
@@ -518,9 +521,9 @@ test("a private chat's uploads through the proxy are the uploader's alone; share
   );
   expect(created.status, await created.clone().text()).toBe(202);
   const session = (await created.json()) as { id: string };
-  expect(
-    (await f.browser.getSession(f.workspace.id, session.id)).resources ?? [],
-  ).toContainEqual(expect.objectContaining({ kind: "file", fileId: begin.fileId }));
+  expect((await f.browser.getSession(f.workspace.id, session.id)).resources ?? []).toContainEqual(
+    expect.objectContaining({ kind: "file", fileId: begin.fileId }),
+  );
 
   // An explicit workspace choice is the uploader's own and is kept.
   const chosen = await f.browser.beginFileUpload(f.workspace.id, {

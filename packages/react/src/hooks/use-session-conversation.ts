@@ -96,8 +96,7 @@ export function useSessionConversation(
   const control = useSessionControl(sessionId, scope);
   const approvals = useMemo(() => projectPendingApprovals(feed.events), [feed.events]);
   // As in the web app: a private chat's attachments are its owner's alone.
-  const uploadScope = uploadScopeForSession(detail.session);
-  const files = useFileAttachments({ ...scope, ...(uploadScope ? { scope: uploadScope } : {}) });
+  const files = useFileAttachments({ ...scope, scope: uploadScopeForSession(detail.session) });
   const clearFiles = files.clear;
   const attachmentSession = useRef(sessionId);
   useLayoutEffect(() => {
