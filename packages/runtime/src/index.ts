@@ -3293,6 +3293,7 @@ function inspectModularAgentInstructions(
       ? { ...config.capabilities, humanInput: false }
       : config.capabilities,
     renderer: config.renderer,
+    ...(config.guidance === "lean" ? { guidance: "lean" as const } : {}),
     identity: appendDeploymentAgentInstructions(identity, settings),
     resources,
     ...modularToolAvailability(settings, options),

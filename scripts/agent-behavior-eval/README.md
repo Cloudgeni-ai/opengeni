@@ -36,6 +36,19 @@ bun run eval:behavior -- --list     # scenarios and variants
 bun run eval:behavior -- --help
 ```
 
+To compare default and lean guidance for an embedded, customer-facing assistant
+without a sandbox (product identity, `capabilities: "none"`, markdown renderer,
+`sandboxBackend: "none"`):
+
+```bash
+bun run eval:behavior -- --variants embedded-full,embedded-lean --repeats 3
+```
+
+These variants run the conversational scenarios only, including five support
+conversations (`r`–`v`) against a fake booking desk (`support-mcp.ts`): an
+ambiguous cancellation, a clear change, a refund above the product's policy
+limit, an irreversible account deletion, and a lookup followed by "thanks".
+
 Credentials: `--env-file <path>` (or `OPENGENI_EVAL_ENV_FILE`), otherwise
 `./.env`, then the main checkout's `.env`. Only `OPENGENI_OPENAI_*` and
 `OPENGENI_AZURE_OPENAI_*` keys are read; values are never logged. Defaults:

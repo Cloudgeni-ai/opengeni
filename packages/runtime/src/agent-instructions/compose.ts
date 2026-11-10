@@ -1,4 +1,5 @@
 import type {
+  AgentGuidance,
   ModelContextInstructionLayerId,
   ModelContextInstructionModule,
   ResolvedAgentCapabilities,
@@ -73,6 +74,8 @@ export type ComposeModularAgentInstructionsInput = {
    */
   toolAvailability?: AgentPromptToolAvailability | undefined;
   experiments?: AgentPromptExperiments | undefined;
+  /** The agent configuration's guidance; omitted or `full` keeps the default text. */
+  guidance?: AgentGuidance | undefined;
   /** Per-attempt runtime directives, each already gated by its caller. */
   codemode?: string | undefined;
   codeSearch?: string | undefined;
@@ -192,6 +195,7 @@ export function composeModularAgentInstructions(input: ComposeModularAgentInstru
       resources: input.resources,
       ...(input.toolAvailability ? { toolAvailability: input.toolAvailability } : {}),
       ...(input.experiments ? { experiments: input.experiments } : {}),
+      ...(input.guidance === "lean" ? { guidance: "lean" as const } : {}),
     },
     { volatileModulesLast: input.stablePrefix === true },
   );

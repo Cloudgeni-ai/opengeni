@@ -346,7 +346,10 @@ describe("agent configuration client config and MCP (real PostgreSQL)", () => {
     expect(schema.required).not.toContain("agent");
     expect(schema.properties!.agent).toMatchObject({
       type: "object",
-      properties: { capabilities: { anyOf: expect.any(Array) } },
+      properties: {
+        capabilities: { anyOf: expect.any(Array) },
+        guidance: { type: "string", enum: ["full", "lean"] },
+      },
     });
   });
 
@@ -696,6 +699,46 @@ describe("agent configuration on create (real PostgreSQL)", () => {
     expect(names).toContain("request_human_input");
     expect(names).not.toContain("web_search");
     expect(names).not.toContain("list_models");
+  });
+
+  test("lean guidance is stored on the agent and changes no tools", async () => {
+    if (!available) return;
+    const grant = await fixture();
+    const target = app();
+    const bearer = await humanBearer(grant);
+    const none = await create(target, grant, {
+      agent: { capabilities: "none" },
+    });
+    const lean = await create(target, grant, {
+      agent: { capabilities: "none", guidance: "lean" },
+    });
+    expect(lean.status).toBe(202);
+    expect(lean.json.agent).toMatchObject({ from: "none", guidance: "lean" });
+    expect(none.json.agent).not.toHaveProperty("guidance");
+    expect(lean.json.firstPartyMcpTools).toEqual(none.json.firstPartyMcpTools);
+    expect(lean.json.tools).toEqual(none.json.tools);
+
+    const sessionId = lean.json.id as string;
+    const kept = await putAgent(target, bearer, grant, sessionId, {
+      agent: { identity: "Booking assistant" },
+      expectedVersion: lean.json.toolPolicyVersion as number,
+    });
+    expect(kept.status).toBe(200);
+    expect(kept.json.agent).toMatchObject({
+      identity: "Booking assistant",
+      guidance: "lean",
+    });
+    const cleared = await putAgent(target, bearer, grant, sessionId, {
+      agent: { guidance: "full" },
+      expectedVersion: kept.json.toolPolicyVersion as number,
+    });
+    expect(cleared.status).toBe(200);
+    expect(cleared.json.agent).not.toHaveProperty("guidance");
+
+    const invalid = await create(target, grant, {
+      agent: { capabilities: "none", guidance: "minimal" },
+    });
+    expect([400, 422]).toContain(invalid.status);
   });
 
   test("typed 422s: goal conflict, instructions alias conflict", async () => {

@@ -106,6 +106,18 @@ export type AgentCapabilities = z.infer<typeof AgentCapabilities>;
 export const AgentRenderer = /* @__PURE__ */ defineSchema(() => z.enum(["opengeni", "markdown"]));
 export type AgentRenderer = z.infer<typeof AgentRenderer>;
 
+/**
+ * How much of Opengeni's general behavior guidance the system prompt carries.
+ * `full` (the default) is the complete guidance for open-ended, long-running
+ * work. `lean` is for short conversations a person answers turn by turn (for
+ * example support or booking assistants): it keeps identity, precedence,
+ * authorization limits, destructive-action care, compaction and the guidance
+ * of tools the session has, and leaves out autonomy, progress-update and
+ * final-answer detail. It never changes tools, permissions or refusals.
+ */
+export const AgentGuidance = /* @__PURE__ */ defineSchema(() => z.enum(["full", "lean"]));
+export type AgentGuidance = z.infer<typeof AgentGuidance>;
+
 export const AGENT_IDENTITY_MAX_CHARACTERS = 8_000;
 /** Same bound as `SESSION_INSTRUCTIONS_MAX_CHARACTERS` (asserted by test). */
 export const AGENT_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
@@ -128,6 +140,8 @@ export const AgentConfigRequest = /* @__PURE__ */ defineSchema(() =>
         .max(AGENT_INSTRUCTIONS_MAX_CHARACTERS)
         .optional(),
       renderer: AgentRenderer.optional(),
+      /** `lean` trims general guidance for short conversations; omitted keeps the current value. */
+      guidance: AgentGuidance.optional(),
       /**
        * Vaults this session may use (input only, Q-08). Intersected with the
        * parent's policy and any session-level `vaultPolicy`.
@@ -145,6 +159,7 @@ export const WorkspaceAgentDefaults = /* @__PURE__ */ defineSchema(() =>
       capabilities: AgentCapabilities.optional(),
       identity: AgentIdentity.nullable().optional(),
       renderer: AgentRenderer.optional(),
+      guidance: AgentGuidance.optional(),
     })
     .strict(),
 );
@@ -233,6 +248,8 @@ export const ResolvedAgentConfig = /* @__PURE__ */ defineSchema(() =>
         unavailableReasons: z.partialRecord(AgentCapabilityId, primitives.string).optional(),
         identity: AgentIdentity.nullable(),
         renderer: AgentRenderer,
+        /** Present only when lean; absent means `full`, so stored rows keep their shape. */
+        guidance: z.literal("lean").optional(),
         source: ResolvedAgentConfigSource,
       })
       .strict(),
@@ -1175,6 +1192,7 @@ function agentConfigFromCapabilities(input: {
   deployment: AgentConfigDeploymentLimits;
   identity: string | null;
   renderer: AgentRenderer;
+  guidance?: AgentGuidance | undefined;
   source: ResolvedAgentConfigSource;
   inheritedUnavailable?: readonly AgentCapabilityId[] | undefined;
   inheritedUnavailableReasons?: Partial<Record<AgentCapabilityId, string>> | undefined;
@@ -1212,6 +1230,7 @@ function agentConfigFromCapabilities(input: {
     ...(unavailable.size > 0 ? { unavailableReasons } : {}),
     identity: input.identity,
     renderer: input.renderer,
+    ...(input.guidance === "lean" ? { guidance: "lean" as const } : {}),
     source: input.source,
   };
 }
@@ -1260,6 +1279,7 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
     (request.capabilities !== undefined ||
       request.identity !== undefined ||
       request.renderer !== undefined ||
+      request.guidance !== undefined ||
       request.instructions !== undefined);
 
   const parent = input.parent;
@@ -1300,6 +1320,9 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
       ...((request.renderer ?? workspaceDefaults?.renderer)
         ? { renderer: request.renderer ?? workspaceDefaults?.renderer }
         : {}),
+      ...((request.guidance ?? workspaceDefaults?.guidance)
+        ? { guidance: request.guidance ?? workspaceDefaults?.guidance }
+        : {}),
     };
     return {
       config: resolveTopLevel(input, merged, "request", request.capabilities === undefined),
@@ -1334,6 +1357,7 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
     deployment: input.deployment,
     identity: request.identity !== undefined ? request.identity : (parentConfig?.identity ?? null),
     renderer: request.renderer ?? parentConfig?.renderer ?? defaultRenderer(input.creator),
+    guidance: request.guidance ?? parentConfig?.guidance,
     source: "request",
     inheritedUnavailable: parentConfig?.unavailable,
     inheritedUnavailableReasons: parentConfig?.unavailableReasons,
@@ -1390,6 +1414,7 @@ function resolveTopLevel(
     deployment: input.deployment,
     identity: source.identity ?? null,
     renderer: source.renderer ?? defaultRenderer(input.creator),
+    guidance: source.guidance,
     source: sourceKind,
   });
   return withGoalImplication(config, input.goal, explicitGoalsOff, allAgentCapabilities());
@@ -1486,6 +1511,7 @@ export function resolveAgentConfigUpdate(input: {
     deployment: input.deployment,
     identity: input.request.identity !== undefined ? input.request.identity : current.identity,
     renderer: input.request.renderer ?? current.renderer,
+    guidance: input.request.guidance ?? current.guidance,
     source: input.current ? "request" : "legacy_conversion",
     // Capabilities a human re-enables are re-checked against the deployment.
     inheritedUnavailable: current.unavailable.filter(

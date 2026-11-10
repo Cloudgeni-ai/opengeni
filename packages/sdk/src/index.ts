@@ -1708,6 +1708,7 @@ export type {
   AgentCapabilityToggles,
   AgentCapabilities,
   AgentRenderer,
+  AgentGuidance,
   AgentConfigRequest,
   WorkspaceAgentDefaults,
   ResolvedAgentCapabilities,

@@ -733,3 +733,103 @@ describe("effective tools projection", () => {
     ]);
   });
 });
+
+describe("guidance", () => {
+  const ceiling = legacyEffectiveAgentCapabilities({
+    firstPartyMcpTools: DEFAULT_FIRST_PARTY_MCP_TOOLS,
+    tools: [{ kind: "mcp", id: "opengeni" }],
+    toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+    humanInputEnabled: true,
+  });
+
+  test("accepts only full and lean", () => {
+    expect(AgentConfigRequest.parse({ guidance: "lean" })).toEqual({
+      guidance: "lean",
+    });
+    expect(AgentConfigRequest.parse({ guidance: "full" })).toEqual({
+      guidance: "full",
+    });
+    expect(() => AgentConfigRequest.parse({ guidance: "minimal" })).toThrow();
+  });
+
+  test("full is the absence of the field, so default configurations keep their shape", () => {
+    for (const request of [undefined, {}, { capabilities: "none" as const }]) {
+      expect(Object.hasOwn(resolve({ request }).config!, "guidance")).toBe(false);
+    }
+    expect(Object.hasOwn(resolve({ request: { guidance: "full" } }).config!, "guidance")).toBe(
+      false,
+    );
+    // Stored configurations without the field still parse unchanged.
+    const stored = resolve({ request: { capabilities: "none" } }).config!;
+    expect(ResolvedAgentConfig.parse(stored)).toEqual(stored);
+  });
+
+  test("lean is a configuration field on its own and changes nothing else", () => {
+    const lean = resolve({
+      request: { capabilities: "none", guidance: "lean" },
+    }).config!;
+    const full = resolve({ request: { capabilities: "none" } }).config!;
+    expect(lean.guidance).toBe("lean");
+    expect({ ...lean, guidance: undefined }).toEqual({
+      ...full,
+      guidance: undefined,
+    });
+    // guidance alone is an explicit agent object.
+    expect(resolve({ request: { guidance: "lean" } }).config).toMatchObject({
+      source: "request",
+      guidance: "lean",
+    });
+    expect(ResolvedAgentConfig.parse(lean)).toEqual(lean);
+  });
+
+  test("workspace default applies unless the request sets it", () => {
+    const defaults = {
+      capabilities: "none" as const,
+      guidance: "lean" as const,
+    };
+    const ws = { defaults, humanInputEnabled: true };
+    expect(resolve({ workspace: ws }).config!.guidance).toBe("lean");
+    expect(resolve({ workspace: ws, request: { identity: "Acme" } }).config!.guidance).toBe("lean");
+    expect(
+      Object.hasOwn(resolve({ workspace: ws, request: { guidance: "full" } }).config!, "guidance"),
+    ).toBe(false);
+    expect(resolveWorkspaceAgentDefaults({ sessionAgentDefaults: defaults })).toEqual(defaults);
+  });
+
+  test("children inherit the parent's guidance and may set their own", () => {
+    const parentConfig = resolve({ request: { guidance: "lean" } }).config!;
+    const parent = { kind: "configured" as const, config: parentConfig };
+    expect(resolve({ parent }).config!.guidance).toBe("lean");
+    expect(resolve({ parent, request: { capabilities: "none" } }).config!.guidance).toBe("lean");
+    expect(
+      Object.hasOwn(resolve({ parent, request: { guidance: "full" } }).config!, "guidance"),
+    ).toBe(false);
+    const fullParent = {
+      kind: "configured" as const,
+      config: resolve({}).config!,
+    };
+    expect(resolve({ parent: fullParent, request: { guidance: "lean" } }).config!.guidance).toBe(
+      "lean",
+    );
+  });
+
+  test("a mid-session update sets, keeps, or clears it", () => {
+    const update = (current: ResolvedAgentConfig | null, request: AgentConfigRequest) =>
+      resolveAgentConfigUpdate({
+        current,
+        legacyCeiling: ceiling,
+        request,
+        deployment,
+        onlyNarrow: false,
+        goal: false,
+      });
+    const lean = update(resolve({}).config!, { guidance: "lean" });
+    expect(lean.guidance).toBe("lean");
+    expect(update(lean, { identity: "B" }).guidance).toBe("lean");
+    expect(Object.hasOwn(update(lean, { guidance: "full" }), "guidance")).toBe(false);
+    expect(update(null, { guidance: "lean" })).toMatchObject({
+      source: "legacy_conversion",
+      guidance: "lean",
+    });
+  });
+});
