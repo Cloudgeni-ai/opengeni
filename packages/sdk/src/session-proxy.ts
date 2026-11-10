@@ -815,8 +815,9 @@ export function createSessionProxyHandler(
           upstream = await send();
         }
         const relayed = relayResponse(upstream, heartbeatMs, rejectedKeyNotice);
+        // A record-only hook returns `void`, which is `undefined` at runtime.
         const answered = await options.afterForward?.(routeInfo, relayed, context);
-        return answered instanceof Response ? answered : relayed;
+        return (answered as Response | undefined) ?? relayed;
       };
 
       // --- Server-owned additions: the few routes whose body the relay reads.

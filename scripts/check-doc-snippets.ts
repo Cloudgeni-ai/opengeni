@@ -23,9 +23,9 @@ import { join, resolve } from "node:path";
 // API: unknown exports, unknown properties and options, wrong argument counts
 // and type mismatches involving Opengeni types.
 //
-// Skip one sample by putting `doc-snippets: skip` in a comment on the line
-// right before its fence (`<!-- doc-snippets: skip -->` or
-// `{/* doc-snippets: skip */}`), for example when it deliberately shows code
+// Skip one sample by putting `doc-snippets: skip` in a comment right before
+// its fence (`<!-- doc-snippets: skip -->` or `{/* doc-snippets: skip */}`;
+// blank lines between are fine), for example when it deliberately shows code
 // that does not compile.
 //
 // Option and prop tables are checked too when a comment right before the
@@ -36,6 +36,14 @@ import { join, resolve } from "node:path";
 // Every backticked name in the table's first column must be a property of that
 // type. With `complete`, every property of the type must also be listed, so a
 // new option cannot ship undocumented and a removed one cannot linger.
+//
+// An excerpt of an object (`agent: { ... }`, a `createSession` hook) is not a
+// statement on its own. Name the type it belongs to and it is checked as part
+// of that type:
+//
+//   {/* doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" */}
+//
+// A TSX sample with several top-level elements is checked as one fragment.
 
 export type DocSnippet = {
   file: string;
@@ -69,6 +77,7 @@ export const DOC_SNIPPET_SOURCES = [
 const GENERATED_MIRRORS = new Set(["docs-site/reference/opengeni-client-skill.mdx"]);
 
 const SKIP_MARKER = "doc-snippets: skip";
+const EXCERPT_MARKER = /doc-snippets:\s*excerpt\s+([A-Za-z_$][\w$]*)\s+from\s+["']([^"']+)["']/;
 const KEYS_MARKER =
   /doc-snippets:\s*keys\s+([A-Za-z_$][\w$]*)\s+from\s+["']([^"']+)["'](\s+complete)?/;
 const LANGS = new Map<string, "ts" | "tsx">([
@@ -88,16 +97,21 @@ const REPORTED_CODES = new Set([
   2339, // Property does not exist on type.
   2345, // Argument is not assignable to parameter.
   2353, // Object literal may only specify known properties.
+  2375, // Not assignable with exactOptionalPropertyTypes.
+  2379, // Argument not assignable with exactOptionalPropertyTypes.
   2551, // Property does not exist; did you mean.
   2554, // Expected N arguments.
+  2559, // Type has no properties in common.
   2555, // Expected at least N arguments.
   2561, // Object literal may only specify known properties; did you mean.
+  2694, // Namespace has no exported member.
   2614, // Module has no exported member; did you mean to use import x from.
   2724, // Module has no exported member; did you mean.
   2741, // Property is missing in type.
   2739, // Type is missing properties.
   2740, // Type is missing properties (and more).
   2769, // No overload matches this call.
+  2820, // Type is not assignable; did you mean (a misspelled option value).
 ]);
 
 function walk(root: string, path: string, files: string[]): void {
@@ -145,17 +159,39 @@ export function extractDocSnippets(file: string, text: string): DocSnippet[] {
     let end = index + 1;
     while (end < lines.length && !close.test(lines[end]!)) end += 1;
     const kind = LANGS.get(lang.toLowerCase());
-    const previous = lines[index - 1] ?? "";
+    // Formatters put a blank line between an MDX comment and the fence, and a
+    // marker for a `<CodeGroup>` sits before the group's opening tag.
+    let before = index - 1;
+    while (before >= 0 && /^\s*(<[A-Z][\w.]*(\s[^>]*)?>)?\s*$/.test(lines[before]!)) before -= 1;
+    const previous = lines[before] ?? "";
     if (kind && !previous.includes(SKIP_MARKER)) {
       const body = lines
         .slice(index + 1, end)
         .map((line) => (line.startsWith(indent) ? line.slice(indent.length) : line.trimStart()));
-      snippets.push({
-        file,
-        line: index + 2,
-        lang: kind,
-        code: body.join("\n"),
-      });
+      const excerpt = EXCERPT_MARKER.exec(previous);
+      if (excerpt) {
+        const sourceLines = body.map((_, offset) => index + 2 + offset);
+        snippets.push({
+          file,
+          line: index + 2,
+          lang: kind,
+          code: [
+            `import type { ${excerpt[1]} as Excerpted } from ${JSON.stringify(excerpt[2])};`,
+            "const excerpt: Partial<Excerpted> = {",
+            ...body,
+            "};",
+            "void excerpt;",
+          ].join("\n"),
+          lineMap: [before + 1, before + 1, ...sourceLines, end + 1, end + 1],
+        });
+      } else {
+        snippets.push({
+          file,
+          line: index + 2,
+          lang: kind,
+          code: body.join("\n"),
+        });
+      }
     }
     index = end;
   }
@@ -182,7 +218,8 @@ function optionTableSnippet(
   let rows = 0;
   for (; index < lines.length && lines[index]!.trimStart().startsWith("|"); index += 1) {
     const firstCell = lines[index]!.trim().slice(1).split("|")[0] ?? "";
-    for (const match of firstCell.matchAll(/`([A-Za-z_$][\w$]*)`/g)) {
+    // `resolve()` and `toolServer.eager` name the option before the punctuation.
+    for (const match of firstCell.matchAll(/`([A-Za-z_$][\w$]*)[^`]*`/g)) {
       code.push(`  key(${JSON.stringify(match[1])}),`);
       lineMap.push(index + 1);
       rows += 1;
@@ -289,12 +326,54 @@ declare module "*?worker" { const Worker: new () => globalThis.Worker; export de
 declare module "*.css";
 `;
 
+export type SnippetCheck = {
+  findings: SnippetFinding[];
+  /** Samples that typechecked. */
+  checked: number;
+  /** Samples set aside because they are not complete statements. */
+  excerpts: DocSnippet[];
+};
+
+/** Wrap a TSX sample's elements in a fragment, keeping its imports at the top. */
+function asFragment(snippet: DocSnippet): DocSnippet | null {
+  const lines = snippet.code.split("\n");
+  let split = 0;
+  while (split < lines.length && /^\s*(import\s|$)/.test(lines[split]!)) split += 1;
+  if (split === lines.length) return null;
+  const sourceLines = lines.map((_, offset) => snippet.line + offset);
+  return {
+    ...snippet,
+    code: [
+      ...lines.slice(0, split),
+      "const fragment = (",
+      "<>",
+      ...lines.slice(split),
+      "</>",
+      ");",
+      "void fragment;",
+    ].join("\n"),
+    lineMap: [
+      ...sourceLines.slice(0, split),
+      snippet.line + split,
+      snippet.line + split,
+      ...sourceLines.slice(split),
+      snippet.line + lines.length - 1,
+      snippet.line + lines.length - 1,
+      snippet.line + lines.length - 1,
+    ],
+  };
+}
+
+// A sample that must fail: if the compiler stops reporting it (a config error,
+// an unresolved package), the check would otherwise pass without checking.
+const CANARY = 'import { __docSnippetsCanary } from "@opengeni/sdk";\nvoid __docSnippetsCanary;';
+const CANARY_NAME = "canary.ts";
+
 /** Typecheck snippets in a scratch project under `tmp/` and map findings back to their sources. */
 export function checkDocSnippets(
   snippets: readonly DocSnippet[],
   root = process.cwd(),
-): SnippetFinding[] {
-  if (snippets.length === 0) return [];
+): SnippetCheck {
   mkdirSync(join(root, "tmp"), { recursive: true });
   const dir = mkdtempSync(join(root, "tmp", "doc-snippets-"));
   try {
@@ -305,6 +384,7 @@ export function checkDocSnippets(
       // `export {}` keeps every sample in its own module scope.
       writeFileSync(join(dir, name), `export {};\n${snippet.code}\n`);
     });
+    writeFileSync(join(dir, CANARY_NAME), `${CANARY}\n`);
     writeFileSync(join(dir, "ambient.d.ts"), AMBIENT_DECLARATIONS);
     writeFileSync(
       join(dir, "tsconfig.json"),
@@ -316,9 +396,15 @@ export function checkDocSnippets(
             jsx: "react-jsx",
             types: ["bun"],
             paths: packagePaths(root),
+            // Hold samples to a reader's ordinary strict project, not to this
+            // repository's extra strictness.
+            noUncheckedIndexedAccess: false,
+            exactOptionalPropertyTypes: false,
             noUnusedLocals: false,
             noUnusedParameters: false,
             allowUnreachableCode: true,
+            // Name every missing option instead of "... 8 more ...".
+            noErrorTruncation: true,
           },
           include: ["*.ts", "*.tsx"],
         },
@@ -327,6 +413,13 @@ export function checkDocSnippets(
       ),
     );
     const compiler = join(root, "node_modules", "tsrs", "bin", "tsrs");
+    // The scratch file a diagnostic belongs to, or null for anything else.
+    const scratchName = (path: string): string | null => {
+      const absolute = resolve(root, path);
+      return absolute.startsWith(`${dir}/`) || absolute.startsWith(`${dir}\\`)
+        ? absolute.slice(dir.length + 1)
+        : null;
+    };
     const run = () => {
       const result = spawnSync(compiler, ["--noEmit", "--pretty", "false", "-p", dir], {
         cwd: root,
@@ -334,26 +427,70 @@ export function checkDocSnippets(
         maxBuffer: 64 * 1024 * 1024,
       });
       if (result.error) throw result.error;
-      return result;
+      const output = `${result.stdout}\n${result.stderr}`;
+      const diagnostics = parseDiagnostics(output);
+      // A diagnostic without a file (a config error) stops type checking.
+      const unattributed = output
+        .split("\n")
+        .filter(
+          (line) => /error TS\d+/.test(line) && !/^.+?\(\d+,\d+\): error TS/.test(line.trim()),
+        );
+      if (unattributed.length > 0) {
+        throw new Error(`snippet typecheck could not run:\n${unattributed.join("\n")}`);
+      }
+      return diagnostics;
     };
     // The compiler reports only syntax errors while any file has one. Samples
     // that are not complete statements (an options excerpt such as
     // `capabilities: "none"`) cannot be typechecked; set them aside and check
     // the rest.
-    let result = run();
-    for (let pass = 0; pass < 5; pass += 1) {
-      const syntactic = parseDiagnostics(result.stdout).filter((d) => isSyntaxDiagnostic(d.code));
+    const excerpts: DocSnippet[] = [];
+    const setAside = new Set<string>();
+    const retried = new Set<string>();
+    let diagnostics = run();
+    for (;;) {
+      const syntactic = diagnostics.filter((d) => isSyntaxDiagnostic(d.code));
       if (syntactic.length === 0) break;
+      let removed = 0;
+      const handled = new Set<string>();
       for (const diagnostic of syntactic) {
-        const name = diagnostic.path.replaceAll("\\", "/").split("/").pop() ?? "";
-        if (byFile.delete(name)) rmSync(join(dir, name), { force: true });
+        const name = scratchName(diagnostic.path);
+        if (name && (setAside.has(name) || handled.has(name))) continue;
+        if (name) handled.add(name);
+        const snippet = name ? byFile.get(name) : undefined;
+        if (!name || !snippet) {
+          throw new Error(
+            `snippet typecheck hit a syntax error outside the samples: ${diagnostic.path}(${diagnostic.line}): TS${diagnostic.code} ${diagnostic.message}`,
+          );
+        }
+        removed += 1;
+        const fragment = snippet.lang === "tsx" && !snippet.lineMap ? asFragment(snippet) : null;
+        if (fragment && !retried.has(name)) {
+          // Several top-level elements: check them as one fragment.
+          retried.add(name);
+          byFile.set(name, fragment);
+          writeFileSync(join(dir, name), `export {};\n${fragment.code}\n`);
+          continue;
+        }
+        byFile.delete(name);
+        setAside.add(name);
+        excerpts.push(
+          retried.has(name) ? snippets[Number(name.slice(8, name.indexOf(".")))]! : snippet,
+        );
+        rmSync(join(dir, name), { force: true });
       }
-      result = run();
+      if (removed === 0) break;
+      diagnostics = run();
+    }
+    if (!diagnostics.some((d) => scratchName(d.path) === CANARY_NAME && d.code === 2305)) {
+      throw new Error(
+        "snippet typecheck did not report the canary sample's missing export: the check is not resolving @opengeni/sdk",
+      );
     }
     const findings: SnippetFinding[] = [];
-    for (const diagnostic of parseDiagnostics(`${result.stdout}\n${result.stderr}`)) {
-      const name = diagnostic.path.replaceAll("\\", "/").split("/").pop() ?? "";
-      const snippet = byFile.get(name);
+    for (const diagnostic of diagnostics) {
+      const name = scratchName(diagnostic.path);
+      const snippet = name ? byFile.get(name) : undefined;
       if (!snippet || !isReportedDiagnostic(diagnostic.code, diagnostic.message)) continue;
       findings.push({
         file: snippet.file,
@@ -364,18 +501,12 @@ export function checkDocSnippets(
         message: diagnostic.message,
       });
     }
-    if (result.status !== 0 && !/error TS\d+/.test(result.stdout)) {
-      throw new Error(`snippet typecheck failed to run:\n${result.stdout}\n${result.stderr}`);
-    }
-    checkedSnippetCount = byFile.size;
-    return findings.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+    findings.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+    return { findings, checked: byFile.size, excerpts };
   } finally {
     if (!process.env.DOC_SNIPPETS_KEEP) rmSync(dir, { recursive: true, force: true });
   }
 }
-
-/** Number of samples the last `checkDocSnippets` call could typecheck. */
-export let checkedSnippetCount = 0;
 
 export function isSyntaxDiagnostic(code: number): boolean {
   // Parser diagnostics; 12xx and 13xx are grammar checks reported with types.
@@ -387,17 +518,19 @@ if (import.meta.main) {
   const snippets = docSnippetFiles(root).flatMap((file) =>
     extractDocSnippets(file, readFileSync(join(root, file), "utf8")),
   );
-  const findings = checkDocSnippets(snippets, root);
+  const { findings, checked, excerpts } = checkDocSnippets(snippets, root);
   for (const finding of findings) {
     console.error(`${finding.file}:${finding.line}: TS${finding.code} ${finding.message}`);
   }
   if (findings.length > 0) {
     console.error(
-      `\n${findings.length} doc sample problem(s). Update the sample to the current SDK, or mark a deliberate non-compiling sample with "${SKIP_MARKER}" on the line before its fence.`,
+      `\n${findings.length} doc sample problem(s). Update the sample to the current SDK, or mark a deliberate non-compiling sample with "${SKIP_MARKER}" in a comment right before its fence.`,
     );
     process.exit(1);
   }
-  console.log(
-    `doc snippets: ${checkedSnippetCount} of ${snippets.length} TypeScript samples typecheck (the rest are excerpts that are not complete statements)`,
-  );
+  console.log(`doc snippets: ${checked} of ${snippets.length} TypeScript samples typecheck.`);
+  if (excerpts.length > 0) {
+    console.log("Not checked (excerpts that are not complete statements):");
+    for (const excerpt of excerpts) console.log(`  ${excerpt.file}:${excerpt.line}`);
+  }
 }

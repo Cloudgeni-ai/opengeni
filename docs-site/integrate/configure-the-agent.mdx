@@ -6,6 +6,8 @@ icon: "sliders"
 
 Every session takes one `agent` object:
 
+{/* doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" */}
+
 ```ts
 agent: {
   identity: "You are Acme Analytics' assistant. You help customers read their dashboards.",
@@ -77,6 +79,8 @@ Put facts about the current page in the message's `modelContext`, not in instruc
 - `"markdown"` for your own chat UI, Slack, or email. The chat facade uses it by default.
 
 ## Where it goes
+
+{/* doc-snippets: excerpt SessionProxyHandlerOptions from "@opengeni/sdk" */}
 
 <CodeGroup>
 ```ts Proxy

@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 
 import { checkDocSnippets, extractDocSnippets } from "./check-doc-snippets";
 
-const check = (file: string, text: string) => checkDocSnippets(extractDocSnippets(file, text));
+const check = (file: string, text: string) =>
+  checkDocSnippets(extractDocSnippets(file, text)).findings;
 
 describe("doc snippet drift check", () => {
   test("extracts indented MDX fences and honors the skip marker", () => {
@@ -14,6 +15,7 @@ describe("doc snippet drift check", () => {
         "  const a = 1;",
         "  ```",
         "{/* doc-snippets: skip */}",
+        "",
         "```tsx",
         "<Broken",
         "```",
@@ -36,6 +38,7 @@ describe("doc snippet drift check", () => {
         "  resolve: async () => ({ user: userId }),",
         "  sandboxFiles: true,",
         "});",
+        'createSessionProxyHandler(og, { resolve, chats: "sharedd" });',
         "```",
         "",
         "Excerpts that are not statements are left alone:",
@@ -48,6 +51,7 @@ describe("doc snippet drift check", () => {
     expect(findings.map(({ line, code }) => ({ line, code }))).toEqual([
       { line: 2, code: 2305 },
       { line: 6, code: 2353 },
+      { line: 8, code: 2820 },
     ]);
   }, 60_000);
 
@@ -61,12 +65,47 @@ describe("doc snippet drift check", () => {
         ...rows.map((name) => `| \`${name}\` | ... |`),
       ].join("\n");
     // A stale table (it once listed `sandboxFiles`) points at the stale row.
-    const stale = check("sdk.mdx", table(["resolve", "sandboxFiles", "chats"]));
+    const stale = check("sdk.mdx", table(["resolve()", "sandboxFiles", "chats"]));
     expect(stale.map(({ line, code }) => ({ line, code }))).toEqual([{ line: 6, code: 2345 }]);
     // `complete` also requires every option to be listed.
     const partial = check("sdk.mdx", table(["resolve", "chats"], " complete"));
     expect(partial).toHaveLength(1);
     expect(partial[0]!.line).toBe(1);
-    expect(partial[0]!.message).toContain("afterForward");
+    for (const name of ["afterForward", "basePath", "heartbeatMs", "toolServer"]) {
+      expect(partial[0]!.message).toContain(name);
+    }
+  }, 60_000);
+
+  test("fails instead of passing when nothing could be checked", () => {
+    expect(() => checkDocSnippets([], "/nonexistent-root")).toThrow();
+  });
+
+  test("checks marked object excerpts and multi-element TSX samples", () => {
+    const findings = check(
+      "agent.mdx",
+      [
+        '{/* doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" */}',
+        "",
+        "<CodeGroup>",
+        "```ts",
+        "agent: {",
+        '  identity: "You help customers.",',
+        '  capabilities: { from: "none", webSerch: true },',
+        "},",
+        "```",
+        "</CodeGroup>",
+        "",
+        "```tsx",
+        'import { SessionConversation } from "@opengeni/react/session-ui";',
+        "",
+        '<SessionConversation baseUrl="/api/opengeni" sessionId={id} />',
+        "<SessionConversation sessionId={id} agentSignal={false} />",
+        "```",
+      ].join("\n"),
+    );
+    expect(findings.map(({ line, code }) => ({ line, code }))).toEqual([
+      { line: 7, code: 2561 },
+      { line: 16, code: 2322 },
+    ]);
   }, 60_000);
 });

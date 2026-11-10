@@ -161,7 +161,7 @@ Without `reasoningEffort`, chats use the deployment default, which can be high:
 deeper answers, slower replies. A lighter effort (`"medium"` or `"low"`) suits
 quick end-user chat; keep the default where answer quality matters more than
 speed. The stock UI shows end users a model picker only when the handler sets
-`modelSelection: true`; the picker then lists the workspace's model catalog, so
+`modelSelection: true` (or the component's `modelPicker` prop is set); the picker then lists the workspace's model catalog, so
 the workspace's allowed-model settings decide which models appear. The option
 itself defaults to `true`, so the relay accepts model choices a custom browser
 client sends; set `modelSelection: false` to remove them.
