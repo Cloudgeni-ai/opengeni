@@ -132,3 +132,12 @@ test("a Connected Machine's drain is not reported as a stop", async () => {
     reason: "idle",
   });
 }, 60_000);
+
+test("a box replaced while a tool ran is not reported once the tool's result is in", async () => {
+  if (!client) return;
+  const { append, read } = await chat();
+  await append([toolCall("call-1")]);
+  await append([{ type: "sandbox.box.lost", payload: { sandboxId: "sb-gone" } }]);
+  await append([{ type: "agent.toolCall.output", payload: { id: "call-1", output: "ok" } }]);
+  expect(await read()).toBeNull();
+}, 60_000);
