@@ -108,6 +108,34 @@ test("known provider failures get plain copy with the exact recorded text as det
   }
 });
 
+test("encrypted reasoning another model left in the chat points at the model picker", () => {
+  // Recorded in production when a chat moved from a Codex subscription to Azure OpenAI.
+  const azure =
+    "400 The encrypted content gAAA...aiQ= could not be verified. Reason: Encrypted content could not be decrypted or parsed.";
+  const openAi =
+    "400 Could not decrypt the provided encrypted_content. Ensure the value is the unmodified encrypted_content from a previous response.";
+  for (const recorded of [azure, openAi, "400 invalid_encrypted_content"]) {
+    expect(failedSessionCopy({ ...summary, reason: recorded }, false, false, true)).toEqual({
+      reason:
+        "This model can’t read earlier reasoning in this chat from another model. Choose another model below.",
+      unavailableModel: false,
+      retryUnhelpful: true,
+      detail: recorded,
+    });
+  }
+  // Without a picker, or once another model is selected, the headline stands alone.
+  expect(failedSessionCopy({ ...summary, reason: azure }, false, true, true).reason).toBe(
+    "This model can’t read earlier reasoning in this chat from another model.",
+  );
+  // Field-shape refusals that merely mention the parameter keep the generic headline.
+  expect(
+    failedSessionCopy({
+      ...summary,
+      reason: "400 Unknown parameter: 'include[0]' (reasoning.encrypted_content).",
+    }).reason,
+  ).toBe("The session stopped unexpectedly.");
+});
+
 test("a bare HTTP status classifies only 401, 402, 403 and 429", () => {
   expect(failedSessionCopy({ ...summary, reason: "403 Forbidden" })).toMatchObject({
     reason: "The model provider denied access to this model.",

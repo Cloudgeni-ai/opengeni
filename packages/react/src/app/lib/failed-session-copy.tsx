@@ -44,7 +44,8 @@ export type KnownFailureKind =
   | "monthly_limit"
   | "provider_quota"
   | "rate_limited"
-  | "provider_error";
+  | "provider_error"
+  | "model_history";
 
 const CREDENTIALS: KnownFailure = {
   kind: "provider_credentials",
@@ -104,6 +105,28 @@ const PROVIDER_ERROR: KnownFailure = {
   retryUnhelpful: false,
   suggestModel: true,
 };
+/**
+ * The provider refused encrypted reasoning that another model or account left
+ * in this chat, after the worker already resent it as readable text. The same
+ * model refuses it again, so Retry waits for another model.
+ */
+const UNREADABLE_HISTORY: KnownFailure = {
+  kind: "model_history",
+  message: "This model can’t read earlier reasoning in this chat from another model.",
+  retryUnhelpful: true,
+  suggestModel: true,
+};
+
+/** A provider's definitive refusal of encrypted reasoning it cannot decrypt. */
+function isUnreadableHistory(text: string): boolean {
+  return (
+    text.includes("invalid_encrypted_content") ||
+    (/\bencrypted[ _](?:content|reasoning)\b/.test(text) &&
+      /\b(?:could not be (?:verified|decrypted|parsed)|could not decrypt|cannot be decrypted)\b/.test(
+        text,
+      ))
+  );
+}
 
 const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
 const SANDBOX_START_FAILURE = "The sandbox didn’t start.";
@@ -163,6 +186,7 @@ export function classifyProviderFailure(
   // Platform credit exhaustion ("workspace credits"; older history says
   // "Opengeni credits") has a dedicated billing remedy upstream.
   if (text.includes("workspace credits") || text.includes("opengeni credits")) return null;
+  if (isUnreadableHistory(text)) return UNREADABLE_HISTORY;
   // Provider SDKs prefix the HTTP status ("401 Incorrect API key ..."). A
   // status alone classifies only 401/402/403/429; other statuses do not prove
   // a cause and use the generic headline with recorded diagnostics.
