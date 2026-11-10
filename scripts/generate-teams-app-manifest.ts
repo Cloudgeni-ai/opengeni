@@ -10,7 +10,13 @@ export type TeamsManifestOptions = {
   privacyUrl: string;
   termsOfUseUrl: string;
   version?: string;
+  /** Teams' display name (`name.short`), shown in chat. */
   appName?: string;
+  /**
+   * The full app name (`name.full`), for example the Store listing name.
+   * Defaults to `appName`.
+   */
+  appFullName?: string | undefined;
   groupChats?: boolean;
   /** Team scope: mention Opengeni in an approved channel. */
   channels?: boolean;
@@ -34,14 +40,20 @@ export type TeamsManifestOptions = {
 const DEFAULT_DEVELOPER_NAME = "Opengeni";
 const DEFAULT_MPN_ID = "7181379";
 
-/** Personal-scope commands: account and help commands, then a few prompt starters. */
-const PERSONAL_COMMANDS = [
-  { title: "help", description: "See what Opengeni can do, its commands and its limits" },
+/**
+ * Personal-scope commands: account and help commands, then a few prompt
+ * starters. The app name is the bot; "Opengeni" is the service and accounts.
+ */
+const personalCommands = (appName: string) => [
+  { title: "help", description: `See what ${appName} can do, its commands and its limits` },
   { title: "link", description: "Link your Teams account to your Opengeni account" },
   { title: "unlink", description: "Disconnect your Teams account from Opengeni" },
-  { title: "Research a topic", description: "Ask Opengeni to research something and report back" },
-  { title: "Draft a message", description: "Ask Opengeni to write or improve a message" },
-  { title: "Plan a project", description: "Ask Opengeni to break work into steps" },
+  {
+    title: "Research a topic",
+    description: `Ask ${appName} to research something and report back`,
+  },
+  { title: "Draft a message", description: `Ask ${appName} to write or improve a message` },
+  { title: "Plan a project", description: `Ask ${appName} to break work into steps` },
 ];
 
 function guid(value: string, name: string): string {
@@ -64,9 +76,14 @@ function httpsUrl(value: string, name: string): URL {
 
 /** Packaging metadata only: never enables the bot or grants workspace access. */
 export function buildTeamsAppManifest(options: TeamsManifestOptions) {
-  const appName = options.appName ?? "Opengeni";
+  // Trimmed, as the API trims the same OPENGENI_TEAMS_APP_NAME for the bot.
+  const appName = (options.appName ?? "Opengeni").trim();
   if (!appName.trim() || appName.length > 30)
     throw new Error("appName must contain 1–30 characters");
+  // An explicit full name is trimmed; the default is the short name unchanged.
+  const appFullName = options.appFullName?.trim() ?? appName;
+  if (!appFullName.trim() || appFullName.length > 100)
+    throw new Error("appFullName must contain 1–100 characters");
   const version = options.version ?? "1.0.0";
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
     throw new Error("version must be three numeric components");
@@ -105,15 +122,16 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
   const description = {
     // One sentence that says what it is, without the app name or the word "app".
     short: "An AI agent for Microsoft Teams that researches, writes and plans work.",
+    // The app name is the bot; "Opengeni" is the service, accounts and workspace.
     full: [
-      "Opengeni is an AI agent that works with Microsoft Teams.",
+      `${appName} is an AI agent that works with Microsoft Teams.`,
       shared
-        ? `Chat with Opengeni one-on-one, or mention Opengeni in ${shared} where it is enabled for your organization, to ask questions, research topics, draft and improve writing, plan work and use the tools your organization has connected to Opengeni.`
-        : "Chat with Opengeni one-on-one to ask questions, research topics, draft and improve writing, plan work and use the tools your organization has connected to Opengeni.",
+        ? `Chat with ${appName} one-on-one, or mention ${appName} in ${shared} where it is enabled for your organization, to ask questions, research topics, draft and improve writing, plan work and use the tools your organization has connected to Opengeni.`
+        : `Chat with ${appName} one-on-one to ask questions, research topics, draft and improve writing, plan work and use the tools your organization has connected to Opengeni.`,
       shared
-        ? `Opengeni replies in the same conversation when a task is done. Send "help" (in ${shared}, mention Opengeni with it) to see its commands.`
-        : 'Opengeni replies in the same conversation when a task is done. Send "help" at any time to see its commands.',
-      `Requirements: an administrator must first connect your organization's Microsoft Teams to an Opengeni workspace, and you need an Opengeni account with access to that workspace. Visit ${websiteUrl.replace(/\/$/, "")} to sign up or get access. The first time you message Opengeni, it asks you to link your Teams account to your Opengeni account.`,
+        ? `${appName} replies in the same conversation when a task is done. Send "help" (in ${shared}, mention ${appName} with it) to see its commands.`
+        : `${appName} replies in the same conversation when a task is done. Send "help" at any time to see its commands.`,
+      `Requirements: an administrator must first connect your organization's Microsoft Teams to an Opengeni workspace, and you need an Opengeni account with access to that workspace. Visit ${websiteUrl.replace(/\/$/, "")} to sign up or get access. The first time you message ${appName}, it asks you to link your Teams account to your Opengeni account.`,
       ...(options.groupChats
         ? [
             "In a group chat, every participant must have linked an Opengeni account with access to that workspace.",
@@ -121,20 +139,20 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
         : []),
       ...(contextPermissions.length
         ? [
-            `In ${shared}, Opengeni also reads recent messages, only to answer the next mention there.`,
+            `In ${shared}, ${appName} also reads recent messages, only to answer the next mention there.`,
           ]
         : []),
-      "Limitations: replies are generated by AI and can be wrong, so check important details. Opengeni reads text messages only; files and images sent in Teams aren't supported. Approvals and requests for private information open Opengeni in your web browser. Use thumbs down on a reply to report a problem.",
+      `Limitations: replies are generated by AI and can be wrong, so check important details. ${appName} reads text messages only; files and images sent in Teams aren't supported. Approvals and requests for private information open Opengeni in your web browser. Use thumbs down on a reply to report a problem.`,
     ].join(" "),
   };
   const commandLists = [
-    { scopes: ["personal"], commands: PERSONAL_COMMANDS },
+    { scopes: ["personal"], commands: personalCommands(appName) },
     ...(sharedScopes.length
       ? [
           {
             scopes: sharedScopes,
             commands: [
-              { title: "help", description: "See what Opengeni can do in this conversation" },
+              { title: "help", description: `See what ${appName} can do in this conversation` },
             ],
           },
         ]
@@ -156,7 +174,7 @@ export function buildTeamsAppManifest(options: TeamsManifestOptions) {
       privacyUrl: httpsUrl(options.privacyUrl, "privacyUrl").href,
       termsOfUseUrl: httpsUrl(options.termsOfUseUrl, "termsOfUseUrl").href,
     },
-    name: { short: appName, full: appName },
+    name: { short: appName, full: appFullName },
     description,
     icons: { color: "color.png", outline: "outline.png" },
     accentColor: "#111111",
@@ -205,6 +223,8 @@ export function teamsManifestOptionsFromEnv(
     termsOfUseUrl: required("OPENGENI_TEAMS_TERMS_URL"),
     version: env.OPENGENI_TEAMS_APP_VERSION,
     appName: env.OPENGENI_TEAMS_APP_NAME,
+    // Unset or empty uses the short name.
+    appFullName: env.OPENGENI_TEAMS_APP_FULL_NAME?.trim() || undefined,
     developerName: env.OPENGENI_TEAMS_DEVELOPER_NAME?.trim() || undefined,
     // Unset or empty uses Opengeni's partner ID; only "none" leaves it out.
     mpnId: (() => {

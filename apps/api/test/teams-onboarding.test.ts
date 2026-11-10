@@ -544,6 +544,9 @@ describe("Teams replies for organizations that haven't connected Opengeni", () =
       "Opengeni isn't available for your organization yet. Your Microsoft 365 or Teams admin can request access at support@example.test.",
     );
     expect(teamsTenantUnavailableText({})).toContain("contact the Opengeni team");
+    expect(teamsTenantUnavailableText({ teamsAppName: "Opengeni Assistant" })).toBe(
+      "Opengeni Assistant isn't available for your organization yet. Your Microsoft 365 or Teams admin can contact the Opengeni team to request access.",
+    );
   });
 
   test("self-serve needs an admitted work or school tenant", () => {
