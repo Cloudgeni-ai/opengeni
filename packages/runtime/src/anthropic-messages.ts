@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { applyClaudeCodeIdentity } from "./claude-code-identity";
 import { AnthropicRequestError } from "./anthropic-request-error";
-import { isCompactionSummary } from "./context-compaction";
+import { isCompactionSummary, isUserMessage } from "./context-compaction";
 import {
   ANTHROPIC_IMAGE_MAX_ENCODED_BYTES,
   ANTHROPIC_REQUEST_MAX_BYTES,
@@ -172,6 +172,32 @@ export function claudeReplayScope(
   if (claudeNativeModelProfile(model)?.prefixBoundThinking)
     binding.update("\0").update(request.systemInstructions ?? "");
   return `claude:${model}:${binding.digest("base64url").slice(0, 22)}`;
+}
+
+/**
+ * The reply in progress (everything after the last user message) keeps its
+ * signed thinking native whatever binding it records: the system prompt can
+ * legitimately differ between requests of one turn (a one-shot directive on
+ * its first request), Claude accepts that, and text in place of the turn's
+ * thinking would turn thinking off for the rest of the turn. Only earlier
+ * turns follow the binding check; a refusal is still caught by the retry.
+ */
+function inProgressThinkingNative(
+  input: Array<Record<string, unknown>>,
+  scope: string,
+): Array<Record<string, unknown>> {
+  let start = input.length;
+  while (start > 0 && !isUserMessage(input[start - 1])) start -= 1;
+  let changed = false;
+  const projected = input.map((raw, index) => {
+    if (index < start) return raw;
+    const origin = claudeSignedThinkingBlock(raw) ? artifactOrigin(raw) : undefined;
+    if (origin === undefined || origin === scope) return raw;
+    changed = true;
+    const { [ARTIFACT_ORIGIN_KEY]: _origin, ...providerData } = object(raw.providerData);
+    return { ...raw, providerData };
+  });
+  return changed ? projected : input;
 }
 
 /** Fingerprints of the signed thinking blocks a request body sends natively. */
@@ -861,15 +887,20 @@ export function buildAnthropicRequest(
             fingerprint !== null &&
             (replayAsText?.has(fingerprint) === true || remembered?.(fingerprint) === true)
         : undefined;
+  const scope = claudeReplayScope(request, model, provider);
   const input =
     typeof request.input === "string"
       ? request.input
-      : (projectHistoryForProvider(request.input, "anthropic-messages", {
-          artifactScope: claudeReplayScope(request, model, provider),
-          ...(isRefused
-            ? { isRejectedArtifact: (item) => isRefused(opaqueReasoningFingerprint(item)) }
-            : {}),
-        }) as ModelRequest["input"]);
+      : (projectHistoryForProvider(
+          inProgressThinkingNative(request.input as Array<Record<string, unknown>>, scope),
+          "anthropic-messages",
+          {
+            artifactScope: scope,
+            ...(isRefused
+              ? { isRejectedArtifact: (item) => isRefused(opaqueReasoningFingerprint(item)) }
+              : {}),
+          },
+        ) as ModelRequest["input"]);
   const webSearch = request.tools.some(isHostedWebSearchTool);
   let messages = anthropicMessages(input, {
     // Plain history replays earlier searches as readable facts, never as

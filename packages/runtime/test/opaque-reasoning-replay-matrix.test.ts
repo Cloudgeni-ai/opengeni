@@ -91,9 +91,12 @@ function claudeProvider({ transport, account }: Endpoint): ResolvedModelProvider
 
 /** What a signature binds: platform and credential, model, and (prefix-bound) system. */
 function signature(issuer: string, model: string, system: string): string {
-  const bound = PREFIX_BOUND.has(model) ? system : "";
-  return `sig-${createHash("sha256").update(`${issuer}\0${model}\0${bound}`).digest("hex").slice(0, 24)}`;
+  const digest = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 12);
+  const bound = PREFIX_BOUND.has(model) && system !== INPUT_INDEPENDENT ? system : "";
+  return `sig-${digest(`${issuer}\0${model}`).slice(0, 8)}${digest(bound)}`;
 }
+/** Marks the platform, account and model part of a signature only. */
+const INPUT_INDEPENDENT = "\0";
 
 const issuerOf = (provider: ResolvedModelProvider) =>
   `${new URL(provider.baseUrl!).host}|${provider.apiKey}`;
@@ -126,15 +129,34 @@ function claudePlatform(options: {
       options.honorsDropBlock === true &&
       body.thinking?.block_binding?.prefix_mismatch_behavior === "drop_block" &&
       betas.includes("thinking-binding-controls-2026-08-01");
+    // The reply in progress (after the last message the person wrote, not a
+    // tool result) is checked only for platform, account and model: a new
+    // chat's first request carries a one-shot system addition, and Claude
+    // accepts that turn's thinking on its later requests.
+    let lastUser = -1;
+    body.messages.forEach((message: any, m: number) => {
+      if (
+        message.role === "user" &&
+        message.content.some((block: any) => block.type !== "tool_result")
+      )
+        lastUser = m;
+    });
+    const inProgress = signature(issuer, body.model, INPUT_INDEPENDENT);
     let at: string | undefined;
     body.messages.forEach((message: any, m: number) =>
       message.content.forEach((block: any, c: number) => {
-        if (
-          !at &&
-          block.type === "thinking" &&
-          (options.refusesAllThinking || (block.signature !== expected && !dropsMismatched))
-        )
-          at = `messages.${m}.content.${c}`;
+        const secret =
+          block.type === "thinking"
+            ? block.signature
+            : block.type === "redacted_thinking"
+              ? block.data
+              : undefined;
+        if (secret === undefined || at) return;
+        const valid =
+          secret === expected ||
+          (m > lastUser && secret.startsWith(inProgress.slice(0, 12))) ||
+          dropsMismatched;
+        if (options.refusesAllThinking || !valid) at = `messages.${m}.content.${c}`;
       }),
     );
     const refused = at !== undefined;
@@ -553,6 +575,61 @@ describe("the fallback chain always ends in a successful request", () => {
       expect(platform.sent.map(({ refused }) => refused)).toEqual([true, false, false]);
       expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([fresh.providerData.anthropic.block]);
     });
+
+  for (const streamed of [false, true])
+    test(`a one-shot system addition on a turn's first request keeps that turn's thinking native (stream=${streamed})`, async () => {
+      const platform = claudePlatform({ streamed });
+      const model = new AnthropicMessagesModel(
+        claudeProvider(API),
+        "claude-opus-5-5",
+        platform.fetch,
+      );
+      const withTitleDirective = `${BASE_SYSTEM} Also give this chat a title.`;
+      const tools = [lookupTool] as ModelRequest["tools"];
+      const first = await run(
+        model,
+        { ...request([user("New chat.")], withTitleDirective), tools },
+        streamed,
+      );
+      const loop = [
+        user("New chat."),
+        ...persisted(first),
+        { type: "function_call", callId: "call_1", name: "lookup", arguments: "{}" },
+        { type: "function_call_result", callId: "call_1", output: "found" },
+      ];
+      const second = await run(model, { ...request(loop, BASE_SYSTEM), tools }, streamed);
+      expect(platform.sent.map(({ refused }) => refused)).toEqual([false, false]);
+      expect(thinkingBlocks(platform.sent[1]!.body)).toEqual([reasoningBlock(first)]);
+
+      // On the next turn it is earlier history and follows the binding check.
+      const next = [...loop, ...persisted(second), user("Next.")];
+      await run(model, { ...request(next, BASE_SYSTEM), tools }, streamed);
+      expect(platform.sent.map(({ refused }) => refused)).toEqual([false, false, false]);
+      expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([reasoningBlock(second)]);
+    });
+
+  test("redacted thinking stored before bindings follows the same chain", async () => {
+    const platform = claudePlatform({ streamed: false });
+    const model = new AnthropicMessagesModel(
+      claudeProvider(API),
+      "claude-opus-5-5",
+      platform.fetch,
+    );
+    const history = [
+      user("One"),
+      {
+        type: "reasoning",
+        content: [],
+        providerData: { anthropic: { block: { type: "redacted_thinking", data: "opaque-data" } } },
+      },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Ok." }] },
+      user("Two"),
+    ];
+    const output = await run(model, request(history, BASE_SYSTEM), false);
+    expect(JSON.stringify(output)).toContain("Answer 1.");
+    expect(platform.sent.map(({ refused }) => refused)).toEqual([true, false]);
+    expect(JSON.stringify(platform.sent[1]!.body)).not.toContain("opaque-data");
+  });
 
   test("if even plain history is refused, the failure carries only the generic line", async () => {
     let calls = 0;
