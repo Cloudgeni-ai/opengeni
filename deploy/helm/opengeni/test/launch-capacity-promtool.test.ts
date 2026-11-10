@@ -286,7 +286,12 @@ test.skipIf(!promtool)(
       ["stale queue sample", { timestamps: "0+0x20" }],
       ["implausibly future queue sample", { timestamps: "300+30x20" }],
     ] as const) {
-      const incomplete = scenario(name, inputs({ age: "121+0x20", ...options }), [alerts[3]!]);
+      const incomplete = scenario(
+        name,
+        inputs({ age: "121+0x20", ...options }),
+        [alerts[3]!],
+        "6m",
+      );
       incomplete.promql_expr_test = [
         {
           expr: 'opengeni:turn_eligible_backlog:fresh_max{namespace="fixture"}',
@@ -296,16 +301,28 @@ test.skipIf(!promtool)(
       ];
     }
     scenario(
-      "staleness warns after 60-second expiry plus 30-second hold",
+      "staleness warns after 60-second expiry plus 5-minute hold",
       inputs({ timestamps: "0+0x20" }),
       [alerts[3]!],
-      "90s",
+      "6m",
+    );
+    scenario(
+      "staleness inside the rollout hold does not warn yet",
+      inputs({ timestamps: "0+0x20" }),
+      [],
+      "5m30s",
     );
     const down = inputs({ age: "121+0x20" });
     down.find(
       (input) => input.series.startsWith("up{") && input.series.includes("worker-b"),
     )!.values = "0+0x20";
-    scenario("down scrape is unknown, not healthy empty queue", down, [alerts[3]!]);
+    scenario("down scrape is unknown, not healthy empty queue", down, [alerts[3]!], "6m");
+    // A rollout: one worker's scrape drops for two minutes, then recovers.
+    const rollout = inputs({ age: "20+0x20" });
+    rollout.find(
+      (input) => input.series.startsWith("up{") && input.series.includes("worker-b"),
+    )!.values = "1 1 0 0 0 0 1+0x14";
+    scenario("a short rollout gap does not warn", rollout, [], "3m");
     const swapped = inputs({ age: "121+0x20" });
     const timestamp = swapped.find(
       (input) =>
@@ -313,7 +330,7 @@ test.skipIf(!promtool)(
         input.series.includes("worker-b"),
     )!;
     timestamp.series = timestamp.series.replace("worker-b", "foreign-worker");
-    scenario("equal counts cannot hide a foreign timestamp identity", swapped, [alerts[3]!]);
+    scenario("equal counts cannot hide a foreign timestamp identity", swapped, [alerts[3]!], "6m");
     scenario(
       "ceiling and growing queue replace slot warning",
       inputs({ age: "20+0x20", backlog: "1+1x20", slots: "1+0x20", ceiling: true }),
