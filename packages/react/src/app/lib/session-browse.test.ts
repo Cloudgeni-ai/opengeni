@@ -105,7 +105,7 @@ describe("session browse projections", () => {
       }).map((item) => item.id),
     ).toEqual(["scheduler"]);
     expect(sessionCreatorLabel(opaqueSubject)).toBe("tenant:ada");
-    expect(sessionCreatorLabel(scheduler)).toBe("scheduler · Service");
+    expect(sessionCreatorLabel(scheduler)).toBe("Service");
   });
 
   test("groups root browse results by creator or created-date buckets", () => {
@@ -282,6 +282,13 @@ describe("session browse projections", () => {
     expect(sessionCreatorOptions([first, second])).toEqual([
       { value: "api_key:aaaa", label: "Codex operator · API key (1)" },
       { value: "api_key:bbbb", label: "Codex operator · API key (2)" },
+    ]);
+    const unnamed = session({
+      id: "unnamed",
+      createdBy: { kind: "service", subjectId: "api_key:7dbccefa-3591-437a-81d2-6319352f124d" },
+    });
+    expect(sessionCreatorOptions([unnamed])).toEqual([
+      { value: "api_key:7dbccefa-3591-437a-81d2-6319352f124d", label: "API key" },
     ]);
   });
 

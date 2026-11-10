@@ -15,8 +15,6 @@ const UNATTRIBUTED_LEGACY_SUBJECT_ID = "unattributed-legacy";
 
 const API_KEY_SUBJECT_PREFIX = "api_key:";
 const SERVICE_SUBJECT_PREFIX = "service:";
-const OPAQUE_ID =
-  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{16,})$/i;
 
 /** What kind of thing created a chat. Display-only. */
 export type CreatorType = "person" | "api_key" | "service" | "unattributed";
@@ -43,19 +41,26 @@ export function creatorIdentityKey(createdBy: Pick<CreatorRef, "subjectId">): st
 }
 
 /**
- * How a non-person creator is named: its friendly name and a short kind hint,
- * never a raw subject id. Null for people, whose labels are shown as frozen.
+ * How a non-person creator is named: the friendly name its owner gave it and a
+ * short kind hint. Without a friendly name it is just its kind, never an id.
+ * Null for people, whose labels are shown as frozen.
  */
 export function machineCreatorDisplay(
   createdBy: CreatorRef,
-): { name: string; hint: "API key" | "Service" } | null {
+): { name: string | null; hint: "API key" | "Service" } | null {
   const type = creatorType(createdBy);
-  const frozen = createdBy.label?.trim();
-  if (type === "api_key") return { name: frozen || "Unnamed API key", hint: "API key" };
-  if (type !== "service") return null;
-  const withoutPrefix = humanizeSubjectId(createdBy.subjectId);
-  const readable = withoutPrefix && !OPAQUE_ID.test(withoutPrefix) ? withoutPrefix : null;
-  return { name: frozen || readable || "Service", hint: "Service" };
+  if (type !== "api_key" && type !== "service") return null;
+  return {
+    name: createdBy.label?.trim() || null,
+    hint: type === "api_key" ? "API key" : "Service",
+  };
+}
+
+/** A non-person creator's label ("Codex operator · API key", or just "API key"); null for people. */
+export function machineCreatorLabel(createdBy: CreatorRef): string | null {
+  const machine = machineCreatorDisplay(createdBy);
+  if (!machine) return null;
+  return machine.name ? `${machine.name} · ${machine.hint}` : machine.hint;
 }
 
 function humanizeSubjectId(subjectId: string): string {
@@ -106,8 +111,8 @@ export function railRowCreator(session: {
 
 /** Human-readable creator name for a tooltip or screen-reader announcement. */
 export function creatorLabel(createdBy: CreatorRef): string {
-  const machine = machineCreatorDisplay(createdBy);
-  if (machine) return `${machine.name} · ${machine.hint}`;
+  const machine = machineCreatorLabel(createdBy);
+  if (machine) return machine;
   return createdBy.label?.trim() || createdBy.subjectId;
 }
 

@@ -3,7 +3,7 @@
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
 import { t } from "./console-text";
-import { creatorIdentityKey, machineCreatorDisplay } from "./creator-initials";
+import { creatorIdentityKey, machineCreatorLabel } from "./creator-initials";
 import { formatWaitingSince } from "./format";
 import { awaitsPerson } from "./needs-you";
 import { sessionInputWait } from "./session-rail";
@@ -562,8 +562,8 @@ export function sessionCreatorKey(session: Session): string {
 
 export function sessionCreatorLabel(session: Session): string {
   // API keys and services: a friendly name and kind, never a raw id.
-  const machine = machineCreatorDisplay(session.createdBy);
-  if (machine) return `${machine.name} · ${machine.hint}`;
+  const machine = machineCreatorLabel(session.createdBy);
+  if (machine) return machine;
   const explicit = session.createdBy.label?.trim();
   if (explicit) return explicit;
   if (session.createdBy.subjectId === "unattributed-legacy") return "Unattributed";
@@ -610,7 +610,7 @@ export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string,
       .map(([value, creator]) => {
         const shared = sharedLabels.get(creator.label) ?? [value];
         if (shared.length === 1) return { value, label: creator.label };
-        const machine = machineCreatorDisplay({ kind: creator.kind, subjectId: creator.subjectId });
+        const machine = machineCreatorLabel({ kind: creator.kind, subjectId: creator.subjectId });
         return {
           value,
           label: machine

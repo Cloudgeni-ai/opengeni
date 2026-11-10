@@ -7,6 +7,7 @@ import {
   creatorLabel,
   creatorType,
   machineCreatorDisplay,
+  machineCreatorLabel,
   railRowCreator,
 } from "./creator-initials";
 import {
@@ -463,7 +464,24 @@ describe("creatorLabel", () => {
       expect(creatorInitials(key)).toBeNull();
       expect(creatorAnnouncement(key)).toBeNull();
     }
-    expect(creatorLabel({ kind: "service", subjectId })).toBe("Unnamed API key · API key");
+  });
+
+  test("a key or service without a friendly name is just its kind, never a raw id", () => {
+    const subjectId = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
+    for (const kind of ["service", "subject"] as const) {
+      expect(creatorLabel({ kind, subjectId })).toBe("API key");
+      expect(creatorLabel({ kind, subjectId, label: "   " })).toBe("API key");
+    }
+    expect(machineCreatorLabel({ kind: "service", subjectId })).toBe("API key");
+    expect(creatorLabel({ kind: "service", subjectId: "service:billing-worker-v2" })).toBe(
+      "Service",
+    );
+    expect(
+      creatorLabel({ kind: "service", subjectId: "service:5b0f9a7e-3c1d-4e2f-9a8b-7c6d5e4f3a2b" }),
+    ).toBe("Service");
+    expect(creatorLabel({ kind: "service", subjectId: "scheduler", label: "Nightly" })).toBe(
+      "Nightly · Service",
+    );
     expect(machineCreatorDisplay({ kind: "subject", subjectId: "user:x" })).toBeNull();
   });
 });
