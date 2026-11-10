@@ -272,6 +272,7 @@ BEGIN
   END;
   -- Retention: records older than 90 days are removed a few at a time as new
   -- ones arrive, except for accounts still held, which stay reviewable.
+  -- Concurrent setups skip rows another setup is already removing.
   BEGIN
     DELETE FROM opengeni_private.signup_network_sources expired
       WHERE expired.data_schema = target AND expired.account_id IN (
@@ -279,7 +280,7 @@ BEGIN
         WHERE s.data_schema = target AND s.set_up_at < clock_timestamp() - interval '90 days'
           AND NOT EXISTS (SELECT 1 FROM promotion_decisions d
             WHERE d.account_id = s.account_id AND d.decision = 'held')
-        ORDER BY s.set_up_at LIMIT 20);
+        ORDER BY s.set_up_at LIMIT 20 FOR UPDATE OF s SKIP LOCKED);
   EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'signup network retention skipped (%)', SQLSTATE;
   END;
