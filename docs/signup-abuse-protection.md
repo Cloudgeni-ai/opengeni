@@ -83,14 +83,17 @@ row, created by `POST /v1/auth/organization-onboarding`. When that receipt is
 written, the existing setup trigger records one
 `opengeni_private.signup_network_sources` row: the account, the owner user, the
 setup time and two keyed hashes. The API derives the HMAC key from the existing
-Better Auth secret (no new secret) and hashes the trusted client address and its
-/24 (IPv4) or /48 (IPv6) prefix; an IPv4-mapped IPv6 address counts as IPv4. Raw
-addresses are never stored. Recording happens in every mode, so counts exist
+Better Auth secret (no new secret) and hashes the trusted client and its /24
+(IPv4) or /48 (IPv6) prefix. The client is the IPv4 address or the IPv6 /64, the
+same unit the request rate limiter uses, because one client normally controls a
+whole /64; an IPv4-mapped IPv6 address counts as IPv4. Raw addresses are never
+stored. Recording happens in every mode, so counts exist
 before the rule is switched on. When the trusted client address is unknown
 nothing is recorded, so unknown sources never group. Recording is best-effort and
 never fails organization setup. Invited members never get a setup receipt, so
 they are never recorded, counted or held. Rotating the Better Auth secret starts
-new groups.
+new groups. Records older than 90 days are deleted a few at a time as new ones
+arrive, except for accounts that are still held.
 
 **Settings.** Owner-only and revision-fenced like the signup cutoff: every write
 names the expected revision (0 before the first write, `40001` when stale) and
@@ -102,7 +105,7 @@ read the settings, sources or evidence nor write them.
 | --- | --- | --- |
 | `mode` | `off` | `observe` records evidence, `enforce` also holds. Migrations stay inert. |
 | `windowHours` | 24 | Farms create 21 accounts per day from one address. |
-| `exactHoldThreshold` | 3 | Hold from the 3rd new organization from one address within the window. Catches farms early; the largest real groups were 3-4, so release must be quick. |
+| `exactHoldThreshold` | 3 | Hold from the 3rd new organization from one address (IPv6: one /64) within the window. Catches farms early; the largest real groups were 3-4, so release must be quick. |
 | `prefixHoldThreshold` | none | /24 and /48 groups are a weaker signal (shared ISPs, offices, mobile carriers): recorded and shown in evidence, but they hold only if an operator sets a threshold. |
 | `rateLimitEnabled` | off | Refuse extreme bursts at the organization step. |
 | `rateLimitMax` | 5 | Per exact address per rolling hour; the 6th is refused. Far above any real pattern, well below the 12/h farms. |
@@ -111,7 +114,9 @@ read the settings, sources or evidence nor write them.
 spendable-balance admission) evaluates the current account only, under its own
 account lock. For an account set up within the last seven days it counts distinct
 self-serve organizations with the same address hash set up within the window of
-this account's setup (including itself), and the same for the prefix. In
+this account's setup (including itself), and the same for the prefix. An
+unexpected failure of this rule is logged and skipped, so it never blocks
+admission or Free issuance. In
 `observe` or `enforce` it records an observation with policy version
 `ip-velocity-v1` when a group has two or more members: group sizes, thresholds,
 the rule id, a short group reference and up to 20 setup times. Evidence has no
@@ -181,8 +186,9 @@ direct model API spend versus in-app spend, Free credit granted and used, and th
 current held balance; per group: recent organizations and held accounts. The same
 operations are available through the opengeni-ops `promotion-decisions` workflow
 (`network-velocity`, `network-velocity-set`, `network-holds`,
-`network-release-holds`, and `decision` for single accounts). Bulk release writes
-operator `eligible` decisions, so the released accounts are not held again.
+`network-release-holds`, and `decision` for single accounts). A dry run lists the
+accounts and revisions it would release. Bulk release writes operator `eligible`
+decisions, so the released accounts are not held again.
 
 ### Reviewer rules
 

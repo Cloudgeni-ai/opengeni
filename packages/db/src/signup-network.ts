@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withAccountRls } from "./database";
 import { getBillingBalance } from "./credit-balances";
+import { nestedPostgresSqlState } from "./persistence-errors";
 
 /**
  * Signup network velocity (migration 1354): the post-setup
@@ -396,6 +397,7 @@ export async function releaseSignupNetworkHolds(
   input: { operator: string; reason: string; limit?: number; dryRun?: boolean },
 ): Promise<{
   candidates: number;
+  wouldRelease?: { accountId: string; revision: number }[];
   released: { accountId: string; revision: number }[];
   skipped: { accountId: string; reason: string }[];
   dryRun: boolean;
@@ -429,13 +431,29 @@ export async function releaseSignupNetworkHolds(
           revision: Number(row!.decision.revision),
         });
       } catch (error) {
-        const code = (error as { code?: string; cause?: { code?: string } })?.cause?.code;
         skipped.push({
           accountId: candidate.account_id,
-          reason: code === "40001" ? "decision changed; review it individually" : "release failed",
+          reason:
+            nestedPostgresSqlState(error) === "40001"
+              ? "decision changed; review it individually"
+              : "release failed",
         });
       }
     }
   }
-  return { candidates: candidates.length, released, skipped, dryRun: input.dryRun === true };
+  return {
+    candidates: candidates.length,
+    // A dry run lists exactly what an apply run would release.
+    ...(input.dryRun
+      ? {
+          wouldRelease: candidates.map((candidate) => ({
+            accountId: candidate.account_id,
+            revision: Number(candidate.revision),
+          })),
+        }
+      : {}),
+    released,
+    skipped,
+    dryRun: input.dryRun === true,
+  };
 }

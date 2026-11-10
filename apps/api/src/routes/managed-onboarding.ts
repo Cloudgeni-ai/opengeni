@@ -200,8 +200,11 @@ export function registerManagedOnboardingRoutes(
       }
       return context.json(completed);
     } catch (error) {
-      recordOrganizationSetupOutcome(deps.observability, "failed");
       const sqlState = nestedPostgresSqlState(error);
+      recordOrganizationSetupOutcome(
+        deps.observability,
+        sqlState === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE ? "rate_limited" : "failed",
+      );
       if (sqlState === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE) {
         throw new ApiHttpError(429, {
           code: "limit_exceeded",

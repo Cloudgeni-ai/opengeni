@@ -13,7 +13,7 @@ export const SIGNUP_NETWORK_RATE_LIMIT_CODE = "organization_setup_rate_limited";
 const KEY_LABEL = "opengeni:signup-network:v1";
 
 /**
- * Keyed hashes of the exact client address and its /24 or /48 prefix, for
+ * Keyed hashes of the client (IPv4 address or IPv6 /64) and its /24 or /48 prefix, for
  * signup network velocity. The HMAC key is derived from the existing
  * Better Auth secret, so no new secret is required; rotating that secret
  * starts new groups. Returns null, and nothing is recorded, when the address

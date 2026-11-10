@@ -31,6 +31,8 @@ CREATE INDEX IF NOT EXISTS signup_network_sources_address
   ON opengeni_private.signup_network_sources (data_schema, address_hash, set_up_at);
 CREATE INDEX IF NOT EXISTS signup_network_sources_prefix
   ON opengeni_private.signup_network_sources (data_schema, prefix_hash, set_up_at);
+CREATE INDEX IF NOT EXISTS signup_network_sources_set_up
+  ON opengeni_private.signup_network_sources (data_schema, set_up_at);
 REVOKE ALL ON opengeni_private.signup_network_sources FROM PUBLIC;
 
 -- Append-only, owner-only. The newest revision is current; none means defaults.
@@ -268,6 +270,19 @@ BEGIN
   EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'signup network source was not recorded (%)', SQLSTATE;
   END;
+  -- Retention: records older than 90 days are removed a few at a time as new
+  -- ones arrive, except for accounts still held, which stay reviewable.
+  BEGIN
+    DELETE FROM opengeni_private.signup_network_sources expired
+      WHERE expired.data_schema = target AND expired.account_id IN (
+        SELECT s.account_id FROM opengeni_private.signup_network_sources s
+        WHERE s.data_schema = target AND s.set_up_at < clock_timestamp() - interval '90 days'
+          AND NOT EXISTS (SELECT 1 FROM promotion_decisions d
+            WHERE d.account_id = s.account_id AND d.decision = 'held')
+        ORDER BY s.set_up_at LIMIT 20);
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'signup network retention skipped (%)', SQLSTATE;
+  END;
   RETURN NEW;
 END $$;
 
@@ -278,7 +293,13 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT A
 DECLARE signup_not_before timestamptz;
 BEGIN
   PERFORM opengeni_private.evaluate_promotion_abuse(p_account_id);
-  PERFORM opengeni_private.evaluate_signup_network_velocity(p_account_id);
+  -- Fail open: an unexpected network velocity failure never blocks admission
+  -- or Free issuance; the next evaluation retries.
+  BEGIN
+    PERFORM opengeni_private.evaluate_signup_network_velocity(p_account_id);
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'signup network velocity evaluation skipped (%)', SQLSTATE;
+  END;
   IF p_account_id IS DISTINCT FROM opengeni_private.current_account_id() THEN
     RAISE EXCEPTION 'Plan account scope mismatch' USING ERRCODE = '42501';
   END IF;

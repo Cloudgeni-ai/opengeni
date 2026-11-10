@@ -522,6 +522,56 @@ test("rate limit: 5 per network per hour allowed, the 6th refused, replays allow
   await configure({ rateLimitEnabled: false });
 }, 180_000);
 
+test("concurrent setups at the rate-limit boundary admit exactly the maximum", async () => {
+  if (!shared || !client) return;
+  await configure({ mode: "off", rateLimitEnabled: true, rateLimitMax: 2 });
+  try {
+    const source = fresh("concurrent-rate");
+    const results = await Promise.allSettled(
+      Array.from({ length: 4 }, async () => await owner(source)),
+    );
+    const admitted = results.filter((result) => result.status === "fulfilled");
+    const refused = results.filter(
+      (result) => result.status === "rejected" && nestedPostgresSqlState(result.reason) === "OG429",
+    );
+    expect(admitted).toHaveLength(2);
+    expect(refused).toHaveLength(2);
+  } finally {
+    await configure({ rateLimitEnabled: false, rateLimitMax: 5 });
+  }
+}, 180_000);
+
+test("an unexpected detector failure never blocks Free eligibility or admission", async () => {
+  if (!shared || !client) return;
+  await configure({ mode: "enforce" });
+  const [definition] = await shared.admin`select pg_get_functiondef(
+    'opengeni_private.evaluate_signup_network_velocity(uuid)'::regprocedure) as body`;
+  const created = await owner(fresh("detector-failure"));
+  await shared.admin
+    .unsafe(`CREATE OR REPLACE FUNCTION opengeni_private.evaluate_signup_network_velocity(p_account_id uuid)
+    RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
+    BEGIN RAISE EXCEPTION 'detector broken' USING ERRCODE = 'XX000'; END $$`);
+  try {
+    expect(await freePlanCreditEligible(client.db, created.accountId)).toBe(true);
+    await getSpendableCreditBalance(client.db, created.accountId);
+  } finally {
+    await shared.admin.unsafe(definition!.body as string);
+    await configure({ mode: "off" });
+  }
+}, 180_000);
+
+test("network records older than 90 days are removed as new ones arrive, except held accounts", async () => {
+  if (!shared || !client) return;
+  const old = await owner(fresh("retention-old"));
+  const heldOld = await owner(fresh("retention-held"));
+  await shared.admin`select opengeni_private.set_promotion_decision(${heldOld.accountId}::uuid,'held',
+    'operator-v1','manual-review','{}'::jsonb,'operator:test',0)`;
+  await age([old.accountId, heldOld.accountId], 91 * 24 * HOUR);
+  await owner(fresh("retention-new"));
+  expect(await sources(old.accountId)).toHaveLength(0);
+  expect(await sources(heldOld.accountId)).toHaveLength(1);
+}, 180_000);
+
 test("settings are owner-only and revision-fenced; runtime roles cannot read evidence or write settings", async () => {
   if (!shared || !client || !ownerClient) return;
   const current = await settings();
@@ -641,6 +691,9 @@ test("review lists pending detector holds with domain-only evidence; bulk releas
       dryRun: true,
     });
     expect(dryRun).toMatchObject({ candidates: 3, released: [], dryRun: true });
+    expect(new Set(dryRun.wouldRelease!.map((entry) => entry.accountId))).toEqual(
+      new Set(burst.map((created) => created.accountId)),
+    );
     const released = await releaseSignupNetworkHolds(ownerClient.db, {
       operator: "operator:test",
       reason: "rollback of network velocity holds",

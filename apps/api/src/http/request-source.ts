@@ -93,10 +93,12 @@ export function trustedRequestSourceRateLimitKey(c: Context, trust: RequestSourc
 }
 
 /**
- * Canonical exact address and network prefix of a trusted source address:
- * the /24 for IPv4 and the /48 for IPv6 (an IPv4-mapped IPv6 address counts
- * as its IPv4 address). Null for {@link UNKNOWN_REQUEST_SOURCE_ADDRESS} or
- * anything that is not an IP address, so unknown sources never group.
+ * Canonical client and network prefix of a trusted source address. The
+ * client is the IPv4 address or, like {@link requestSourceRateLimitKey}, the
+ * IPv6 /64 (one client normally controls a whole /64). The prefix is the /24
+ * for IPv4 and the /48 for IPv6. An IPv4-mapped IPv6 address counts as its
+ * IPv4 address. Null for {@link UNKNOWN_REQUEST_SOURCE_ADDRESS} or anything
+ * that is not an IP address, so unknown sources never group.
  */
 export function requestSourceNetwork(address: string): { exact: string; prefix: string } | null {
   if (isIP(address) === 4) {
@@ -112,7 +114,10 @@ export function requestSourceNetwork(address: string): { exact: string; prefix: 
     return requestSourceNetwork(`${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`);
   }
   const hex = groups.map((group) => group.toString(16));
-  return { exact: hex.join(":"), prefix: `${hex.slice(0, 3).join(":")}::/48` };
+  return {
+    exact: `${hex.slice(0, 4).join(":")}::/64`,
+    prefix: `${hex.slice(0, 3).join(":")}::/48`,
+  };
 }
 
 /**

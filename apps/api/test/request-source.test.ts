@@ -196,7 +196,7 @@ describe("trusted client address header", () => {
 });
 
 describe("requestSourceNetwork", () => {
-  test("groups IPv4 by /24 and IPv6 by /48; mapped IPv4 counts as IPv4; unknown is null", () => {
+  test("one client is an IPv4 address or an IPv6 /64; prefixes are /24 and /48; unknown is null", () => {
     expect(requestSourceNetwork("192.0.2.77")).toEqual({
       exact: "192.0.2.77",
       prefix: "192.0.2.0/24",
@@ -206,12 +206,14 @@ describe("requestSourceNetwork", () => {
       prefix: "192.0.2.0/24",
     });
     expect(requestSourceNetwork("2001:db8:12:34::1")).toEqual({
-      exact: "2001:db8:12:34:0:0:0:1",
+      exact: "2001:db8:12:34::/64",
       prefix: "2001:db8:12::/48",
     });
-    expect(requestSourceNetwork("2001:DB8:12:34:0::1")).toEqual(
+    // Rotating within one /64 is the same client.
+    expect(requestSourceNetwork("2001:DB8:12:34:abcd::99")).toEqual(
       requestSourceNetwork("2001:db8:12:34::1"),
     );
+    expect(requestSourceNetwork("2001:db8:12:35::1")?.exact).toBe("2001:db8:12:35::/64");
     expect(requestSourceNetwork(UNKNOWN_REQUEST_SOURCE_ADDRESS)).toBeNull();
     expect(requestSourceNetwork("not-an-address")).toBeNull();
   });
