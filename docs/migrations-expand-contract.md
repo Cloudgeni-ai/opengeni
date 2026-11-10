@@ -394,6 +394,14 @@ named-object contracts are used, not a reconstructed subset of tables.
 This is the deterministic readiness-code equivalent of starting the old API
 and workers; it does not test their other queries or writer protocols.
 
+The job also reads the revision production reports from its public `/healthz`.
+When that differs from the pin, it warns that the pin is stale and runs the same
+readiness check with that live revision's inspector and evaluator, in addition
+to the pin. An unreadable live revision only warns. The release operator in
+opengeni-ops independently repeats this check against the revisions the live
+production workloads run before any production migration, so a stale pin can no
+longer let an incompatible rolling release through.
+
 The test also adds safe unknown objects and deliberately weakens RLS, adds
 unsafe grants/definers and revokes known EXECUTE privileges. Both the current
 and pinned binary must reject the negative controls. Missing PostgreSQL, pin
