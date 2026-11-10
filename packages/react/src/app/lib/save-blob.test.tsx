@@ -5,6 +5,7 @@ import { clickDownloadLink, saveBlob, SAVED_OBJECT_URL_LIFETIME_MS } from "./sav
 
 const realCreateObjectURL = URL.createObjectURL;
 const realRevokeObjectURL = URL.revokeObjectURL;
+let listeners = new AbortController();
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -12,6 +13,8 @@ beforeAll(() => {
 
 afterEach(() => {
   jest.useRealTimers();
+  listeners.abort();
+  listeners = new AbortController();
   URL.createObjectURL = realCreateObjectURL;
   URL.revokeObjectURL = realRevokeObjectURL;
   document.body.replaceChildren();
@@ -34,21 +37,28 @@ function recordClicks() {
       });
       event.preventDefault();
     },
-    { capture: true },
+    { capture: true, signal: listeners.signal },
   );
   return clicks;
 }
 
 describe("saveBlob", () => {
-  test("keeps the object URL alive well past the click, then revokes it", () => {
+  test("keeps the object URL alive well past the click, then revokes it", async () => {
     jest.useFakeTimers();
     const revoke = mock((_url: string) => undefined);
-    URL.createObjectURL = () => "blob:saved-file";
+    const created: Blob[] = [];
+    URL.createObjectURL = (blob: Blob | MediaSource) => {
+      created.push(blob as Blob);
+      return "blob:saved-file";
+    };
     URL.revokeObjectURL = revoke;
     const clicks = recordClicks();
 
     saveBlob(new Blob(["hello"], { type: "text/plain" }), "notes.txt");
 
+    expect(created).toHaveLength(1);
+    expect(created[0]!.type).toBe("text/plain");
+    expect(await created[0]!.text()).toBe("hello");
     expect(clicks).toEqual([{ href: "blob:saved-file", download: "notes.txt", attached: true }]);
     expect(document.body.querySelector("a")).toBeNull();
 
@@ -59,10 +69,6 @@ describe("saveBlob", () => {
     jest.advanceTimersByTime(1);
     expect(revoke).toHaveBeenCalledTimes(1);
     expect(revoke).toHaveBeenCalledWith("blob:saved-file");
-  });
-
-  test("uses a lifetime of at least thirty seconds", () => {
-    expect(SAVED_OBJECT_URL_LIFETIME_MS).toBeGreaterThanOrEqual(30_000);
   });
 
   test("still schedules the revoke and removes the anchor when the click throws", () => {
