@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 import {
   SESSION_ARCHIVE_FORMAT_VERSION,
+  SESSION_ARCHIVE_PURGE_TABLES,
   SESSION_ARCHIVE_RESTORE_TABLES,
   SESSION_ARCHIVE_TRANSCRIPT_FORMAT,
   applySessionTurnSettlement,
@@ -25,6 +26,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import {
+  SESSION_ARCHIVE_PURGE_BATCH_ROWS,
   createSessionArchiveActivities,
   type ArchiveIdleSessionsResult,
 } from "../src/activities/session-archive";
@@ -523,6 +525,59 @@ describe("idle-session archive worker", () => {
       const session = await getSession(client.db, scope.workspaceId, scope.sessionId);
       expect(session?.retention?.archive?.state).toBe("archived");
     }
+  }, 120_000);
+
+  test("the purge resumes at the table still in progress instead of starting over each batch", async () => {
+    const scope = await idleSession();
+    // Two full purge batches and a partial one of deltas in the last table.
+    const deltas = 2 * SESSION_ARCHIVE_PURGE_BATCH_ROWS + 500;
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      await sql`insert into session_events
+          (account_id, workspace_id, session_id, sequence, type, payload, occurred_at)
+        select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
+          'agent.message.delta', jsonb_build_object('delta', n), now() - interval '40 days'
+        from (select max(sequence) as last from session_events
+          where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
+          generate_series(1, ${deltas}) n`;
+    });
+    // Count this session's purge calls on the wire.
+    const counted = createDb(shared.appUrl);
+    let calls = 0;
+    (counted.db as unknown as { $client: { options: { debug: unknown } } }).$client.options.debug =
+      (_id: number, query: string, parameters: unknown[]) => {
+        if (
+          query.includes("purge_archived_session_content") &&
+          parameters.includes(scope.sessionId)
+        )
+          calls += 1;
+      };
+    try {
+      const activities = createSessionArchiveActivities(
+        async () =>
+          ({
+            db: counted.db,
+            objectStorage: { deleteObject: async () => undefined } as never,
+            observability: { info: () => undefined, warn: () => undefined } as never,
+            settings: testSettings({ sessionArchiveEnabled: true, sessionArchiveIdleDays: 30 }),
+          }) as unknown as ActivityServices,
+        { upload: async () => undefined },
+      );
+      expect((await activities.archiveIdleSessions()).failed).toBe(0);
+    } finally {
+      await counted.close();
+    }
+
+    const [row] = await shared.admin`select content_archive_purged_at from sessions
+      where id = ${scope.sessionId}`;
+    expect(row!.content_archive_purged_at).not.toBeNull();
+    const [left] = await shared.admin`select count(*)::int as count from session_events
+      where session_id = ${scope.sessionId} and type = 'agent.message.delta'`;
+    expect((left as { count: number }).count).toBe(0);
+    // Starting at the first table on every step would visit every table for
+    // each of the three delta batches and again for the confirming pass.
+    expect(calls).toBeGreaterThan(0);
+    expect(calls).toBeLessThan(4 * SESSION_ARCHIVE_PURGE_TABLES.length);
   }, 120_000);
 
   test("an archived chat whose goal is still active is stopped, then stored", async () => {
