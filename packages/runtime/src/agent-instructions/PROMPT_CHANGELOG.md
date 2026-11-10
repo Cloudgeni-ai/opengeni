@@ -1,5 +1,35 @@
 # Modular prompt changelog
 
+The "Repository skills" system-prompt section no longer changes between turns
+of one chat. It used to carry the live index (or an unreachable, degraded or
+deferred notice), so a repository Skill added mid-chat, an offline Connected
+Machine or a deferred turn rewrote the system prompt, which broke prompt caching
+and made Claude reject replayed signed thinking. The section is now one stable
+notice built only from the search folders; the index is a durable "Repository
+skills" developer history item, written only when it changes. Repository
+sessions always get the notice: 1,185 characters with the two default folders
+(before: 472 for the deferred notice, about 900 plus the listing when indexed,
+and nothing for a workspace without skills, which now gets a short "No
+repository skills were found" history item instead). The one-shot request for a
+missing session title moves from the first request's system prompt into that
+turn's operational notice.
+
+```text
+- ## Repository skills / Repository skills are instructions already present in the live workspace. Read them with repository_skill_read using the exact repository: id below. … ### Available repository skills … ### How to use repository skills …   (indexed)
+- ## Repository skills / Repository skills are not listed here: the repository may not be ready until a tool first uses the workspace. If the task involves the repository, look for skill folders in {folders} …   (deferred)
+- ## Repository skills / Repository skills could not be indexed because the workspace was unreachable when this run started …   (unreachable; degraded similar)
++ ## Repository skills
++ Repository skills are instructions already present in the live workspace, in skill folders under {folders} (paths from the workspace root). A skill's identifier is repository: followed by its SKILL.md path, such as repository:{first folder}/<folder>/SKILL.md. Read skills with repository_skill_read, which returns current live files; ordinary filesystem tools execute referenced scripts and read binary assets. Configured Skills use their separate skill_read index.
++ Once the workspace has been indexed, its index appears in the conversation as a Repository skills context message; the latest one replaces earlier ones. If there is none, or it may be out of date, and the task involves the repository, look in those folders yourself.
++ (the four "How to use" bullets, unchanged)
++ history item: <opengeni_repository_skills> This is the Repository skills index from the last time the live workspace was indexed, and it replaces earlier ones. Files may have changed since. {listing, or the unreachable/degraded/no-skills notice} </opengeni_repository_skills>
+- repository_skill_read: … Use the exact repository: identifier from the Repository skills index. …   (indexed)
+- repository_skill_read: … Name a skill as repository: followed by its SKILL.md path from the workspace root, for a skill folder in one of the folders the Repository skills section lists. …   (deferred)
++ repository_skill_read: … Name a skill by its exact repository: identifier, which is repository: followed by its SKILL.md path from the workspace root. …   (all modes)
+- system prompt (first request only): … This session still needs a semantic display title. …
++ turn operational notice: … This session still needs a semantic display title. …   (same text)
+```
+
 A configured session without a sandbox or Connected Machine no longer gets
 text it cannot act on: editing files in the sandbox, publishing new files,
 workspace file links, sandbox paths, background-command acknowledgement and

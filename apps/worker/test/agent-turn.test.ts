@@ -3763,8 +3763,8 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(buildCallAt).toBeGreaterThan(-1);
     expect(decisionAt).toBeGreaterThan(buildCallAt);
     expect(runSource.indexOf("});", buildCallAt)).toBeGreaterThan(decisionAt);
-    expect(buildSource).toContain(
-      '...(deps.deferRepositorySkillIndex || turn.source === "compaction"\n          ? { deferRepositorySkillIndex: true }',
+    expect(buildSource.replace(/\s+/g, " ")).toContain(
+      '...(deps.deferRepositorySkillIndex || turn.source === "compaction" ? { deferRepositorySkillIndex: true }',
     );
   });
 
