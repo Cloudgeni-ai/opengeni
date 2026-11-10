@@ -126,8 +126,11 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * get no names (as before).
  * 1153 withholds the Slack agent update sweeper's inventory; until it is
  * granted, the sweeper finds nothing and sends no update messages.
- * 1240 withheld the inventory of meeting tracks not yet kept compact and
- * 1282 granted it.
+ * 1240 withheld the inventory of meeting tracks not yet kept compact, 1282
+ * granted it and 1283 withholds it again: the binary then in production
+ * (6327db2c) did not know the routine and rejects its runtime grant. Until a
+ * later migration grants it, existing meetings keep their audio as it is and
+ * only new transcripts keep it compact.
  * 1344 withholds the end of a call's ring on the other phones; until it is
  * granted, settling a call sends no ended push and those phones ring out.
  */
@@ -137,6 +140,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
   "end_agent_call_rings_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
@@ -2451,6 +2455,7 @@ export const FORCE_RLS_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
+  "turn_timing_profiles",
   "usage_events",
   "vault_field_versions",
   "vault_item_fields",
@@ -2815,6 +2820,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "transcription_recording_objects",
   "transcription_recording_segments",
   "transcription_recordings",
+  // 1351_turn_timing_profiles: per-turn timing profiles written by the maintenance sweep.
+  "turn_timing_profiles",
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
@@ -3774,8 +3781,16 @@ export async function inspectRuntimeDatabasePosture(
                 AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
               ORDER BY acl.privilege_type
             ) AS extra_privileges,
+            -- Same answer as has_any_column_privilege(current_user, c.oid, privilege):
+            -- the table-level privilege, or that privilege on a live user column.
+            -- A column without its own ACL grants nothing beyond the table, so only
+            -- columns with an ACL need a check. has_any_column_privilege reads every
+            -- column through the catalog cache, which on a fresh connection loads
+            -- thousands of pg_attribute rows one by one on each readiness probe.
             ARRAY(SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
-              WHERE has_any_column_privilege(current_user, c.oid, privilege)) as column_privileges
+              WHERE has_table_privilege(current_user, c.oid, privilege)
+                OR EXISTS (SELECT 1 FROM unnest(column_acls.attnums) attnum
+                  WHERE has_column_privilege(current_user, c.oid, attnum, privilege))) as column_privileges
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
           left join (
@@ -3784,6 +3799,12 @@ export async function inspectRuntimeDatabasePosture(
               bool_or(polname = 'editable_artifact_materializer_owner') as artifact_materializer_policy
             from pg_policy group by polrelid
           ) policies on policies.polrelid = c.oid
+          left join (
+            select attrelid, array_agg(attnum) as attnums
+            from pg_attribute
+            where attnum > 0 and not attisdropped and attacl is not null
+            group by attrelid
+          ) column_acls on column_acls.attrelid = c.oid
           where n.nspname in (${targetSchema}, 'opengeni_private')
             and c.relkind in ('r', 'p')
           order by c.relname
@@ -6920,7 +6941,18 @@ export function runtimeDatabaseReadyCheck(
   db: Database,
   options: RuntimeDatabasePostureOptions,
 ): () => Promise<void> {
-  return async () => {
-    await assertRuntimeDatabasePosture(db, options);
+  let inFlight: Promise<void> | undefined;
+  return () => {
+    // The HTTP timeout cannot cancel a driver query. Concurrent probes share
+    // the outstanding inspection, as the worker readiness check does, so slow
+    // database answers cannot pile up one pooled connection per probe. The
+    // next probe after it settles always runs a fresh inspection.
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      await assertRuntimeDatabasePosture(db, options);
+    })().finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
   };
 }

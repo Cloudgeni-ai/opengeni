@@ -69,7 +69,7 @@ The executable runtime bundle contains code from these MIT-licensed packages:
 @openai/agents-realtime 0.14.3
 Copyright (c) 2025 OpenAI
 
-zod 4.4.3
+zod 4.6.7
 Copyright (c) 2025 Colin McDonnell
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -1265,76 +1265,72 @@ License / NOTICE text 8
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 @opentelemetry/api 1.9.1
-@opentelemetry/api-logs 0.207.0
-@opentelemetry/context-async-hooks 2.2.0
-@opentelemetry/core 2.2.0
+@opentelemetry/api-logs 0.223.0
+@opentelemetry/configuration 0.223.0
+@opentelemetry/context-async-hooks 2.12.0
 @opentelemetry/core 2.12.0
-@opentelemetry/exporter-logs-otlp-grpc 0.207.0
-@opentelemetry/exporter-logs-otlp-http 0.207.0
-@opentelemetry/exporter-logs-otlp-proto 0.207.0
-@opentelemetry/exporter-metrics-otlp-grpc 0.207.0
-@opentelemetry/exporter-metrics-otlp-http 0.207.0
-@opentelemetry/exporter-metrics-otlp-proto 0.207.0
-@opentelemetry/exporter-prometheus 0.207.0
-@opentelemetry/exporter-trace-otlp-grpc 0.207.0
-@opentelemetry/exporter-trace-otlp-http 0.207.0
-@opentelemetry/exporter-trace-otlp-proto 0.207.0
-@opentelemetry/exporter-zipkin 2.2.0
-@opentelemetry/instrumentation 0.207.0
-@opentelemetry/instrumentation-http 0.207.0
-@opentelemetry/otlp-exporter-base 0.207.0
-@opentelemetry/otlp-grpc-exporter-base 0.207.0
-@opentelemetry/otlp-transformer 0.207.0
-@opentelemetry/propagator-b3 2.2.0
-@opentelemetry/propagator-jaeger 2.2.0
-@opentelemetry/resources 2.2.0
+@opentelemetry/exporter-logs-otlp-grpc 0.223.0
+@opentelemetry/exporter-logs-otlp-http 0.223.0
+@opentelemetry/exporter-logs-otlp-proto 0.223.0
+@opentelemetry/exporter-metrics-otlp-grpc 0.223.0
+@opentelemetry/exporter-metrics-otlp-http 0.223.0
+@opentelemetry/exporter-metrics-otlp-proto 0.223.0
+@opentelemetry/exporter-prometheus 0.223.0
+@opentelemetry/exporter-trace-otlp-grpc 0.223.0
+@opentelemetry/exporter-trace-otlp-http 0.223.0
+@opentelemetry/exporter-trace-otlp-proto 0.223.0
+@opentelemetry/exporter-zipkin 2.12.0
+@opentelemetry/instrumentation 0.223.0
+@opentelemetry/instrumentation-http 0.223.0
+@opentelemetry/otlp-exporter-base 0.223.0
+@opentelemetry/otlp-grpc-exporter-base 0.223.0
+@opentelemetry/otlp-transformer 0.223.0
+@opentelemetry/propagator-b3 2.12.0
+@opentelemetry/propagator-jaeger 2.12.0
 @opentelemetry/resources 2.12.0
-@opentelemetry/sdk-logs 0.207.0
-@opentelemetry/sdk-metrics 2.2.0
-@opentelemetry/sdk-node 0.207.0
+@opentelemetry/sdk-logs 0.223.0
+@opentelemetry/sdk-metrics 2.12.0
+@opentelemetry/sdk-node 0.223.0
 @opentelemetry/sdk-trace 2.12.0
-@opentelemetry/sdk-trace-base 2.2.0
 @opentelemetry/sdk-trace-base 2.12.0
-@opentelemetry/sdk-trace-node 2.2.0
+@opentelemetry/sdk-trace-node 2.12.0
 @opentelemetry/semantic-conventions 1.43.0
-import-in-the-middle 2.0.6
+import-in-the-middle 3.6.0
 uuidv7 1.2.1
 
 Sources:
 - @opentelemetry/api 1.9.1: LICENSE
-- @opentelemetry/api-logs 0.207.0: LICENSE
-- @opentelemetry/context-async-hooks 2.2.0: LICENSE
-- @opentelemetry/core 2.2.0: LICENSE
+- @opentelemetry/api-logs 0.223.0: LICENSE
+- @opentelemetry/configuration 0.223.0: LICENSE
+- @opentelemetry/context-async-hooks 2.12.0: LICENSE
 - @opentelemetry/core 2.12.0: LICENSE
-- @opentelemetry/exporter-logs-otlp-grpc 0.207.0: LICENSE
-- @opentelemetry/exporter-logs-otlp-http 0.207.0: LICENSE
-- @opentelemetry/exporter-logs-otlp-proto 0.207.0: LICENSE
-- @opentelemetry/exporter-metrics-otlp-grpc 0.207.0: LICENSE
-- @opentelemetry/exporter-metrics-otlp-http 0.207.0: LICENSE
-- @opentelemetry/exporter-metrics-otlp-proto 0.207.0: LICENSE
-- @opentelemetry/exporter-prometheus 0.207.0: LICENSE
-- @opentelemetry/exporter-trace-otlp-grpc 0.207.0: LICENSE
-- @opentelemetry/exporter-trace-otlp-http 0.207.0: LICENSE
-- @opentelemetry/exporter-trace-otlp-proto 0.207.0: LICENSE
-- @opentelemetry/exporter-zipkin 2.2.0: LICENSE
-- @opentelemetry/instrumentation 0.207.0: LICENSE
-- @opentelemetry/instrumentation-http 0.207.0: LICENSE
-- @opentelemetry/otlp-exporter-base 0.207.0: LICENSE
-- @opentelemetry/otlp-grpc-exporter-base 0.207.0: LICENSE
-- @opentelemetry/otlp-transformer 0.207.0: LICENSE
-- @opentelemetry/propagator-b3 2.2.0: LICENSE
-- @opentelemetry/propagator-jaeger 2.2.0: LICENSE
-- @opentelemetry/resources 2.2.0: LICENSE
+- @opentelemetry/exporter-logs-otlp-grpc 0.223.0: LICENSE
+- @opentelemetry/exporter-logs-otlp-http 0.223.0: LICENSE
+- @opentelemetry/exporter-logs-otlp-proto 0.223.0: LICENSE
+- @opentelemetry/exporter-metrics-otlp-grpc 0.223.0: LICENSE
+- @opentelemetry/exporter-metrics-otlp-http 0.223.0: LICENSE
+- @opentelemetry/exporter-metrics-otlp-proto 0.223.0: LICENSE
+- @opentelemetry/exporter-prometheus 0.223.0: LICENSE
+- @opentelemetry/exporter-trace-otlp-grpc 0.223.0: LICENSE
+- @opentelemetry/exporter-trace-otlp-http 0.223.0: LICENSE
+- @opentelemetry/exporter-trace-otlp-proto 0.223.0: LICENSE
+- @opentelemetry/exporter-zipkin 2.12.0: LICENSE
+- @opentelemetry/instrumentation 0.223.0: LICENSE
+- @opentelemetry/instrumentation-http 0.223.0: LICENSE
+- @opentelemetry/otlp-exporter-base 0.223.0: LICENSE
+- @opentelemetry/otlp-grpc-exporter-base 0.223.0: LICENSE
+- @opentelemetry/otlp-transformer 0.223.0: LICENSE
+- @opentelemetry/propagator-b3 2.12.0: LICENSE
+- @opentelemetry/propagator-jaeger 2.12.0: LICENSE
 - @opentelemetry/resources 2.12.0: LICENSE
-- @opentelemetry/sdk-logs 0.207.0: LICENSE
-- @opentelemetry/sdk-metrics 2.2.0: LICENSE
-- @opentelemetry/sdk-node 0.207.0: LICENSE
+- @opentelemetry/sdk-logs 0.223.0: LICENSE
+- @opentelemetry/sdk-metrics 2.12.0: LICENSE
+- @opentelemetry/sdk-node 0.223.0: LICENSE
 - @opentelemetry/sdk-trace 2.12.0: LICENSE
-- @opentelemetry/sdk-trace-base 2.2.0: LICENSE
 - @opentelemetry/sdk-trace-base 2.12.0: LICENSE
-- @opentelemetry/sdk-trace-node 2.2.0: LICENSE
+- @opentelemetry/sdk-trace-node 2.12.0: LICENSE
 - @opentelemetry/semantic-conventions 1.43.0: LICENSE
-- import-in-the-middle 2.0.6: LICENSE
+- import-in-the-middle 3.6.0: LICENSE
 - uuidv7 1.2.1: LICENSE
 
 Apache License
@@ -2488,10 +2484,10 @@ THE SOFTWARE.
 License / NOTICE text 41
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-import-in-the-middle 2.0.6
+import-in-the-middle 3.6.0
 
 Sources:
-- import-in-the-middle 2.0.6: LICENSE-3rdparty.csv
+- import-in-the-middle 3.6.0: LICENSE-3rdparty.csv
 
 Component,Origin,License,Copyright
 require,module-details-from-path,MIT,Copyright 2016 Thomas Watson Steen
@@ -2501,10 +2497,10 @@ dev,imhotap,MIT,Copyright (c) 2019 Bryan English.
 License / NOTICE text 42
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-import-in-the-middle 2.0.6
+import-in-the-middle 3.6.0
 
 Sources:
-- import-in-the-middle 2.0.6: NOTICE
+- import-in-the-middle 3.6.0: NOTICE
 
 import-in-the-middle is licensed for use as follows:
 
@@ -3332,3 +3328,25 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+License / NOTICE text 67
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+yaml 2.9.0
+
+Sources:
+- yaml 2.9.0: LICENSE
+
+Copyright Eemeli Aro <eemeli@gmail.com>
+
+Permission to use, copy, modify, and/or distribute this software for any purpose
+with or without fee is hereby granted, provided that the above copyright notice
+and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND
+FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF
+THIS SOFTWARE.

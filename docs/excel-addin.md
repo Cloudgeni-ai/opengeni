@@ -127,6 +127,12 @@ come from `@opengeni/sdk/office` and `@opengeni/react`:
   `openOfficeDialog(url)`, a top-level window on the product's origin, and
   have the page it lands on send a short-lived credential back with
   `office().context.ui.messageParent`.
+- **Framing.** Office on the web frames the pane inside Microsoft's hosts. If
+  the product restricts framing, give its pane pages a `frame-ancestors` list
+  with those hosts (`*.officeapps.live.com`, `*.office.com`,
+  `*.cloud.microsoft`, `*.sharepoint.com` and the rest of the list in
+  `apps/web/src/server.ts`) and no `X-Frame-Options`. Opengeni's own console
+  does this for `/office/` and allows only itself to frame every other page.
 - **Server passthrough.** The packaged session proxy needs no option: it
   forwards the workbook routes (`office/workbook-tickets`, `office/workbooks`)
   and everything `SessionApp` reads as the signed-in user (`asUser`), so each

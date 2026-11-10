@@ -1015,6 +1015,7 @@ const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
   useTool: "plug",
   requestAccess: "plug",
   listRepositories: "git",
+  attachRepository: "git",
   // Web, images and video
   searchWeb: "search",
   createImage: "image",

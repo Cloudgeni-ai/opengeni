@@ -3,7 +3,11 @@ import {
   connectSetupContinuesWithoutDialog,
   continueConnectSetup,
 } from "../../../connect-setup-model";
-import { connectionServicePresentation } from "../../../connection-service-presentation";
+import {
+  connectionServicePresentation,
+  connectionServiceWording,
+} from "../../../connection-service-presentation";
+import { useOpenGeniText } from "../../../messages/runtime";
 import { useEffect, useState, useRef } from "react";
 import {
   ConnectController,
@@ -91,6 +95,9 @@ export function NativeConnectSetup({
    */
   onComplete(attempt: ConnectAttempt): void;
 }) {
+  const t = useOpenGeniText();
+  const own = connectionServiceWording(t, request.providerId);
+  const serviceName = own.name ?? request.displayName;
   const [controller, setController] = useState<ConnectController | null>(null);
   const [approvalPending, setApprovalPending] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -245,10 +252,10 @@ export function NativeConnectSetup({
               request.logoUrl ??
               connectionServicePresentation({
                 id: request.providerId,
-                label: request.displayName ?? request.providerId,
+                label: serviceName ?? request.providerId,
               }).logo
             }
-            name={request.displayName ?? request.providerId}
+            name={serviceName ?? request.providerId}
           />
           <div className="min-w-0 space-y-1.5">
             <DialogTitle
@@ -257,12 +264,14 @@ export function NativeConnectSetup({
               className="text-xl font-semibold tracking-tight outline-hidden"
             >
               {request.title ??
-                `Connect ${request.displayName ?? request.installationTarget?.displayName ?? request.providerId}`}
+                `Connect ${serviceName ?? request.installationTarget?.displayName ?? request.providerId}`}
             </DialogTitle>
             <DialogDescription
               className={approvalPending ? "sr-only" : "text-sm leading-6 text-fg-muted"}
             >
-              {request.description ?? "Authorize access to use this connection in Opengeni."}
+              {own.description ??
+                request.description ??
+                "Authorize access to use this connection in Opengeni."}
             </DialogDescription>
           </div>
         </DialogHeader>
@@ -342,6 +351,7 @@ export function NativeConnectSetup({
               className="og-connect"
               authorizeLabel={request.authorizeLabel}
               explained={!!request.title && !!request.description}
+              serviceName={serviceName ?? request.installationTarget?.displayName}
               controller={controller}
               onRetry={() =>
                 controller.begin(

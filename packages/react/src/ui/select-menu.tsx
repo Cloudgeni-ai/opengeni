@@ -48,13 +48,26 @@ export interface SelectOption<V extends string = string> {
    * offset; for people the email.
    */
   meta?: string | undefined;
+  /**
+   * The trigger's detail instead of `meta`, when the closed control needs
+   * more than the menu shows next to a group heading (such as the group's
+   * own name). An empty string shows none.
+   */
+  triggerMeta?: string | undefined;
   /** A 20px avatar or 16px icon before the label. */
   leading?: ReactNode | undefined;
   disabled?: boolean | undefined;
   /** Why it can't be picked and who can fix it. Replaces the description. */
   disabledReason?: string | undefined;
+  /**
+   * The 14px icon before `disabledReason`; a lock when absent. Use another
+   * where a lock already means something else in the same list.
+   */
+  disabledIcon?: ReactNode | undefined;
   /** Consecutive options with the same group get one quiet heading. */
   group?: string | undefined;
+  /** A 16px tile before the group's heading, from the group's first option. */
+  groupLeading?: ReactNode | undefined;
   /** Extra words the combobox search matches. */
   keywords?: string[] | undefined;
 }
@@ -244,10 +257,10 @@ function TriggerValue<V extends string>({
       ) : null}
       <span className="min-w-0 flex-1 truncate">
         {option.label}
-        {showMeta && option.meta ? (
+        {showMeta && (option.triggerMeta ?? option.meta) ? (
           <span className="text-fg-subtle group-disabled/select-trigger:text-fg-subtle">
             {" "}
-            · {option.meta}
+            · {option.triggerMeta ?? option.meta}
           </span>
         ) : null}
       </span>
@@ -386,9 +399,19 @@ export function SelectMenuPanel<V extends string>({
           className={cn(
             MENU_LABEL_CLASS,
             index === 0 ? null : "mt-1.5 border-t border-border pt-2.5",
+            option.groupLeading ? "flex min-w-0 items-center gap-2" : null,
           )}
         >
-          {option.group}
+          {option.groupLeading ? (
+            <>
+              <span aria-hidden="true" className="flex shrink-0 items-center">
+                {option.groupLeading}
+              </span>
+              <span className="min-w-0 truncate">{option.group}</span>
+            </>
+          ) : (
+            option.group
+          )}
         </div>,
       );
     }
@@ -447,7 +470,16 @@ export function SelectMenuPanel<V extends string>({
           </span>
           {reason ? (
             <span className="mt-0.5 flex min-w-0 items-start gap-1.5 text-xs leading-4.5 text-fg-muted">
-              <LockIcon className="mt-0.5 size-3.5 shrink-0 text-fg-subtle" aria-hidden="true" />
+              {option.disabledIcon ? (
+                <span
+                  aria-hidden="true"
+                  className="mt-0.5 flex shrink-0 text-fg-subtle [&_svg]:size-3.5"
+                >
+                  {option.disabledIcon}
+                </span>
+              ) : (
+                <LockIcon className="mt-0.5 size-3.5 shrink-0 text-fg-subtle" aria-hidden="true" />
+              )}
               <span className="min-w-0">{reason}</span>
             </span>
           ) : option.description ? (

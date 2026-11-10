@@ -76,6 +76,8 @@ import { observePromptCacheRequestBody } from "./prompt-cache-fingerprint";
 import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import { invalidRequestSignatureOfResponse } from "./provider-invalid-request";
+import { classifyProviderAccountRefusalResponse } from "./provider-quota";
+import type { ProviderAccountRefusal } from "@opengeni/observability";
 import {
   captureClaudeRequestToken,
   prepareClaudeSubscriptionRequest,
@@ -907,7 +909,19 @@ export function instrumentedModelFetch(
           });
         }
       }
-      recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
+      if (response.status === 404) {
+        // Only the provider's body tells an account restriction (for example
+        // an OpenRouter account limited to its own keys) from any other 404.
+        // Read a bounded clone off-path; the call never waits for it.
+        recordModelCallMetricAfterAccountRefusalCheck(provider, response, started);
+      } else {
+        recordModelCallMetric(
+          provider,
+          response.ok ? "completed" : "failed",
+          started,
+          response.status,
+        );
+      }
       if (response.status === 400) recordModelInvalidRequestMetric(provider, response);
       return response;
     } catch (error) {
@@ -936,13 +950,66 @@ function recordModelCallMetric(
   provider: string,
   outcome: "completed" | "failed",
   started: number,
+  httpStatus?: number,
+  providerAccountRefusal?: ProviderAccountRefusal,
 ): void {
-  const durationSeconds = Math.max(0, (performance.now() - started) / 1000);
+  recordModelCallMetricWithDuration(
+    provider,
+    outcome,
+    Math.max(0, (performance.now() - started) / 1000),
+    httpStatus,
+    providerAccountRefusal,
+  );
+}
+
+function recordModelCallMetricWithDuration(
+  provider: string,
+  outcome: "completed" | "failed",
+  durationSeconds: number,
+  httpStatus?: number,
+  providerAccountRefusal?: ProviderAccountRefusal,
+): void {
   try {
-    runtimeMetricsHooks?.onModelCall?.({ provider, outcome, durationSeconds });
+    runtimeMetricsHooks?.onModelCall?.({
+      provider,
+      outcome,
+      durationSeconds,
+      ...(httpStatus !== undefined ? { httpStatus } : {}),
+      ...(providerAccountRefusal ? { providerAccountRefusal } : {}),
+    });
   } catch {
     // Metrics emission must never affect a model call.
   }
+}
+
+/**
+ * Record a failed 404 call once its bounded body clone has been classified.
+ * The duration is the response time, not the classification time, and a
+ * failed classification still records the call (as an unclassified 404).
+ */
+function recordModelCallMetricAfterAccountRefusalCheck(
+  provider: string,
+  response: Response,
+  started: number,
+): void {
+  const durationSeconds = Math.max(0, (performance.now() - started) / 1000);
+  let classification: Promise<ProviderAccountRefusal | null>;
+  try {
+    classification = classifyProviderAccountRefusalResponse(response);
+  } catch {
+    classification = Promise.resolve(null);
+  }
+  void classification
+    .catch(() => null)
+    .then((refusal) =>
+      recordModelCallMetricWithDuration(
+        provider,
+        "failed",
+        durationSeconds,
+        response.status,
+        refusal ?? undefined,
+      ),
+    );
 }
 
 /**

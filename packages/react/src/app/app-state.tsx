@@ -213,6 +213,12 @@ export type AppStateHost = Readonly<{
    */
   signInPasskey?: () => Promise<unknown>;
   signUpPasskey?: (input: { name: string; signupChallengeToken?: string }) => Promise<unknown>;
+  /**
+   * Calls the listener when an API request is refused because the page's
+   * sign-in is gone (a 401 that says the sign-in was missing or expired);
+   * absent: the app only learns of a lapsed sign-in when it next loads.
+   */
+  subscribeSignInLost?: ((listener: () => void) => () => void) | undefined;
   configureManagedActorEpoch: (epoch: string | null) => void;
   getStoredAccessKey: () => string | null;
   setStoredAccessKey: (value: string) => void;
@@ -408,6 +414,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     signInPasskey,
     signUpPasskey,
     slackLink,
+    subscribeSignInLost,
   } = host;
   const [session, setSessionState] = useState<Session | null>(null);
   const [sessionChannelProjectionAuthority] = useState(
@@ -910,6 +917,52 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       controller.abort();
     };
   }, [clientConfig, fetchAuthSession, managedAuthRequired, invalidatePrincipalWorkspaceState]);
+
+  // A request refused because the sign-in is gone (it expired, was revoked,
+  // or its cookie lapsed) means every other background read fails the same
+  // way. Confirm with the session read once, then leave the signed-in app at
+  // once: its pages unmount, so their polling and streams stop, and the
+  // sign-in surface shows (inside the desktop app it renews the window's
+  // sign-in first). A refusal while the session is still live changes nothing.
+  useEffect(() => {
+    if (!subscribeSignInLost || !managedAuthRequired || !authSession) return;
+    const signedInUserId = authSession.user.id;
+    const acceptedPrincipal = principalTransitionIdentity.current;
+    let cancelled = false;
+    let checking = false;
+    const unsubscribe = subscribeSignInLost(() => {
+      if (cancelled || checking) return;
+      checking = true;
+      void fetchAuthSession()
+        .then((current) => {
+          if (
+            cancelled ||
+            !ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal) ||
+            current?.user.id === signedInUserId
+          ) {
+            return;
+          }
+          invalidatePrincipalWorkspaceState();
+          authPrincipalIdRef.current = current?.user.id ?? null;
+          setAuthSession(current);
+        })
+        // Unreachable right now: the next refused request asks again.
+        .catch(() => undefined)
+        .finally(() => {
+          checking = false;
+        });
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [
+    subscribeSignInLost,
+    managedAuthRequired,
+    authSession,
+    fetchAuthSession,
+    invalidatePrincipalWorkspaceState,
+  ]);
 
   useEffect(() => {
     if (!clientConfig || !authReady) {

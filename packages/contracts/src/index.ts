@@ -11,6 +11,7 @@ export * from "./workspace-control-event";
 export * from "./billing-auto-top-up";
 export * from "./secret-value";
 export * from "./claude-cite-tags";
+export * from "./machine-access";
 export * from "./no-reply";
 import { NO_REPLY_SENTINEL } from "./no-reply";
 export * from "./integration-capability-id";
@@ -968,6 +969,40 @@ export const ErrorEnvelope = /* @__PURE__ */ defineSchema(() =>
 );
 export type ErrorEnvelope = z.infer<typeof ErrorEnvelope>;
 
+/**
+ * Why a request was refused as `unauthenticated` (HTTP 401) for want of a
+ * sign-in, carried as the error envelope's `details.code`:
+ *
+ * - `session_missing`: the request carried no sign-in cookie, app credential
+ *   or other credential.
+ * - `session_expired`: it carried a sign-in cookie or app credential that no
+ *   longer signs anyone in (expired, signed out or revoked).
+ * - `credential_invalid`: it carried another credential, such as an API key
+ *   or a delegated token, that was not accepted.
+ *
+ * The first two mean the caller's own sign-in is gone: a signed-in client
+ * should stop its background work and sign in again.
+ */
+export const AUTHENTICATION_REQUIRED_REASONS = [
+  "session_missing",
+  "session_expired",
+  "credential_invalid",
+] as const;
+export type AuthenticationRequiredReason = (typeof AUTHENTICATION_REQUIRED_REASONS)[number];
+
+/** Does this error envelope say the caller's own sign-in is gone? */
+export function isSignInLostRejection(envelope: unknown): boolean {
+  const error =
+    envelope && typeof envelope === "object" ? (envelope as { error?: unknown }).error : undefined;
+  if (!error || typeof error !== "object") return false;
+  const { code, details } = error as { code?: unknown; details?: unknown };
+  const reason =
+    details && typeof details === "object" ? (details as { code?: unknown }).code : undefined;
+  return (
+    code === "unauthenticated" && (reason === "session_missing" || reason === "session_expired")
+  );
+}
+
 /** A denied child can be one greater than the persisted PostgreSQL int ceiling. */
 export const NestedAgentDepthAttemptValue = /* @__PURE__ */ defineSchema(() =>
   primitives.nonnegativeInteger.max(MAX_NESTED_AGENT_DEPTH + 1),
@@ -1170,6 +1205,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "custom_mcp_setup_request",
   "github_connect_link",
   "github_repositories_list",
+  "github_repository_attach",
   "social_connections_list",
   "social_posts_recent",
   "social_daily_analysis_context",
@@ -4433,6 +4469,14 @@ const delegatedAccessTokenPrefix = "ogd_";
 const delegatedServiceAccessTokenPrefix = "ogd2_";
 const delegatedRestrictedAccessTokenPrefix = "ogd3_";
 
+/**
+ * The longest a delegated access token (`ogd_`, `ogd2_`, `ogd3_`) may stay
+ * valid: 24 hours (ADA CASA / OWASP ASVS 2.2.3). Tokens carry no issue time,
+ * so the verifier refuses any token whose expiry is further than this from
+ * now. Every Opengeni minter issues tokens of an hour or less.
+ */
+export const DELEGATED_ACCESS_TOKEN_MAX_LIFETIME_SECONDS = 24 * 60 * 60;
+
 export async function signDelegatedAccessToken(
   secret: string,
   payload: DelegatedAccessTokenPayload,
@@ -4490,7 +4534,11 @@ export async function verifyDelegatedAccessToken(
     return null;
   }
   const payload = DelegatedAccessTokenPayload.safeParse(decoded);
-  if (!payload.success || payload.data.exp < nowSeconds) {
+  if (
+    !payload.success ||
+    payload.data.exp < nowSeconds ||
+    payload.data.exp - nowSeconds > DELEGATED_ACCESS_TOKEN_MAX_LIFETIME_SECONDS
+  ) {
     return null;
   }
   if (
@@ -17461,6 +17509,9 @@ export const SessionEventType = /* @__PURE__ */ defineSchema(() =>
     // A person removed repositories from the chat; access ends on the next
     // Git or GitHub call and the next turn removes their sandbox folders.
     "session.resources.removed",
+    // A repository was attached to the chat after it started, such as one the
+    // agent asked for and a person approved. The next turn clones it.
+    "session.resources.added",
     // Multi-account Codex (P1): the account a session's turn runs on changed
     // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
     // the in-session "Running on:" indicator's live flip.
@@ -17720,6 +17771,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.agent.updated",
     "session.skills.updated",
     "session.resources.removed",
+    "session.resources.added",
     "session.model_settings.updated",
     "session.usage_limit.updated",
   ],
@@ -22898,6 +22950,7 @@ export const SwapActiveSandboxResponse = /* @__PURE__ */ defineSchema(() =>
         "concurrent_swap",
         "personal_machine_permission_required",
         "personal_machine_not_permitted",
+        "machine_access_required",
         "recovery_in_progress",
         "recovery_degraded",
         "recovery_unrecoverable",
@@ -23436,12 +23489,32 @@ export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() 
 );
 export type ModelAvailabilityV1 = z.infer<typeof ModelAvailabilityV1>;
 
+/**
+ * The plan an organization needs before its own subscriptions (Codex, Claude,
+ * SuperGrok) run, read from the plan catalog: its key, name and monthly price
+ * in USD micros (null when custom-priced).
+ */
+export const OwnSubscriptionPlanV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    key: primitives.nonEmptyString,
+    label: primitives.nonEmptyString,
+    monthlyPriceMicros: z.number().int().nonnegative().nullable(),
+  }),
+);
+export type OwnSubscriptionPlanV1 = z.infer<typeof OwnSubscriptionPlanV1>;
+
 export const WorkspaceModelCatalogModel =
   /* @__PURE__ */ defineModelContractSchema(() =>
     ClientModel.extend({
       credentialReadiness: ModelCredentialReadinessV1,
       /** Current funding status, without exposing the organization's balance. */
       creditFunding: z.enum(["promotional", "general", "unavailable"]).optional(),
+      /**
+       * Set on the person's own subscription models while the organization's
+       * plan doesn't include them: the plan they need. Sends with the model
+       * are refused until then; omitted when it can run.
+       */
+      requiredPlan: OwnSubscriptionPlanV1.optional(),
       /**
        * Exact verdict of the policy the workspace runs with (its own lists
        * within its organization's, and its credit switch), without exposing
@@ -23494,6 +23567,12 @@ export const WorkspaceModelCatalogResponse =
        * credits.
        */
       creditsSelection: DefaultModelSelection.nullable().optional(),
+      /**
+       * Present while the organization's plan doesn't include its own
+       * subscriptions: the plan that does. Connecting one still works; using
+       * it waits for that plan. Omitted when they can run or no plan is sold.
+       */
+      ownSubscriptionPlan: OwnSubscriptionPlanV1.optional(),
     }),
   );
 export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;
@@ -23532,6 +23611,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
     claudeSubscriptionEnabled: primitives.optionalBoolean,
+    // Whether Connect provider offers "Claude Code (API key)". Absent on older
+    // servers and when not offered.
+    claudeCodeApiKeyEnabled: primitives.optionalBoolean,
     // Whether organization admins may connect Azure OpenAI as this
     // deployment's own Microsoft Entra identity (the operator offers it).
     // Absent on older servers and when not offered.

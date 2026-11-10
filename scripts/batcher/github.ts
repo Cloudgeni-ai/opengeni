@@ -24,6 +24,17 @@ export class GitHubNetworkError extends Error {
   }
 }
 
+/**
+ * GitHub refused to run a workflow run again. It answers so when asked to
+ * rerun the failed jobs of a run that failed before any job started (GitHub
+ * could not start the workflow), which has no failed job to rerun.
+ */
+export function refusesRetry(error: unknown): boolean {
+  return (
+    error instanceof GitHubError && error.status === 403 && /cannot be retried/i.test(error.body)
+  );
+}
+
 export interface PullSummary {
   id: string;
   number: number;
@@ -117,6 +128,8 @@ export interface GitHub {
   ): Promise<string>;
   cancelRun(id: number): Promise<void>;
   rerunFailedJobs(id: number): Promise<void>;
+  /** Run every job of a finished run again, as a new attempt. */
+  rerunAll(id: number): Promise<void>;
   comment(number: number, body: string): Promise<void>;
   /** The bodies of a PR's comments created or edited at or after `since` (epoch ms). */
   commentBodies(number: number, since: number): Promise<string[]>;
@@ -683,6 +696,10 @@ export class RestGitHub implements GitHub {
 
   async rerunFailedJobs(id: number) {
     await this.request("POST", `actions/runs/${id}/rerun-failed-jobs`, {});
+  }
+
+  async rerunAll(id: number) {
+    await this.request("POST", `actions/runs/${id}/rerun`, {});
   }
 
   async comment(number: number, body: string) {

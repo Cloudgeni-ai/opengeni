@@ -98,13 +98,19 @@ export type ManagedAuthEmailThrottle = {
  * distributed attacker may make up to `perEmailMax` attempts per window
  * against one email, and can deny that email's password sign-in for the rest
  * of the window once it spends them.
+ *
+ * Email sign-in uses one-hour windows: at most 100 password attempts per
+ * account in each window from all addresses together (OWASP ASVS / ADA CASA
+ * 1.1.1 allow no more than 100 failed attempts per hour on one account), and
+ * 20 in each window from one address. A window starts with the first attempt
+ * after the previous one ended, so these are per-hour budgets, never more.
  */
 export const MANAGED_AUTH_EMAIL_THROTTLES = {
   "/sign-in/email": {
     purpose: "sign_in",
-    windowSeconds: 15 * 60,
-    perSourceMax: 10,
-    perEmailMax: 50,
+    windowSeconds: 60 * 60,
+    perSourceMax: 20,
+    perEmailMax: 100,
   },
   "/sign-up/email": {
     purpose: "sign_up",

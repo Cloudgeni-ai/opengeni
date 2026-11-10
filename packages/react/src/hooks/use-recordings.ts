@@ -254,6 +254,12 @@ export type UseRecorderResult = RecorderSnapshot & {
   discard: () => Promise<void>;
   /** Rename the recording being made; the title reaches the server with the upload. */
   rename: (title: string) => Promise<void>;
+  /**
+   * Open a stopped track's source again, from a click: the browser asks again
+   * what to share, or for the microphone. Rejects with a RecorderCaptureError
+   * when it can't; a microphone that was unplugged comes back by itself.
+   */
+  reconnectTrack: (trackNumber: number) => Promise<void>;
   /** Input level per track number, 0 to 1. Read it from an animation frame for a meter. */
   levels: () => Record<number, number>;
   /**
@@ -526,6 +532,9 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       const recorder = recorderRef.current;
       if (!recorder) throw new Error("Nothing is being recorded to rename.");
       await recorder.rename(title);
+    }, []),
+    reconnectTrack: useCallback(async (trackNumber: number) => {
+      await recorderRef.current?.reconnect?.(trackNumber);
     }, []),
     levels: useCallback(() => recorderRef.current?.levels() ?? {}, []),
     importAudio: useCallback(

@@ -182,6 +182,52 @@ describe("Teams app package", () => {
     ).toBeUndefined();
   });
 
+  test("uses the short name as the full name unless a full name is set", () => {
+    expect(buildTeamsAppManifest(options).name).toEqual({ short: "Opengeni", full: "Opengeni" });
+    expect(buildTeamsAppManifest({ ...options, appName: "Example" }).name).toEqual({
+      short: "Example",
+      full: "Example",
+    });
+    expect(buildTeamsAppManifest({ ...options, appFullName: "Opengeni Assistant" }).name).toEqual({
+      short: "Opengeni",
+      full: "Opengeni Assistant",
+    });
+    expect(
+      buildTeamsAppManifest({ ...options, appFullName: "x".repeat(100) }).name.full,
+    ).toHaveLength(100);
+    expect(buildTeamsAppManifest({ ...options, appName: " Example " }).name).toEqual({
+      short: "Example",
+      full: "Example",
+    });
+    expect(buildTeamsAppManifest({ ...options, appFullName: " Example " }).name.full).toBe(
+      "Example",
+    );
+    for (const appFullName of ["", "  ", "x".repeat(101)])
+      expect(() => buildTeamsAppManifest({ ...options, appFullName })).toThrow("appFullName");
+
+    const env = {
+      OPENGENI_TEAMS_APP_ID: options.appId,
+      OPENGENI_TEAMS_BOT_CLIENT_ID: options.botId,
+      OPENGENI_PUBLIC_BASE_URL: options.publicBaseUrl,
+      OPENGENI_TEAMS_WEBSITE_URL: options.websiteUrl,
+      OPENGENI_TEAMS_PRIVACY_URL: options.privacyUrl,
+      OPENGENI_TEAMS_TERMS_URL: options.termsOfUseUrl,
+    };
+    for (const OPENGENI_TEAMS_APP_FULL_NAME of [undefined, "", "  "])
+      expect(
+        teamsManifestOptionsFromEnv({ ...env, OPENGENI_TEAMS_APP_FULL_NAME }).appFullName,
+      ).toBeUndefined();
+    expect(
+      buildTeamsAppManifest(
+        teamsManifestOptionsFromEnv({
+          ...env,
+          OPENGENI_TEAMS_APP_NAME: "Opengeni",
+          OPENGENI_TEAMS_APP_FULL_NAME: " Opengeni Assistant ",
+        }),
+      ).name,
+    ).toEqual({ short: "Opengeni", full: "Opengeni Assistant" });
+  });
+
   test("describes the app, its AI, its requirements and its limits within Store limits", () => {
     for (const variant of [
       options,
@@ -214,6 +260,50 @@ describe("Teams app package", () => {
     const channelsOnly = buildTeamsAppManifest({ ...options, channels: true }).description.full;
     expect(channelsOnly).toContain("mention Opengeni in a channel where it is enabled");
     expect(channelsOnly).not.toContain("group chat");
+  });
+
+  test("names the bot by the app name and the service, accounts and workspace Opengeni", () => {
+    const appName = "Opengeni Assistant";
+    const manifest = buildTeamsAppManifest({
+      ...options,
+      appName,
+      channels: true,
+      groupChats: true,
+      conversationContext: true,
+    });
+    const { full } = manifest.description;
+    expect(full).toStartWith(`${appName} is an AI agent that works with Microsoft Teams.`);
+    for (const phrase of [
+      `Chat with ${appName} one-on-one, or mention ${appName} in a channel or group chat`,
+      `${appName} replies in the same conversation`,
+      `mention ${appName} with it`,
+      `The first time you message ${appName}, it asks`,
+      `${appName} also reads recent messages`,
+      `${appName} reads text messages only`,
+    ])
+      expect(full).toContain(phrase);
+    for (const phrase of [
+      "tools your organization has connected to Opengeni.",
+      "to an Opengeni workspace",
+      "you need an Opengeni account",
+      "to your Opengeni account.",
+      "open Opengeni in your web browser",
+    ])
+      expect(full).toContain(phrase);
+    expect(full.length).toBeLessThanOrEqual(4000);
+    expect(manifest.description.short).not.toContain("Opengeni");
+    const [personal, shared] = manifest.bots[0]!.commandLists;
+    expect(personal!.commands.map((command) => command.description)).toEqual([
+      `See what ${appName} can do, its commands and its limits`,
+      "Link your Teams account to your Opengeni account",
+      "Disconnect your Teams account from Opengeni",
+      `Ask ${appName} to research something and report back`,
+      `Ask ${appName} to write or improve a message`,
+      `Ask ${appName} to break work into steps`,
+    ]);
+    expect(shared!.commands).toEqual([
+      { title: "help", description: `See what ${appName} can do in this conversation` },
+    ]);
   });
 
   test("lists help, account commands and prompt starters for personal chats", () => {

@@ -2236,6 +2236,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 2
             : 0) +
+          // 1351 turn timing profiles: one full-DML FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -2320,7 +2326,8 @@ describe("runtime database posture evaluator", () => {
         2 + // 1258 Teams conversation context messages and join cutoffs: full-DML, FORCE-RLS.
         1 + // 1294 Teams install welcome claims: full-DML, FORCE-RLS.
         1 + // 1300 Teams onboarding reply limits: full-DML, FORCE-RLS.
-        1; // 1301 Teams reply claims: full-DML, FORCE-RLS.
+        1 + // 1301 Teams reply claims: full-DML, FORCE-RLS.
+        1; // 1351 turn timing profiles: full-DML, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -4245,7 +4252,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 grant what 0937, 0946, 1103, 1060, 1107, 0988, 1218, 1224 and 1240 withheld; 0978's, 0984's, 1002's, 1091's, 1172's and 1211's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272 and 1274 grant what 0937, 0946, 1103, 1060, 1107, 0988, 1218 and 1224 withheld; 0978's, 0984's, 1002's, 1091's, 1172's, 1211's and 1240's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4390,6 +4397,7 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1282 gr
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
+      "list_uncompacted_recording_tracks_v1(integer, text)",
       "end_agent_call_rings_v1(uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);

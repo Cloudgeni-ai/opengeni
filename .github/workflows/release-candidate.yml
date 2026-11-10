@@ -432,6 +432,16 @@ jobs:
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      # The API, worker, web and sandbox images fill the runner's disk, and the
+      # relay's cross-compilation toolchain then fails to unpack ("no space left
+      # on device"). Free the runner before it, as before the desktop image.
+      - name: Make room for the relay candidate
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker buildx prune --all --force
+          df -h /
+
       - name: Build and push relay candidate
         id: build-relay
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0

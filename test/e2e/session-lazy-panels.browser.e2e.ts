@@ -41,7 +41,6 @@ describe("production session conditional loading", () => {
   let browser: Browser;
   let baseUrl: string;
   let panelAsset: string;
-  let attachmentAsset: string;
   let workspaceFilesAsset: string;
   const evidenceDir = `${repoRoot}/.agent/evidence/session-lazy-panels`;
 
@@ -61,9 +60,6 @@ describe("production session conditional loading", () => {
       (key) => manifest[key]?.name === "session-conditional-panels",
     )!;
     panelAsset = manifest[panelKey]!.file;
-    attachmentAsset =
-      manifest["../../packages/react/src/app/components/session/message-resource-attachments.tsx"]!
-        .file;
     const filesKey = "../../packages/react/src/components/sandbox-files.tsx";
     workspaceFilesAsset = manifest[filesKey]!.file;
     const eager = new Set<string>();
@@ -97,7 +93,6 @@ describe("production session conditional loading", () => {
       /["'`]plus["'`]/u,
     );
     expect(panelAsset).toBeTruthy();
-    expect(attachmentAsset).toBeTruthy();
     const port = await freePort();
     baseUrl = `http://127.0.0.1:${port}`;
     web = await startProcess(
@@ -200,7 +195,60 @@ describe("production session conditional loading", () => {
   }
 
   for (const width of [320, 1280]) {
-    for (const mode of ["questions", "commands", "attachments"] as const) {
+    // A sent file shows above its message, as it looked in the composer, and
+    // its image opens larger.
+    test(`a sent message shows its attached image at ${width}px`, async () => {
+      const context = await browser.newContext({
+        viewport: { width, height: 900 },
+        reducedMotion: "reduce",
+      });
+      const page = await context.newPage();
+      const errors: string[] = [];
+      page.on("pageerror", (error) => errors.push(error.stack ?? error.message));
+      const state: State = {
+        mode: "attachments",
+        answers: [],
+        stops: 0,
+        commandReads: 0,
+        fileReads: 0,
+      };
+      await installApi(page, baseUrl, state);
+      try {
+        await page.goto(`${baseUrl}/workspaces/${workspaceId}/sessions/${sessionId}`);
+        const transcript = page
+          .locator('[data-testid="timeline-user"]')
+          .getByText("Keep this message visible.", { exact: true });
+        await transcript.waitFor({ timeout: 20_000 });
+        const preview = page.getByRole("button", { name: "Preview fixture.svg", exact: true });
+        await preview.waitFor();
+        await page.waitForFunction(() => {
+          const image = document.querySelector(
+            "[data-og-message-attachments] img",
+          ) as HTMLImageElement | null;
+          return Boolean(image?.complete && image.naturalWidth > 0);
+        });
+        expect(state.fileReads).toBe(1);
+        await page.screenshot({ path: `${evidenceDir}/attachments-${width}.png`, fullPage: true });
+        await preview.click();
+        await page.getByRole("dialog").waitFor();
+        await page.keyboard.press("Escape");
+        await page.getByRole("dialog").waitFor({ state: "hidden" });
+        expect(await transcript.isVisible()).toBe(true);
+        expect(
+          await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+        ).toBeLessThanOrEqual(1);
+        expect(errors).toEqual([]);
+      } catch (error) {
+        throw new Error(
+          `attachments/${width}: ${JSON.stringify(errors)}\n${await page.locator("body").innerText()}`,
+          { cause: error },
+        );
+      } finally {
+        await context.close();
+      }
+    }, 45_000);
+
+    for (const mode of ["questions", "commands"] as const) {
       test(`${mode} remains usable across its production lazy boundary at ${width}px`, async () => {
         const context = await browser.newContext({
           viewport: { width, height: 900 },
@@ -231,7 +279,7 @@ describe("production session conditional loading", () => {
         const blocked = new Promise<void>((resolve) => {
           release = resolve;
         });
-        const blockedAsset = mode === "attachments" ? attachmentAsset : panelAsset;
+        const blockedAsset = panelAsset;
         await page.route(`${baseUrl}/${blockedAsset}`, async (route) => {
           await blocked;
           await route.continue();
@@ -257,13 +305,8 @@ describe("production session conditional loading", () => {
             await page.getByRole("button", { name: "Session activity", exact: true }).click();
             await page.getByRole("button", { name: "1 command", exact: true }).waitFor();
             await page.getByText("Loading commands…", { exact: true }).waitFor();
-          } else if (mode === "questions") {
-            await page.getByText("Loading questions…", { exact: true }).waitFor();
           } else {
-            expect(state.fileReads).toBe(0);
-            expect(await page.locator('[data-testid="timeline-user"] .animate-pulse').count()).toBe(
-              1,
-            );
+            await page.getByText("Loading questions…", { exact: true }).waitFor();
           }
           expect(await transcript.isVisible()).toBe(true);
           await page.screenshot({
@@ -290,7 +333,7 @@ describe("production session conditional loading", () => {
                 answers: [{ questionId: "environment", values: ["staging"] }],
               },
             ]);
-          } else if (mode === "commands") {
+          } else {
             const stop = page.getByRole("button", { name: "Stop bun run verify", exact: true });
             await stop.waitFor();
             await page.screenshot({
@@ -302,23 +345,6 @@ describe("production session conditional loading", () => {
             await page.getByText("Stopping…", { exact: true }).waitFor();
             expect(state.stops).toBe(1);
             expect(state.commandReads).toBeGreaterThanOrEqual(2);
-          } else {
-            const preview = page.getByRole("button", { name: "Open fixture.svg", exact: true });
-            await preview.waitFor();
-            await page.waitForFunction(() => {
-              const image = document.querySelector(
-                '[data-testid="timeline-user"] img',
-              ) as HTMLImageElement | null;
-              return Boolean(image?.complete && image.naturalWidth > 0);
-            });
-            expect(state.fileReads).toBe(1);
-            await page.screenshot({
-              path: `${evidenceDir}/${mode}-${width}-loaded.png`,
-              fullPage: true,
-            });
-            await preview.click();
-            await page.getByRole("dialog").waitFor();
-            await page.keyboard.press("Escape");
           }
           expect(await transcript.isVisible()).toBe(true);
           expect(assets.some((url) => url.endsWith(blockedAsset))).toBe(true);

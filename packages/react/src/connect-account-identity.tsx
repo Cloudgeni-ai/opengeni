@@ -5,6 +5,7 @@ import { ConnectionServiceLogo } from "./connection-service-logo";
 import {
   accountServiceCapability,
   connectionServicePresentation,
+  connectionServiceWording,
 } from "./connection-service-presentation";
 import { useOpenGeniText } from "./messages/runtime";
 
@@ -21,7 +22,8 @@ export function ConnectAccountIdentity({
   const t = useOpenGeniText();
   const item = accountServiceCapability(account, capabilities);
   const service = connectionServicePresentation({ id: account.providerId, label: account.label });
-  const name = item?.name ?? service.name;
+  // The host's name for the service wins, so it reads as it did in discovery.
+  const name = connectionServiceWording(t, account.providerId).name ?? item?.name ?? service.name;
   return (
     <>
       <ConnectionServiceLogo client={client} item={item} name={name} fallback={service.logo} />

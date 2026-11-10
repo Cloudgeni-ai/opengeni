@@ -274,6 +274,19 @@ describe("observability", () => {
     expect(metrics).toContain("opengeni_sandbox_operation_duration_seconds_bucket");
   });
 
+  test("records a caller path rejection apart from provider failures", async () => {
+    const obs = createObservability(settings, { component: "worker", now: () => 1 });
+    const observe = sandboxOperationMetricObserver(obs);
+    observe({ backend: "modal", op: "viewImage", outcome: "rejected", durationMs: 1 });
+
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_sandbox_operations_total\{[^}]*backend="modal"[^}]*op="viewImage"[^}]*outcome="rejected"[^}]*\} 1\b/,
+    );
+    // The failure-ratio alert reads outcome="failed" over outcome=~"ok|failed".
+    expect(metrics).not.toMatch(/opengeni_sandbox_operations_total\{[^}]*outcome="(?:failed|ok)"/);
+  });
+
   test("capture waits have distinct bounded metrics and never inflate provider call counts", async () => {
     const exported: unknown[] = [];
     const obs = createObservability(settings, {

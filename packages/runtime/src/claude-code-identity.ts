@@ -2,24 +2,67 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ModelRequest } from "@openai/agents";
 import type { ClaudeSubscriptionIdentity } from "@opengeni/config";
 
-// Pinned to locally inspected Claude Code 2.1.285 / Agent SDK 0.3.276 captures.
-// These are compatibility wire values, not a claim about Opengeni's host runtime.
-export const CLAUDE_CODE_HEADERS = {
-  "user-agent": "claude-cli/2.1.285 (external, sdk-ts, agent-sdk/0.3.276)",
-  "x-app": "cli",
-  "x-stainless-lang": "js",
-  "x-stainless-package-version": "0.127.0",
-  "x-stainless-os": "MacOS",
-  "x-stainless-arch": "arm64",
-  "x-stainless-runtime": "node",
-  "x-stainless-runtime-version": "v26.3.0",
-  "x-stainless-retry-count": "0",
-  "x-stainless-timeout": "600",
-  "anthropic-dangerous-direct-browser-access": "true",
-  "anthropic-dispatch-id": "v2d",
-} as const;
+/** One pinned Claude Code release, as seen on the wire. */
+export type ClaudeCodeClient = {
+  version: string;
+  agentSdkVersion: string;
+  stainlessPackageVersion: string;
+};
 
-export function claudeCodeFingerprint(input: ModelRequest["input"]): string {
+// Locally inspected Claude Code 2.1.285 / Agent SDK 0.3.276 captures.
+export const CLAUDE_CODE_2_1_285: ClaudeCodeClient = {
+  version: "2.1.285",
+  agentSdkVersion: "0.3.276",
+  stainlessPackageVersion: "0.127.0",
+};
+// Claude Code 2.1.321 / Agent SDK 0.3.321 (2026-11-09): same billing fingerprint
+// salt and algorithm as 2.1.285 in the published binary; bundled Stainless SDK 0.128.0.
+export const CLAUDE_CODE_2_1_321: ClaudeCodeClient = {
+  version: "2.1.321",
+  agentSdkVersion: "0.3.321",
+  stainlessPackageVersion: "0.128.0",
+};
+
+/**
+ * Anthropic refuses a model the presented Claude Code release doesn't know
+ * ("version 2.1.290 or newer is required" for Claude Fable 5.2). A model added
+ * later names the first pinned release that supports it. Every other model
+ * keeps 2.1.285: the version is part of the billing system block that starts
+ * every cached prefix, so changing it would rewrite text that running
+ * sessions already sent.
+ */
+const CLAUDE_CODE_CLIENT_BY_MODEL: Readonly<Record<string, ClaudeCodeClient>> = {
+  "claude-fable-5-2": CLAUDE_CODE_2_1_321,
+};
+export function claudeCodeClient(model: string | undefined): ClaudeCodeClient {
+  return model !== undefined && Object.hasOwn(CLAUDE_CODE_CLIENT_BY_MODEL, model)
+    ? CLAUDE_CODE_CLIENT_BY_MODEL[model]!
+    : CLAUDE_CODE_2_1_285;
+}
+
+// These are compatibility wire values, not a claim about Opengeni's host runtime.
+export function claudeCodeHeaders(client: ClaudeCodeClient = CLAUDE_CODE_2_1_285) {
+  return {
+    "user-agent": `claude-cli/${client.version} (external, sdk-ts, agent-sdk/${client.agentSdkVersion})`,
+    "x-app": "cli",
+    "x-stainless-lang": "js",
+    "x-stainless-package-version": client.stainlessPackageVersion,
+    "x-stainless-os": "MacOS",
+    "x-stainless-arch": "arm64",
+    "x-stainless-runtime": "node",
+    "x-stainless-runtime-version": "v26.3.0",
+    "x-stainless-retry-count": "0",
+    "x-stainless-timeout": "600",
+    "anthropic-dangerous-direct-browser-access": "true",
+    "anthropic-dispatch-id": "v2d",
+  } as const;
+}
+export const CLAUDE_CODE_HEADERS = claudeCodeHeaders(CLAUDE_CODE_2_1_285);
+
+export function claudeCodeFingerprint(
+  input: ModelRequest["input"],
+  version: string = CLAUDE_CODE_2_1_285.version,
+): string {
   const message =
     typeof input === "string"
       ? input
@@ -40,13 +83,15 @@ export function claudeCodeFingerprint(input: ModelRequest["input"]): string {
   const prompt =
     typeof first === "string" ? first : first && "text" in first ? String(first.text) : "";
   const sample = [4, 7, 20].map((index) => prompt[index] || "0").join("");
-  return createHash("sha256").update(`59cf53e54c78${sample}2.1.285`).digest("hex").slice(0, 3);
+  return createHash("sha256").update(`59cf53e54c78${sample}${version}`).digest("hex").slice(0, 3);
 }
 
 export type ClaudeCodeRequestIdentity = {
   sessionId: string;
   promptId: string;
   previousRequestId?: string | undefined;
+  /** Upstream model id; picks the Claude Code release presented. */
+  model?: string | undefined;
 };
 
 export function applyClaudeCodeIdentity(
@@ -58,7 +103,8 @@ export function applyClaudeCodeIdentity(
   identity: ClaudeCodeRequestIdentity,
 ): void {
   url.searchParams.set("beta", "true");
-  for (const [name, value] of Object.entries(CLAUDE_CODE_HEADERS)) headers.set(name, value);
+  const client = claudeCodeClient(identity.model);
+  for (const [name, value] of Object.entries(claudeCodeHeaders(client))) headers.set(name, value);
   headers.set("accept", "application/json");
   headers.set("x-claude-code-session-id", identity.sessionId);
   headers.set("x-claude-code-prompt-id", identity.promptId);
@@ -94,6 +140,6 @@ export function applyClaudeCodeIdentity(
       : "";
   // The version suffix is derived from the first user message. Never replay a
   // captured checksum. cch is deliberately omitted until its algorithm is verified.
-  const billing = `x-anthropic-billing-header: cc_version=2.1.285.${claudeCodeFingerprint(request.input)}; cc_entrypoint=sdk-ts;${previous} cc_prompt_id=${identity.promptId}; cc_turn_origin=sdk;`;
+  const billing = `x-anthropic-billing-header: cc_version=${client.version}.${claudeCodeFingerprint(request.input, client.version)}; cc_entrypoint=sdk-ts;${previous} cc_prompt_id=${identity.promptId}; cc_turn_origin=sdk;`;
   body.system = [{ type: "text", text: billing }, ...(body.system ?? [])];
 }

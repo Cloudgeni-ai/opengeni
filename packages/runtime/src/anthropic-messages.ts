@@ -1290,6 +1290,7 @@ export class AnthropicMessagesModel implements Model {
         sessionId,
         promptId: this.promptId,
         previousRequestId: this.previousRequestId,
+        model: this.model,
       });
     }
     const serialized = JSON.stringify(body);

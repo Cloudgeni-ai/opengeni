@@ -11,7 +11,7 @@ import {
   listSessions,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "@opengeni/db";
@@ -201,9 +201,9 @@ describe("a scheduled occurrence aimed at a paused target", () => {
 
   test("a paused workspace skips a new-chat run without leaving a chat behind it", async () => {
     const workspace = await fixture();
-    await withWorkspaceRls(client.db, workspace.workspaceId, (db) =>
+    await withWorkspaceSessionActivityRls(client.db, workspace.workspaceId, (db) =>
       db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as typeof db, {
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: workspace.accountId,
           workspaceId: workspace.workspaceId,
           actor: { type: "human", subjectId: workspace.key.subjectId },

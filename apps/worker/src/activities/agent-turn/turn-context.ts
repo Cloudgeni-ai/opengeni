@@ -31,7 +31,11 @@ import type { GitCredentialRenewalController } from "../git-credential-renewal";
 import type { RunCredentialRenewalController } from "../run-credential-renewal";
 import type { createRuntimeBatcher, startActivityHeartbeat } from "../streaming";
 import type { RunAgentTurnResult } from "../types";
-import type { ModelRequestPreDispatchStage, TurnOutcome } from "../../observability-metrics";
+import type {
+  ModelRequestPreDispatchStage,
+  TurnOutcome,
+  TurnRecoveryCause,
+} from "../../observability-metrics";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
 import type { TurnBackgroundEventPublisher, TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
@@ -82,6 +86,9 @@ export type TurnControlState = {
   cancellationRequestedAt: number | null;
   activityStatus: RunAgentTurnResult["status"] | "unknown";
   turnMetricOutcome: TurnOutcome | null;
+  /** Set with turnMetricOutcome "recovering"; labels opengeni_turn_recoveries_total. */
+  turnRecoveryCause?: TurnRecoveryCause;
+  turnFailureOrigin?: import("@opengeni/observability").FailureOrigin;
   activityError: unknown;
   acknowledgeQuiescence: boolean;
 };

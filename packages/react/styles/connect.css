@@ -296,8 +296,24 @@
 .og-catalog-more:focus-visible { outline:2px solid var(--og-color-accent,currentColor); outline-offset:2px; }
 .og-plugin-discovery.og-catalog-overview { border-top:1px solid var(--og-color-border,#888); margin-top:24px; padding-top:24px; }
 
-.og-connect-setup .og-connect-setup-approval { display:grid; gap:20px; }
-.og-connect-setup .og-connect-setup-approval-actions { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
-.og-connect-setup .og-connect-setup-approval-actions button { min-height:44px; }
-
-.og-connect-setup .og-connect-setup-approval-actions .og-connect-setup-secondary { border-color:transparent; background:transparent; padding-inline:0; text-decoration:underline; text-underline-offset:3px; }
+/* Organization approval: the whole step after the provider said an admin must
+   approve, or a quiet note beside sign-in after a sign-in that never came back.
+   Unscoped so the chat card can show the note before any setup exists. */
+.og-connect-setup-approval { display:grid; gap:16px; min-width:0; }
+.og-connect-setup-approval-note { display:grid; gap:12px; min-width:0; padding:14px 16px; border:1px solid var(--og-color-border,#888); border-radius:10px; background:var(--og-color-surface-1,transparent); font-size:13px; line-height:1.55; }
+.og-connect-setup-approval-copy { display:grid; gap:4px; min-width:0; }
+.og-connect-setup-approval-copy p { margin:0; }
+.og-connect-setup-approval-title { font-size:15px; font-weight:600; line-height:1.4; color:var(--og-color-fg,inherit); }
+.og-connect-setup-approval-note .og-connect-setup-approval-title { font-size:13px; }
+.og-connect-setup-approval-copy .og-connect-setup-description { color:var(--og-color-fg-muted,inherit); font-size:13px; line-height:1.55; }
+.og-connect-setup-approval-message { min-width:0; font-size:13px; }
+.og-connect-setup-approval-message summary { width:fit-content; cursor:pointer; color:var(--og-color-fg-muted,inherit); text-decoration:underline; text-underline-offset:3px; }
+.og-connect-setup-approval-message summary:focus-visible { outline:2px solid var(--og-color-accent,currentColor); outline-offset:2px; border-radius:4px; }
+.og-connect-setup-approval-message p { margin:8px 0 0; padding:10px 12px; border-radius:8px; background:var(--og-color-surface-2,transparent); color:var(--og-color-fg,inherit); white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.55; user-select:text; }
+.og-connect-setup-approval-actions { display:flex; flex-wrap:wrap; gap:4px 16px; align-items:center; min-width:0; }
+.og-connect-setup-approval-actions .og-connect-setup-primary { flex:1 0 100%; min-height:44px; margin-bottom:4px; }
+:is(.og-connect-setup-approval,.og-connect-setup-approval-note) .og-connect-setup-approval-button { min-height:36px; padding:6px 12px; border:1px solid var(--og-color-border,#888); border-radius:8px; background:var(--og-color-surface-2,transparent); color:var(--og-color-fg,inherit); font:inherit; font-size:13px; font-weight:500; cursor:pointer; }
+:is(.og-connect-setup-approval,.og-connect-setup-approval-note) .og-connect-setup-approval-action { display:inline-flex; align-items:center; min-height:36px; padding:0; border:0; border-radius:4px; background:transparent; color:var(--og-color-fg,inherit); font:inherit; font-size:13px; text-decoration:underline; text-underline-offset:3px; cursor:pointer; }
+:is(.og-connect-setup-approval,.og-connect-setup-approval-note) :is(.og-connect-setup-approval-action,.og-connect-setup-approval-button):disabled { opacity:.55; cursor:not-allowed; }
+:is(.og-connect-setup-approval,.og-connect-setup-approval-note) :is(.og-connect-setup-approval-action,.og-connect-setup-approval-button):focus-visible { outline:2px solid var(--og-color-accent,currentColor); outline-offset:2px; }
+@media (pointer:coarse) { :is(.og-connect-setup-approval,.og-connect-setup-approval-note) :is(.og-connect-setup-approval-action,.og-connect-setup-approval-button) { min-height:44px; } }

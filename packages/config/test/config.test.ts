@@ -240,11 +240,13 @@ describe("deployment credit margin override", () => {
 });
 
 describe("usage allowance rolling activation", () => {
-  test("defaults producers off in every environment", () => {
+  test("defaults producers on in every environment", () => {
+    // Every database this release runs on is past the 0977 baseline, which
+    // includes the allowance migrations, so no older consumer can be running.
     for (const environment of ["local", "test", "production"]) {
       expect(
         withEnv({ OPENGENI_ENVIRONMENT: environment }, () => getSettings()).usageAllowancesEnabled,
-      ).toBe(false);
+      ).toBe(true);
     }
   });
   test("parses explicit activation and opt-out without boolean coercion", () => {
@@ -1032,6 +1034,20 @@ describe("Opengeni Slack interaction settings", () => {
       withEnv({ OPENGENI_SLACK_BOT_DISPLAY_NAME: "Opengeni Preview" }, () => getSettings()),
     ).toThrow();
     expect(() => withEnv({ OPENGENI_SLACK_COMMAND: "/Opengeni" }, () => getSettings())).toThrow();
+  });
+
+  test("defaults the Teams app name and keeps it within Teams' short-name limit", () => {
+    expect(withEnv({}, () => getSettings()).teamsAppName).toBe("Opengeni");
+    expect(withEnv({ OPENGENI_TEAMS_APP_NAME: "" }, () => getSettings()).teamsAppName).toBe(
+      "Opengeni",
+    );
+    expect(
+      withEnv({ OPENGENI_TEAMS_APP_NAME: " Opengeni Assistant " }, () => getSettings())
+        .teamsAppName,
+    ).toBe("Opengeni Assistant");
+    expect(() =>
+      withEnv({ OPENGENI_TEAMS_APP_NAME: "x".repeat(31) }, () => getSettings()),
+    ).toThrow();
   });
 });
 

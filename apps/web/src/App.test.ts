@@ -1937,6 +1937,25 @@ describe("buildTools", () => {
       { id: "api_openapi_google_gmail_account_one", name: "Work Gmail" },
       { id: "api_openapi_inventory_account_one", name: "Inventory API" },
     ]);
+    // The catalog entry and domain travel along, so its logo can be found.
+    expect(
+      installedApiIntegrationMcpServers([
+        {
+          serverId: "api_openapi_google_gmail_account_one",
+          name: "Gmail",
+          displayName: "",
+          capabilityId: "api:gmail",
+          providerDomain: "gmail.com",
+        },
+      ]),
+    ).toEqual([
+      {
+        id: "api_openapi_google_gmail_account_one",
+        name: "Gmail",
+        capabilityId: "api:gmail",
+        providerDomain: "gmail.com",
+      },
+    ]);
   });
 
   test("keeps only mandatory Opengeni infrastructure out of selectable server catalogs", () => {

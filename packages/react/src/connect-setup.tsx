@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from "react";
 import type { ConnectAttempt, ConnectController } from "@opengeni/connect";
-import { copyTextToClipboard } from "./lib/clipboard";
 import { useOpenGeniText } from "./messages/runtime";
 import { useConnectSetupFlow } from "./connect-setup-model";
+import { OrganizationApprovalHelp } from "./organization-approval-help";
 
 export {
   adminApprovalLink,
@@ -10,26 +10,6 @@ export {
   isCuratedDefinitionAttempt,
   isOwnerApprovalPending,
 } from "./connect-setup-model";
-
-function CopyLinkButton({ url }: { url: string }) {
-  const t = useOpenGeniText();
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      className="og-connect-setup-primary"
-      onClick={() =>
-        void copyTextToClipboard(url).then((ok) => {
-          if (!ok) return;
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1600);
-        })
-      }
-    >
-      {copied ? t("copyButton.copied") : t("connectSetup.copyAdminApprovalLink")}
-    </button>
-  );
-}
 
 export type ConnectSetupProps = {
   controller: ConnectController;
@@ -53,7 +33,12 @@ export type ConnectSetupProps = {
    */
   explained?: boolean;
   /** Begin a fresh attempt after declined or administrator-gated authorization. */
-  onRetry?: () => void | Promise<unknown>;
+  onRetry?: (() => void | Promise<unknown>) | undefined;
+  /**
+   * The service being connected ("Outlook Mail"), as the person knows it. The
+   * ready-made message for an organization's IT names it.
+   */
+  serviceName?: string | undefined;
 };
 
 /** Controller-backed setup surface, styled by opt-in connect.css. No provider secrets enter React state. Host owns
@@ -81,6 +66,7 @@ function ScopedSetup({
   inChat = false,
   explained = false,
   onRetry,
+  serviceName,
 }: ConnectSetupProps) {
   const t = useOpenGeniText();
   const authorizeLabel =
@@ -97,7 +83,13 @@ function ScopedSetup({
       </section>
     );
   const action = attempt.nextAction;
-  const { verificationUrl, awaitingOwner, adminApproval, offersGitHubRequest } = flow;
+  const { verificationUrl, awaitingOwner, offersGitHubRequest } = flow;
+  // The provider said (or may have said) an administrator must approve first:
+  // that help is the whole step. After a sign-in the person never came back
+  // from, it sits beside the sign-in button instead.
+  const approval = flow.organizationApproval;
+  const adminApproval = approval && approval.reason !== "unfinished" ? approval : null;
+  const approvalNote = approval?.reason === "unfinished" ? approval : null;
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -154,34 +146,18 @@ function ScopedSetup({
         </div>
       )}
       {adminApproval && (
-        <div className="og-connect-setup-approval">
-          <p role="status" className="og-connect-setup-description">
-            {adminApproval.required
-              ? t("connectSetup.microsoftAdminApprovalRequired")
-              : t("connectSetup.microsoftAdminApprovalMaybe")}
-          </p>
-          {inChat && (
-            <a href={adminApproval.url} target="_blank" rel="noreferrer noopener">
-              {t("connectSetup.adminApprovalLink")}
-            </a>
-          )}
-          <div className="og-connect-setup-approval-actions">
-            <CopyLinkButton url={adminApproval.url} />
-            {onRetry && (
-              <button
-                type="button"
-                disabled={flow.busy}
-                className="og-connect-setup-secondary"
-                onClick={() => invoke(onRetry)}
-              >
-                {t("connectSetup.trySigningInAgain")}
-              </button>
-            )}
-          </div>
-        </div>
+        <OrganizationApprovalHelp
+          approval={adminApproval}
+          serviceName={serviceName}
+          retryDisabled={flow.busy}
+          onRetry={onRetry ? () => invoke(onRetry) : undefined}
+        />
+      )}
+      {approvalNote && flow.interactive && (
+        <OrganizationApprovalHelp approval={approvalNote} serviceName={serviceName} />
       )}
       {flow.errorText && <p role="alert">{flow.errorText}</p>}
-      {flow.notice && <p role="status">{flow.notice}</p>}
+      {flow.notice && !approvalNote && <p role="status">{flow.notice}</p>}
       {flow.interactive && !adminApproval && (
         <form key={`${attempt.id}:${attempt.revision}`} onSubmit={submit} autoComplete="off">
           <fieldset disabled={view.busy || navigating}>

@@ -621,9 +621,7 @@ describe("browser e2e", () => {
     // Composer `blob:` URLs are transient. The sent timeline preview must be a
     // fully loaded signed object URL, and opening it via keyboard must enter the
     // focus-trapped lightbox and restore focus after Escape.
-    const preview = page
-      .getByTestId("timeline-user")
-      .getByRole("img", { name: "e2e screenshot.png" });
+    const preview = page.getByTestId("timeline-user").locator("[data-og-message-attachments] img");
     await waitForImage(preview);
     const signedPreviewUrl = await preview.getAttribute("src");
     expect(signedPreviewUrl?.startsWith("blob:")).toBe(false);
@@ -631,28 +629,21 @@ describe("browser e2e", () => {
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
-    const open = page.getByRole("button", { name: "Open e2e screenshot.png" });
+    // The sent chip is the same control the composer showed: one coarse
+    // target that opens the shared lightbox, whose Download link carries a
+    // provider-backed signed URL rather than a transient blob.
+    const open = page.getByRole("button", { name: "Preview e2e screenshot.png" });
+    await expectCoarseTarget(open);
     await open.focus();
     await page.keyboard.press("Enter");
-    await page.getByRole("dialog", { name: "Screenshot" }).waitFor();
+    const previewDialog = page.getByRole("dialog", { name: "Attachment preview" });
+    await previewDialog.waitFor();
+    const downloadUrl = await page
+      .getByRole("link", { name: "Download e2e screenshot.png" })
+      .getAttribute("href");
     await page.keyboard.press("Escape");
-    await page.getByRole("dialog", { name: "Screenshot" }).waitFor({ state: "hidden" });
+    await previewDialog.waitFor({ state: "hidden" });
     expect(await open.evaluate((element) => element === document.activeElement)).toBe(true);
-
-    // Download mints a fresh signed URL on demand. Capture window.open rather
-    // than navigating away from the E2E page, then validate it is provider-backed.
-    const download = page.getByRole("button", { name: "Download e2e screenshot.png" });
-    await expectCoarseTarget(download);
-    await download.tap();
-    await waitFor(
-      async () =>
-        (await page.evaluate(() => (window as unknown as { __openedUrls: string[] }).__openedUrls))
-          .length === 1,
-      { timeoutMs: 10_000 },
-    );
-    const [downloadUrl] = await page.evaluate(
-      () => (window as unknown as { __openedUrls: string[] }).__openedUrls,
-    );
     expect(downloadUrl?.startsWith("blob:")).toBe(false);
     expect(downloadUrl).toContain(`127.0.0.1:${services.minioPort}`);
     if (services.minioPort === undefined) {
@@ -715,7 +706,7 @@ describe("browser e2e", () => {
       .waitFor({ timeout: 15_000 });
     const reloadedPreview = page
       .getByTestId("timeline-user")
-      .getByRole("img", { name: "e2e screenshot.png" });
+      .locator("[data-og-message-attachments] img");
     await waitForImage(reloadedPreview);
     expect((await reloadedPreview.getAttribute("src"))?.startsWith("blob:")).toBe(false);
     expect(await resourceCount()).toBe(1);
@@ -743,7 +734,7 @@ describe("browser e2e", () => {
       ).toBe(variant.theme);
       const clientPreview = client
         .getByTestId("timeline-user")
-        .getByRole("img", { name: "e2e screenshot.png" });
+        .locator("[data-og-message-attachments] img");
       await waitForImage(clientPreview);
       expect((await clientPreview.getAttribute("src"))?.startsWith("blob:")).toBe(false);
       expect(
@@ -751,12 +742,12 @@ describe("browser e2e", () => {
       ).toBe(true);
       if (variant.mobile) {
         await expectCoarseTarget(
-          client.getByRole("button", { name: "Download e2e screenshot.png" }),
+          client.getByRole("button", { name: "Preview e2e screenshot.png" }),
         );
       }
       if (variant.name === "desktop-dark") {
-        await client.getByRole("button", { name: "Open e2e screenshot.png" }).click();
-        const dialog = client.getByRole("dialog", { name: "Screenshot" });
+        await client.getByRole("button", { name: "Preview e2e screenshot.png" }).click();
+        const dialog = client.getByRole("dialog", { name: "Attachment preview" });
         await dialog.waitFor();
         await client.getByRole("button", { name: "Close" }).click();
         await dialog.waitFor({ state: "hidden" });

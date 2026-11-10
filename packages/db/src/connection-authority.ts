@@ -7,6 +7,7 @@ import { ConnectionKind, type ConnectionKind as ConnectionKindValue } from "@ope
 import { sql } from "drizzle-orm";
 import { getExternalLinkTurnAuthorizationInTransaction } from "./external-link-work";
 import { rawRows, setSubjectRlsContext, withRlsContext, type Database } from "./database";
+import { listOwnLoginsTurnedOnInOwnerScope } from "./user-resource-authority";
 
 async function withOwnerContext<T>(
   db: Database,
@@ -25,14 +26,46 @@ export async function listOwnedConnectionAccounts(
   input: { accountId: string; workspaceId: string; subjectId: string },
 ): Promise<Array<{ connectionId: string; originWorkspaceId: string }>> {
   return withOwnerContext(db, input, async (tx) =>
-    rawRows<{ connectionId: string; originWorkspaceId: string }>(
-      tx,
-      sql`
+    listOwnedConnectionAccountsInOwnerScope(tx, input),
+  );
+}
+
+function listOwnedConnectionAccountsInOwnerScope(
+  tx: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<Array<{ connectionId: string; originWorkspaceId: string }>> {
+  return rawRows<{ connectionId: string; originWorkspaceId: string }>(
+    tx,
+    sql`
       select connection_id as "connectionId", origin_workspace_id as "originWorkspaceId"
       from list_owned_connection_accounts(${input.accountId}::uuid, ${input.workspaceId}::uuid)
     `,
-    ),
   );
+}
+
+/**
+ * `listOwnedConnectionAccounts` and then, only when there is an account and
+ * `loginsTurnedOn` is true, `listOwnLoginsTurnedOn`, in the one owner scope
+ * both use (the same account, workspace and subject): the same two answers,
+ * one scope. Called only after the core layer has established the
+ * authenticated sender.
+ */
+export async function listOwnedConnectionAccountsAndLoginsTurnedOn(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string; loginsTurnedOn: boolean },
+): Promise<{
+  accounts: Array<{ connectionId: string; originWorkspaceId: string }>;
+  /** Null when not read: no accounts, or `loginsTurnedOn` was false. */
+  turnedOn: Map<string, string> | null;
+}> {
+  return withOwnerContext(db, input, async (tx) => {
+    const accounts = await listOwnedConnectionAccountsInOwnerScope(tx, input);
+    const turnedOn =
+      accounts.length > 0 && input.loginsTurnedOn
+        ? await listOwnLoginsTurnedOnInOwnerScope(tx, input)
+        : null;
+    return { accounts, turnedOn };
+  });
 }
 
 export type AcceptedConnectionUseContext = {

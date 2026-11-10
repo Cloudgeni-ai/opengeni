@@ -17,6 +17,8 @@ export type ModelProviderId =
   | "opper"
   | "anthropic"
   | "claude_subscription"
+  /** "Claude Code (API key)": the Anthropic API-key connection, with the Claude mark. */
+  | "claude_code_api"
   | "openai"
   | "azure_openai"
   /** An organization's own OpenAI-compatible endpoint: a generic API mark. */
@@ -70,7 +72,8 @@ export function ProviderMark({
   if (provider === "azure_openai") return <AzureMark className={className} />;
   if (provider === "openai_compatible") return <EndpointMark className={className} />;
   if (provider === "vercel") return <VercelMark className={className} />;
-  if (provider === "claude_subscription") return <ClaudeMark className={className} />;
+  if (provider === "claude_subscription" || provider === "claude_code_api")
+    return <ClaudeMark className={className} />;
   if (provider === "anthropic") return <AnthropicMark className={className} />;
   if (provider === "supergrok") return <GrokMark className={className} />;
   if (provider === "opper") return <OpperMark className={className} />;

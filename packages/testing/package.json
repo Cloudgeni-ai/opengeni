@@ -16,6 +16,7 @@
     "./compose": "./src/compose.ts",
     "./object-storage-fixture": "./src/object-storage-fixture.ts",
     "./shared-pg": "./src/shared-pg.ts",
+    "./pg-wire-proxy": "./src/pg-wire-proxy.ts",
     "./process": "./src/process.ts",
     "./sse": "./src/sse.ts",
     "./assertions": "./src/assertions.ts",
