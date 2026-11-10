@@ -501,6 +501,12 @@ export type NoticeItem = {
   /** A preserved turn-end outcome, not a claim about current session state. */
   recordedOutcome?: true;
   /**
+   * A failed attempt that a Retry reopened. The turn's final outcome carries
+   * the failure that still matters, so this attempt reads as one quiet step
+   * ("Attempt failed · retried") with its recorded text behind a disclosure.
+   */
+  retriedAttempt?: true;
+  /**
    * Recorded agent wait only: delegated worker sessions that had not reported
    * back when the wait began. Best effort from the loaded history; absent when
    * none are known.

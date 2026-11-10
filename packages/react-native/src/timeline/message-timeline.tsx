@@ -1241,8 +1241,9 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
   const c = theme.colors;
   const [open, setOpen] = useState(false);
   // An agent's own wait is ordinary progress, not a warning: a quiet line that
-  // discloses the reason, as on web.
-  if (item.recordedOutcome) {
+  // discloses the reason, as on web. So is an attempt a Retry reopened: the
+  // turn's outcome carries the failure that still matters.
+  if (item.recordedOutcome || item.retriedAttempt) {
     return (
       <Pressable
         accessibilityRole="button"
@@ -1255,7 +1256,9 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
             <Icon name="chevron-right" size={14} color={c["fg-muted"]} />
           </View>
           <Text style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: c["fg-muted"] }}>
-            {recordedWaitSummaryText(t, item).replace(" at ", ", ")}
+            {item.retriedAttempt
+              ? t("messageTimeline.attemptFailedRetried")
+              : recordedWaitSummaryText(t, item).replace(" at ", ", ")}
           </Text>
         </View>
         {open ? (
@@ -1269,7 +1272,11 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
               color: c["fg-muted"],
             }}
           >
-            {item.text}
+            {item.retriedAttempt && typeof item.details?.value === "string"
+              ? `${noticeDisplayText(t, item)}\n\n${item.details.value}`
+              : item.retriedAttempt
+                ? noticeDisplayText(t, item)
+                : item.text}
           </Text>
         ) : null}
       </Pressable>

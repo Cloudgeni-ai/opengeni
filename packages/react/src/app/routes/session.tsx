@@ -60,7 +60,7 @@ import {
 } from "../lib/composer-send-blocking";
 import { ChatPaymentPages } from "../components/chat-payment-pages";
 import { creditRefusalRecord, type CreditRefusalRecord } from "../lib/model-access";
-import { timelineShowsFailure } from "../lib/timeline-failure-owner";
+import { bannerFailureEventIds, timelineShowsFailure } from "../lib/timeline-failure-owner";
 import { sessionDisplayTitle } from "../lib/session-rename";
 import { canArchiveChat, requestSessionArchive } from "../lib/archive-session";
 import { notifySessionListChanged } from "../lib/session-list-invalidation";
@@ -4275,6 +4275,15 @@ function SessionChatPane(props: {
                           }}
                           renderMessageSender={renderMessageSender}
                           allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
+                          presentedFailureEventIds={
+                            failureRecovery && props.failure
+                              ? bannerFailureEventIds(
+                                  props.events,
+                                  props.failure,
+                                  props.creditExhausted,
+                                )
+                              : undefined
+                          }
                           trailingState={
                             <>
                               {/* Recovery follows the failed request, only in the latest history window.

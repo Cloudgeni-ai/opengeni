@@ -1,4 +1,34 @@
+import type { SessionEvent } from "../types";
 import type { TimelineItem } from "../../timeline";
+
+/**
+ * The failure events the failed-session banner presents, for
+ * `MessageTimeline`'s `presentedFailureEventIds`, so the timeline does not
+ * repeat what the banner says next to its actions. That is the failure
+ * itself, and for a credit stop the turn end it stopped (a credit stop can
+ * end a turn as nominally completed, with no failure event).
+ */
+export function bannerFailureEventIds(
+  events: readonly SessionEvent[],
+  failure: { failureEventId?: string | null | undefined },
+  creditExhausted: boolean | undefined,
+): string[] {
+  const ids = failure.failureEventId ? [failure.failureEventId] : [];
+  if (creditExhausted) {
+    let last: SessionEvent | undefined;
+    for (const event of events) {
+      if (
+        (event.type === "turn.completed" ||
+          event.type === "turn.failed" ||
+          event.type === "turn.cancelled") &&
+        (!last || event.sequence > last.sequence)
+      )
+        last = event;
+    }
+    if (last && !ids.includes(last.id)) ids.push(last.id);
+  }
+  return ids;
+}
 
 /**
  * Whether the rendered timeline already shows this exact session failure, so

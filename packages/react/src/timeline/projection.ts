@@ -1348,6 +1348,17 @@ export function buildTimeline(
           items.push(item);
         } else if (status === "requires_action") rememberPresentationWait(item, turnId);
         else {
+          // A turn's own failure already settles its work row as failed, and
+          // the reason is shown in one place (see `presentedFailureEventIds`).
+          // The status change that follows it is the same fact again, and a
+          // Retry that reopens the turn continues that same work row, so it
+          // gets neither a "failed" divider nor a "work resumed" one.
+          if (
+            status === "failed" &&
+            payload.code !== "pre_claim_failure" &&
+            turnFailedInTimeline(items, turnId ?? presentationTurnId)
+          )
+            break;
           items.push(item);
           if (status === "failed") {
             const key = turnId ?? presentationTurnId;
@@ -1906,6 +1917,15 @@ export function buildTimeline(
                 : null,
             );
         items.push(turnEndItem(event, "failed", failure?.summary ?? failureText, failure?.detail));
+        // A "failed" status recorded just before this event repeats it.
+        {
+          const key = turnId ?? presentationTurnId;
+          for (const status of presentationFailures.get(key) ?? []) {
+            const index = items.indexOf(status);
+            if (index >= 0 && !status.resolvedAt) items.splice(index, 1);
+          }
+          presentationFailures.delete(key);
+        }
         // The turn's own failed compaction landmark is the one place that
         // shows a compaction failure's recorded text: it receives it, and no
         // separate notice repeats it.
@@ -2959,6 +2979,15 @@ export type GroupTimelineOptions = {
    * is not counted as work.
    */
   pauses?: readonly TimelinePauseSpan[];
+  /**
+   * Session-failure event ids the host already presents itself, together
+   * with what can be done about them (for example a failed-session banner
+   * with Retry). A failure is shown once: for these the timeline keeps only a
+   * quiet "Failed" on the turn's work row and never repeats their text. The
+   * failure's own notice is left out, and its turn end keeps the outcome
+   * without the text. Other failures keep their text in the timeline.
+   */
+  presentedFailureEventIds?: readonly string[] | undefined;
 };
 
 export function groupTimeline(
@@ -2966,6 +2995,8 @@ export function groupTimeline(
   items: TimelineItem[],
   options: GroupTimelineOptions = {},
 ): TimelineGroup[] {
+  if (options.presentedFailureEventIds?.length)
+    items = withoutPresentedFailureText(items, options.presentedFailureEventIds);
   if (options.readableTurns || options.foldExchanges)
     return groupReadableTurns(t, items, options.pauses ?? []);
   const groups: TimelineGroup[] = [];
@@ -2994,6 +3025,31 @@ export function groupTimeline(
     groups.push({ kind: "item", item });
   }
   return groups;
+}
+
+/** See `GroupTimelineOptions.presentedFailureEventIds`. Matches by item identity, never wording. */
+function withoutPresentedFailureText(
+  items: TimelineItem[],
+  eventIds: readonly string[],
+): TimelineItem[] {
+  const ids = new Set(eventIds);
+  const turnEnds = new Set(eventIds.map((id) => `${id}-turn-end`));
+  return items.flatMap((item): TimelineItem[] => {
+    if (
+      item.kind === "notice" &&
+      item.tone === "failed" &&
+      ids.has(item.id) &&
+      !item.allowance &&
+      !item.sessionUsageLimit &&
+      !item.learningRefusal
+    )
+      return [];
+    if (item.kind === "turn-end" && item.outcome === "failed" && turnEnds.has(item.id)) {
+      const { failureDetail: _detail, ...rest } = item;
+      return [{ ...rest, failureText: null }];
+    }
+    return [item];
+  });
 }
 
 /** Live prose stays primary; settled progress joins its own turn's work history. */
@@ -3175,6 +3231,7 @@ function groupReadableTurns(
               id: item.id,
               tone: "failed",
               text: item.failureText ?? t("timeline.projection.theTurnFailedBeforeRetrying"),
+              retriedAttempt: true,
               ...(item.failureDetail
                 ? {
                     details: { label: t("timeline.projection.details"), value: item.failureDetail },
@@ -3779,6 +3836,17 @@ function sessionUsageLimitNotice(
     },
     occurredAt: event.occurredAt,
   };
+}
+
+/** Whether this turn's latest settlement in the timeline is its own failure. */
+function turnFailedInTimeline(items: TimelineItem[], turnId: string | null): boolean {
+  if (turnId === null) return false;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item?.kind === "turn-end" && item.turnId === turnId)
+      return item.outcome === "failed" && !item.resumedAt;
+  }
+  return false;
 }
 
 function hasTurnActivity(items: TimelineItem[], turnId: string | null): boolean {

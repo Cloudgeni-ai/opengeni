@@ -398,7 +398,15 @@ export function failedSessionCopy(
             ? `${recorded.slice(0, 157)}…`
             : recorded
           : "This session failed.";
-  return { reason, unavailableModel };
+  // The banner is where a current failure is shown (the timeline keeps only
+  // a quiet status), so recorded text the headline shortened or replaced stays
+  // reachable behind Details. A credit stop's recorded text adds nothing.
+  const detail = creditExhausted ? undefined : diagnostic?.trim();
+  return {
+    reason,
+    unavailableModel,
+    ...(detail && detail.replace(/\s+/g, " ") !== reason ? { detail } : {}),
+  };
 }
 
 /**
