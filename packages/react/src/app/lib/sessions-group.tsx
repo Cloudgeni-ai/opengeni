@@ -5,6 +5,7 @@
 import { t } from "./console-text";
 import { formatWaitingSince } from "./format";
 import { awaitsPerson } from "./needs-you";
+import { failureHandledByAgent, needsFailureReview } from "./session-failure";
 import { sessionInputWait } from "./session-rail";
 import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
 import type { SessionListTotals, SiteConversationGroup } from "@opengeni/sdk";
@@ -24,6 +25,8 @@ import {
   sessionActivityTime,
   type SessionRecencyGroup,
 } from "../../session-list-model";
+
+export { failureHandledByAgent, needsFailureReview };
 
 export {
   compareSessionActivity,
@@ -186,17 +189,6 @@ function ownRailStatusCounts(
 }
 
 /**
- * A failed session the person should still review: unread, and its failure not
- * consumed by a parent agent. Matches the server's
- * `treeStats.unreadFailedDescendants`.
- */
-export function needsFailureReview(
-  session: Pick<Session, "status" | "unread" | "failureHandled">,
-): boolean {
-  return session.status === "failed" && Boolean(session.unread) && !session.failureHandled;
-}
-
-/**
  * Work a pause holds for Resume: a turn still open, queued or running. A
  * paused chat with nothing in progress shows no marker, nor does one that
  * needs the person or is ending (Cancel also pauses while the turn stops).
@@ -301,7 +293,9 @@ function railStatusCounts(
     }
   } else {
     for (const child of node.children) {
-      addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+      const childCounts = railStatusCounts(child, localDeliveryAttention);
+      if (failureHandledByAgent(child.session) && child.session.unread) childCounts.unread -= 1;
+      addRailStatusCounts(counts, childCounts);
     }
   }
   return counts;
@@ -1234,7 +1228,7 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     pausedWork: hasPausedWork(node.session) ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
     unreadFailed: needsFailureReview(node.session) ? 1 : 0,
-    unread: node.session.unread ? 1 : 0,
+    unread: node.session.unread && !failureHandledByAgent(node.session) ? 1 : 0,
     activeWork: node.session.activelyWorking ? 1 : 0,
   };
   const stats = node.session.treeStats;

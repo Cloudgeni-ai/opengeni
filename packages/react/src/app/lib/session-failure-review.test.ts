@@ -3,7 +3,8 @@ import { describe, expect, test } from "bun:test";
 import type { Session } from "../types";
 import { filterNeedsYou } from "./needs-you";
 import { applySessionAttentionProjections } from "./session-attention";
-import { needsFailureReview, summarizeRailNodes, type SessionTreeNode } from "./sessions-group";
+import { needsFailureReview } from "./session-failure";
+import { summarizeRailNodes, type SessionTreeNode } from "./sessions-group";
 
 // A failed sub-agent whose result its parent agent already consumed is that
 // agent's to retry, restart or replace. The server marks it `failureHandled`
@@ -54,9 +55,9 @@ describe("failures a parent agent already handled", () => {
     expect(needsFailureReview(session({ id: "root", status: "failed", unread: true }))).toBe(true);
   });
 
-  test("leave no red marker on a row built from loaded sub-agents", () => {
+  test("leave no red or unread marker on a row built from loaded sub-agents", () => {
     const root = session({ id: "root" });
-    expect(summarizeRailNodes([node(root, [node(handled)])]).kind).not.toBe("failed");
+    expect(summarizeRailNodes([node(root, [node(handled)])]).kind).toBe("neutral");
     expect(summarizeRailNodes([node(root, [node(handled), node(unhandled)])])).toMatchObject({
       kind: "failed",
       count: 1,
@@ -74,9 +75,9 @@ describe("failures a parent agent already handled", () => {
         attentionDescendants: 0,
         pausedDescendants: 0,
         failedDescendants: 2,
-        // Only `unhandled` counts; the server already left `handled` out.
         unreadFailedDescendants: 1,
-        unreadDescendants: 2,
+        // The server leaves `handled` out of both counts.
+        unreadDescendants: 1,
         activelyWorkingDescendants: 0,
         truncated: false,
       },
@@ -85,6 +86,7 @@ describe("failures a parent agent already handled", () => {
       [root, handled, unhandled],
       new Map([[handled.id, { ...handled, unread: false, attentionVersion: 2 }]]),
     );
+    // Neither count included `handled`, so reading it leaves both unchanged.
     expect(projected.find((row) => row.id === root.id)?.treeStats).toMatchObject({
       unreadFailedDescendants: 1,
       unreadDescendants: 1,

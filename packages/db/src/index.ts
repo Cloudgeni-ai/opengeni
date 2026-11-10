@@ -36360,11 +36360,13 @@ export async function sessionTreeStatsForSessions(
               )
           )::int as "pausedWorkDescendants",
           count(*) filter (where status = 'failed')::int as "failedDescendants",
-          -- A failure its parent agent already consumed is that agent's to handle.
+          -- A failure its parent agent already consumed is that agent's to handle,
+          -- including anything the failed session logs after it (for example a
+          -- late workspace capture): neither asks the person through an ancestor.
           count(*) filter (
             where status = 'failed' and unread and not failure_handled
           )::int as "unreadFailedDescendants",
-          count(*) filter (where unread)::int as "unreadDescendants",
+          count(*) filter (where unread and not failure_handled)::int as "unreadDescendants",
           count(*) filter (where actively_working)::int as "activelyWorkingDescendants",
           -- Oldest still-open requires_action turn among the counted attention
           -- descendants. The correlated lookup runs only for rows passing the
@@ -36835,7 +36837,7 @@ async function sessionListTotalsInScope(
         count(*) filter (where pause_revision is null and
           status in ('queued', 'waiting_capacity'))::int as queued,
         count(*) filter (where pause_revision is null and input_wait)::int as waiting,
-        count(*) filter (where unread)::int as unread,
+        count(*) filter (where unread and not failure_handled)::int as unread,
         count(*) filter (where active_work)::int as "activeWork"
       from measured group by channel_id
     ), site_conv as (
@@ -36970,7 +36972,7 @@ async function sessionListTotalsInScope(
         count(*) filter (where node.pause_revision is null and
           node.status in ('queued', 'waiting_capacity'))::int as queued,
         count(*) filter (where node.pause_revision is null and node.input_wait)::int as waiting,
-        count(*) filter (where node.unread)::int as unread,
+        count(*) filter (where node.unread and not node.failure_handled)::int as unread,
         count(*) filter (where node.active_work)::int as "activeWork"
       from measured node join site_conv conv on conv.id = node.root_id
       group by conv.site_id, conv.row_channel_id

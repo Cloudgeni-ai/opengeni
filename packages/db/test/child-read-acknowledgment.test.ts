@@ -1297,9 +1297,10 @@ describe("child read acknowledgment on parent consumption", () => {
       includeTotals: true,
     });
     const child = await getSessionForSubject(client.db, grant.workspaceId, childId, subjectId);
+    const stats = listed.sessions.find((session) => session.id === parentId)?.treeStats;
     return {
-      unreadFailedDescendants: listed.sessions.find((session) => session.id === parentId)
-        ?.treeStats?.unreadFailedDescendants,
+      unreadFailedDescendants: stats?.unreadFailedDescendants,
+      unreadDescendants: stats?.unreadDescendants,
       projectFailed: listed.totals?.groups.reduce((sum, group) => sum + group.failed, 0),
       childUnread: child?.unread,
       childFailureHandled: child?.failureHandled ?? false,
@@ -1320,6 +1321,7 @@ describe("child read acknowledgment on parent consumption", () => {
         await failureAttention(grant, subjectId, parent.session.id, child.session.id),
       ).toEqual({
         unreadFailedDescendants: 1,
+        unreadDescendants: 1,
         projectFailed: 1,
         childUnread: true,
         childFailureHandled: false,
@@ -1337,13 +1339,15 @@ describe("child read acknowledgment on parent consumption", () => {
         payload: { reason: "repository_discovery_command_failed" },
       },
     ]);
-    // Read state is unchanged (the new event is unread, and the other member
-    // never read anything), but the failure no longer asks anyone for review.
+    // The child's own read state is unchanged (the new event is unread, and the
+    // other member never read anything), but neither the failure nor that late
+    // event reaches anyone through the parent.
     for (const subjectId of [grant.subjectId, other]) {
       expect(
         await failureAttention(grant, subjectId, parent.session.id, child.session.id),
       ).toEqual({
         unreadFailedDescendants: 0,
+        unreadDescendants: 0,
         projectFailed: 0,
         childUnread: true,
         childFailureHandled: true,
@@ -1388,6 +1392,7 @@ describe("child read acknowledgment on parent consumption", () => {
       await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id),
     ).toEqual({
       unreadFailedDescendants: 1,
+      unreadDescendants: 1,
       projectFailed: 1,
       childUnread: true,
       childFailureHandled: false,

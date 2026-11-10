@@ -1,4 +1,5 @@
 import type { RailSession as Session } from "./session-list-entry";
+import { failureHandledByAgent } from "./session-failure";
 
 // The attention-boundary predicate is shared with native clients.
 export { sessionAttentionReadThroughSequence } from "../../session-attention-model";
@@ -174,9 +175,9 @@ export function applySessionAttentionProjections<T extends Session>(
     projectedById.set(sessionId, projected);
 
     const unreadDelta = Number(projected.unread) - Number(source.unread);
-    if (unreadDelta === 0) continue;
-    // A failure its parent agent consumed was never counted for the person.
-    const failedDelta = source.status === "failed" && !source.failureHandled ? unreadDelta : 0;
+    // A failure its parent agent consumed never reached ancestor counts.
+    if (unreadDelta === 0 || failureHandledByAgent(source)) continue;
+    const failedDelta = source.status === "failed" ? unreadDelta : 0;
     const visited = new Set<string>([sessionId]);
     let parentSessionId = source.parentSessionId;
     while (parentSessionId && !visited.has(parentSessionId)) {
