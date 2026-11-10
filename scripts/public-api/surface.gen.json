@@ -38764,6 +38764,7 @@
       "RecorderPlatform": "type",
       "RecorderSnapshot": "type",
       "RecorderState": "type",
+      "RecorderTrackLoss": "type",
       "RECORDING_AUDIO_UPLOAD_PIECE_BYTES": "value",
       "RecordingChunk": "type",
       "RecordingChunkStore": "type",
@@ -40850,11 +40851,13 @@
     "@opengeni/react/meetings-recorder": {
       "createMeetingRecorderStore": "value",
       "MeetingRecorder": "type",
+      "MeetingRecorderLostTrack": "type",
       "MeetingRecorderProvider": "value",
       "MeetingRecorderStore": "type",
       "MeetingRecorderStoreProvider": "value",
       "MeetingStartRequest": "type",
       "useMeetingRecorder": "value",
+      "useMeetingRecorderLostTrack": "value",
       "useMeetingRecorderState": "value",
       "usePendingMeetingStart": "value"
     },

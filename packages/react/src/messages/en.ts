@@ -2855,6 +2855,7 @@ export const englishMessages = {
   "meetings.player.playbackSpeedRate": "Playback speed {rate}×",
   "meetings.player.position": "Position",
   "meetings.player.rate": "{rate}×",
+  "meetings.recorderPanel.allowMicrophone": "Allow microphone",
   "meetings.recorderPanel.allowMicrophoneAccessForThis":
     "Allow microphone access for this site in your browser's address bar or settings, then start again.",
   "meetings.recorderPanel.allowThisAppToUse":
@@ -2868,6 +2869,8 @@ export const englishMessages = {
   "meetings.recorderPanel.canTRecordComputerAudio": "Can't record computer audio",
   "meetings.recorderPanel.capturingwhatValue": "{capturingWhat} {value}",
   "meetings.recorderPanel.computerAudio": "Computer audio",
+  "meetings.recorderPanel.computerAudioInSentence": "computer audio",
+  "meetings.recorderPanel.couldNotReconnect": "Couldn't start that audio again",
   "meetings.recorderPanel.computerAudioDidnTStart":
     "Computer audio didn't start. Start again, or record without computer audio.",
   "meetings.recorderPanel.computerAudioIsnTAllowed": "Computer audio isn't allowed",
@@ -2883,6 +2886,20 @@ export const englishMessages = {
   "meetings.recorderPanel.liveTextIsnTAvailable":
     "No live text this time.{value} You still get the transcript after you stop.",
   "meetings.recorderPanel.liveTranscript": "Live transcript",
+  "meetings.recorderPanel.lostComputerAudio":
+    "Computer audio stopped, so the call isn't being recorded.",
+  "meetings.recorderPanel.lostMicrophoneOff":
+    "Your voice isn't being recorded: microphone access was turned off.",
+  "meetings.recorderPanel.lostMicrophoneWaiting":
+    "Your voice isn't being recorded: no microphone is connected. Recording picks up again as soon as one is.",
+  "meetings.recorderPanel.lostReasonComputerAudio": "computer audio stopped",
+  "meetings.recorderPanel.lostReasonJoin": ", and ",
+  "meetings.recorderPanel.lostReasonMicrophoneOff": "microphone access is off",
+  "meetings.recorderPanel.lostReasonMicrophoneWaiting":
+    "no microphone is connected (it comes back by itself when one is)",
+  "meetings.recorderPanel.lostReasonTabAudio": "tab sharing ended",
+  "meetings.recorderPanel.lostTabAudio": "Tab sharing ended, so the call isn't being recorded.",
+  "meetings.recorderPanel.lostTrackStillRecording": "{lost} {track} is still recording.",
   "meetings.recorderPanel.meetingLanguage": "Meeting language",
   "meetings.recorderPanel.meetingTitle": "Meeting title",
   "meetings.recorderPanel.microphone": "Microphone",
@@ -2890,6 +2907,8 @@ export const englishMessages = {
   "meetings.recorderPanel.microphoneOnlySoPeopleOn":
     "Microphone only: other people on a call won't be heard.",
   "meetings.recorderPanel.nameIt": "Name it",
+  "meetings.recorderPanel.nothingRecordingReasons": "Nothing is being recorded. {reasons}.",
+  "meetings.recorderPanel.notRecording": "Not recording",
   "meetings.recorderPanel.nameThisMeeting": "Name this meeting",
   "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting, or it's named for you",
   "meetings.recorderPanel.namedForYou": "Named for you",
@@ -2907,7 +2926,18 @@ export const englishMessages = {
     "Offline. The audio uploads when you're back online.",
   "meetings.recorderPanel.pause": "Pause",
   "meetings.recorderPanel.paused": "Paused",
+  "meetings.recorderPanel.pausedComputerAudio":
+    "Paused. Computer audio stopped, so after you resume only {track} will be recorded.",
+  "meetings.recorderPanel.pausedLostReasons":
+    "Paused. {reasons}. Until one is back, nothing will be recorded when you resume.",
+  "meetings.recorderPanel.pausedMicrophoneOff":
+    "Paused. Microphone access is off, so after you resume only {track} will be recorded.",
+  "meetings.recorderPanel.pausedMicrophoneWaiting":
+    "Paused. No microphone is connected. Connect one before you resume, or only {track} will be recorded.",
+  "meetings.recorderPanel.pausedTabAudio":
+    "Paused. Tab sharing ended, so after you resume only {track} will be recorded.",
   "meetings.recorderPanel.pausedNothingIsHeardUntil": "Paused.",
+  "meetings.recorderPanel.recordComputerAudioAgain": "Record computer audio",
   "meetings.recorderPanel.recording": "Recording.",
   "meetings.recorderPanel.recording2": "Recording",
   "meetings.recorderPanel.recordingNotUploading": "Recording · not uploading",
@@ -2943,7 +2973,9 @@ export const englishMessages = {
     "Starting… Allow the microphone if asked.",
   "meetings.recorderPanel.startRecording": "Start recording",
   "meetings.recorderPanel.stop": "Stop",
+  "meetings.recorderPanel.shareTabAgain": "Share tab again",
   "meetings.recorderPanel.tabAudio": "Tab audio",
+  "meetings.recorderPanel.tabAudioInSentence": "tab audio",
   "meetings.recorderPanel.takeNotes": "Take notes",
   "meetings.recorderPanel.theLiveTranscriptAddsAbout": "About ${value} per hour.",
   "meetings.recorderPanel.theLiveTranscriptionAccountHas":
@@ -2962,6 +2994,11 @@ export const englishMessages = {
     "This browser can't share a tab's audio. Record with the microphone only, or use Chrome or Edge on a computer.",
   "meetings.recorderPanel.thisComputerCanTRecordItsOwnAudio":
     "This computer can't record its own audio. Record without computer audio instead.",
+  "meetings.recorderPanel.trackAccessOff": "Access off",
+  "meetings.recorderPanel.trackDisconnected": "Disconnected",
+  "meetings.recorderPanel.trackRecordingAgain": "{track} is recording again.",
+  "meetings.recorderPanel.trackSharingEnded": "Sharing ended",
+  "meetings.recorderPanel.trackStopped": "Stopped",
   "meetings.recorderPanel.uploaded": "Uploaded",
   "meetings.recorderPanel.uploadFailedMessage": "Upload failed: {message}",
   "meetings.recorderPanel.uploadfailurereasonTheRecordingIsSaved":
@@ -2973,6 +3010,7 @@ export const englishMessages = {
     "Use a current version of Chrome, Edge, Safari or Firefox to record meetings.",
   "meetings.recorderPanel.whenYourBrowserAsksWhat":
     "When your browser asks what to share, pick the meeting tab and turn on Share tab audio. Or record without it.",
+  "meetings.recorderPanel.yourMicrophone": "your microphone",
   "meetings.recorderPanel.youCanUseOtherPages": "Closing this tab stops the recording.",
   "meetings.recorderPanel.youNoLongerHavePermission":
     "You no longer have permission to add recordings to this workspace.",
