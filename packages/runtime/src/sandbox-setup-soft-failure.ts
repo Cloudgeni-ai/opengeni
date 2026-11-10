@@ -186,6 +186,14 @@ const BOX_PATH = /^\/(?:workspace|tmp)(?:\/|$)/;
  */
 function isFileOperationError(node: Error): boolean {
   if (/Filesystem|FileSystem/.test(node.name)) return true;
+  // The machine agent's own answer that a filesystem operation failed at the
+  // OS layer in the box (agent-proto ERROR_CODE_OS).
+  if (
+    node.name === "SelfhostedControlError" &&
+    (node as Error & { code?: unknown }).code === ErrorCode.ERROR_CODE_OS
+  ) {
+    return true;
+  }
   const errno = node as Error & { code?: unknown; syscall?: unknown; path?: unknown };
   return (
     typeof errno.code === "string" &&
@@ -261,9 +269,10 @@ const UNSUPPORTED_ERROR_NAMES = new Set([
  * in place. Not when the attempt stopped, the machine agent did not answer or
  * was replaced (the worker recovers or replaces the box), the box's own disk or
  * path caused it (setup fails softly with a notice instead), or the box
- * answered with a definite refusal (consent, payload size, missing path,
- * unsupported operation). Everything else, such as a lost or failed routed
- * write response, is worth a bounded retry.
+ * answered. A machine-agent error is retried only when it says so (retryable)
+ * or never reached the agent; any other answer from the agent would repeat.
+ * Everything else, such as a lost routed write response, is worth a bounded
+ * retry.
  */
 export function isRetryableSetupFileWriteFailure(error: unknown): boolean {
   const nodes = errorGraph(error);
@@ -277,7 +286,8 @@ export function isRetryableSetupFileWriteFailure(error: unknown): boolean {
         control.payloadTooLarge === true ||
         control.osNotFound === true ||
         control.reason === "consent_required" ||
-        control.code === ErrorCode.ERROR_CODE_UNSUPPORTED
+        control.code === ErrorCode.ERROR_CODE_UNSUPPORTED ||
+        (control.retryable !== true && control.neverSent !== true)
       ) {
         return false;
       }

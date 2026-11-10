@@ -14294,20 +14294,66 @@ export class GitBrokerCredentialDeliveryError extends Error {
   }
 }
 
+function redactGitBrokerCredentials(text: string, bindings: GitCredentialBindingSeed[]): string {
+  let redacted = text;
+  for (const binding of bindings) {
+    for (const secret of [binding.token, ...binding.token.split("\n")]) {
+      if (secret.length >= 4) redacted = redacted.split(secret).join("[redacted]");
+    }
+  }
+  return redacted;
+}
+
 function redactGitBrokerCredentialDetail(
   error: unknown,
   bindings: GitCredentialBindingSeed[],
 ): string {
-  let detail = errorMessage(error);
-  for (const binding of bindings) {
-    for (const secret of [binding.token, ...binding.token.split("\n")]) {
-      if (secret.length >= 4) detail = detail.split(secret).join("[redacted]");
-    }
-  }
-  detail = detail.replace(/\s+/g, " ").trim();
+  const detail = redactGitBrokerCredentials(errorMessage(error), bindings)
+    .replace(/\s+/g, " ")
+    .trim();
   return detail.length > GIT_BROKER_DELIVERY_CAUSE_MAX_CHARS
     ? `${detail.slice(0, GIT_BROKER_DELIVERY_CAUSE_MAX_CHARS)}…`
     : detail;
+}
+
+/**
+ * Redact broker bearers in place from every error in the cause graph that is
+ * kept as `cause`, so serializing the chain (for example into workflow
+ * history) cannot carry one. Typed fields the classifiers read are unchanged.
+ */
+function redactGitBrokerCredentialCauseGraph(
+  error: unknown,
+  bindings: GitCredentialBindingSeed[],
+): void {
+  const queue: unknown[] = [error];
+  const seen = new Set<object>();
+  for (let index = 0; index < queue.length && seen.size < 64; index += 1) {
+    const node = queue[index];
+    if (!node || typeof node !== "object" || seen.has(node)) continue;
+    seen.add(node);
+    try {
+      if (node instanceof Error) {
+        for (const field of ["message", "stack"] as const) {
+          const value = node[field];
+          if (typeof value !== "string") continue;
+          const redacted = redactGitBrokerCredentials(value, bindings);
+          if (redacted !== value) {
+            Object.defineProperty(node, field, {
+              value: redacted,
+              writable: true,
+              configurable: true,
+            });
+          }
+        }
+      }
+      const record = node as { cause?: unknown; error?: unknown; errors?: unknown };
+      queue.push(record.cause, record.error);
+      if (Array.isArray(record.errors)) queue.push(...record.errors.slice(0, 16));
+    } catch {
+      // A frozen or unreadable node keeps its text; the wrapper's message is
+      // redacted regardless.
+    }
+  }
 }
 
 async function stageGitHttpBrokerBindingSeeds(
@@ -14359,11 +14405,17 @@ async function stageGitHttpBrokerBindingSeeds(
           console.warn(
             `[opengeni] Git broker credential write failed (attempt ${attempt + 1}); retrying: ${redactGitBrokerCredentialDetail(error, brokered)}`,
           );
-          // The abandoned attempt may still have landed: remove it now, since
-          // a later successful attempt hands only its own path onward.
-          await cleanupStagedGitCredentialSeeds(editor, [candidate]);
-          cleanupEligible.splice(cleanupEligible.indexOf(candidate), 1);
           await delay(delayMs);
+          // The abandoned attempt may still have landed: remove it now (after
+          // the delay, so a late write has landed), since a later successful
+          // attempt hands only its own path onward. A failed delete keeps the
+          // path for the final cleanup on failure.
+          try {
+            await editor.deleteFile({ type: "delete_file", path: candidate.path });
+            cleanupEligible.splice(cleanupEligible.indexOf(candidate), 1);
+          } catch {
+            // Best effort, as in cleanupStagedGitCredentialSeeds.
+          }
         }
       }
     }
@@ -14371,6 +14423,7 @@ async function stageGitHttpBrokerBindingSeeds(
   } catch (error) {
     const kit = await ghGatewayKit;
     await cleanupStagedGitCredentialSeeds(editor, cleanupEligible, kit);
+    redactGitBrokerCredentialCauseGraph(error, brokered);
     const detail = redactGitBrokerCredentialDetail(error, brokered);
     console.warn(`[opengeni] ${GIT_BROKER_CREDENTIAL_DELIVERY_FAILED}: ${detail}`);
     throw new GitBrokerCredentialDeliveryError(detail, error);
@@ -17331,7 +17384,11 @@ export async function runRepositoryCloneHook(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   context: SandboxLifecycleHookContext = { environment: {} },
   /** Test seam: the per-repository optional clone bound, in seconds. */
-  options: { optionalCloneTimeoutSeconds?: number } = {},
+  options: {
+    optionalCloneTimeoutSeconds?: number;
+    /** Test seam: waits before each retry of a failed broker seed write. */
+    brokerSeedRetryDelaysMs?: readonly number[];
+  } = {},
 ): Promise<void> {
   const payload = {
     name: "repository-clone",
@@ -17369,6 +17426,9 @@ export async function runRepositoryCloneHook(
           personalGitHubGatewayDescriptor(
             runtimeGitHttpBrokerRouteDescriptors(resources, gitCredentialBindings),
           ) !== null,
+        ...(options.brokerSeedRetryDelaysMs
+          ? { retryDelaysMs: options.brokerSeedRetryDelaysMs }
+          : {}),
       },
     );
     // Per run, inline with the seeds, so the staged program stays reusable.
