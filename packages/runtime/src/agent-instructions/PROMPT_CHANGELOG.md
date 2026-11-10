@@ -6,9 +6,9 @@ deferred notice), so a repository Skill added mid-chat, an offline Connected
 Machine or a deferred turn rewrote the system prompt, which broke prompt caching
 and made Claude reject replayed signed thinking. The section is now one stable
 notice built only from the search folders; the index is a durable "Repository
-skills" developer history item, written only when it changes. Repository
-sessions always get the notice: 1,185 characters with the two default folders
-(before: 472 for the deferred notice, about 900 plus the listing when indexed,
+skills" developer history item, written only when it changes. Sessions with
+repository skill folders always get the notice: 1,185 characters with the two
+default folders (before: 472 for the deferred notice, about 820 plus the listing when indexed,
 and nothing for a workspace without skills, which now gets a short "No
 repository skills were found" history item instead). The one-shot request for a
 missing session title moves from the first request's system prompt into that
