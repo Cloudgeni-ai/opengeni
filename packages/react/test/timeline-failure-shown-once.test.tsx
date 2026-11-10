@@ -298,15 +298,9 @@ describe("the non-rolling timeline", () => {
     expect(notices).toEqual([]);
   });
 
-  test("a Retry that never ran leaves the attempt folded with its outcome", () => {
+  test("a Retry refused before it started folds the turn once, as its outcome", () => {
     sequence = 0;
-    const events = [
-      event("user.message", { text: "Go" }, null),
-      ...attempt(),
-      ...failure(),
-      event("turn.recovery.requested", { reason: "human_retry" }),
-      event("session.status.changed", { status: "failed", code: "pre_claim_failure" }),
-    ];
+    const events = refusedRetry();
     const turns = nonRolling(events).filter((group) => group.kind === "turn");
     expect(turns).toHaveLength(1);
     expect(turns[0]).toMatchObject({ outcome: "failed" });
@@ -391,28 +385,38 @@ describe("the non-rolling timeline", () => {
     }
   });
 
-  test("a Retry that never ran leaves the failure as the turn's outcome, shown once", () => {
+  test("a Retry refused before it started shows each failure once, without a divider", () => {
     sequence = 0;
-    const events = [
-      event("user.message", { text: "Go" }, null),
-      ...attempt(),
-      ...failure(),
-      event("turn.recovery.requested", { reason: "human_retry" }),
-      event("session.status.changed", { status: "failed", code: "pre_claim_failure" }),
-    ];
-    const failureId = events.filter((e) => e.type === "turn.failed").at(-1)!.id;
+    const events = refusedRetry();
+    const refusalId = events.filter((e) => e.type === "turn.failed").at(-1)!.id;
     for (const readableTurns of [true, false]) {
-      const groups = groupTimeline(t, buildTimeline(t, events), {
+      const items = buildTimeline(t, events);
+      expect(items.filter((item) => item.kind === "session-status")).toEqual([]);
+      const groups = groupTimeline(t, items, {
         readableTurns,
-        presentedFailureEventIds: [failureId],
+        presentedFailureEventIds: [refusalId],
       });
-      expect(JSON.stringify(groups)).not.toContain(ERROR);
-      expect(flatten(groups).some((item) => item.kind === "notice" && item.retriedAttempt)).toBe(
-        false,
-      );
+      const shown = JSON.stringify(groups);
+      // The banner has the refusal; the first attempt's text is behind its quiet step.
+      expect(shown).not.toContain(REFUSAL);
+      expect(occurrences(shown, ERROR)).toBe(1);
     }
   });
 });
+
+const REFUSAL = "This chat's machine is offline.";
+
+/** A Retry the server refused before it started: its own failure, then the failed status. */
+function refusedRetry(): SessionEvent[] {
+  return [
+    event("user.message", { text: "Go" }, null),
+    ...attempt(),
+    ...failure(),
+    event("turn.recovery.requested", { reason: "human_retry" }),
+    event("turn.failed", { error: REFUSAL, code: "pre_claim_failure" }),
+    event("session.status.changed", { status: "failed", code: "pre_claim_failure" }),
+  ];
+}
 
 describe("the rendered timeline (web and the desktop app)", () => {
   test("with the failed banner, the error text appears only behind the retried attempt", async () => {

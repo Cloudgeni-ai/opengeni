@@ -282,25 +282,6 @@ export function buildTimeline(
   // Failure notices of turns that failed before any work, by turn. A Retry
   // turns them into quiet "retried" steps, like a failed attempt with work.
   const noWorkFailureNotices = new Map<string, NoticeItem[]>();
-  // The notices a Retry made quiet, by turn, so a refused Retry can undo it.
-  const retriedNoticesByTurn = new Map<string, NoticeItem[]>();
-  // A Retry refused before it started (a failed status with nothing of the
-  // turn since the Retry reopened it) never replaced the attempt: the failure
-  // stays the turn's outcome.
-  const revertRefusedRetry = (turnId: string) => {
-    let index = items.length - 1;
-    for (; index >= 0; index -= 1) {
-      const item = items[index]!;
-      if ("turnId" in item && item.turnId === turnId) break;
-    }
-    const last = items[index];
-    if (last?.kind !== "turn-end" || last.outcome !== "failed" || !last.resumedAt) return;
-    delete last.resumedAt;
-    const notices = retriedNoticesByTurn.get(turnId) ?? [];
-    for (const notice of notices) delete notice.retriedAttempt;
-    retriedNoticesByTurn.delete(turnId);
-    if (notices.length > 0) noWorkFailureNotices.set(turnId, notices);
-  };
   let presentationTurnId: string | null = null;
   const rememberPresentationWait = (
     item: NoticeItem | SessionStatusItem,
@@ -1333,7 +1314,6 @@ export function buildTimeline(
         }
         const blocked = status === "requires_action" && payload.code === "admission_blocked";
         const archived = sessionStatusChangeIsArchive(payload);
-        if (status === "failed" && turnId) revertRefusedRetry(turnId);
         if (!blocked && openAdmissionBlocks.length > 0) {
           for (const open of openAdmissionBlocks) open.resolvedAt = event.occurredAt;
           openAdmissionBlocks = [];
@@ -1378,8 +1358,11 @@ export function buildTimeline(
           // gets neither a "failed" divider nor a "work resumed" one.
           if (
             status === "failed" &&
-            payload.code !== "pre_claim_failure" &&
-            turnFailedInTimeline(items, turnId ?? presentationTurnId)
+            // A pre-claim status without a turn has no other row to stand on.
+            turnFailedInTimeline(
+              items,
+              payload.code === "pre_claim_failure" ? turnId : (turnId ?? presentationTurnId),
+            )
           )
             break;
           items.push(item);
@@ -1675,7 +1658,6 @@ export function buildTimeline(
             for (const notice of noWorkFailureNotices.get(turnId) ?? []) {
               notice.retriedAttempt = true;
             }
-            retriedNoticesByTurn.set(turnId, noWorkFailureNotices.get(turnId) ?? []);
             noWorkFailureNotices.delete(turnId);
           }
         }
@@ -1983,7 +1965,7 @@ export function buildTimeline(
         }
         if (allowance) {
           allowanceNotice(event, turnId);
-          end.ownRow = true;
+          end.ownRow = "usage-limit";
         } else if (!hadActivity && !landmark) {
           const notice: NoticeItem = {
             kind: "notice",
@@ -1996,10 +1978,10 @@ export function buildTimeline(
             occurredAt: event.occurredAt,
           };
           items.push(notice);
-          end.ownRow = true;
+          end.ownRow = "notice";
           if (turnId !== null)
             noWorkFailureNotices.set(turnId, [...(noWorkFailureNotices.get(turnId) ?? []), notice]);
-        } else if (landmark) end.ownRow = true;
+        } else if (landmark) end.ownRow = "landmark";
         break;
       }
 
@@ -3072,7 +3054,8 @@ export function groupTimeline(
       // settlement folds both attempts together. Its own steps keep its own
       // outcome, and a failure with its own row needs no second step.
       if (replaced.has(item.id)) {
-        stampTurnOutcome(groups, item);
+        // Its quiet step (or its own row) carries the text.
+        stampTurnOutcome(groups, withoutFailureText(item));
         if (!item.ownRow) groups.push({ kind: "item", item: retriedAttemptNotice(t, item) });
         continue;
       }
@@ -3117,7 +3100,8 @@ function withoutPresentedFailureText(
 
 /**
  * Failed settlements of attempts a Retry replaced (`resumedAt`). A Retry
- * refused before it started is no replacement: `buildTimeline` reverts it.
+ * refused before it started records its own failure, so it reads as one more
+ * failed attempt.
  */
 function replacedAttemptEnds(items: readonly TimelineItem[]): Set<string> {
   const replaced = new Set<string>();
