@@ -323,6 +323,8 @@ function useImageProxyTicket(token: string): boolean {
       try {
         const response = await fetch(`${apiBaseUrl}/v1/image-proxy/ticket`, {
           headers: { Authorization: `Bearer ${token}` },
+          // The pane waits for this first attempt; never let it hang.
+          signal: AbortSignal.timeout(10_000),
         });
         const body = response.ok ? ((await response.json()) as { ticket?: unknown }) : null;
         if (!stopped && typeof body?.ticket === "string") setImageProxyTicket(body.ticket);

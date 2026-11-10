@@ -131,23 +131,23 @@ const LOADER_SCRIPT = [
   `if(!data||data.type!==M.render||data.version!==V||typeof data.html!=="string")return;`,
   `done=true;`,
   `removeEventListener("message",receive);`,
-  // A still may not leave its frame: drop refresh redirects (parsed inertly,
-  // so entity-encoded attributes are caught too) before writing it. The inert
-  // parse runs without scripting, which is the only thing that changes how
-  // HTML parses (inside <noscript>), so <noscript> goes too: the reparse in
-  // this scripted frame then reads exactly the checked tree (and a scripted
-  // frame never shows <noscript> content anyway).
-  `let html=data.html;`,
+  // A still may not leave its frame: refresh redirects are dropped from an
+  // inert parse (so entity-encoded attributes are caught too) and the checked
+  // nodes themselves are moved in after the still policy, never serialized
+  // and reparsed, so no parser differential can bring a redirect back.
+  `let html=data.html,still=null;`,
   `if(data.mode==="still"){`,
-  `try{const doc=new DOMParser().parseFromString(html,"text/html");`,
-  `for(const el of doc.querySelectorAll("noscript,meta[http-equiv]"))if(el.localName==="noscript"||(el.getAttribute("http-equiv")||"").trim().toLowerCase()==="refresh")el.remove();`,
-  `html=doc.documentElement.outerHTML;}catch{html="";}`,
-  `html='<!doctype html><meta http-equiv="Content-Security-Policy" content="'+S+'"><meta name="color-scheme" content="light">'+html;}`,
+  `try{still=new DOMParser().parseFromString(html,"text/html");`,
+  `for(const el of still.querySelectorAll("meta[http-equiv]"))if((el.getAttribute("http-equiv")||"").trim().toLowerCase()==="refresh")el.remove();}catch{still=null;}`,
+  `html='<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="'+S+'"><meta name="color-scheme" content="light"></head><body></body></html>';}`,
   `const target=window.parent,origin=parentOrigin;`,
   `document.open();`,
   `addEventListener("load",()=>target.postMessage({type:M.loaded,version:V},origin),{once:true});`,
   `document.write(html);`,
   `document.close();`,
+  `if(still){`,
+  `for(const node of Array.from(still.head.childNodes))document.head.appendChild(document.importNode(node,true));`,
+  `document.body.replaceWith(document.importNode(still.body,true));}`,
   `};`,
   `addEventListener("message",receive);`,
   `window.parent.postMessage({type:M.ready,version:V},parentOrigin);`,
