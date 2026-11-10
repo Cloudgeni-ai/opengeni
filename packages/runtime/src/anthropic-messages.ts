@@ -184,7 +184,11 @@ export function claudeReplayScope(
  * prompt can legitimately differ between requests of one turn (a one-shot
  * directive on its first request), Claude accepts that, and text in place of
  * the turn's thinking would turn thinking off for the rest of the turn. A
- * refusal is still caught by the retry.
+ * refusal is still caught by the retry. (That Claude accepts the reply in
+ * progress under a changed system prompt is inferred from production, not
+ * documented; if it is wrong, the cost is one refusal and retry.) Claude binds
+ * every block to the prefix before it, so once a block of an earlier turn
+ * becomes text, the later blocks of that turn do too.
  */
 function replayEarlierThinkingUnderBinding(
   messages: Message[],
@@ -193,24 +197,32 @@ function replayEarlierThinkingUnderBinding(
 ): void {
   if (!origins.size) return;
   let turnStart = -1;
+  const opensTurn = (message: Message) =>
+    message.role === "user" && message.content.some((block) => block.type !== "tool_result");
   messages.forEach((message, index) => {
-    if (message.role === "user" && message.content.some((block) => block.type !== "tool_result"))
-      turnStart = index;
+    if (opensTurn(message)) turnStart = index;
   });
+  let downgraded = false;
   for (const message of messages.slice(0, Math.max(turnStart, 0))) {
+    if (opensTurn(message)) downgraded = false;
     if (message.role !== "assistant") continue;
     message.content = message.content.map((block) => {
       const fingerprint = claudeThinkingFingerprint(block);
-      const origin = fingerprint ? origins.get(fingerprint) : undefined;
-      if (origin === undefined || origin === scope) return block;
-      return {
-        type: "text",
-        text: historicalReasoningText(
-          block.type === "thinking" ? String(block.thinking ?? "") : "",
-        ),
-      };
+      if (!fingerprint) return block;
+      const origin = origins.get(fingerprint);
+      if (!downgraded && (origin === undefined || origin === scope)) return block;
+      downgraded = true;
+      return thinkingAsText(block);
     });
   }
+}
+
+/** A thinking or redacted thinking block as readable historical text. */
+function thinkingAsText(block: Json): Json {
+  return {
+    type: "text",
+    text: historicalReasoningText(block.type === "thinking" ? String(block.thinking ?? "") : ""),
+  };
 }
 
 /** The binding recorded on each signed thinking block of a request's history. */
@@ -265,12 +277,22 @@ function historyThinking(input: ModelRequest["input"]): { all: number; unbound: 
   return { all, unbound };
 }
 
-/** The signed block a replay refusal names (`messages.N.content.M`), if any. */
-function refusedBlockFingerprint(error: AnthropicRequestError, body: Json): string | null {
+/**
+ * The signed blocks a replay refusal implicates: the one it names
+ * (`messages.N.content.M`) and every signed block after it, whose prefix was
+ * built with the named block native.
+ */
+function refusedBlockFingerprints(
+  error: AnthropicRequestError,
+  body: Json,
+  sent: readonly string[],
+): string[] {
   const at = /\bmessages\.(\d+)\.content\.(\d+)\b/.exec(String(error.detail ?? ""));
-  if (!at) return null;
+  if (!at) return [];
   const block = body.messages?.[Number(at[1])]?.content?.[Number(at[2])];
-  return block && typeof block === "object" ? claudeThinkingFingerprint(block) : null;
+  const named = block && typeof block === "object" ? claudeThinkingFingerprint(block) : null;
+  const from = named ? sent.indexOf(named) : -1;
+  return from < 0 ? [] : sent.slice(from);
 }
 
 /**
@@ -281,9 +303,11 @@ function refusedBlockFingerprint(error: AnthropicRequestError, body: Json): stri
  */
 type ThinkingReplay = "binding" | "refused" | "plain";
 
-/** Operator-only record of the thinking a sent request replayed as text, by fallback. */
-const REPLAY_TRANSFORMATION_REASON: Record<ThinkingReplay, string> = {
-  binding: "opengeni_replayed_as_text",
+/**
+ * Operator-only record of the thinking a fallback request replayed as text.
+ * The steady-state binding projection is not a fallback and is not recorded.
+ */
+const REPLAY_TRANSFORMATION_REASON: Record<Exclude<ThinkingReplay, "binding">, string> = {
   refused: "opengeni_refused_replay",
   plain: "opengeni_plain_history",
 };
@@ -953,6 +977,15 @@ export function buildAnthropicRequest(
     recordedThinkingOrigins(request.input),
     claudeReplayScope(request, model, provider),
   );
+  // Plain history carries no thinking block of any kind, signed or not.
+  if (plainHistory === true)
+    for (const message of messages)
+      if (message.role === "assistant")
+        message.content = message.content.map((block) =>
+          block.type === "thinking" || block.type === "redacted_thinking"
+            ? thinkingAsText(block)
+            : block,
+        );
   const tools: Json[] = request.tools.map((tool) => {
     // Claude's own server-side search, at the agent's tool position so the
     // tools prefix is identical on every request of the conversation.
@@ -1569,12 +1602,12 @@ export class AnthropicMessagesModel implements Model {
       try {
         const response = await this.dispatch(request, prepared);
         const asText = history.all - prepared.signedThinking.length;
-        if (asText > 0)
+        if (asText > 0 && replay.fallback !== "binding")
           replayTransformations.set(
             response,
             Array.from({ length: asText }, () => ({
               type: "thinking_dropped",
-              reason: REPLAY_TRANSFORMATION_REASON[replay.fallback],
+              reason: REPLAY_TRANSFORMATION_REASON[replay.fallback as "refused" | "plain"],
             })),
           );
         return response;
@@ -1585,12 +1618,16 @@ export class AnthropicMessagesModel implements Model {
           error.code !== CLAUDE_REASONING_REPLAY_REJECTED
         )
           throw error;
-        const named = refusedBlockFingerprint(error, prepared.body);
         if (prepared.replay === "binding" && prepared.signedThinking.length > 0) {
           const suspects = new Set(
             history.unbound.filter((fingerprint) => prepared.signedThinking.includes(fingerprint)),
           );
-          if (named) suspects.add(named);
+          for (const fingerprint of refusedBlockFingerprints(
+            error,
+            prepared.body,
+            prepared.signedThinking,
+          ))
+            suspects.add(fingerprint);
           // A refusal we cannot attribute concerns every block it carried.
           const refused = suspects.size ? suspects : new Set(prepared.signedThinking);
           rememberRefusedOpaqueReasoning(this.provider.id, refused);

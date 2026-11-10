@@ -264,13 +264,14 @@ back replays it natively. This works on every Claude transport, including
 gateways that do not forward the binding beta. Blocks stored before bindings
 were recorded stay native until Claude refuses them. A refused replay never
 fails the turn: the request is sent once more with the blocks the refusal
-concerns (those with no recorded binding, and the one it names) as text, and
+concerns (those with no recorded binding, the one it names and every signed
+block after it) as text, and
 those are remembered per provider in the worker process (a process-local memory
 shared by the provider's sessions). If Claude refuses that too, the request is
-sent with plain history, with no signed thinking, encrypted search results or
+sent with plain history, with no thinking blocks, encrypted search results or
 citations, which it always accepts. Each fallback is recorded for operators
-as a `thinkingBlocksDropped` reason (`opengeni_replayed_as_text`,
-`opengeni_refused_replay`, `opengeni_plain_history`) on the model usage and
+as a `thinkingBlocksDropped` reason (`opengeni_refused_replay`,
+`opengeni_plain_history`) on the model usage and
 the `opengeni_model_thinking_blocks_dropped_total` metric; the person sees
 nothing.
 See Anthropic's [preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).

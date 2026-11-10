@@ -109,6 +109,8 @@ function claudePlatform(options: {
   honorsDropBlock?: boolean;
   /** Refuse every replayed thinking block, valid or not. */
   refusesAllThinking?: boolean;
+  /** Name the last refused block instead of the first. */
+  namesLastRefused?: boolean;
 }) {
   const sent: Sent[] = [];
   let issued = 0;
@@ -151,7 +153,7 @@ function claudePlatform(options: {
             : block.type === "redacted_thinking"
               ? block.data
               : undefined;
-        if (secret === undefined || at) return;
+        if (secret === undefined || (at && !options.namesLastRefused)) return;
         const valid =
           secret === expected ||
           (m > lastUser && secret.startsWith(inProgress.slice(0, 12))) ||
@@ -469,7 +471,11 @@ describe("the fallback chain always ends in a successful request", () => {
 
   for (const streamed of [false, true])
     test(`a turn succeeds even when every replay attempt is refused (stream=${streamed})`, async () => {
-      const platform = claudePlatform({ streamed, refusesAllThinking: true });
+      const platform = claudePlatform({
+        streamed,
+        refusesAllThinking: true,
+        namesLastRefused: true,
+      });
       const provider = claudeProvider(API);
       const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", platform.fetch);
       // Two blocks recorded under this very binding, which Claude refuses
@@ -505,6 +511,7 @@ describe("the fallback chain always ends in a successful request", () => {
       // then accepted with no opaque state at all.
       expect(platform.sent.map(({ refused }) => refused)).toEqual([true, true, false]);
       expect(thinkingBlocks(platform.sent[1]!.body).map((block) => block.signature)).toEqual([
+        "bound-1",
         "bound-2",
       ]);
       const plain = platform.sent[2]!.body;
@@ -513,6 +520,38 @@ describe("the fallback chain always ends in a successful request", () => {
       for (const thought of ["Bound one.", "Bound two.", "Stored before bindings."])
         expect(JSON.stringify(plain.messages)).toContain(`${HISTORICAL}${thought}`);
     });
+
+  test("a refusal converts the block it names and every signed block after it", async () => {
+    const platform = claudePlatform({ streamed: false, refusesAllThinking: true });
+    const provider = claudeProvider(API);
+    const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", platform.fetch);
+    const scope = claudeReplayScope(
+      { systemInstructions: BASE_SYSTEM },
+      "claude-opus-5-5",
+      provider,
+    );
+    const reply = {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text: "Ok." }],
+    };
+    const history = [
+      user("One"),
+      signedReasoning("Bound one.", "bound-1", scope),
+      reply,
+      user("Two"),
+      signedReasoning("Bound two.", "bound-2", scope),
+      reply,
+      user("Three"),
+    ];
+    await model.getResponse(request(history, BASE_SYSTEM));
+    // The refusal names the first block; the second was signed with it native
+    // before it, so one retry with both as text succeeds.
+    expect(platform.sent.map(({ refused }) => refused)).toEqual([true, false]);
+    expect(thinkingBlocks(platform.sent[1]!.body)).toEqual([]);
+    for (const thought of ["Bound one.", "Bound two."])
+      expect(JSON.stringify(platform.sent[1]!.body.messages)).toContain(`${HISTORICAL}${thought}`);
+  });
 
   test("operators see each fallback; the person sees nothing", async () => {
     const platform = claudePlatform({ streamed: false, refusesAllThinking: true });
@@ -537,12 +576,11 @@ describe("the fallback chain always ends in a successful request", () => {
       JSON.stringify([{ ...visible[0], content: [{ type: "output_text", text: "Answer 1." }] }]),
     );
 
-    // Remembered: the next request replays it as text straight away.
+    // Remembered: the next request replays it as text straight away, which is
+    // the steady-state projection, not a fallback, so nothing is recorded.
     const next = await model.getResponse(request(history, BASE_SYSTEM));
     expect(platform.sent).toHaveLength(3);
-    expect(next.providerData?.anthropic?.thinkingBlocksDropped).toEqual({
-      opengeni_replayed_as_text: 1,
-    });
+    expect(next.providerData?.anthropic?.thinkingBlocksDropped).toBeUndefined();
   });
 
   for (const streamed of [false, true])
@@ -601,11 +639,18 @@ describe("the fallback chain always ends in a successful request", () => {
       expect(platform.sent.map(({ refused }) => refused)).toEqual([false, false]);
       expect(thinkingBlocks(platform.sent[1]!.body)).toEqual([reasoningBlock(first)]);
 
-      // On the next turn it is earlier history and follows the binding check.
+      // On the next turn it is earlier history and follows the binding check:
+      // the first block was issued under the title directive, and the turn's
+      // later thinking was signed with it native before it, so both go back
+      // as text rather than under a prefix Claude never signed.
       const next = [...loop, ...persisted(second), user("Next.")];
       await run(model, { ...request(next, BASE_SYSTEM), tools }, streamed);
       expect(platform.sent.map(({ refused }) => refused)).toEqual([false, false, false]);
-      expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([reasoningBlock(second)]);
+      expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([]);
+      for (const thought of ["Reasoning 1.", "Reasoning 2."])
+        expect(JSON.stringify(platform.sent[2]!.body.messages)).toContain(
+          `${HISTORICAL}${thought}`,
+        );
     });
 
   for (const streamed of [false, true])
