@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { checkDocSnippets, extractDocSnippets } from "./check-doc-snippets";
 
@@ -76,9 +79,48 @@ describe("doc snippet drift check", () => {
     }
   }, 60_000);
 
-  test("fails instead of passing when nothing could be checked", () => {
-    expect(() => checkDocSnippets([], "/nonexistent-root")).toThrow();
-  });
+  test("fails instead of passing when a missing export goes unreported", () => {
+    // A root whose `@opengeni/sdk` exports everything the canary asks for: the
+    // canary's expected error is absent, so the check must refuse to pass.
+    const root = mkdtempSync(join(tmpdir(), "doc-snippets-root-"));
+    try {
+      mkdirSync(join(root, "packages"));
+      writeFileSync(join(root, "sdk.ts"), "export const __docSnippetsCanary = 1;\n");
+      writeFileSync(
+        join(root, "tsconfig.base.json"),
+        JSON.stringify({
+          compilerOptions: {
+            strict: true,
+            moduleResolution: "Bundler",
+            module: "ESNext",
+            paths: { "@opengeni/sdk": ["./sdk.ts"] },
+          },
+        }),
+      );
+      mkdirSync(join(root, "node_modules", "@types"), { recursive: true });
+      const modules = join(process.cwd(), "node_modules");
+      symlinkSync(join(modules, "tsrs"), join(root, "node_modules", "tsrs"));
+      symlinkSync(join(modules, "@types", "bun"), join(root, "node_modules", "@types", "bun"));
+      expect(() => checkDocSnippets([], root)).toThrow(/canary/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  test("a marked excerpt that does not parse is reported, not skipped", () => {
+    const findings = check(
+      "agent.mdx",
+      [
+        '{/* doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" */}',
+        "```ts",
+        'capabilities: "none"',
+        'capabilities: "all"',
+        "```",
+      ].join("\n"),
+    );
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.message).toContain("does not parse");
+  }, 60_000);
 
   test("checks marked object excerpts and multi-element TSX samples", () => {
     const findings = check(
@@ -96,8 +138,9 @@ describe("doc snippet drift check", () => {
         "</CodeGroup>",
         "",
         "```tsx",
-        'import { SessionConversation } from "@opengeni/react/session-ui";',
-        "",
+        "import {",
+        "  SessionConversation,",
+        '} from "@opengeni/react/session-ui";',
         '<SessionConversation baseUrl="/api/opengeni" sessionId={id} />',
         "<SessionConversation sessionId={id} agentSignal={false} />",
         "```",
@@ -105,7 +148,7 @@ describe("doc snippet drift check", () => {
     );
     expect(findings.map(({ line, code }) => ({ line, code }))).toEqual([
       { line: 7, code: 2561 },
-      { line: 16, code: 2322 },
+      { line: 17, code: 2322 },
     ]);
   }, 60_000);
 });

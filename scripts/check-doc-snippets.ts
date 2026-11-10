@@ -44,6 +44,10 @@ import { join, resolve } from "node:path";
 //   {/* doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" */}
 //
 // A TSX sample with several top-level elements is checked as one fragment.
+//
+// Limit: TypeScript does not check extra keys in an object a callback returns
+// (`createSession: () => ({ ... })`); write such samples with
+// `satisfies CreateSessionRequest` to have their keys checked.
 
 export type DocSnippet = {
   file: string;
@@ -105,6 +109,8 @@ const REPORTED_CODES = new Set([
   2555, // Expected at least N arguments.
   2561, // Object literal may only specify known properties; did you mean.
   2694, // Namespace has no exported member.
+  1192, // Module has no default export.
+  2613, // Module has no default export; did you mean a named import.
   2614, // Module has no exported member; did you mean to use import x from.
   2724, // Module has no exported member; did you mean.
   2741, // Property is missing in type.
@@ -316,6 +322,13 @@ export function packagePaths(root: string): Record<string, string[]> {
       paths[specifier] ??= [resolve(packagesDir, entry.name, file)];
     }
   }
+  // React is not hoisted to the root; resolve samples' own `react` imports
+  // (and the JSX runtime) to the React package's types.
+  const reactTypes = join(packagesDir, "react", "node_modules", "@types", "react");
+  if (existsSync(reactTypes)) {
+    paths.react ??= [reactTypes];
+    paths["react/*"] ??= [join(reactTypes, "*")];
+  }
   return paths;
 }
 
@@ -337,8 +350,18 @@ export type SnippetCheck = {
 /** Wrap a TSX sample's elements in a fragment, keeping its imports at the top. */
 function asFragment(snippet: DocSnippet): DocSnippet | null {
   const lines = snippet.code.split("\n");
+  // Keep leading import statements (including wrapped ones) outside the fragment.
   let split = 0;
-  while (split < lines.length && /^\s*(import\s|$)/.test(lines[split]!)) split += 1;
+  while (split < lines.length) {
+    if (/^\s*$/.test(lines[split]!)) {
+      split += 1;
+      continue;
+    }
+    if (!/^\s*import[\s{]/.test(lines[split]!)) break;
+    while (split < lines.length && !/(from\s+)?["'][^"']+["'];?\s*$/.test(lines[split]!))
+      split += 1;
+    split += 1;
+  }
   if (split === lines.length) return null;
   const sourceLines = lines.map((_, offset) => snippet.line + offset);
   return {
@@ -374,6 +397,7 @@ export function checkDocSnippets(
   snippets: readonly DocSnippet[],
   root = process.cwd(),
 ): SnippetCheck {
+  const paths = packagePaths(root);
   mkdirSync(join(root, "tmp"), { recursive: true });
   const dir = mkdtempSync(join(root, "tmp", "doc-snippets-"));
   try {
@@ -395,7 +419,7 @@ export function checkDocSnippets(
             noEmit: true,
             jsx: "react-jsx",
             types: ["bun"],
-            paths: packagePaths(root),
+            paths,
             // Hold samples to a reader's ordinary strict project, not to this
             // repository's extra strictness.
             noUncheckedIndexedAccess: false,
@@ -447,8 +471,12 @@ export function checkDocSnippets(
     const excerpts: DocSnippet[] = [];
     const setAside = new Set<string>();
     const retried = new Set<string>();
+    const unparsedMarked: SnippetFinding[] = [];
     let diagnostics = run();
     for (;;) {
+      // The canary's missing export is a checker error: once it shows, every
+      // file parsed and 1xxx codes are checker errors, not syntax errors.
+      if (diagnostics.some((d) => scratchName(d.path) === CANARY_NAME)) break;
       const syntactic = diagnostics.filter((d) => isSyntaxDiagnostic(d.code));
       if (syntactic.length === 0) break;
       let removed = 0;
@@ -472,6 +500,15 @@ export function checkDocSnippets(
           writeFileSync(join(dir, name), `export {};\n${fragment.code}\n`);
           continue;
         }
+        if (snippet.lineMap && !retried.has(name)) {
+          // A marked excerpt was explicitly asked to be checked.
+          unparsedMarked.push({
+            file: snippet.file,
+            line: snippet.line,
+            code: diagnostic.code,
+            message: `marked sample does not parse: ${diagnostic.message}`,
+          });
+        }
         byFile.delete(name);
         setAside.add(name);
         excerpts.push(
@@ -487,7 +524,7 @@ export function checkDocSnippets(
         "snippet typecheck did not report the canary sample's missing export: the check is not resolving @opengeni/sdk",
       );
     }
-    const findings: SnippetFinding[] = [];
+    const findings: SnippetFinding[] = [...unparsedMarked];
     for (const diagnostic of diagnostics) {
       const name = scratchName(diagnostic.path);
       const snippet = name ? byFile.get(name) : undefined;
