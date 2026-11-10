@@ -499,6 +499,16 @@ describe("creatorLabel", () => {
       subjectId: "user:ada",
     });
   });
+
+  test("a creator without a subject id never breaks grouping or labels", () => {
+    // Malformed or older payloads can omit the subject id; the rail must still render.
+    const malformed = { type: "user", id: "fixture" } as unknown as Session["createdBy"];
+    expect(creatorType(malformed)).toBe("person");
+    expect(creatorIdentityKey(malformed)).toBe("undefined:undefined");
+    expect(creatorPageIdentity(malformed).subjectId).toBeUndefined();
+    expect(machineCreatorLabel(malformed)).toBeNull();
+    expect(creatorInitials(malformed)).toBeNull();
+  });
 });
 
 describe("summarizeRailNodes waiting duration", () => {

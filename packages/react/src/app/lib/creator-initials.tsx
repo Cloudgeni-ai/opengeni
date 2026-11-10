@@ -16,6 +16,14 @@ const UNATTRIBUTED_LEGACY_SUBJECT_ID = "unattributed-legacy";
 const API_KEY_SUBJECT_PREFIX = "api_key:";
 const SERVICE_SUBJECT_PREFIX = "service:";
 
+/**
+ * Whether a frozen subject id has a prefix. Tolerates a missing or non-string
+ * id (malformed or older payloads) so a creator label can never break the rail.
+ */
+function subjectIdHasPrefix(subjectId: unknown, prefix: string): boolean {
+  return typeof subjectId === "string" && subjectId.startsWith(prefix);
+}
+
 /** What kind of thing created a chat. Display-only. */
 export type CreatorType = "person" | "api_key" | "service" | "unattributed";
 
@@ -25,8 +33,11 @@ export type CreatorType = "person" | "api_key" | "service" | "unattributed";
  */
 export function creatorType(createdBy: Pick<CreatorRef, "kind" | "subjectId">): CreatorType {
   if (createdBy.subjectId === UNATTRIBUTED_LEGACY_SUBJECT_ID) return "unattributed";
-  if (createdBy.subjectId.startsWith(API_KEY_SUBJECT_PREFIX)) return "api_key";
-  if (createdBy.kind === "service" || createdBy.subjectId.startsWith(SERVICE_SUBJECT_PREFIX)) {
+  if (subjectIdHasPrefix(createdBy.subjectId, API_KEY_SUBJECT_PREFIX)) return "api_key";
+  if (
+    createdBy.kind === "service" ||
+    subjectIdHasPrefix(createdBy.subjectId, SERVICE_SUBJECT_PREFIX)
+  ) {
     return "service";
   }
   return "person";
@@ -38,7 +49,7 @@ export function creatorType(createdBy: Pick<CreatorRef, "kind" | "subjectId">): 
  * creator keeps its exact frozen kind, so a service can never join a person.
  */
 export function creatorIdentityKey(createdBy: Pick<CreatorRef, "kind" | "subjectId">): string {
-  return createdBy.subjectId.startsWith(API_KEY_SUBJECT_PREFIX)
+  return subjectIdHasPrefix(createdBy.subjectId, API_KEY_SUBJECT_PREFIX)
     ? createdBy.subjectId
     : `${createdBy.kind}:${createdBy.subjectId}`;
 }
@@ -51,7 +62,7 @@ export function creatorPageIdentity(createdBy: Pick<CreatorRef, "kind" | "subjec
   kind?: CreatorRef["kind"];
   subjectId: string;
 } {
-  return createdBy.subjectId.startsWith(API_KEY_SUBJECT_PREFIX)
+  return subjectIdHasPrefix(createdBy.subjectId, API_KEY_SUBJECT_PREFIX)
     ? { subjectId: createdBy.subjectId }
     : { kind: createdBy.kind, subjectId: createdBy.subjectId };
 }
