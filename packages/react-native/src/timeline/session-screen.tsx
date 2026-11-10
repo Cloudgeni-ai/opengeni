@@ -762,15 +762,17 @@ function StuckCard({
   // the block is only known from its status event. Most refusals start by
   // themselves once fixed, so they offer no button; the machine's owner gets
   // Allow for this chat, and only an unknown failure gets Try again.
+  const paused = session.effectiveControl.state === "paused";
   const copy = reason
     ? start.needsMachineAccess && start.machineAccess
       ? sessionAdmissionMachineAccessCopy(t, start.machineAccess, {
           canAllowHere: start.allowMachine !== undefined,
+          paused,
+          shared: session.tenancy?.visibility === "workspace",
         })
       : sessionAdmissionCopy(t, reason)
     : null;
   const allowing = start.needsMachineAccess && start.machineAccess?.isOwner === true;
-  const paused = session.effectiveControl.state === "paused";
   const actionLabel = !copy
     ? paused
       ? null
@@ -899,7 +901,10 @@ function StuckCard({
         <>
           <Text style={textStyle}>{copy.body}</Text>
           <Text style={textStyle}>{copy.next}</Text>
-          {paused ? <Text style={textStyle}>{t("sessionAdmission.pausedNote")}</Text> : null}
+          {/* The owner's own words already say it starts once resumed. */}
+          {paused && !allowing ? (
+            <Text style={textStyle}>{t("sessionAdmission.pausedNote")}</Text>
+          ) : null}
         </>
       ) : (
         <Text style={textStyle}>{m.stuckBody}</Text>
