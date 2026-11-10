@@ -5,6 +5,8 @@ import { HTTPException } from "hono/http-exception";
 
 const ANTHROPIC_API_KEY_MESSAGE =
   "Enter an Anthropic API key. Use Claude subscription for setup tokens.";
+const ANTHROPIC_ADMIN_KEY_MESSAGE =
+  "This is an Anthropic Admin API key, which can't run models. Create an API key in the Anthropic Console and connect that instead.";
 
 /**
  * Clean up a pasted Anthropic API key. Keys never contain whitespace or
@@ -17,15 +19,19 @@ export function normalizeAnthropicApiKey(apiKey: string): string {
 }
 
 /**
- * Accept any plausible Anthropic API key; Anthropic itself decides whether it
- * works, and a rejected key surfaces at use. Only an empty value or a Claude
- * subscription setup/OAuth token (`sk-ant-oat…`) is refused here, because
- * those are clearly the wrong kind of credential for this connection.
+ * Accept any plausible Anthropic API key (`sk-ant-api…`, personal `sk-ant-usr…`,
+ * service-account `sk-ant-svc…` or a future kind); Anthropic itself decides
+ * whether it works, and a rejected key surfaces at use. Only credentials that
+ * clearly cannot run models through an API key are refused here: an empty
+ * value, Claude subscription OAuth access/refresh tokens (`sk-ant-oat…`,
+ * `sk-ant-ort…`) and Admin API keys (`sk-ant-admin…`).
  */
 export function assertAnthropicApiKey(apiKey: string): string {
   const key = normalizeAnthropicApiKey(apiKey);
-  if (!key || /^sk-ant-oat/iu.test(key))
+  if (!key || /^sk-ant-o(?:at|rt)/iu.test(key))
     throw new HTTPException(422, { message: ANTHROPIC_API_KEY_MESSAGE });
+  if (/^sk-ant-admin/iu.test(key))
+    throw new HTTPException(422, { message: ANTHROPIC_ADMIN_KEY_MESSAGE });
   return key;
 }
 

@@ -2,4 +2,4 @@
 "@opengeni/api-router": patch
 ---
 
-Connecting an Anthropic API key no longer fails on a strict key-format check. Line breaks, spaces, invisible characters and wrapping quotes picked up while pasting are removed. Any other Anthropic key is accepted and Anthropic decides whether it works. Only an empty value or a Claude subscription setup token (`sk-ant-oat…`) is refused, with the existing pointer to Claude subscription.
+Connecting an Anthropic API key accepts every Anthropic key kind, including the newer personal (`sk-ant-usr-…`) and service-account (`sk-ant-svc-…`) keys, which the old `sk-ant-api…` format check rejected. Line breaks, spaces, invisible characters and wrapping quotes picked up while pasting are removed, and Anthropic decides whether the key works. The connection still refuses an empty value and Claude subscription setup or refresh tokens (`sk-ant-oat…`, `sk-ant-ort…`), and it now explains that an Admin API key (`sk-ant-admin…`) can't run models.

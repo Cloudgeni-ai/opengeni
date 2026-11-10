@@ -12,7 +12,7 @@ import { registerOrganizationModelProviderRoutes } from "../src/routes/organizat
 const ORGANIZATION = "00000000-0000-4000-8000-0000000000a2";
 const BASE = `/v1/organizations/${ORGANIZATION}/model-providers/anthropic`;
 // Synthetic fixture; never a real key.
-const KEY = "sk-ant-api03-SyntheticFixtureKey_0123456789-abcdefAA";
+const KEY = "sk-ant-usr-SyntheticFixtureKey_0123456789-abcdefAA";
 
 describe("organization Anthropic API key connection", () => {
   const spies: Array<{ mockRestore(): void }> = [];
@@ -86,20 +86,28 @@ describe("organization Anthropic API key connection", () => {
     }
   });
 
-  test("other Anthropic key formats are left for Anthropic to accept or refuse", async () => {
-    for (const key of ["sk-ant-admin01-Synthetic_fixture", "sk-ant-Synthetic_fixture-AA"]) {
-      expect((await put(key)).status).toBe(200);
-      expect(upsert.mock.calls.at(-1)![1].credentialDigest).toBe(
-        opengeniDb.organizationModelProviderCredentialDigest(key),
-      );
-    }
+  test.each([
+    ["personal key", "sk-ant-usr-Synthetic_fixture-AA"],
+    ["service-account key", "sk-ant-svc-Synthetic_fixture-AA"],
+    ["Console API key", "sk-ant-api03-Synthetic_fixture-AA"],
+    ["future key kind", "sk-ant-new07-Synthetic_fixture-AA"],
+    ["key without a kind", "sk-ant-Synthetic_fixture-AA"],
+  ] as const)("saved for Anthropic to accept or refuse: %s", async (_label, key) => {
+    expect((await put(key)).status).toBe(200);
+    expect(upsert.mock.calls.at(-1)![1].credentialDigest).toBe(
+      opengeniDb.organizationModelProviderCredentialDigest(key),
+    );
   });
 
-  test("a Claude subscription setup token is refused with a pointer to the right place", async () => {
-    const response = await put("sk-ant-oat01-Synthetic_fixture");
+  test.each([
+    ["setup token", "sk-ant-oat01-Synthetic_fixture", "Use Claude subscription for setup tokens."],
+    ["OAuth refresh token", "sk-ant-ort01-Synthetic_fixture", "Use Claude subscription"],
+    ["Admin API key", "sk-ant-admin01-Synthetic_fixture", "Admin API key, which can't run models"],
+  ] as const)("refused with a plain reason: %s", async (_label, key, message) => {
+    const response = await put(key);
     expect(response.status).toBe(422);
     const text = await response.text();
-    expect(text).toContain("Use Claude subscription for setup tokens.");
+    expect(text).toContain(message);
     expect(text).not.toContain("Synthetic_fixture");
     expect(upsert).not.toHaveBeenCalled();
   });
