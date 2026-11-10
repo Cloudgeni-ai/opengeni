@@ -60,8 +60,8 @@ export function opaqueReasoningFingerprint(item: Record<string, unknown>): strin
   return fingerprint;
 }
 
-/** Bound on remembered refused states per provider (process-local). */
-const REFUSED_PER_PROVIDER = 4_096;
+/** Bound on remembered refused states per provider (process-local, shared by its sessions). */
+const REFUSED_PER_PROVIDER = 16_384;
 const refused = new Map<string, Set<string>>();
 
 /** Remember opaque reasoning (by fingerprint) that `providerId` refused. */
