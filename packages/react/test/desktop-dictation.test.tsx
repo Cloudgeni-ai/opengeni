@@ -220,6 +220,21 @@ describe("DesktopDictationHost", () => {
     expect(app.last("d1")).toEqual({ dictationId: "d1", phase: "done", text: "second try" });
   });
 
+  test("a speech service out of credit says so, not that dictation couldn't start", async () => {
+    const app = fakeApp();
+    const server = new FakeServer();
+    server.failNext = "provider_quota_exceeded";
+    await mountHost(app, server);
+    await app.send({ kind: "start", dictationId: "d1", profileId: "default", language: null });
+    await waitFor(() => app.phases("d1").includes("recording"));
+    await app.send({ kind: "stop", dictationId: "d1" });
+    await waitFor(() => app.phases("d1").includes("failed"));
+    expect(app.last("d1")).toMatchObject({
+      phase: "failed",
+      message: "The speech service is out of credit. Your speech is saved.",
+    });
+  });
+
   test("Dismiss keeps a failed dictation for the composer, and the next starts fresh", async () => {
     const app = fakeApp();
     const server = new FakeServer();

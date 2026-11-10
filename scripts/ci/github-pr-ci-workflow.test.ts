@@ -79,7 +79,7 @@ test("required aggregate covers docs and every selected job at exact head", () =
   expect(commands).not.toContain("--exclude generated-fonts");
   expect(readFileSync("scripts/ci/impact.ts", "utf8")).toContain('"generated-fonts"');
   for (const name of ["fast"]) {
-    expect(jobs[name]["runs-on"]).toBe("ubuntu-latest");
+    expect(jobs[name]["runs-on"]).toBe("ubuntu-24.04");
     const checkout = jobs[name].steps.find((s: any) => s.uses?.startsWith("actions/checkout@"));
     expect(checkout.with.ref).toBe("${{ needs.plan.outputs.head }}");
     expect(checkout.with["persist-credentials"]).toBe(false);

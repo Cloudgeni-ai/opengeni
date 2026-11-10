@@ -279,7 +279,12 @@ export async function withSessionTitleCustody<T>(
         const next = await refresh;
         return next.credentialVersion > generation ? next : null;
       },
-      assertDispatch,
+      // The operation's own lease renewal and source read come before its
+      // reservation (the operation reservation does not hold the lease).
+      admit: async (reserve: () => Promise<unknown>) => {
+        await assertDispatch();
+        await reserve();
+      },
       mainLaneAdmitted: () => undefined,
       observeResponse: (response: Response, generation: number, upstreamModelId?: string) => {
         const observation = parseClaudeUsageHeaders(response.headers, new Date(), upstreamModelId);
