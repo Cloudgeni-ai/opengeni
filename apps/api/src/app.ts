@@ -855,6 +855,16 @@ export function createAppComposition(
     }
   };
 
+  // Every API response, including errors, Better Auth and streams, tells the
+  // browser never to sniff a different content type. Set after the handler
+  // ran so it covers responses a route built itself; a route's own value wins.
+  app.use("*", async (c, next) => {
+    await next();
+    if (!c.res.headers.has("x-content-type-options")) {
+      c.header("x-content-type-options", "nosniff");
+    }
+  });
+
   // A trusted in-process dispatcher (a published Site, an organization
   // action) fixed who pays for this exact request; read it before any
   // middleware rebuilds the Request.
@@ -873,6 +883,11 @@ export function createAppComposition(
     correlationIds.set(c, correlationId);
     c.header(OPENGENI_CORRELATION_HEADER, correlationId);
     await next();
+    // A Response a route built itself replaces the prepared headers unless a
+    // later middleware materialized the response first; keep the id either way.
+    if (!c.res.headers.has(OPENGENI_CORRELATION_HEADER)) {
+      c.header(OPENGENI_CORRELATION_HEADER, correlationId);
+    }
   });
 
   // Unauthenticated local mode: admit only requests addressed to this computer
@@ -992,20 +1007,28 @@ export function createAppComposition(
       // CORS grant (in local development the boundary above refused them).
       return origin ? localCors(c, next) : next();
     }
-    if (origin && landingOrigins.has(origin) && c.req.path === DISPLAY_IDENTITY_PATH) {
+    if (!origin) {
+      // No Origin header means no cross-origin browser read: servers, CLIs,
+      // same-origin GETs and no-cors subresources. They need no CORS grant, so
+      // none is sent. The answer still varies by Origin, so a cache never
+      // hands this grant-less response to a later cross-origin request.
+      return withVaryOrigin(c, next);
+    }
+    if (landingOrigins.has(origin) && c.req.path === DISPLAY_IDENTITY_PATH) {
       return displayIdentityCors(c, next);
     }
-    const middleware =
-      origin && allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
-        ? credentialedCors
-        : publicApiCors;
+    // Allowlisted console origins get credentialed CORS. Every other browser
+    // origin gets the wildcard: customer pages call the public API directly
+    // with a bearer API key, which needs no cookie. The wildcard never carries
+    // credentials (browsers refuse `*` with credentials, and none is sent), so
+    // a non-allowlisted origin can never read a cookie-authenticated answer.
+    const middleware = allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
+      ? credentialedCors
+      : publicApiCors;
     if (middleware === publicApiCors && c.req.path === DISPLAY_IDENTITY_PATH) {
       // The answer depends on the caller's origin and cookie; caches must not
       // share it across origins (the credentialed middlewares add Vary already).
-      return middleware(c, async () => {
-        await next();
-        c.res.headers.append("vary", "Origin");
-      });
+      return middleware(c, () => withVaryOrigin(c, next));
     }
     return middleware(c, next);
   });
@@ -2858,6 +2881,12 @@ export function appendVary(current: string | null, value: string): string {
     values.push(value);
   }
   return values.join(", ");
+}
+
+/** Runs the rest of the chain, then marks the response as varying by `Origin`. */
+async function withVaryOrigin(c: Context, next: () => Promise<void>): Promise<void> {
+  await next();
+  c.header("vary", appendVary(c.res.headers.get("vary"), "Origin"));
 }
 
 const publicWorkspaceBrowserRoutePatterns = [

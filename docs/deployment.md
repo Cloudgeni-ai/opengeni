@@ -1794,6 +1794,10 @@ without per-application origin registration. `OPENGENI_CORS_ALLOW_ORIGIN_REGEX`
 is only the allowlist for origins that may send browser cookies cross-origin.
 Keep that regex narrow; unlisted origins receive wildcard, non-credentialed
 CORS responses and therefore cannot use a managed-login session cookie.
+A request without an `Origin` header (servers, command-line clients,
+same-origin page loads) is not a cross-origin browser read and receives no CORS
+headers at all, only `Vary: Origin` so caches keep the two answers apart. Every
+API response carries `X-Content-Type-Options: nosniff`.
 Browser and desktop controller requests also admit the configured
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_WEB_BASE_URL` origins directly; this
 does not grant those origins credentialed cross-origin responses.
