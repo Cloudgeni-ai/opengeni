@@ -1125,7 +1125,9 @@ for (const width of [1280, 390]) {
       try {
         if (origin === "created") {
           await page.goto(`${base}/workspaces/${workspaceId}/sessions`);
-          const create = page.getByRole("textbox", { name: /Message|Prompt|Ask anything/i }).first();
+          const create = page
+            .getByRole("textbox", { name: /Message|Prompt|Ask anything/i })
+            .first();
           await create.fill(state.session.initialMessage);
           await create.press("Enter");
           await state.gates.create.entered;
