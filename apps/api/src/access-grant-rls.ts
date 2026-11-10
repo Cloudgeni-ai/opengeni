@@ -20,6 +20,8 @@ import {
 import { ApiHttpError } from "./http/api-error";
 
 const AGENT_ATTEMPT_AUTHORITY_INVALID = "agent attempt authority is invalid";
+const AGENT_ATTEMPT_CALLER_STALE =
+  "This process's tool access belongs to a turn attempt that is no longer active. Stop retrying this process; start a fresh command from the current live turn. If a tool call may already have run, check its existing receipt or actual state before submitting it again.";
 
 /**
  * A refused agent-attempt credential. The detail code names why, so request
@@ -32,7 +34,8 @@ function agentAttemptAuthorityError(
 ): ApiHttpError {
   const error = new ApiHttpError(403, {
     code: "forbidden",
-    message: AGENT_ATTEMPT_AUTHORITY_INVALID,
+    message:
+      reason === "caller_stale" ? AGENT_ATTEMPT_CALLER_STALE : AGENT_ATTEMPT_AUTHORITY_INVALID,
     retryable: false,
     outcomeUnknown: false,
     details: { code: `agent_attempt_${reason}` },
