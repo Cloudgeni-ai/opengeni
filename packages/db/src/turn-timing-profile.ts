@@ -226,7 +226,7 @@ function invokedToolName(payload: Record<string, unknown>): string | null {
   const fromObject = text(record(args)?.name);
   if (fromObject) return fromObject;
   if (typeof args === "string") {
-    const match = /"name"\s*:\s*"([^"]{1,256})"/.exec(args);
+    const match = /"name"\s*:\s*"([^"]{1,255})"/.exec(args);
     if (match?.[1]) return match[1];
   }
   return null;
