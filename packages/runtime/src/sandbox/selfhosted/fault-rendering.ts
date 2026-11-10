@@ -520,6 +520,16 @@ function unresponsiveAgentFields(error: SelfhostedControlError, compute: boolean
         tryNext:
           "wait a couple of minutes, then re-run the command; if it changes state, first check whether it already took effect.",
       };
+    case "host_unavailable":
+      return {
+        headline:
+          "this chat's workspace machine can't be reached because its host is not answering for now",
+        happened: `the workspace machine did not answer for ${waited}; a restart was asked for, but the host it runs on could not serve it (it may be restarting its own agent), so the machine was not restarted`,
+        layer: "the workspace machine's host — not your command, and not the machine itself",
+        preserved: `files are kept, and the machine keeps running: commands already started go on and their output is kept. ${command}`,
+        tryNext:
+          "wait a minute or two, then check running commands with command_read before re-running anything; if this command changes state, first check whether it already took effect.",
+      };
     default:
       return {
         headline: "this chat's workspace machine stopped responding",

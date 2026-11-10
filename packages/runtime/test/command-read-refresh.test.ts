@@ -609,3 +609,65 @@ test('waitFor "any" returns once one of several owned commands settles', async (
     snapshot(result).commands.map((command: { terminal: boolean }) => command.terminal),
   ).toEqual([false, true]);
 });
+
+test("a refresh the machine never answers cannot stretch command_wait past its wait", async () => {
+  const waits: unknown[] = [];
+  let unhandled = 0;
+  const onUnhandled = () => unhandled++;
+  process.on("unhandledRejection", onUnhandled);
+  let fail: (error: unknown) => void = () => undefined;
+  const started = Date.now();
+  try {
+    const result = await executeCommandReadWithRefresh({
+      toolName: "command_wait",
+      args: { commandId, waitSeconds: 6 },
+      call: async (readArgs) => {
+        waits.push(readArgs.waitSeconds);
+        return receipt(false, ["retained"]);
+      },
+      // The machine's host is restarting: the refresh hangs, then fails long
+      // after the caller's wait.
+      refresh: async () =>
+        await new Promise<boolean>((_resolve, reject) => {
+          fail = reject;
+        }),
+    });
+    const waited = Date.now() - started;
+    expect(waited).toBeGreaterThanOrEqual(5_500);
+    expect(waited).toBeLessThan(8_000);
+    // One read before the refresh, and one without waiting once the wait is spent.
+    expect(waits).toEqual([0, 0]);
+    expect(snapshot(result)).toMatchObject({
+      terminal: false,
+      chunks: ["retained"],
+      freshness: { status: "refresh_unavailable", retryable: true },
+      timedOut: true,
+    });
+    // The abandoned refresh settling later is never an unhandled rejection.
+    fail(new Error("agent offline"));
+    await Bun.sleep(10);
+    expect(unhandled).toBe(0);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+}, 15_000);
+
+test("a zero-second read still gives an answering refresh its few seconds", async () => {
+  const calls: string[] = [];
+  const result = await executeCommandReadWithRefresh({
+    toolName: "command_read",
+    args: { commandId, waitSeconds: 0 },
+    call: async (readArgs) => {
+      calls.push(`api:${readArgs.waitSeconds}`);
+      return receipt(calls.length > 1, calls.length > 1 ? ["fresh"] : []);
+    },
+    refresh: async () => {
+      calls.push("refresh");
+      await Bun.sleep(300);
+      return true;
+    },
+  });
+  expect(calls).toEqual(["api:0", "refresh", "api:0"]);
+  expect(snapshot(result)).toMatchObject({ terminal: true, chunks: ["fresh"] });
+  expect(snapshot(result).freshness).toBeUndefined();
+});

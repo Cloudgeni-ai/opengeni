@@ -268,6 +268,17 @@ describe("the words a command whose workspace machine stopped answering gets", (
     );
   });
 
+  test("its host refused the restart for now", () => {
+    const text = renderSelfhostedFault(unresponsive("host_unavailable", false));
+    expect(text).toContain("its host is not answering for now");
+    expect(text).toContain("so the machine was not restarted");
+    // The machine is not blamed, and running commands are not written off.
+    expect(text).toContain("not the machine itself");
+    expect(text).toContain("commands already started go on");
+    expect(text).toContain("check running commands with command_read");
+    expect(text).not.toContain("restarting it failed");
+  });
+
   test("answering again", () => {
     expect(renderSelfhostedFault(unresponsive("answering", true))).toContain("is answering again");
     // A start that may have reached it may still be running, or be stopping:

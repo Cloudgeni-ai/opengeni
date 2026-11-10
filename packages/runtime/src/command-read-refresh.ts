@@ -7,6 +7,37 @@ import { OpStreamUnavailableError } from "./sandbox/selfhosted/op-transport";
 const COMMAND_READ_DEFAULT_SECONDS = 30;
 const COMMAND_WAIT_DEFAULT_SECONDS = 45;
 const COMMAND_READ_MAX_WAIT_SECONDS = 50;
+/** The least time one live refresh gets, so a read that asked for no wait
+ * (or has under this left) still refreshes a machine that answers. */
+const MIN_REFRESH_BUDGET_MS = 5_000;
+
+/** A live refresh still going when its budget ran out. */
+const REFRESH_TIMED_OUT = Symbol("refresh timed out");
+
+/** `refresh(commandId)`, unless it is still going after `budgetMs`: a machine
+ * that does not answer (its host restarting, say) can hold a refresh for
+ * minutes, longer than the caller's wait. Then the read goes on without it;
+ * the refresh, a read only, settles by itself. */
+async function refreshWithin(
+  refresh: (commandId: string) => Promise<boolean>,
+  commandId: string,
+  budgetMs: number,
+): Promise<boolean | typeof REFRESH_TIMED_OUT> {
+  const refreshing = refresh(commandId);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      refreshing,
+      new Promise<typeof REFRESH_TIMED_OUT>((resolve) => {
+        timer = setTimeout(() => resolve(REFRESH_TIMED_OUT), budgetMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    // Settled unobserved once the budget ran out: never an unhandled rejection.
+    refreshing.catch(() => undefined);
+  }
+}
 
 /** First-party execution edge only. API reads authorize before provider access
  * and remain the sole terminal-observation authority. No background poller.
@@ -51,9 +82,22 @@ export async function executeCommandReadWithRefresh(input: {
       return finish(result);
     let refreshedOwner = false;
     const unavailable = new Set<string>();
+    let outOfTime = false;
     for (const commandId of snapshot.running) {
+      // Each refresh is bounded by what is left of the caller's wait, so an
+      // unanswering machine cannot stretch a 50-second wait to minutes.
+      const budgetMs = Math.max(deadline - Date.now(), MIN_REFRESH_BUDGET_MS);
       try {
-        if (await input.refresh(commandId)) refreshedOwner = true;
+        const refreshed = await refreshWithin(input.refresh, commandId, budgetMs);
+        if (refreshed === REFRESH_TIMED_OUT) {
+          // Unanswered within the wait: like a transient failure, the retained
+          // output stands, marked as not fresh.
+          refreshedOwner = true;
+          unavailable.add(commandId);
+          outOfTime = true;
+          break;
+        }
+        if (refreshed) refreshedOwner = true;
       } catch (error) {
         if (input.signal?.aborted || !isTransientRefreshFailure(error)) throw error;
         // A failed live refresh must not hide durable output. The reread below
@@ -64,6 +108,12 @@ export async function executeCommandReadWithRefresh(input: {
         refreshedOwner = true;
         unavailable.add(commandId);
       }
+    }
+    if (outOfTime) {
+      // The wait is spent: one last reread without waiting, which reauthorizes
+      // and picks up anything the command recorded meanwhile.
+      const last = await input.call({ ...input.args, waitSeconds: 0 });
+      return finish(last, unavailable, true);
     }
     if (!refreshedOwner) {
       return finish(
