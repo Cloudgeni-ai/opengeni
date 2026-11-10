@@ -69,6 +69,140 @@ classifier: new keys, no connected machine, slower rotation, and human CAPTCHA
 solvers may evade it. Disposable-email, IP reputation, fingerprinting, and content
 classification are not implemented by this change.
 
+## Signup network velocity
+
+`1354_signup_network_velocity.sql` adds a second rule for farms that never connect
+a machine: many new self-serve organizations from one network. A real company
+normally has one person set up an organization and invite colleagues, so several
+new organizations from one address in a day are unusual. Observed farms reached 12
+new organizations per hour and 21 per day from one address; real groups sharing an
+address were at most three or four organizations.
+
+**Record.** A new self-serve owner is a `self_service_organization_setup_receipts`
+row, created by `POST /v1/auth/organization-onboarding`. When that receipt is
+written, the existing setup trigger records one
+`opengeni_private.signup_network_sources` row: the account, the owner user, the
+setup time and two keyed hashes. The API derives the HMAC key from the existing
+Better Auth secret (no new secret) and hashes the trusted client address and its
+/24 (IPv4) or /48 (IPv6) prefix; an IPv4-mapped IPv6 address counts as IPv4. Raw
+addresses are never stored. Recording happens in every mode, so counts exist
+before the rule is switched on. When the trusted client address is unknown
+nothing is recorded, so unknown sources never group. Recording is best-effort and
+never fails organization setup. Invited members never get a setup receipt, so
+they are never recorded, counted or held. Rotating the Better Auth secret starts
+new groups.
+
+**Settings.** Owner-only and revision-fenced like the signup cutoff: every write
+names the expected revision (0 before the first write, `40001` when stale) and
+appends a row with the operator, reason and database role to
+`opengeni_private.signup_network_velocity_revisions`. Runtime roles can neither
+read the settings, sources or evidence nor write them.
+
+| Setting | Default | Why |
+| --- | --- | --- |
+| `mode` | `off` | `observe` records evidence, `enforce` also holds. Migrations stay inert. |
+| `windowHours` | 24 | Farms create 21 accounts per day from one address. |
+| `exactHoldThreshold` | 3 | Hold from the 3rd new organization from one address within the window. Catches farms early; the largest real groups were 3-4, so release must be quick. |
+| `prefixHoldThreshold` | none | /24 and /48 groups are a weaker signal (shared ISPs, offices, mobile carriers): recorded and shown in evidence, but they hold only if an operator sets a threshold. |
+| `rateLimitEnabled` | off | Refuse extreme bursts at the organization step. |
+| `rateLimitMax` | 5 | Per exact address per rolling hour; the 6th is refused. Far above any real pattern, well below the 12/h farms. |
+
+**Detect and hold.** `free_plan_credit_eligible` (before Free issuance and in
+spendable-balance admission) evaluates the current account only, under its own
+account lock. For an account set up within the last seven days it counts distinct
+self-serve organizations with the same address hash set up within the window of
+this account's setup (including itself), and the same for the prefix. In
+`observe` or `enforce` it records an observation with policy version
+`ip-velocity-v1` when a group has two or more members: group sizes, thresholds,
+the rule id, a short group reference and up to 20 setup times. Evidence has no
+address or email. In `enforce`, when the exact count reaches the threshold, it
+holds the account as `service:promotion-detector`. It never overwrites a manual
+decision and never re-holds an account an operator released. The rule does not
+wait for Free credit to be consumed. Groups are read with a bound of 501; a
+larger group still meets any threshold.
+
+After a new setup commits, the API also evaluates the other recent same-address
+organizations, sequentially and each in its own account transaction, so reserve
+farm accounts are held before they spend and appear for review. Failures are
+logged and never fail setup; the per-account evaluation remains the backstop.
+
+Holds use the existing promotion decision: sign-in, the app, invited members,
+purchased credit, top-ups and paid-plan allowances are untouched, and the console
+shows the existing held-credit notice with **Request review**. Holds withhold
+funding only while funding enforcement (`--enforcement on`) is on.
+
+**Rate limit.** With the rate limit on, organization setup from an address that
+already has `rateLimitMax` new self-serve organizations in the last hour is
+refused before anything is created, with HTTP 429 and the message "Too many new
+organizations were created from your network in the last hour. Please try again
+later, or ask a teammate to invite you to their organization." Refusing at the
+organization step, not at user creation, means existing users and invited members
+are never affected: the account can still sign in and accept invitations. An
+idempotent replay of a committed setup is never refused. If the settings or the
+count cannot be read, setup proceeds (fail open) and a warning is logged.
+
+### Operator commands
+
+All commands print JSON. Network groups appear only as 16-hex references of the
+keyed hash; emails appear only as domains.
+
+```sh
+# Current settings and revision
+bun scripts/operator/promotion-decisions.ts --network-velocity
+# Observe first, then enforce (only the flags given change)
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --mode observe \
+  --revision 0 --operator <operator-id> --reason 'Observe signup network velocity'
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --mode enforce \
+  --revision <current-revision> --operator <operator-id> --reason 'Hold same-network farms'
+# Rate limit on (or off), optional maximum; thresholds and window
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --rate-limit on \
+  --rate-limit-max 5 --revision <current-revision> --operator <operator-id> \
+  --reason 'Refuse extreme same-network bursts'
+bun scripts/operator/promotion-decisions.ts --network-velocity-set --exact-threshold 3 \
+  --window-hours 24 --prefix-threshold none --revision <current-revision> \
+  --operator <operator-id> --reason 'Reset thresholds to defaults'
+# Review pending detector holds of this rule, per account and per network group
+bun scripts/operator/promotion-decisions.ts --network-holds --limit 200
+# Release or deny one account (existing revision-fenced decision path)
+bun scripts/operator/promotion-decisions.ts --account <uuid> --decision eligible \
+  --revision <current-revision> --operator <operator-id> --reason 'Normal app use'
+bun scripts/operator/promotion-decisions.ts --account <uuid> --decision denied \
+  --revision <current-revision> --operator <operator-id> --reason 'Same-network farm'
+# Rollback: release every current detector hold of this rule (try --dry-run first)
+bun scripts/operator/promotion-decisions.ts --network-release-holds --dry-run \
+  --operator <operator-id> --reason 'Roll back network velocity holds'
+bun scripts/operator/promotion-decisions.ts --network-release-holds \
+  --operator <operator-id> --reason 'Roll back network velocity holds'
+```
+
+`--network-holds` lists, per held account: decision and revision, signup and
+setup times, email domain, exact and prefix group sizes, chats and sessions,
+direct model API spend versus in-app spend, Free credit granted and used, and the
+current held balance; per group: recent organizations and held accounts. The same
+operations are available through the opengeni-ops `promotion-decisions` workflow
+(`network-velocity`, `network-velocity-set`, `network-holds`,
+`network-release-holds`, and `decision` for single accounts). Bulk release writes
+operator `eligible` decisions, so the released accounts are not held again.
+
+### Reviewer rules
+
+These apply to people and to agent reviewers using the JSON output.
+
+- Release (`eligible`) accounts with normal app use: chats or sessions in the
+  product, not only direct model API calls.
+- Deny clear farm groups: large same-address groups whose accounts have zero chats,
+  spend only through the direct model API and use throwaway domains.
+- Leave anything unclear held for a human.
+- Always use the current revision and give a reason.
+- Never act on prefix-only evidence.
+
+### Rollback
+
+Set `--mode off` to stop new observations and holds. Release existing detector
+holds of this rule with `--network-release-holds`. Turn the rate limit off with
+`--rate-limit off`. The migration is additive; recorded sources and history stay
+for review.
+
 ## Funding and review
 
 `0981_promotion_funding_decisions.sql` adds account decisions: `eligible`,
