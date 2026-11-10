@@ -74,6 +74,33 @@ jobs:
           git -c credential.helper='!gh auth git-credential' fetch --no-tags origin "$pin"
           old="$(bun -e 'import {PRE_COMPATIBILITY_PRODUCTION_SOURCE} from "./scripts/runtime-posture-baseline"; console.log(PRE_COMPATIBILITY_PRODUCTION_SOURCE)')"
           git -c credential.helper='!gh auth git-credential' fetch --no-tags origin "$old"
+      - name: Also check the revision production actually runs
+        # The pin can lag production (it once pointed at a commit production
+        # never ran). Production reports its revision publicly; when it can be
+        # read and differs from the pin, the readiness test checks it too.
+        # An unreadable revision only warns: the pinned check still runs.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIVE_HEALTHZ_URL: https://app.opengeni.ai/healthz
+        run: |
+          set -uo pipefail
+          pin="$(bun -e 'import {readRuntimePostureBaseline} from "./scripts/runtime-posture-baseline"; console.log((await readRuntimePostureBaseline(process.cwd())).sourceCommit)')"
+          healthz="$(curl --fail --silent --show-error --max-time 10 --retry 3 --retry-all-errors "$LIVE_HEALTHZ_URL" || true)"
+          live="$(printf '%s' "$healthz" | bun -e 'import {parseLiveProductionRevision} from "./scripts/runtime-posture-baseline"; let raw = await Bun.stdin.text(); let value = null; try { value = JSON.parse(raw); } catch {} console.log(parseLiveProductionRevision(value) ?? "")')"
+          if [ -z "$live" ]; then
+            echo "::warning title=Live production revision unavailable::Checked the pinned baseline $pin only."
+            exit 0
+          fi
+          if [ "$live" = "$pin" ]; then
+            echo "Production runs the pinned baseline $pin."
+            exit 0
+          fi
+          echo "::warning title=Runtime posture baseline pin is stale::Production runs $live but scripts/runtime-posture-baseline.json pins $pin. Both are checked; advance the pin in a pin-only PR."
+          if git -c credential.helper='!gh auth git-credential' fetch --no-tags origin "$live"; then
+            echo "OPENGENI_RUNTIME_POSTURE_LIVE_SOURCE=$live" >> "$GITHUB_ENV"
+          else
+            echo "::warning title=Live production revision not fetched::Checked the pinned baseline $pin only."
+          fi
       - name: Unit regressions and baseline validation
         run: bun test --max-concurrency=2 packages/db/test/runtime-posture.test.ts scripts/runtime-posture-baseline.test.ts
       - name: Database package typecheck

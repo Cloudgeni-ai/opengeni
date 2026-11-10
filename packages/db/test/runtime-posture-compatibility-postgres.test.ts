@@ -21,6 +21,10 @@ let database: RestrictedRuntimeTestDatabase | null = null;
 let client: DbClient | null = null;
 let baseline: Awaited<ReturnType<typeof loadRuntimePostureBaseline>> | null = null;
 let preCompatibility: Awaited<ReturnType<typeof loadRuntimePostureBaseline>> | null = null;
+// The revision production actually reports, when CI could read and fetch it
+// and it differs from the pin. The pin is still checked either way.
+let liveProduction: Awaited<ReturnType<typeof loadRuntimePostureBaseline>> | null = null;
+const liveProductionSource = process.env.OPENGENI_RUNTIME_POSTURE_LIVE_SOURCE?.trim() || null;
 const options = { rlsStrategy: "force" as const, targetSchema: "og_data" };
 
 beforeAll(async () => {
@@ -31,8 +35,14 @@ beforeAll(async () => {
   const pin = await readRuntimePostureBaseline(root);
   baseline = await loadRuntimePostureBaseline(root, pin.sourceCommit);
   preCompatibility = await loadRuntimePostureBaseline(root, PRE_COMPATIBILITY_PRODUCTION_SOURCE);
+  if (liveProductionSource && liveProductionSource !== pin.sourceCommit) {
+    liveProduction = await loadRuntimePostureBaseline(root, liveProductionSource);
+  }
   console.log(
     `runtime posture baseline: ${pin.status} ${pin.sourceCommit} (${pin.release ?? "not yet a production release"})`,
+  );
+  console.log(
+    `live production revision: ${liveProductionSource ?? "unknown"}${liveProduction ? " (checked in addition to the pin)" : ""}`,
   );
   database = await acquireRestrictedRuntimeTestDatabase(
     "posture-compatibility",
@@ -47,6 +57,7 @@ afterAll(async () => {
   await database?.release();
   await baseline?.cleanup();
   await preCompatibility?.cleanup();
+  await liveProduction?.cleanup();
 }, 180_000);
 
 const realTest = test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1");
@@ -81,6 +92,22 @@ realTest(
   async () => {
     await assertRuntimeDatabasePosture(client!.db, options);
     await baseline!.module.assertRuntimeDatabasePosture(client!.db, options);
+  },
+);
+
+realTest(
+  "the binary production actually runs accepts all current migrations and role provisioning",
+  async () => {
+    if (!liveProduction) return; // Unknown, or the pin already is the live revision.
+    const module = liveProduction.module;
+    const violations = module.evaluateRuntimeDatabasePosture(
+      await module.inspectRuntimeDatabasePosture(client!.db, options),
+      options,
+    );
+    if (violations.length > 0) {
+      console.log(`live production ${liveProductionSource} violations`, JSON.stringify(violations));
+    }
+    expect(violations).toEqual([]);
   },
 );
 
