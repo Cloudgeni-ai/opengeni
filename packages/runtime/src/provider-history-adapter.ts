@@ -317,7 +317,9 @@ function scopedOpaqueArtifact(
     return memoized(foreignArtifactProjections, item, () =>
       historicalReasoningMessage(reasoningSummaryText(item)),
     );
-  if (origin === undefined) return undefined;
+  // Without a scope the item keeps its own projection (for Claude, the
+  // native block; for another provider's reasoning, its readable text).
+  if (origin === undefined || scope === undefined) return undefined;
   return memoized(nativeArtifactProjections, item, () => withoutArtifactOrigin(item));
 }
 
