@@ -86,7 +86,7 @@ describe("fixed turn admission refusals", () => {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).name).toBe("TurnAdmissionRefusedError");
     expect((error as Error).message).toBe(SUBSCRIPTION_API_UNAVAILABLE_MESSAGE);
-    expect((error as TurnAdmissionRefusedError).creditsExhausted).toBe(false);
+    expect((error as TurnAdmissionRefusedError).stopsAsBudgetLimit).toBe(false);
   });
 
   test("empty credits throw the named refusal for app and API work", async () => {
@@ -95,7 +95,7 @@ describe("fixed turn admission refusals", () => {
       const app = await refusal(ensureRunAllowed(billedSettings(), db, ACCOUNT, WORKSPACE, false));
       expect(app).toBeInstanceOf(TurnAdmissionRefusedError);
       expect((app as Error).message).toBe("insufficient workspace credits");
-      expect((app as TurnAdmissionRefusedError).creditsExhausted).toBe(true);
+      expect((app as TurnAdmissionRefusedError).stopsAsBudgetLimit).toBe(true);
       const api = await refusal(
         ensureRunAllowed(
           billedSettings(),
@@ -114,7 +114,7 @@ describe("fixed turn admission refusals", () => {
       );
       expect(api).toBeInstanceOf(TurnAdmissionRefusedError);
       expect((api as Error).message).toBe(API_CREDITS_REQUIRED_MESSAGE);
-      expect((api as TurnAdmissionRefusedError).creditsExhausted).toBe(true);
+      expect((api as TurnAdmissionRefusedError).stopsAsBudgetLimit).toBe(true);
     } finally {
       balance.mockRestore();
     }
@@ -141,7 +141,7 @@ describe("fixed turn admission refusals", () => {
       );
       expect(error).toBeInstanceOf(TurnAdmissionRefusedError);
       expect((error as Error).message).toBe("monthly token limit reached (100)");
-      expect((error as TurnAdmissionRefusedError).creditsExhausted).toBe(false);
+      expect((error as TurnAdmissionRefusedError).stopsAsBudgetLimit).toBe(false);
     } finally {
       usage.mockRestore();
       allowance.mockRestore();

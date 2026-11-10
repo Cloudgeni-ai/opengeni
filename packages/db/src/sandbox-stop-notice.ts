@@ -13,7 +13,9 @@ export type UnseenSandboxStop = {
 /**
  * The latest stop of this chat's managed sandbox (`sandbox.box.terminated`
  * from the reaper's drain, or `sandbox.box.lost`) that is newer than the
- * model's own last output in the chat (a tool call or a completed message).
+ * model's own last action in the chat (a tool call, its result, or a
+ * completed message). A tool's result counts so that a box replaced while the
+ * tool ran is not reported again on the next turn.
  *
  * Only the workspace is saved and restored across such a stop: files outside
  * it and running programs may be gone, so the model is told before it relies
@@ -52,7 +54,10 @@ export async function readUnseenSandboxStop(
             and type = 'agent.toolCall.created'),
         (select max(sequence) from session_events
           where workspace_id = ${workspaceId} and session_id = ${sessionId}
-            and type = 'agent.message.completed')
+            and type = 'agent.message.completed'),
+        (select max(sequence) from session_events
+          where workspace_id = ${workspaceId} and session_id = ${sessionId}
+            and type = 'agent.toolCall.output')
       ), 0)
     `);
     const row = rows[0];

@@ -653,7 +653,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     } else if (error instanceof AllowanceExhaustedError) {
       allowanceRefusal = error.refusal;
     } else if (
-      (error instanceof TurnAdmissionRefusedError && error.creditsExhausted) ||
+      (error instanceof TurnAdmissionRefusedError && error.stopsAsBudgetLimit) ||
       error instanceof HostEntitlementDeniedError
     ) {
       creditsRefusal = error.message;

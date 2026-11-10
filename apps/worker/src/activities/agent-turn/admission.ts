@@ -45,16 +45,17 @@ import { errorMessage } from "@opengeni/contracts/values";
  * person what to change (choose a credit-billed model, add credits, upgrade,
  * wait for a monthly limit). Its name reaches Temporal as the failure type, so
  * `turn.failed` can show the message instead of the generic activity failure.
- * `creditsExhausted` marks the refusals that only adding credit fixes; a
- * claimed turn stops on those like a mid-turn credit stop instead of failing.
+ * `stopsAsBudgetLimit` marks the refusals that adding credit or a paid plan
+ * fixes, which clients name from a `budget_exhausted` stop's detail: a claimed
+ * turn stops on those like a mid-turn credit stop instead of failing.
  */
 export class TurnAdmissionRefusedError extends Error {
-  readonly creditsExhausted: boolean;
+  readonly stopsAsBudgetLimit: boolean;
 
-  constructor(message: string, options: { creditsExhausted?: boolean } = {}) {
+  constructor(message: string, options: { stopsAsBudgetLimit?: boolean } = {}) {
     super(message);
     this.name = "TurnAdmissionRefusedError";
-    this.creditsExhausted = options.creditsExhausted ?? false;
+    this.stopsAsBudgetLimit = options.stopsAsBudgetLimit ?? false;
   }
 }
 
@@ -533,13 +534,15 @@ export async function ensureRunAllowed(
       // Plan credit never pays for API work: say which balance is empty.
       throw new TurnAdmissionRefusedError(
         billingOrigin === "api" ? API_CREDITS_REQUIRED_MESSAGE : "insufficient workspace credits",
-        { creditsExhausted: true },
+        { stopsAsBudgetLimit: true },
       );
     }
   } else if (!chargesOpenGeniCredits && ownSubscription) {
     // The person's own subscription pays no fee; it needs a paid plan.
     if (!(await ownSubscriptionPlanAllows(db, settings, accountId))) {
-      throw new TurnAdmissionRefusedError(SUBSCRIPTION_PLAN_REQUIRED_MESSAGE);
+      throw new TurnAdmissionRefusedError(SUBSCRIPTION_PLAN_REQUIRED_MESSAGE, {
+        stopsAsBudgetLimit: true,
+      });
     }
   } else if (!chargesOpenGeniCredits && byok && byokPlatformFeeActive(settings, accountId)) {
     // The person's own API key pays a platform fee, payable only from paid credit.
@@ -547,7 +550,7 @@ export async function ensureRunAllowed(
     if (balance.balanceMicros <= 0) {
       throw new TurnAdmissionRefusedError(
         byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(billingOrigin)),
-        { creditsExhausted: true },
+        { stopsAsBudgetLimit: true },
       );
     }
   }
