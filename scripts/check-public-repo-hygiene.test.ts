@@ -44,7 +44,7 @@ describe("public repository hygiene", () => {
       ).toBe(true);
     }
     const contacts = [...source.matchAll(/\b[\w.+-]+@gmail\.com\b/g)];
-    expect(contacts).toHaveLength(4);
+    expect(contacts).toHaveLength(5);
     for (const [contact] of contacts) {
       const altered = source.replace(contact, `x${contact.slice(1)}`);
       expect(Buffer.byteLength(altered, "utf8")).toBe(Buffer.byteLength(source, "utf8"));

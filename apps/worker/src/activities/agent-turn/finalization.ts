@@ -850,6 +850,7 @@ async function finalizeTurnAttemptSteps(
       turnLifecycleMetricsFor(observability).finish({
         attemptId: input.attemptId,
         outcome: control.turnMetricOutcome,
+        recoveryCause: control.turnRecoveryCause,
         durationSeconds,
       });
     }

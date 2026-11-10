@@ -230,6 +230,8 @@ export type RecordingDiarizer = {
       speakers?: number | undefined;
       /** Windows `scan` already went through, reused rather than scanned again. */
       cache?: Uint8Array | null | undefined;
+      /** How long the audio is, for setting aside the memory it takes. */
+      durationMilliseconds?: number | undefined;
       signal?: AbortSignal | undefined;
     },
   ): Promise<RecordingDiarizerResult>;
@@ -240,7 +242,11 @@ export type RecordingDiarizer = {
    */
   scan?(
     audio: RecordingTranscriptionAudio,
-    options: { cache?: Uint8Array | null | undefined; signal?: AbortSignal | undefined },
+    options: {
+      cache?: Uint8Array | null | undefined;
+      durationMilliseconds?: number | undefined;
+      signal?: AbortSignal | undefined;
+    },
   ): Promise<Uint8Array>;
 };
 

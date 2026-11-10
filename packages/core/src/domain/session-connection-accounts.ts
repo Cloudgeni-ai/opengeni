@@ -17,6 +17,7 @@ import {
   type ClaimSessionWorkForAttemptInput,
 } from "@opengeni/db";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
+import { ConnectionAccountReads } from "./connection-account-reads";
 import {
   ConnectionAccountSelectionError,
   freezeConnectionAccounts,
@@ -96,7 +97,11 @@ export type ContinuedConnectionAccountGap = {
  * several accounts now match and none was picked). Every other connector is
  * unaffected.
  *
- * `db` is the claim transaction, so every read runs one at a time.
+ * `db` is the claim transaction, so every read runs one at a time. The
+ * resolution shares its reads (`ConnectionAccountReads`): membership, the
+ * Personal-workspace check, the person's accounts and logins, and connection
+ * metadata are each read once, in as few scopes as their security contexts
+ * allow, however many connectors and retries the resolution has.
  */
 export async function resolveContinuedConnectionAccounts(input: {
   db: Database;
@@ -120,13 +125,18 @@ export async function resolveContinuedConnectionAccounts(input: {
     intent.principal.kind === "subject" ? intent.principal.subjectId : null;
   const session = input.claimedSession ?? (await requireSession(db, workspaceId, sessionId));
   const workspace = await requireWorkspace(db, workspaceId);
+  const reads = new ConnectionAccountReads(db);
   const capabilitySettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     workspaceId,
     settings,
-    principalSubjectId
-      ? { subjectId: principalSubjectId, oneReadAtATime: true }
-      : { oneReadAtATime: true },
+    {
+      ...(principalSubjectId ? { subjectId: principalSubjectId } : {}),
+      oneReadAtATime: true,
+      // The workspace row just read names its organization.
+      accountId: workspace.accountId,
+      connectionAccountReads: reads,
+    },
   );
   const runtimeSettings = settingsWithSessionMcpServerMetadata(
     capabilitySettings,
@@ -172,6 +182,7 @@ export async function resolveContinuedConnectionAccounts(input: {
           : { kind: "none" },
         targetSessionId: sessionId,
         authoritySelections: selections,
+        reads,
       });
       return {
         mcpAccountBindings: resolved.mcpAccountBindings,

@@ -4,19 +4,21 @@ import { registerDom } from "./render-hook";
 
 registerDom();
 
+/** Records every `style.height` write; the element keeps its real declaration underneath. */
 function trackHeightWrites(el: HTMLTextAreaElement): string[] {
   const writes: string[] = [];
-  const desc = Object.getOwnPropertyDescriptor(CSSStyleDeclaration.prototype, "height");
-  Object.defineProperty(el.style, "height", {
-    configurable: true,
-    get() {
-      return desc?.get?.call(this) ?? "";
+  const style = el.style;
+  const recording = new Proxy(style, {
+    get(target, property) {
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
     },
-    set(value: string) {
-      writes.push(value);
-      desc?.set?.call(this, value);
+    set(target, property, value) {
+      if (property === "height") writes.push(String(value));
+      return Reflect.set(target, property, value, target);
     },
   });
+  Object.defineProperty(el, "style", { configurable: true, get: () => recording });
   return writes;
 }
 

@@ -201,6 +201,7 @@ export type {
 export { useSessionStart } from "./hooks/use-session-start";
 export type { UseSessionStartOptions, UseSessionStartResult } from "./hooks/use-session-start";
 export {
+  allowMachineForChat,
   admissionControlNeedsRefresh,
   admissionRecheckControl,
   currentSessionMachineAccess,
@@ -213,11 +214,14 @@ export {
   sessionAdmissionApprovedElsewhere,
   sessionAdmissionApprovedElsewhereCopy,
   sessionAdmissionCopy,
+  sessionAdmissionMachineAccessCopy,
   sessionAdmissionMachineChangedCopy,
   sessionAdmissionNeedsDifferentMachine,
+  sessionAdmissionNeedsMachineAccess,
   sessionAdmissionReason,
 } from "./session-admission-model";
 export type {
+  AllowMachineClient,
   ApprovedElsewhereCopy,
   ApprovedMachineChoice,
   PersonalMachineCopy,

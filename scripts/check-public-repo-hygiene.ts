@@ -106,8 +106,8 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
     offsets: [9_379],
   },
 };
-// Preserve the four published copyright contacts from agentkeepalive, fastq,
-// follow-redirects and isomorphic-ws. Only these personal-mail matches are
+// Preserve the five published copyright contacts from agentkeepalive, fastq,
+// follow-redirects, isomorphic-ws and yaml. Only these personal-mail matches are
 // suppressed, at this exact notices path, UTF-8 size, hash and string offsets.
 // Every other rule still runs; changed license bytes require renewed review.
 const REVIEWED_UPSTREAM_LICENSE_CONTACT_MATCHES: Record<
@@ -115,9 +115,9 @@ const REVIEWED_UPSTREAM_LICENSE_CONTACT_MATCHES: Record<
   { bytes: number; sha256: string; offsets: readonly number[] }
 > = {
   "packages/runtime/THIRD_PARTY_NOTICES": {
-    bytes: 153_257,
-    sha256: "e6f51121859869e0c64026f8ffb87065d04321661f1aaff7fa491cd9d182aada",
-    offsets: [84_593, 101_439, 102_325, 124_221],
+    bytes: 153_969,
+    sha256: "30d9bdbf27f1f06272f2cb8ffe49bfd737c7eecb3ce842b9d442b5b1ea2c5a17",
+    offsets: [84_471, 101_317, 102_203, 124_099, 153_247],
   },
 };
 const RUST_SIGNED_BYTE_TYPE = ["i", "8"].join("");

@@ -54,18 +54,18 @@ test("attention first keeps every other connection in its given order", () => {
     service("Slack", "added"),
     service("GitHub", "attention"),
     service("Mail", "available", false),
-    // Merely unavailable to add here is not a problem with your connection.
+    // Unavailable is a limit the person can't fix here (for example
+    // restricted access), whether or not it is connected.
     service("Drive", "unavailable", false),
-    // A connection you have that became unavailable is.
     service("Calendar", "unavailable", true),
     service("Notion", "attention"),
   ]);
   expect(ordered.map((entry) => entry.name)).toEqual([
     "GitHub",
-    "Calendar",
     "Notion",
     "Slack",
     "Mail",
     "Drive",
+    "Calendar",
   ]);
 });

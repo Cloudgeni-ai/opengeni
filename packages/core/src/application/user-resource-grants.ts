@@ -18,6 +18,7 @@ import {
 } from "@opengeni/db";
 import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
 import type { AppDependencies } from "../dependencies";
+import { releaseAdmissionBlocksAfterAccessChange } from "./admission-release";
 import { listOwnConnectionMetadata } from "../domain/personal-connection-delegations";
 import { requireSessionAuthorization } from "../session-authorization";
 import {
@@ -25,7 +26,30 @@ import {
   SessionTenancyManagedHumanRequiredError,
 } from "./session-tenancy";
 
-type UserResourceGrantDependencies = Pick<AppDependencies, "db" | "sessionAuthorization">;
+type UserResourceGrantDependencies = Pick<AppDependencies, "db" | "sessionAuthorization"> & {
+  workflowClient?: Pick<AppDependencies["workflowClient"], "requestSessionWorkflowWakeDispatch">;
+};
+
+/** A new grant may be what a chat's saved message is waiting for. */
+async function startMessagesWaitingForGrant(
+  deps: Pick<UserResourceGrantDependencies, "db" | "workflowClient">,
+  input: { accountId: string; workspaceId: string; sessionId: string | null },
+): Promise<void> {
+  await releaseAdmissionBlocksAfterAccessChange(
+    {
+      db: deps.db,
+      requestSessionWorkflowWakeDispatch: deps.workflowClient
+        ? () => deps.workflowClient!.requestSessionWorkflowWakeDispatch()
+        : undefined,
+    },
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      change: "personal_resource",
+      ...(input.sessionId ? { sessionIds: [input.sessionId] } : {}),
+    },
+  );
+}
 
 const LIST_PERMISSIONS = {
   connection: ["connections:read"],
@@ -120,7 +144,7 @@ export async function issueManagedHumanUserResourceGrant(
     });
   }
 
-  return await issueSelfUserResourceGrant(deps.db, {
+  const grant = await issueSelfUserResourceGrant(deps.db, {
     accountId: authorization.grant.accountId,
     workspaceId,
     subjectId: authorization.grant.subjectId,
@@ -132,6 +156,12 @@ export async function issueManagedHumanUserResourceGrant(
     expectedAuthorityEpoch: request.expectedAuthorityEpoch ?? null,
     workspaceSharedAcknowledged: request.workspaceSharedAcknowledged,
   });
+  await startMessagesWaitingForGrant(deps, {
+    accountId: authorization.grant.accountId,
+    workspaceId,
+    sessionId: request.mode === "session" ? (request.sessionId ?? null) : null,
+  });
+  return grant;
 }
 
 export async function revokeManagedHumanUserResourceGrant(
@@ -510,7 +540,7 @@ export class OwnResourceAlwaysOnError extends Error {
  * Grants for one chat are left alone. Returns the new state.
  */
 export async function setOwnResourceHere(
-  deps: Pick<UserResourceGrantDependencies, "db">,
+  deps: Pick<UserResourceGrantDependencies, "db" | "workflowClient">,
   authorization: AccessGrantAuthorization,
   workspaceId: string,
   input: OwnResourceInput & { on: boolean },
@@ -559,6 +589,7 @@ export async function setOwnResourceHere(
       if (standing.some((grant) => grant.context === context && liveGrant(grant, now))) continue;
       await issue(context);
     }
+    await startMessagesWaitingForGrant(deps, { ...owner, sessionId: null });
   } else if (!input.on) {
     const live = standing.filter((grant) => liveGrant(grant, now));
     for (const grant of live) {

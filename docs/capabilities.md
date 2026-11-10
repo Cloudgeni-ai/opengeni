@@ -1428,7 +1428,8 @@ The importer copies a vendored asset into object storage under the same
 `catalog-assets/...` key a fetched logo would use, in every mode: `--skip-logos`
 suppresses only network fetches for the uncurated long tail, because a
 vendored copy adds no third-party dependency. A curated `logoSourceUrl: null`
-(currently Gmail and Mobbin, which publish no reusable logo licence) always
+(currently Gmail, Google Drive and Google Calendar, whose marks ship with the
+product UI instead) always
 wins: no asset is vendored for such a row and a stray vendored file for it is
 ignored. A vendored entry whose recorded source no longer matches the row's
 effective source, or whose bytes no longer match its digest, is not served;

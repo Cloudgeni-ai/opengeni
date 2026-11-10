@@ -4,9 +4,11 @@ import { sql as drizzleSql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { rawRows } from "../src/database";
+import { LOSSLESS_CONTENT_CODEC_VERSION, toPostgresLosslessJson } from "../src/lossless-json";
 import * as schema from "../src/schema";
 import {
   SESSION_ARCHIVE_EXPORT_TABLES,
+  SESSION_ARCHIVE_PURGED_EVENT_TYPES,
   SESSION_ARCHIVE_PURGE_TABLES,
   SessionArchivedError,
   abandonSessionArchive,
@@ -28,6 +30,7 @@ import {
   readSessionArchiveTranscriptEvents,
   readSessionEventStorageGapEnd,
   sessionArchiveExportSql,
+  sessionArchiveTranscriptEvent,
   setSessionKeepLive,
   submitHumanPromptInTransaction,
   withRlsContext,
@@ -883,6 +886,85 @@ describe("idle-session archive export reads", () => {
       expect(String(failure)).toContain("the session changed while archiving");
     } finally {
       await exporter.close();
+    }
+  }, 120_000);
+
+  test("transcript events made from exported event rows equal the transcript read in every time zone", async () => {
+    const { scope } = await idleSession();
+    const [turn] = await shared.admin`select id, execution_generation from session_turns
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId} limit 1`;
+    const kept = [
+      "agent.message.completed",
+      "turn.completed",
+      "user.message",
+      "agent.toolCall.created",
+    ];
+    const types = [...SESSION_ARCHIVE_PURGED_EVENT_TYPES, ...kept];
+    // Stored the way the lossless codec stores what PostgreSQL text cannot hold.
+    const encoded = toPostgresLosslessJson({
+      text: "nul \u0000, lone \ud800 and \u2028 survive",
+      nested: { big: 2 ** 64, list: [1.5, -0, "x"], __proto__x: true },
+    });
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      // 3,000 events across the bundle's 200-row pages and the old transcript's
+      // 500-event pages, with times across a daylight-saving change, whole
+      // seconds, and microseconds the millisecond Date truncates.
+      await sql`insert into session_events (account_id, workspace_id, session_id, sequence, type,
+          payload, payload_codec_version, occurred_at, client_event_id, turn_id, turn_generation,
+          turn_association)
+        select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
+          (${types}::text[])[1 + n % ${types.length}],
+          case when n % 7 = 0 then ${sql.json(encoded as never)}::jsonb
+            else jsonb_build_object('text', 'event ' || n, 'n', n, 'quote', '"\\', 'emoji', '🧪') end,
+          case when n % 7 = 0 then ${LOSSLESS_CONTENT_CODEC_VERSION}::int end,
+          case when n % 50 = 0
+            then date_trunc('second', timestamptz '2025-10-26 00:20:00+00' + n * interval '2.3456789 seconds')
+            when n % 50 = 1 then timestamptz '2025-10-26 00:59:59.999999+00'
+            else timestamptz '2025-10-26 00:20:00+00' + n * interval '2.3456789 seconds' end,
+          case when n % 3 = 0 then 'client-' || n end,
+          case when n % 2 = 0 then ${turn!.id}::uuid end,
+          case when n % 2 = 0 then ${turn!.execution_generation}::int end,
+          case when n % 2 = 0 then 'current' end
+        from (select max(sequence) as last from session_events
+          where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
+          generate_series(1, 3000) n`;
+    });
+
+    for (const timeZone of [
+      "UTC",
+      "Europe/Oslo",
+      "Asia/Kolkata",
+      "America/St_Johns",
+      "Pacific/Chatham",
+    ]) {
+      const wire = postgres(shared.appUrl, { max: 1, connection: { TimeZone: timeZone } });
+      const db = drizzle(wire, { schema }) as unknown as Database;
+      try {
+        const [setting] = await wire`select current_setting('TimeZone') as zone`;
+        expect(setting!.zone).toBe(timeZone);
+        const read: string[] = [];
+        for (let afterSequence = 0; ;) {
+          const page = await readSessionArchiveTranscriptEvents(db, scope, {
+            afterSequence,
+            limit: 500,
+          });
+          for (const event of page) read.push(JSON.stringify({ event }));
+          if (page.length < 500) break;
+          afterSequence = page.at(-1)!.sequence;
+        }
+        const derived: string[] = [];
+        for (const rows of await exportAll(db, scope, exportSpec("session_events"), 200)) {
+          for (const row of rows) {
+            const event = sessionArchiveTranscriptEvent(row);
+            if (event) derived.push(JSON.stringify({ event }));
+          }
+        }
+        expect(read.length).toBeGreaterThan(500);
+        expect(derived).toEqual(read);
+      } finally {
+        await wire.end();
+      }
     }
   }, 120_000);
 });

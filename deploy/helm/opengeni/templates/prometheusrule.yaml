@@ -473,7 +473,7 @@ spec:
         - alert: OpenGeniTurnRecoveryRatioHigh
           expr: |
             (
-              sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="recovering"}[10m]))
+              sum(increase(opengeni_turn_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},cause!="provider"}[10m]))
               /
               clamp_min(sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.2
@@ -483,12 +483,12 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: 'More than 20% of agent turns needed an automatic retry over the last 10 minutes.'
+            summary: 'More than 20% of agent turns needed an automatic retry for a reason other than the model provider over the last 10 minutes.'
             headline: 'Many agent turns needing automatic retries'
             value: '{{ "{{ $value | humanizePercentage }}" }} of turns retried (10 min)'
             user_impact: 'Replies are slower and may pause briefly while turns retry automatically; no work is lost.'
-            next_step: 'Usually self-heals once the underlying provider, tool or worker issue clears; if it lasts over 30 min, find the dominant retry cause in Runtime Failures.'
-            description: Recovery is preserving logical turns but consuming capacity and adding latency. Inspect typed MCP transport, sandbox, provider, and worker-shutdown evidence for the dominant retryable boundary.
+            next_step: 'Split opengeni_turn_recoveries_total by cause (sandbox, tool, worker, database, control, other) and follow the matching sandbox, MCP, worker or Postgres evidence.'
+            description: Recovery is preserving logical turns but consuming capacity and adding latency. Provider-caused retries (outages, rate limits, subscription capacity and lease changes) are excluded; OpenGeniModelCallFailureRatioHigh covers the provider per model route. Inspect the dominant non-provider cause.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerRestarted
           expr: |

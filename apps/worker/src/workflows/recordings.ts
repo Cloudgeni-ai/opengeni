@@ -5,6 +5,7 @@ import {
   patched,
   proxyActivities,
   sleep,
+  TimeoutFailure,
 } from "@temporalio/workflow";
 import type * as activities from "../activities";
 import type { BrowserRecordingVideoInput } from "../activities/browser-recordings";
@@ -129,6 +130,7 @@ function failureCode(error: unknown): string {
   let cause: unknown = error;
   while (cause instanceof ActivityFailure) cause = cause.cause;
   if (cause instanceof ApplicationFailure && cause.type) return cause.type.slice(0, 128);
+  if (workerStopped(cause)) return "worker_stopped";
   return "processing_failed";
 }
 
@@ -136,7 +138,18 @@ function failureCode(error: unknown): string {
 function failureMessage(error: unknown): string {
   let cause: unknown = error;
   while (cause instanceof ActivityFailure) cause = cause.cause;
+  if (workerStopped(cause)) {
+    return "the worker stopped mid-attempt every time (most often for lack of memory)";
+  }
   return cause instanceof Error && cause.message ? cause.message : "processing failed";
+}
+
+/**
+ * The last attempt stopped sending heartbeats: its worker was killed (out
+ * of memory, most often) or lost, as each attempt before it was.
+ */
+function workerStopped(cause: unknown): boolean {
+  return cause instanceof TimeoutFailure && cause.timeoutType === "HEARTBEAT";
 }
 
 /**
