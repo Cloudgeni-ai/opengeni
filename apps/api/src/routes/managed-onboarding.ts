@@ -12,8 +12,9 @@ import {
 } from "@opengeni/contracts";
 import { getManagedSession, type ApiRouteDeps } from "@opengeni/core";
 import {
-  completeSelfServiceOrganizationSetup,
+  completeSelfServiceOrganizationSetupWithSignupNetwork,
   completeOrganizationUserSetup,
+  evaluateSignupNetworkAccounts,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getSelfServiceOrganizationOnboardingState,
   nestedPostgresSqlState,
@@ -22,6 +23,7 @@ import {
   readOrganizationSignupUseCase,
   recordOrganizationSignupUseCase,
   setOrganizationSignupUseCase,
+  SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -32,6 +34,12 @@ import {
   selfServiceOrganizationSetupRequestFingerprint,
 } from "../auth/organization-user-setup";
 import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
+import {
+  requestSignupNetworkSource,
+  SIGNUP_NETWORK_RATE_LIMIT_CODE,
+  SIGNUP_NETWORK_RATE_LIMIT_MESSAGE,
+} from "../auth/signup-network";
+import { ApiHttpError } from "../http/api-error";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
 import {
   MANAGED_AUTH_PASSWORD_COMPROMISED_CODE,
@@ -136,8 +144,11 @@ export function registerManagedOnboardingRoutes(
         authUserId: session.user.id,
         organizationName,
       });
-      const completed = CompleteSelfServiceOrganizationSetupResponse.parse(
-        await completeSelfServiceOrganizationSetup(deps.db, {
+      // Keyed hashes only; the receipt trigger records them for a new
+      // organization and applies the per-network rate limit (migration 1354).
+      const signupNetwork = requestSignupNetworkSource(context, deps.settings);
+      const { setup, evaluateAccountIds } =
+        await completeSelfServiceOrganizationSetupWithSignupNetwork(deps.db, {
           authUserId: session.user.id,
           actorSubjectId: `user:${session.user.id}`,
           organizationName,
@@ -147,8 +158,20 @@ export function registerManagedOnboardingRoutes(
           trialCreditsEnabled:
             deps.settings.productAccessMode === "managed" &&
             deps.settings.verifiedSignupTrialCreditsEnabled,
-        }),
-      );
+          signupNetwork,
+        });
+      const completed = CompleteSelfServiceOrganizationSetupResponse.parse(setup);
+      // Committed. Evaluate this organization and recent same-network ones,
+      // each in its own account transaction, so reserve accounts of a burst
+      // are held before they spend. Best-effort: Free issuance and admission
+      // evaluate each account lazily anyway.
+      if (evaluateAccountIds.length > 0) {
+        await evaluateSignupNetworkAccounts(deps.db, evaluateAccountIds, (_accountId, error) => {
+          console.warn("[api] could not evaluate a signup network account", {
+            sqlState: nestedPostgresSqlState(error) ?? null,
+          });
+        });
+      }
       // An idempotent replay of the same operation returns the same committed
       // setup and is counted again; clients retry only on an ambiguous response.
       recordOrganizationSetupOutcome(deps.observability, "created");
@@ -177,8 +200,19 @@ export function registerManagedOnboardingRoutes(
       }
       return context.json(completed);
     } catch (error) {
-      recordOrganizationSetupOutcome(deps.observability, "failed");
       const sqlState = nestedPostgresSqlState(error);
+      recordOrganizationSetupOutcome(
+        deps.observability,
+        sqlState === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE ? "rate_limited" : "failed",
+      );
+      if (sqlState === SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE) {
+        throw new ApiHttpError(429, {
+          code: "limit_exceeded",
+          message: SIGNUP_NETWORK_RATE_LIMIT_MESSAGE,
+          retryable: true,
+          details: { managedAuthCode: SIGNUP_NETWORK_RATE_LIMIT_CODE },
+        });
+      }
       if (sqlState === "22023") {
         throw new HTTPException(422, {
           message: "invalid organization setup request",
