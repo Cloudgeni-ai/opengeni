@@ -2392,6 +2392,11 @@ const SettingsSchema = z.object({
   managedAuthPasskeySignUpEnabled: EnvBoolean.default(false),
   // Unset retains environment-based verification (required outside local).
   managedAuthRequireEmailVerification: EnvBoolean.optional(),
+  // Refuse new passwords found in the Have I Been Pwned breached-password
+  // corpus (k-anonymity lookup; only a 5-character SHA-1 prefix leaves the
+  // API). Unset checks outside local and test. An unreachable lookup never
+  // blocks sign-up or a password change.
+  managedAuthBreachedPasswordCheck: EnvBoolean.optional(),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
   // web image understands only fragment bearers, so API replicas must keep
   // generating fragment links until the compatible web fleet has converged.
@@ -6590,6 +6595,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedAuthRequireEmailVerification: optional(
       "OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION",
     ),
+    managedAuthBreachedPasswordCheck: optional("OPENGENI_MANAGED_AUTH_BREACHED_PASSWORD_CHECK"),
     organizationUserSetupEmailTokenTransport: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",
     ),
