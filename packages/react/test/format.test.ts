@@ -27,9 +27,10 @@ import { createOpenGeniText } from "../src/messages/runtime";
 const englishText = createOpenGeniText();
 
 describe("failure presentation", () => {
-  test("a refused Claude reasoning replay shows the short message, never Claude's signature text", () => {
-    const error =
-      "Claude couldn't reuse earlier reasoning from this chat. Try again, or choose another model.";
+  test("a refused Claude reasoning replay never shows Claude's signature text", () => {
+    // The transport falls back to plain history, so this failure is not
+    // expected to reach a person; if it ever does, only the generic line shows.
+    const error = "Claude request failed (HTTP 400)";
     const payload = {
       error,
       code: "anthropic_reasoning_replay_rejected",

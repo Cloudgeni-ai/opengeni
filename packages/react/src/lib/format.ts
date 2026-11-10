@@ -729,7 +729,7 @@ const AUTHORED_ONLY_FAILURE_CODES: ReadonlySet<string> = new Set([
   "sandbox_service_refused",
   // The detail is the machine agent's own text (the program, the OS error).
   "sandbox_process_start_failed",
-  // The detail is Claude's own wording about thinking signatures.
+  // The detail is Claude's own wording about thinking signatures (operator-only).
   "anthropic_reasoning_replay_rejected",
 ]);
 

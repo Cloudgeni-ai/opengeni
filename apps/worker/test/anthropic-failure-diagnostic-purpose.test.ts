@@ -200,19 +200,18 @@ describe("Anthropic failure diagnostic purpose", () => {
   });
 });
 
-test("a refused Claude reasoning replay settles with its short message and keeps the provider text as detail", () => {
+test("a refused Claude reasoning replay settles with the generic message and keeps the provider text as detail", () => {
   const providerMessage =
     "messages.7.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation.";
   const error = new AnthropicRequestError(
-    "Claude couldn't reuse earlier reasoning from this chat. Try again, or choose another model.",
+    "Claude request failed (HTTP 400)",
     400,
     "anthropic_reasoning_replay_rejected",
     { type: "invalid_request_error", message: providerMessage },
     new Headers({ "request-id": "req_replay" }),
   );
   expect(agentRunFailurePayload(error)).toMatchObject({
-    error:
-      "Claude couldn't reuse earlier reasoning from this chat. Try again, or choose another model.",
+    error: "Claude request failed (HTTP 400)",
     code: "anthropic_reasoning_replay_rejected",
     retryable: false,
     detail: `invalid_request_error: ${providerMessage}`,

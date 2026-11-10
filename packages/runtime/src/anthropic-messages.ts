@@ -27,10 +27,12 @@ import { createModelImageSizer } from "./model-image-sizing";
 import { isModelPreempted, preemptedResponseDone } from "./model-preemption";
 import {
   ARTIFACT_ORIGIN_KEY,
+  artifactOrigin,
   historicalReasoningText,
   projectHistoryForProvider,
 } from "./provider-history-adapter";
 import {
+  claudeSignedThinkingBlock,
   claudeThinkingFingerprint,
   opaqueReasoningFingerprint,
   refusedOpaqueReasoning,
@@ -179,6 +181,73 @@ function sentThinkingFingerprints(messages: readonly Message[]): string[] {
       ? message.content.flatMap((block) => claudeThinkingFingerprint(block) ?? [])
       : [],
   );
+}
+
+/**
+ * The signed thinking a request's history holds: every block, and those with
+ * no recorded binding (stored before bindings were recorded, or carried on an
+ * assistant message by older progress-update history).
+ */
+function historyThinking(input: ModelRequest["input"]): { all: number; unbound: string[] } {
+  let all = 0;
+  const unbound: string[] = [];
+  if (typeof input === "string") return { all, unbound };
+  for (const raw of input as unknown[]) {
+    const item = object(raw);
+    const block = claudeSignedThinkingBlock(item);
+    if (block) {
+      all += 1;
+      if (artifactOrigin(item) === undefined) unbound.push(claudeThinkingFingerprint(block)!);
+      continue;
+    }
+    if (item.type !== "message" && item.type !== undefined) continue;
+    if (item.role !== "assistant" || !Array.isArray(item.content)) continue;
+    for (const part of item.content) {
+      const signed = part?.providerData?.anthropic?.block;
+      const fingerprint = signed?.type === "thinking" ? claudeThinkingFingerprint(signed) : null;
+      if (!fingerprint) continue;
+      all += 1;
+      unbound.push(fingerprint);
+    }
+  }
+  return { all, unbound };
+}
+
+/** The signed block a replay refusal names (`messages.N.content.M`), if any. */
+function refusedBlockFingerprint(error: AnthropicRequestError, body: Json): string | null {
+  const at = /\bmessages\.(\d+)\.content\.(\d+)\b/.exec(String(error.detail ?? ""));
+  if (!at) return null;
+  const block = body.messages?.[Number(at[1])]?.content?.[Number(at[2])];
+  return block && typeof block === "object" ? claudeThinkingFingerprint(block) : null;
+}
+
+/**
+ * How far a request fell back from replaying signed thinking natively:
+ * `binding` converts blocks issued under another binding (or already
+ * refused) to readable text; `refused` additionally converts the blocks a
+ * refusal points at; `plain` sends history with no opaque provider state.
+ */
+type ThinkingReplay = "binding" | "refused" | "plain";
+
+/** Operator-only record of the thinking a sent request replayed as text, by fallback. */
+const REPLAY_TRANSFORMATION_REASON: Record<ThinkingReplay, string> = {
+  binding: "opengeni_replayed_as_text",
+  refused: "opengeni_refused_replay",
+  plain: "opengeni_plain_history",
+};
+const replayTransformations = new WeakMap<Response, Json[]>();
+
+/** A response's message, with the thinking its request replayed as text recorded. */
+function withReplayTransformations(message: Json, response: Response): Json {
+  const recorded = replayTransformations.get(response);
+  if (!recorded?.length) return message;
+  return {
+    ...message,
+    input_transformations: [
+      ...(Array.isArray(message.input_transformations) ? message.input_transformations : []),
+      ...recorded,
+    ],
+  };
 }
 
 /** Closed provider rejections carry authored copy, never arbitrary response text. */
@@ -749,6 +818,12 @@ export function buildAnthropicRequest(
   model: string,
   provider: ClaudeRequestProvider,
   stream: boolean,
+  options: {
+    /** Fallback of last resort: history with no opaque provider state at all. */
+    plainHistory?: boolean;
+    /** Signed thinking (by fingerprint) to send as text in this request only. */
+    replayAsText?: ReadonlySet<string>;
+  } = {},
 ): Json {
   if (request.previousResponseId || request.conversationId)
     throw new AnthropicProtocolError(
@@ -776,7 +851,16 @@ export function buildAnthropicRequest(
   };
   // Signed thinking goes back natively only under the binding it was issued
   // with, and never once this provider refused it (opaque-reasoning-replay).
-  const isRefused = provider.id ? refusedOpaqueReasoning(provider.id) : undefined;
+  const remembered = provider.id ? refusedOpaqueReasoning(provider.id) : undefined;
+  const { plainHistory, replayAsText } = options;
+  const isRefused =
+    plainHistory === true
+      ? () => true
+      : remembered || replayAsText?.size
+        ? (fingerprint: string | null) =>
+            fingerprint !== null &&
+            (replayAsText?.has(fingerprint) === true || remembered?.(fingerprint) === true)
+        : undefined;
   const input =
     typeof request.input === "string"
       ? request.input
@@ -788,7 +872,9 @@ export function buildAnthropicRequest(
         }) as ModelRequest["input"]);
   const webSearch = request.tools.some(isHostedWebSearchTool);
   let messages = anthropicMessages(input, {
-    webSearch,
+    // Plain history replays earlier searches as readable facts, never as
+    // provider-encrypted results or citations into them.
+    webSearch: webSearch && plainHistory !== true,
     accountScope: anthropicSearchAccountScope(provider),
     ...(isRefused ? { isRefusedThinking: isRefused } : {}),
   });
@@ -932,6 +1018,7 @@ function thinkingDropCounts(transformations: unknown): Record<string, number> | 
         "prefix_binding_mismatch",
         "model_binding_mismatch",
         "organization_binding_mismatch",
+        ...Object.values(REPLAY_TRANSFORMATION_REASON),
       ].includes(entry.reason)
     )
       continue;
@@ -1290,9 +1377,18 @@ export class AnthropicMessagesModel implements Model {
     );
   }
 
-  private async prepare(request: ModelRequest, stream: boolean) {
+  private async prepare(
+    request: ModelRequest,
+    stream: boolean,
+    replay: { fallback: ThinkingReplay; replayAsText?: ReadonlySet<string> } = {
+      fallback: "binding",
+    },
+  ) {
     request.signal?.throwIfAborted();
-    const body = buildAnthropicRequest(request, this.model, this.provider, stream);
+    const body = buildAnthropicRequest(request, this.model, this.provider, stream, {
+      plainHistory: replay.fallback === "plain",
+      ...(replay.replayAsText ? { replayAsText: replay.replayAsText } : {}),
+    });
     const projection = { resized: false };
     for (const message of body.messages) {
       message.content = await this.sizeImageBlocks(message.content, projection, request.signal);
@@ -1386,6 +1482,8 @@ export class AnthropicMessagesModel implements Model {
       serialized,
       size: anthropicRequestSize(body, serialized),
       signedThinking,
+      body,
+      replay: replay.fallback,
     };
   }
 
@@ -1395,26 +1493,58 @@ export class AnthropicMessagesModel implements Model {
   }
 
   /**
-   * A request Claude refuses because a replayed thinking signature no longer
-   * verifies (another prefix, model, organization or platform) is sent once
-   * more with the blocks it carried as readable historical text. They are
-   * remembered for this provider, so later requests in this process do not
-   * repeat the refusal. Blocks issued after the retry stay native.
+   * Replayed signed thinking never fails a turn. A request carries native
+   * thinking only under the binding it was issued with (opaque-reasoning-
+   * replay). If Claude still refuses a replayed signature (history stored
+   * before bindings were recorded, or a binding Claude checks that we do
+   * not record), the request is sent once more with the blocks the refusal
+   * concerns as readable text: those with no recorded binding and the one it
+   * names. They are remembered for this provider, so later requests do not
+   * repeat the refusal. If Claude refuses that too, the request is sent with
+   * no opaque provider state at all, which it always accepts, and every block
+   * the retry still carried is remembered. Each fallback is recorded for
+   * operators (`thinkingBlocksDropped`), never shown to the person.
    */
   private async send(request: ModelRequest, stream: boolean): Promise<Response> {
-    for (let attempt = 0; ; attempt += 1) {
-      const prepared = await this.prepare(request, stream);
+    let replay: { fallback: ThinkingReplay; replayAsText?: ReadonlySet<string> } = {
+      fallback: "binding",
+    };
+    const history = historyThinking(request.input);
+    for (;;) {
+      const prepared = await this.prepare(request, stream, replay);
       try {
-        return await this.dispatch(request, prepared);
+        const response = await this.dispatch(request, prepared);
+        const asText = history.all - prepared.signedThinking.length;
+        if (asText > 0)
+          replayTransformations.set(
+            response,
+            Array.from({ length: asText }, () => ({
+              type: "thinking_dropped",
+              reason: REPLAY_TRANSFORMATION_REASON[replay.fallback],
+            })),
+          );
+        return response;
       } catch (error) {
         if (
-          attempt > 0 ||
-          prepared.signedThinking.length === 0 ||
+          prepared.replay === "plain" ||
           !(error instanceof AnthropicRequestError) ||
           error.code !== CLAUDE_REASONING_REPLAY_REJECTED
         )
           throw error;
-        rememberRefusedOpaqueReasoning(this.provider.id, prepared.signedThinking);
+        const named = refusedBlockFingerprint(error, prepared.body);
+        if (prepared.replay === "binding" && prepared.signedThinking.length > 0) {
+          const suspects = new Set(
+            history.unbound.filter((fingerprint) => prepared.signedThinking.includes(fingerprint)),
+          );
+          if (named) suspects.add(named);
+          // A refusal we cannot attribute concerns every block it carried.
+          const refused = suspects.size ? suspects : new Set(prepared.signedThinking);
+          rememberRefusedOpaqueReasoning(this.provider.id, refused);
+          replay = { fallback: "refused", replayAsText: refused };
+        } else {
+          rememberRefusedOpaqueReasoning(this.provider.id, prepared.signedThinking);
+          replay = { fallback: "plain" };
+        }
       }
     }
   }
@@ -1472,9 +1602,7 @@ export class AnthropicMessagesModel implements Model {
           ? "Claude credentials expired or were revoked. Replace the key or setup token in Models."
           : webSearchDisabled
             ? "Web search is turned off for this Claude organization. An admin can turn it on in the Claude Console, or web search can be turned off in the workspace's model settings."
-            : reasoningReplayRejected
-              ? "Claude couldn't reuse earlier reasoning from this chat. Try again, or choose another model."
-              : "Claude request failed (HTTP " + response.status + ")";
+            : "Claude request failed (HTTP " + response.status + ")";
       let source: unknown;
       try {
         source = JSON.parse(detail)?.error;
@@ -1508,15 +1636,16 @@ export class AnthropicMessagesModel implements Model {
     const names = toolNames(request);
     const searchQueries = anthropicWebSearchQueries(request.input);
     const accountScope = anthropicSearchAccountScope(this.provider);
+    const replayScope = claudeReplayScope(request, this.model, this.provider);
     let merged: Json | undefined;
     let requestId: string | undefined;
     for (let continuation = 0; ; continuation += 1) {
       const current = merged
-        ? pausedTurnRequest(request, merged, names, searchQueries, accountScope)
+        ? pausedTurnRequest(request, merged, names, searchQueries, accountScope, replayScope)
         : request;
       const response = await this.send(current, false);
       requestId = response.headers.get("request-id") ?? undefined;
-      const message = object(await response.json());
+      const message = withReplayTransformations(object(await response.json()), response);
       if (message.stop_reason === "refusal")
         throw new AnthropicProviderRejection("content_policy_violation", 200, requestId);
       merged = mergePausedMessage(merged, message);
@@ -1533,7 +1662,7 @@ export class AnthropicMessagesModel implements Model {
       {
         progressUpdates: anthropicWritesProgressUpdates(this.model),
         requestSearchResults: () => this.requestSearchResults(request),
-        replayScope: claudeReplayScope(request, this.model, this.provider),
+        replayScope,
       },
     );
   }
@@ -1542,13 +1671,14 @@ export class AnthropicMessagesModel implements Model {
     const names = toolNames(request);
     const searchQueries = anthropicWebSearchQueries(request.input);
     const accountScope = anthropicSearchAccountScope(this.provider);
+    const replayScope = claudeReplayScope(request, this.model, this.provider);
     let merged: Json | undefined;
     let requestId: string | undefined;
     const partial: AnthropicPartialMessage = {};
     try {
       for (let continuation = 0; ; continuation += 1) {
         const current = merged
-          ? pausedTurnRequest(request, merged, names, searchQueries, accountScope)
+          ? pausedTurnRequest(request, merged, names, searchQueries, accountScope, replayScope)
           : request;
         // A continuation's blocks extend the same logical response: stream
         // their text under the ids the merged response will give them.
@@ -1605,7 +1735,7 @@ export class AnthropicMessagesModel implements Model {
       {
         progressUpdates: anthropicWritesProgressUpdates(this.model),
         requestSearchResults: () => this.requestSearchResults(request),
-        replayScope: claudeReplayScope(request, this.model, this.provider),
+        replayScope,
       },
     );
     yield protocol.StreamEventResponseCompleted.parse({
@@ -1806,7 +1936,10 @@ export class AnthropicMessagesModel implements Model {
           message.content = [...blocks.entries()]
             .sort(([a], [b]) => a - b)
             .map(([, state]) => state.block);
-          return { message, requestId: response.headers.get("request-id") ?? undefined };
+          return {
+            message: withReplayTransformations(message, response),
+            requestId: response.headers.get("request-id") ?? undefined,
+          };
         }
       }
     }
@@ -1967,7 +2100,9 @@ function pausedTurnRequest(
   names: Map<string, { name: string; namespace?: string }>,
   searchQueries: ReadonlyMap<string, string>,
   accountScope: string | null,
+  replayScope: string,
 ): ModelRequest {
+  // Its thinking was signed under this same request's binding moments ago.
   const replay = anthropicResponse(
     { ...paused, stop_reason: "pause_turn" },
     undefined,
@@ -1975,6 +2110,7 @@ function pausedTurnRequest(
     searchQueries,
     [],
     accountScope,
+    { replayScope },
   ).output;
   const input =
     typeof request.input === "string"

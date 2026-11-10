@@ -7,6 +7,7 @@ import type { ResolvedModelProvider } from "@opengeni/config";
 import {
   AnthropicMessagesModel,
   CLAUDE_REASONING_REPLAY_REJECTED,
+  claudeReplayScope,
 } from "../src/anthropic-messages";
 import { AnthropicRequestError } from "../src/anthropic-request-error";
 import { COMPACTION_SUMMARY_MARKER } from "../src/context-compaction";
@@ -31,16 +32,14 @@ import { ReplayableJsonOpenAI, requestBodyText } from "../src/replayable-json-bo
  * never replays signed thinking (see provider-history-adapter).
  */
 
-const PRODUCTION_REJECTION = {
+/** The production 400, naming the refused block's position as Claude does. */
+const rejection = (at = "messages.7.content.0") => ({
   type: "error",
   error: {
     type: "invalid_request_error",
-    message:
-      'messages.7.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to "drop_block" (requires anthropic-beta thinking-binding-controls-2026-08-01). The `system` prompt differs from the one this block was created with.',
+    message: `${at}: Invalid \`signature\` in \`thinking\` block. The block is bound to a different conversation. Remove the block, or set \`thinking.block_binding.prefix_mismatch_behavior\` to "drop_block" (requires anthropic-beta thinking-binding-controls-2026-08-01). The \`system\` prompt differs from the one this block was created with.`,
   },
-};
-const HUMAN_MESSAGE =
-  "Claude couldn't reuse earlier reasoning from this chat. Try again, or choose another model.";
+});
 const HISTORICAL = "[Historical reasoning from another model]\\n";
 
 const SKILLS = "Opengeni instructions.\n\n## Skills\n- documents\n\n## Repository skills\n";
@@ -102,7 +101,12 @@ const issuerOf = (provider: ResolvedModelProvider) =>
 type Sent = { body: any; betas: string[]; refused: boolean };
 
 /** Simulated Claude platforms behind every endpoint above. */
-function claudePlatform(options: { streamed: boolean; honorsDropBlock?: boolean }) {
+function claudePlatform(options: {
+  streamed: boolean;
+  honorsDropBlock?: boolean;
+  /** Refuse every replayed thinking block, valid or not. */
+  refusesAllThinking?: boolean;
+}) {
   const sent: Sent[] = [];
   let issued = 0;
   const fetch = (async (url: unknown, init?: RequestInit) => {
@@ -122,14 +126,20 @@ function claudePlatform(options: { streamed: boolean; honorsDropBlock?: boolean 
       options.honorsDropBlock === true &&
       body.thinking?.block_binding?.prefix_mismatch_behavior === "drop_block" &&
       betas.includes("thinking-binding-controls-2026-08-01");
-    const refused = body.messages.some((message: any) =>
-      message.content.some(
-        (block: any) =>
-          block.type === "thinking" && block.signature !== expected && !dropsMismatched,
-      ),
+    let at: string | undefined;
+    body.messages.forEach((message: any, m: number) =>
+      message.content.forEach((block: any, c: number) => {
+        if (
+          !at &&
+          block.type === "thinking" &&
+          (options.refusesAllThinking || (block.signature !== expected && !dropsMismatched))
+        )
+          at = `messages.${m}.content.${c}`;
+      }),
     );
+    const refused = at !== undefined;
     sent.push({ body, betas, refused });
-    if (refused) return Response.json(PRODUCTION_REJECTION, { status: 400 });
+    if (refused) return Response.json(rejection(at), { status: 400 });
     issued += 1;
     const content = [
       { type: "thinking", thinking: `Reasoning ${issued}.`, signature: expected },
@@ -162,6 +172,14 @@ function claudePlatform(options: { streamed: boolean; honorsDropBlock?: boolean 
 }
 
 type Item = Record<string, any>;
+
+const lookupTool = {
+  type: "function",
+  name: "lookup",
+  description: "Look something up.",
+  parameters: { type: "object", properties: {}, additionalProperties: false },
+  strict: false,
+};
 
 function request(input: Item[], systemInstructions: string): ModelRequest {
   return {
@@ -237,8 +255,18 @@ describe("Claude to Claude: every switch a chat can make", () => {
   });
   rows.push(
     ["account switch: another API key", opus55(API), opus55(API_OTHER_KEY), "readable"],
-    ["account switch: Claude subscription to API key", opus55(SUBSCRIPTION), opus55(API), "readable"],
-    ["account switch: API key to Claude subscription", opus55(API), opus55(SUBSCRIPTION), "readable"],
+    [
+      "account switch: Claude subscription to API key",
+      opus55(SUBSCRIPTION),
+      opus55(API),
+      "readable",
+    ],
+    [
+      "account switch: API key to Claude subscription",
+      opus55(API),
+      opus55(SUBSCRIPTION),
+      "readable",
+    ],
     ["transport switch: Anthropic API to a gateway", opus55(API), opus55(GATEWAY), "readable"],
     [
       "a model whose thinking is not prefix-bound keeps it across a system prompt change",
@@ -407,29 +435,137 @@ describe("compaction", () => {
   });
 });
 
-describe("a refusal that persists", () => {
-  test("ends with a short human message, never the provider text", async () => {
+describe("the fallback chain always ends in a successful request", () => {
+  const signedReasoning = (thinking: string, signed: string, origin?: string): Item => ({
+    type: "reasoning",
+    content: [{ type: "input_text", text: thinking }],
+    providerData: {
+      anthropic: { block: { type: "thinking", thinking, signature: signed } },
+      ...(origin ? { "opengeni.artifact_origin.v1": origin } : {}),
+    },
+  });
+
+  for (const streamed of [false, true])
+    test(`a turn succeeds even when every replay attempt is refused (stream=${streamed})`, async () => {
+      const platform = claudePlatform({ streamed, refusesAllThinking: true });
+      const provider = claudeProvider(API);
+      const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", platform.fetch);
+      // Two blocks recorded under this very binding, which Claude refuses
+      // anyway (a binding it checks that Opengeni does not record), and one
+      // stored before bindings were recorded.
+      const scope = claudeReplayScope(
+        { systemInstructions: BASE_SYSTEM },
+        "claude-opus-5-5",
+        provider,
+      );
+      const reply = (text: string) => ({
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text }],
+      });
+      const history = [
+        user("One"),
+        signedReasoning("Bound one.", "bound-1", scope),
+        reply("Ok."),
+        user("Two"),
+        signedReasoning("Bound two.", "bound-2", scope),
+        reply("Ok."),
+        user("Three"),
+        signedReasoning("Stored before bindings.", "legacy-signature"),
+        reply("Ok."),
+        user("Four"),
+      ];
+
+      const output = await run(model, request(history, BASE_SYSTEM), streamed);
+
+      expect(JSON.stringify(output)).toContain("Answer 1.");
+      // Refused natively, refused with the named and unbound blocks as text,
+      // then accepted with no opaque state at all.
+      expect(platform.sent.map(({ refused }) => refused)).toEqual([true, true, false]);
+      expect(thinkingBlocks(platform.sent[1]!.body).map((block) => block.signature)).toEqual([
+        "bound-2",
+      ]);
+      const plain = platform.sent[2]!.body;
+      expect(thinkingBlocks(plain)).toEqual([]);
+      expect(JSON.stringify(plain)).not.toContain("signature");
+      for (const thought of ["Bound one.", "Bound two.", "Stored before bindings."])
+        expect(JSON.stringify(plain.messages)).toContain(`${HISTORICAL}${thought}`);
+    });
+
+  test("operators see each fallback; the person sees nothing", async () => {
+    const platform = claudePlatform({ streamed: false, refusesAllThinking: true });
+    const model = new AnthropicMessagesModel(
+      claudeProvider(API),
+      "claude-opus-5-5",
+      platform.fetch,
+    );
+    const history = [
+      user("One"),
+      signedReasoning("Earlier.", "legacy-signature"),
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Ok." }] },
+      user("Two"),
+    ];
+    const response = await model.getResponse(request(history, BASE_SYSTEM));
+    expect(platform.sent.map(({ refused }) => refused)).toEqual([true, false]);
+    expect(response.providerData?.anthropic?.thinkingBlocksDropped).toEqual({
+      opengeni_refused_replay: 1,
+    });
+    const visible = response.output.filter((item: Item) => item.type === "message");
+    expect(JSON.stringify(visible)).toBe(
+      JSON.stringify([{ ...visible[0], content: [{ type: "output_text", text: "Answer 1." }] }]),
+    );
+
+    // Remembered: the next request replays it as text straight away.
+    const next = await model.getResponse(request(history, BASE_SYSTEM));
+    expect(platform.sent).toHaveLength(3);
+    expect(next.providerData?.anthropic?.thinkingBlocksDropped).toEqual({
+      opengeni_replayed_as_text: 1,
+    });
+  });
+
+  for (const streamed of [false, true])
+    test(`a refusal of stale history keeps the current tool loop's thinking native (stream=${streamed})`, async () => {
+      const platform = claudePlatform({ streamed });
+      const provider = claudeProvider(API);
+      const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", platform.fetch);
+      const stale = signedReasoning("Stale.", "legacy-signature");
+      const first = await run(
+        model,
+        request([user("One"), stale, user("Use a tool.")], BASE_SYSTEM),
+        streamed,
+      );
+      expect(platform.sent.map(({ refused }) => refused)).toEqual([true, false]);
+      // The same turn continues: the fresh block precedes a tool call.
+      const fresh = persisted(first).find((item) => item.type === "reasoning")!;
+      const loop = [
+        user("One"),
+        stale,
+        user("Use a tool."),
+        fresh,
+        { type: "function_call", callId: "call_1", name: "lookup", arguments: "{}" },
+        { type: "function_call_result", callId: "call_1", output: "found" },
+      ];
+      await run(
+        model,
+        { ...request(loop, BASE_SYSTEM), tools: [lookupTool] as ModelRequest["tools"] },
+        streamed,
+      );
+      expect(platform.sent.map(({ refused }) => refused)).toEqual([true, false, false]);
+      expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([fresh.providerData.anthropic.block]);
+    });
+
+  test("if even plain history is refused, the failure carries only the generic line", async () => {
     let calls = 0;
     const model = new AnthropicMessagesModel(claudeProvider(API), "claude-opus-5-5", (async () => {
       calls += 1;
-      return Response.json(PRODUCTION_REJECTION, { status: 400 });
+      return Response.json(rejection("messages.1.content.0"), { status: 400 });
     }) as typeof globalThis.fetch);
-    const history = [
-      user("One"),
-      {
-        type: "reasoning",
-        content: [],
-        providerData: { anthropic: { block: { type: "thinking", thinking: "", signature: "x" } } },
-      },
-      user("Two"),
-    ];
+    const history = [user("One"), signedReasoning("", "x"), user("Two")];
     const error = await model.getResponse(request(history, BASE_SYSTEM)).catch((e) => e);
-    expect(calls).toBe(2);
+    expect(calls).toBe(3);
     expect(error).toBeInstanceOf(AnthropicRequestError);
     expect(error.code).toBe(CLAUDE_REASONING_REPLAY_REJECTED);
-    expect(error.status).toBe(400);
-    expect(error.message).toBe(HUMAN_MESSAGE);
-    expect(error.message).not.toMatch(/signature|block_binding|anthropic-beta/);
+    expect(error.message).toBe("Claude request failed (HTTP 400)");
     // Operators keep the provider's own text as the diagnostic.
     expect(error.detail).toContain("Invalid `signature` in `thinking` block");
   });
