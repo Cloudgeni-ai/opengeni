@@ -39,8 +39,8 @@ test("images load directly only from listed, same-origin or inline sources", () 
   );
   for (const direct of [
     "https://acct.blob.core.windows.net/c/a.png?sig=1",
-    "https://app.example.com/v1/files/a.png",
-    "/v1/files/a.png",
+    "https://app.example.com/v1/workspaces/ws/files/a.png",
+    "/v1/workspaces/ws/files/a.png",
     "data:image/png;base64,AAAA",
     "blob:https://app.example.com/1",
   ]) {
