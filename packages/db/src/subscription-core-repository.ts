@@ -780,7 +780,7 @@ export async function persistSubscriptionCoreRefresh(
  * refresh-generation compare-and-swap; a NULL plan keeps the recorded plan,
  * and a changed plan clears the connection's model cooldowns.
  *
- * Every refresh path persists through it (migration 1354): a chat turn's
+ * Every refresh path persists through it (migration 1361): a chat turn's
  * refresh names its session and turn and consumes the authorization
  * begin_subscription_core_refresh minted; a refresh outside a turn
  * (operations, usage reads, administered connections) passes null for both
