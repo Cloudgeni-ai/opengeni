@@ -155,6 +155,13 @@ describe("console Content-Security-Policy", () => {
     const policy = directives(response.headers.get("content-security-policy")!);
     expect(policy.get("frame-ancestors")).toContain("https://*.officeapps.live.com");
     expect(policy.get("script-src")).toContain("https://appsforoffice.microsoft.com");
+    // office.js frames Office's telemetry page.
+    expect(policy.get("frame-src")).toContain(
+      "https://telemetryservice.firstpartyapps.oaspapps.com",
+    );
+    expect(policy.get("child-src")).toContain(
+      "https://telemetryservice.firstpartyapps.oaspapps.com",
+    );
     expect(policy.get("script-src")).toContain(inlineScriptHashes(html)[0]);
     expect(response.headers.get("x-frame-options")).toBeNull();
     expect(html).toContain(`id="${CONTENT_HOSTING_ELEMENT_ID}"`);

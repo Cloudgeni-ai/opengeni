@@ -74,6 +74,11 @@ export const OFFICE_SCRIPT_SOURCES = [
   "https://alcdn.msauth.net",
 ] as const;
 
+/** office.js frames Office's telemetry page on the add-in pages. */
+export const OFFICE_FRAME_SOURCES = [
+  "https://telemetryservice.firstpartyapps.oaspapps.com",
+] as const;
+
 const DIRECTIVE_ORDER = [
   "default-src",
   "script-src",
@@ -170,6 +175,8 @@ export function buildContentSecurityPolicy(input: ConsolePolicyInput): string {
   if (input.kind === "office") {
     policy["frame-ancestors"] = [...OFFICE_FRAME_ANCESTORS];
     add("script-src", OFFICE_SCRIPT_SOURCES);
+    add("frame-src", OFFICE_FRAME_SOURCES);
+    add("child-src", OFFICE_FRAME_SOURCES);
   }
   return DIRECTIVE_ORDER.map((directive) => `${directive} ${policy[directive].join(" ")}`).join(
     "; ",
