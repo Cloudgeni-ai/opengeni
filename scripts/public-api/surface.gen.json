@@ -11627,6 +11627,7 @@
       "shape": {
         "$": "object",
         "$.capabilities": "ref(AgentCapabilities)?",
+        "$.guidance": "ref(AgentGuidance)?",
         "$.identity": "string? null",
         "$.instructions": "string?",
         "$.renderer": "ref(AgentRenderer)?",
@@ -11661,6 +11662,14 @@
         "$.tools[].visibility": "enum?=[\"\\\"search\\\"\",\"\\\"upfront\\\"\"]",
         "$.unavailable": "array!",
         "$.unavailable[]": "ref(AgentCapabilityId)"
+      }
+    },
+    "AgentGuidance": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"full\\\"\",\"\\\"lean\\\"\"]"
       }
     },
     "AgentInstructionReceipt": {
@@ -26639,6 +26648,7 @@
         "$": "object",
         "$.capabilities": "ref(ResolvedAgentCapabilities)!",
         "$.from": "ref(AgentCapabilityStartingPoint)!",
+        "$.guidance": "const?=[\"\\\"lean\\\"\"]",
         "$.identity": "string! null",
         "$.renderer": "ref(AgentRenderer)!",
         "$.source": "ref(ResolvedAgentConfigSource)!",
@@ -34129,6 +34139,7 @@
       "shape": {
         "$": "object",
         "$.capabilities": "ref(AgentCapabilities)?",
+        "$.guidance": "ref(AgentGuidance)?",
         "$.identity": "string? null",
         "$.renderer": "ref(AgentRenderer)?"
       }
@@ -35708,6 +35719,7 @@
       "AgentConfigRequest": "type",
       "AgentEffectiveTools": "type",
       "AgentErrorCode": "type",
+      "AgentGuidance": "type",
       "AgentInstructionReceipt": "type",
       "AgentInstructionReviewItem": "type",
       "AgentInstructionReviewListResponse": "type",
