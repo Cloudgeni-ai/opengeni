@@ -63,13 +63,16 @@ import { errorMessage } from "@opengeni/contracts/values";
 export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
 /**
  * Why a turn attempt ended recovering. A closed set chosen at each recovery
- * site: `provider` (the model provider or its subscription lease), `sandbox`,
+ * site: `provider` (the model provider or its subscription lease), `route_change`
+ * (the session's active sandbox was deliberately moved mid-turn, so the turn
+ * continues on its new machine in a fresh attempt), `sandbox`,
  * `tool` (MCP and first-party tool setup), `worker` (shutdown or death),
  * `database` (settlement could not be written), `control` (admission holds)
  * and `other`.
  */
 export type TurnRecoveryCause =
   | "provider"
+  | "route_change"
   | "sandbox"
   | "tool"
   | "worker"
@@ -134,6 +137,7 @@ const MAX_MODEL_CACHE_COUNTER_TOTAL = 1_000_000_000_000;
 const TURN_OUTCOMES: readonly TurnOutcome[] = ["completed", "failed", "cancelled", "recovering"];
 const TURN_RECOVERY_CAUSES: readonly TurnRecoveryCause[] = [
   "provider",
+  "route_change",
   "sandbox",
   "tool",
   "worker",

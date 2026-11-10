@@ -145,6 +145,7 @@
     "sync:client-skill": "bun scripts/sync-client-skill.ts",
     "check:client-skill": "bun scripts/sync-client-skill.ts --check",
     "check:docs-refs": "bun scripts/check-docs-refs.ts",
+    "check:doc-snippets": "bun scripts/check-doc-snippets.ts",
     "check:model-pricing": "bun scripts/check-model-pricing.ts",
     "check:public-hygiene": "bun scripts/check-public-repo-hygiene.ts",
     "check:subscription-contract": "bun scripts/check-subscription-contract.ts && bun run check:subscription-core-neutral",

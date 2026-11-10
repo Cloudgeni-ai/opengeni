@@ -95,6 +95,7 @@ describe("home resolver recovery through real SDK function tools", () => {
       });
       historySink.seedHistory("Read the file", 0);
       const reconcile = spyOn(historySink, "reconcileConversationTruth");
+      let control: { turnRecoveryCause?: string } & Record<string, unknown> = {};
       const requestRecovery = spyOn(db, "requestSessionTurnRecovery").mockImplementation(
         async () => {
           expect(reconcile).toHaveBeenCalledWith({ requireDurable: true });
@@ -120,13 +121,13 @@ describe("home resolver recovery through real SDK function tools", () => {
           sandboxRotationController: new AbortController(),
           noteCancellationRequested: () => undefined,
           codexWorkspaceKey: "workspace-key",
-          control: {
+          control: (control = {
             cancellationRequestedAt: null,
             activityStatus: "unknown",
             turnMetricOutcome: null,
             activityError: null,
             acknowledgeQuiescence: false,
-          },
+          }),
           attempt: {
             turnId: "turn-1",
             triggerEventId: "trigger-1",
@@ -147,6 +148,8 @@ describe("home resolver recovery through real SDK function tools", () => {
           acknowledgeRecoveryQuiescence: () => undefined,
         } as never);
         expect(result).toEqual({ status: "recovering" });
+        // A home backend that still needs recovery is a sandbox fault, not a route move.
+        expect(control.turnRecoveryCause).toBe("sandbox");
         expect(requestRecovery.mock.calls[0]?.[2]).toMatchObject({
           sessionId: "session-1",
           turnId: "turn-1",
