@@ -1,5 +1,5 @@
 /**
- * Migration 1353: organization invitations, and so their account setup links,
+ * Migration 1354: organization invitations, and so their account setup links,
  * last at most 48 hours after creation. Longer requests are capped, not
  * refused, and invitations that already exist keep their expiry.
  */
