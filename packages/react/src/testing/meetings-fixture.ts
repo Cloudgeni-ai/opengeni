@@ -100,6 +100,7 @@ function recording(
         chunkCount: 12,
         totalBytes: 2_400_000,
         durationMilliseconds,
+        unrecorded: [],
         playable: true,
         video: null,
         live: null,
@@ -112,6 +113,7 @@ function recording(
         chunkCount: 12,
         totalBytes: 2_400_000,
         durationMilliseconds,
+        unrecorded: [],
         playable: true,
         video: null,
         live: null,
@@ -333,6 +335,7 @@ export function createMeetingsFixture(
               chunkCount: 4,
               totalBytes: 800_000,
               durationMilliseconds: 0,
+              unrecorded: [],
               playable: false,
               video: null,
               live: {

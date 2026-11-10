@@ -3170,9 +3170,23 @@ export const englishMessages = {
   "meetings.transcript.name": "Name",
   "meetings.transcript.nameChangeWhoThisIs": "{name}, change who this is",
   "meetings.transcript.nameNameThisSpeaker": "{name}, name this speaker",
+  /**
+   * Quiet lines in a meeting transcript where audio is missing: a microphone
+   * was unplugged or turned off, or tab sharing ended. {from} and {to} are
+   * times in the recording, like 17:39; {name} is the one person heard on
+   * that microphone.
+   */
+  "meetings.transcript.nameSMicrophoneWasnTRecordingFromTo":
+    "{name}'s microphone wasn't recording from {from} to {to}.",
+  /** As above, when every other track kept recording. */
+  "meetings.transcript.nameSMicrophoneWasnTRecordingFromToEveryoneElse":
+    "{name}'s microphone wasn't recording from {from} to {to}. Everyone else was still recorded.",
   "meetings.transcript.nameSuggestedFromTheirVoice":
     "{name}, suggested from their voice. Confirm or correct",
+  "meetings.transcript.nothingWasRecordedFromTo": "Nothing was recorded from {from} to {to}.",
   "meetings.transcript.noLeaveUnnamed": "No, leave unnamed",
+  "meetings.transcript.otherPeopleWerenTRecordedFromTo":
+    "Other people weren't recorded from {from} to {to}.",
   "meetings.transcript.orPickWhoItIs": "Or pick who it is",
   "meetings.transcript.playFromFormatclock": "Play from {formatClock}",
   "meetings.transcript.rememberDisplaynameSVoice": "Remember {displayName}'s voice…",
@@ -3187,6 +3201,11 @@ export const englishMessages = {
   "meetings.transcript.suggested": "Suggested",
   "meetings.transcript.suggestedBecauseTheVoiceSounds": "Sounds like them ({suggestionMatch})",
   "meetings.transcript.suggestedBecauseTheVoiceSounds2": "Sounds like them",
+  "meetings.transcript.theMicrophoneWasnTRecordingFromTo":
+    "The microphone wasn't recording from {from} to {to}.",
+  /** As above, when every other track kept recording. */
+  "meetings.transcript.theMicrophoneWasnTRecordingFromToOtherPeople":
+    "The microphone wasn't recording from {from} to {to}. Other people were still recorded.",
   "meetings.transcript.theNameIsAddedTo": "Anyone in the workspace can pick this name later.",
   "meetings.transcript.transcript": "Transcript",
   "meetings.transcript.usedToSuggestNamesIn": "Remembered voice",

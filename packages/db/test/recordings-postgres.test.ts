@@ -26,6 +26,7 @@ import {
   ensureManagedAccessForUser,
   failBrowserRecordingVideo,
   failRecordingTranscriptVersion,
+  fillRecordingUnrecordedStretches,
   finalizeRecording,
   findBrowserRecording,
   forgetRecordingPersonVoice,
@@ -237,6 +238,88 @@ describe("recordings", () => {
       ["microphone", 2, 10_000],
       ["system", 2, 10_000],
     ]);
+  });
+
+  test("finalizing keeps where a track has no audio: a lost microphone, and after it stopped", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recordingId = crypto.randomUUID();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    await createRecording(db, {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      tracks: [
+        { trackNumber: 0, source: "microphone", mimeType: "audio/webm" },
+        { trackNumber: 1, source: "system", mimeType: "audio/webm" },
+      ],
+    });
+    // The microphone records 0-10 s, is unplugged, comes back for 14-19 s
+    // and is never heard again; the shared audio runs for 30 s. A reopened
+    // microphone's moment of setup (19-20.5 s) is not missing audio.
+    const pieces: Record<number, Array<[number, number]>> = {
+      0: [
+        [0, 5_000],
+        [5_000, 5_000],
+        [14_000, 5_000],
+      ],
+      1: [0, 1, 2, 3, 4, 5].map((index) => [index * 5_000, 5_000] as [number, number]),
+    };
+    for (const [trackNumber, chunks] of Object.entries(pieces).map(
+      ([key, value]) => [Number(key), value] as const,
+    )) {
+      await reserveRecordingChunks(db, {
+        ...actor,
+        recordingId,
+        trackNumber,
+        chunks: chunks.map(([startMilliseconds, durationMilliseconds], chunkNumber) => ({
+          chunkNumber,
+          byteLength: 100,
+          sha256: sha(`${trackNumber}${chunkNumber}`),
+          startMilliseconds,
+          durationMilliseconds,
+        })),
+      });
+      await markRecordingChunksUploaded(db, {
+        ...actor,
+        recordingId,
+        trackNumber,
+        chunkNumbers: chunks.map((_, chunkNumber) => chunkNumber),
+      });
+    }
+    const finalized = await finalizeRecording(db, {
+      ...actor,
+      recordingId,
+      tracks: [
+        { trackNumber: 0, chunkCount: 3 },
+        { trackNumber: 1, chunkCount: 6 },
+      ],
+      transcription,
+      versionId: crypto.randomUUID(),
+    });
+    const expected = [
+      [
+        { startMilliseconds: 10_000, endMilliseconds: 14_000 },
+        { startMilliseconds: 19_000, endMilliseconds: null },
+      ],
+      [],
+    ];
+    expect(finalized.recording.tracks.map((track) => track.unrecorded)).toEqual(expected);
+    const view = await getRecording(db, { ...actor, recordingId });
+    expect(view.tracks.map((track) => track.unrecorded)).toEqual(expected);
+
+    // A meeting finalized before tracks kept this gets it when next transcribed.
+    await shared!
+      .admin`update recording_tracks set unrecorded = null where recording_id = ${recordingId}`;
+    expect(
+      (await getRecording(db, { ...actor, recordingId })).tracks.map((track) => track.unrecorded),
+    ).toEqual([[], []]);
+    expect(await fillRecordingUnrecordedStretches(db, { ...actor, recordingId })).toBe(true);
+    expect(
+      (await getRecording(db, { ...actor, recordingId })).tracks.map((track) => track.unrecorded),
+    ).toEqual(expected);
+    expect(await fillRecordingUnrecordedStretches(db, { ...actor, recordingId })).toBe(false);
   });
 
   test("creating, reserving and finalizing again are idempotent; a reused id is refused", async () => {
