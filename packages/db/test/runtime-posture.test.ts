@@ -4660,7 +4660,7 @@ describe("runtime readiness: a missing required EXECUTE grant degrades a feature
     });
   });
 
-  test("revoking any single granted routine is degraded only; a runtime-owned one stays fatal", () => {
+  test("revoking any single granted routine is degraded only; unsafe changes next to it never are", () => {
     const base = safePosture();
     const revocable = [
       ...base.privateRoutines
@@ -4671,20 +4671,52 @@ describe("runtime readiness: a missing required EXECUTE grant degrades a feature
         .map((routine) => ({ schema: "targetRoutines" as const, name: routine.name })),
     ];
     expect(revocable.length).toBeGreaterThan(100);
+    // Unsafe changes to the same routine. Whatever the strict evaluator finds
+    // for them must stay fatal: the degraded findings stay within those of the
+    // revocation alone. This catches a check gated on `execute`.
+    const unsafeChanges: Record<
+      string,
+      Partial<RuntimeDatabasePosture["privateRoutines"][number]>
+    > = {
+      "runtime owner": { owner: "opengeni_app" },
+      "another owner": { owner: "someone_else" },
+      "PUBLIC EXECUTE": { publicExecute: true },
+      "flipped SECURITY DEFINER": {},
+      "no search_path": { configuration: null },
+      "trigger-callable": { triggerCallable: true },
+      "catalog dependents": { hasDependents: true },
+    };
     for (const { schema, name } of revocable) {
-      const posture = safePosture();
-      const routine = posture[schema].find((entry) => entry.name === name)!;
-      routine.execute = false;
-      const classified = runtimePosture.classifyRuntimeDatabasePosture(posture, options);
-      expect(classified.fatal, name).toEqual([]);
-      expect(classified.degraded, name).toEqual(evaluateRuntimeDatabasePosture(posture, options));
-      if (schema !== "privateRoutines") continue;
-      // The same revocation next to an unsafe change on that routine.
-      routine.owner = "opengeni_app";
-      expect(runtimePosture.classifyRuntimeDatabasePosture(posture, options).fatal, name).toContain(
-        `runtime role owns private routine ${name}`,
-      );
+      const revoke = () => {
+        const posture = safePosture();
+        const routine = posture[schema].find((entry) => entry.name === name)!;
+        routine.execute = false;
+        return { posture, routine };
+      };
+      const { posture } = revoke();
+      const revocation = runtimePosture.classifyRuntimeDatabasePosture(posture, options);
+      expect(revocation.fatal, name).toEqual([]);
+      expect(revocation.degraded, name).toEqual(evaluateRuntimeDatabasePosture(posture, options));
+      for (const [label, change] of Object.entries(unsafeChanges)) {
+        const unsafe = revoke();
+        Object.assign(unsafe.routine, change);
+        if (label === "flipped SECURITY DEFINER") {
+          unsafe.routine.securityDefiner = !unsafe.routine.securityDefiner;
+        }
+        const classified = runtimePosture.classifyRuntimeDatabasePosture(unsafe.posture, options);
+        // A combined finding may move to fatal; nothing may become degraded.
+        expect(
+          classified.degraded.filter((finding) => !revocation.degraded.includes(finding)),
+          `${name}: ${label}`,
+        ).toEqual([]);
+      }
     }
+    const owned = safePosture();
+    const ownedRoutine = owned.privateRoutines.find((entry) => entry.execute)!;
+    Object.assign(ownedRoutine, { execute: false, owner: "opengeni_app" });
+    expect(runtimePosture.classifyRuntimeDatabasePosture(owned, options).fatal).toContain(
+      `runtime role owns private routine ${ownedRoutine.name}`,
+    );
   }, 180_000);
 
   test("a missing object stays fatal", () => {
