@@ -23,12 +23,18 @@ export function withNoSniff(response: Response): Response {
   }
 }
 
-/** Adds nosniff to a possibly asynchronous, possibly absent response. */
+/**
+ * Adds nosniff to a possibly asynchronous, possibly absent response. A
+ * rejected answer becomes {@link lastResortErrorResponse}.
+ */
 export function withNoSniffEventually(
   response: Response | undefined | Promise<Response | undefined>,
 ): Response | undefined | Promise<Response | undefined> {
   if (response instanceof Promise) {
-    return response.then((resolved) => (resolved ? withNoSniff(resolved) : resolved));
+    return response.then(
+      (resolved) => (resolved ? withNoSniff(resolved) : resolved),
+      () => lastResortErrorResponse(),
+    );
   }
   return response ? withNoSniff(response) : response;
 }
@@ -51,7 +57,11 @@ export function lastResortErrorResponse(): Response {
   );
 }
 
-/** Runs one request, turning any escaped failure into {@link lastResortErrorResponse}. */
+/**
+ * Runs one request, turning any escaped failure into {@link lastResortErrorResponse}.
+ * The API server wraps `app.fetch` with it; a host that serves `createApp()`
+ * itself should do the same.
+ */
 export async function serveWithLastResortError(
   handle: () => Response | Promise<Response>,
   onError?: (error: unknown) => void,

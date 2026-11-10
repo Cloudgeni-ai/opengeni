@@ -4,6 +4,7 @@ import {
   lastResortErrorResponse,
   serveWithLastResortError,
   withNoSniff,
+  withNoSniffEventually,
 } from "../src/http/nosniff";
 import { dispatchApiWebSocketUpgrade } from "../src/http/websocket-upgrade-dispatch";
 
@@ -80,5 +81,13 @@ describe("nosniff outside the Hono app", () => {
     expect(lastResortErrorResponse().headers.get("content-type")).toContain("application/json");
     const passed = await serveWithLastResortError(() => new Response("ok"));
     expect(await passed.text()).toBe("ok");
+  });
+
+  test("a rejected asynchronous upgrade answers the generic 500 with nosniff", async () => {
+    const rejected = await withNoSniffEventually(Promise.reject(new Error("secret")));
+    expect(rejected?.status).toBe(500);
+    expect(rejected?.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(await rejected?.text()).not.toContain("secret");
+    expect(await withNoSniffEventually(Promise.resolve(undefined))).toBeUndefined();
   });
 });

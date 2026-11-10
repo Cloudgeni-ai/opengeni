@@ -32,6 +32,7 @@ import {
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
 import {
   createObservability,
+  errorCauseAttributes,
   installCpuSamplingSignal,
   logStartupDependencyRetry,
   traceClientCalls,
@@ -99,7 +100,7 @@ import {
 import { startApiMetricsListener } from "./http/metrics-listener";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
 import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
-import { serveWithLastResortError } from "./http/nosniff";
+import { lastResortErrorResponse, serveWithLastResortError } from "./http/nosniff";
 import {
   startComputeAgentGateway,
   type ComputeGatewayHandle,
@@ -702,12 +703,23 @@ export async function startApi(options: StartApiOptions = {}) {
     port: settings.apiPort,
     idleTimeout: API_SERVER_IDLE_TIMEOUT_SECONDS,
     fetch: (request, bunServer) => {
-      const upgrade = dispatchApiWebSocketUpgrade(
-        request,
-        bunServer,
-        webSocketUpgrades,
-        localBrowserBoundary,
-      );
+      let upgrade: ReturnType<typeof dispatchApiWebSocketUpgrade>;
+      try {
+        upgrade = dispatchApiWebSocketUpgrade(
+          request,
+          bunServer,
+          webSocketUpgrades,
+          localBrowserBoundary,
+        );
+      } catch (error) {
+        observability.error("Opengeni API WebSocket upgrade failed", {
+          errorClass: "UnhandledUpgradeFailure",
+          errorCode: "unhandled_upgrade_failure",
+          origin: "api",
+          ...errorCauseAttributes(error),
+        });
+        return lastResortErrorResponse();
+      }
       if (upgrade.handled) return upgrade.response;
       // Hono re-throws values that are not Error instances past its onError;
       // answer those with a generic 500 that still carries nosniff.
@@ -717,11 +729,12 @@ export async function startApi(options: StartApiOptions = {}) {
             ...apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
             ...apiRequestBindingsForIdleTimeout((seconds) => bunServer.timeout(request, seconds)),
           }),
-        () =>
+        (error) =>
           observability.error("Opengeni API request failed outside the error handler", {
             errorClass: "UnhandledRequestFailure",
             errorCode: "unhandled_request_failure",
             origin: "api",
+            ...errorCauseAttributes(error),
           }),
       );
     },
