@@ -15,6 +15,7 @@ import {
   type SessionAppSurfaces,
 } from "@opengeni/react/session-app";
 import { enableWorkbench } from "@opengeni/react/workbench";
+import { setImageProxyTicket } from "@opengeni/react/app/lib/content-hosting";
 import { OpenGeniClient, type Workspace } from "@opengeni/sdk";
 import {
   lazy,
@@ -301,8 +302,42 @@ function PaneAccount(props: {
   );
 }
 
+/** Image proxy tickets last 12 hours; renew well before. */
+const IMAGE_PROXY_TICKET_REFRESH_MS = 60 * 60 * 1000;
+
+/**
+ * The pane signs in with a bearer token, which an `<img>` cannot send, so
+ * images the page's policy does not list load through the API's image proxy
+ * with a ticket instead of the sign-in cookie.
+ */
+function useImageProxyTicket(token: string): void {
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/v1/image-proxy/ticket`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const body = response.ok ? ((await response.json()) as { ticket?: unknown }) : null;
+        if (!stopped && typeof body?.ticket === "string") setImageProxyTicket(body.ticket);
+      } catch {
+        // Images from unlisted origins stay unavailable until the next try.
+      }
+      if (!stopped) timer = setTimeout(() => void refresh(), IMAGE_PROXY_TICKET_REFRESH_MS);
+    };
+    void refresh();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      setImageProxyTicket(null);
+    };
+  }, [token]);
+}
+
 function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }) {
   const client = useMemo(() => new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey: token }), [token]);
+  useImageProxyTicket(token);
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(remembered(WORKSPACE_KEY));
   const [loadError, setLoadError] = useState<string | null>(null);

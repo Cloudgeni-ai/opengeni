@@ -3,6 +3,7 @@ import {
   HTML_FRAME_HOST_DOCUMENT,
   HTML_FRAME_HOST_PATH,
   HTML_FRAME_HOST_SANDBOX,
+  OFFICE_FRAME_ANCESTOR_ORIGINS,
 } from "@opengeni/contracts/html-frame-host";
 import worker, { type GatewayEnv } from "../src/index";
 import { TEST_SECRET } from "./helpers";
@@ -37,7 +38,9 @@ describe("HTML frame host on og.<sites domain>", () => {
     expect(response.headers.get("content-type")).toBe("text/html; charset=utf-8");
     expect(await response.text()).toBe(HTML_FRAME_HOST_DOCUMENT);
     const csp = response.headers.get("content-security-policy");
-    expect(csp).toBe(`sandbox ${HTML_FRAME_HOST_SANDBOX}; frame-ancestors https://app.test`);
+    expect(csp).toBe(
+      `sandbox ${HTML_FRAME_HOST_SANDBOX}; frame-ancestors https://app.test ${OFFICE_FRAME_ANCESTOR_ORIGINS.join(" ")}`,
+    );
     expect(csp).not.toContain("allow-same-origin");
     // X-Frame-Options cannot name the console origin; frame-ancestors does.
     expect(response.headers.get("x-frame-options")).toBeNull();

@@ -60,6 +60,25 @@ describe("console Content-Security-Policy sources", () => {
       objectStorage: null,
     });
     expect(selfHosted.directives["form-action"]).toEqual(["https://github.com"]);
+    expect(selfHosted.imageProxyUrl).toBeUndefined();
+  });
+
+  test("a console on another origin gets the API's absolute proxy URL; OpenSandbox ingress is listed", async () => {
+    const result = await consoleContentSecuritySources({
+      settings: testSettings({
+        productAccessMode: "managed",
+        publicBaseUrl: "https://api.example.com",
+        webBaseUrl: "https://app.example.com",
+        sandboxBackend: "opensandbox",
+        openSandboxBaseUrl: "https://sandboxes.example.com/api",
+      } as never),
+      objectStorage: null,
+    });
+    expect(result.imageProxyUrl).toBe("https://api.example.com/v1/image-proxy");
+    expect(result.directives["img-src"]).toContain("https://api.example.com");
+    expect(result.directives["connect-src"]).toEqual(
+      expect.arrayContaining(["https://sandboxes.example.com", "wss://sandboxes.example.com"]),
+    );
   });
 
   test("the route is public and uncached", async () => {

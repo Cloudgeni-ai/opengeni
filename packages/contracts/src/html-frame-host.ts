@@ -82,6 +82,24 @@ export function htmlFrameHostContentSecurityPolicy(frameAncestors: readonly stri
   return `sandbox ${HTML_FRAME_HOST_SANDBOX}; frame-ancestors ${ancestors}`;
 }
 
+/**
+ * Microsoft Office's hosts, which frame the Excel add-in's pages. Every
+ * ancestor must pass a page's frame-ancestors, so pages the add-in itself
+ * frames (the HTML frame host) list them too.
+ */
+export const OFFICE_FRAME_ANCESTOR_ORIGINS = [
+  "https://*.officeapps.live.com",
+  "https://*.office.com",
+  "https://*.office365.com",
+  "https://*.microsoft365.com",
+  "https://*.cloud.microsoft",
+  "https://*.sharepoint.com",
+  "https://onedrive.live.com",
+  "https://*.onedrive.live.com",
+  "https://teams.microsoft.com",
+  "https://*.teams.microsoft.com",
+] as const;
+
 /** The frame host URL an embedder at `parentOrigin` loads. */
 export function htmlFrameHostUrl(frameHostBase: string, parentOrigin: string): string {
   const url = new URL(HTML_FRAME_HOST_PATH, frameHostBase);
@@ -113,7 +131,14 @@ const LOADER_SCRIPT = [
   `if(!data||data.type!==M.render||data.version!==V||typeof data.html!=="string")return;`,
   `done=true;`,
   `removeEventListener("message",receive);`,
-  `const html=data.mode==="still"?'<!doctype html><meta http-equiv="Content-Security-Policy" content="'+S+'"><meta name="color-scheme" content="light">'+data.html:data.html;`,
+  // A still may not leave its frame: drop refresh redirects (parsed inertly,
+  // so entity-encoded attributes are caught too) before writing it.
+  `let html=data.html;`,
+  `if(data.mode==="still"){`,
+  `try{const doc=new DOMParser().parseFromString(html,"text/html");`,
+  `for(const meta of doc.querySelectorAll("meta[http-equiv]"))if((meta.getAttribute("http-equiv")||"").trim().toLowerCase()==="refresh")meta.remove();`,
+  `html=doc.documentElement.outerHTML;}catch{html="";}`,
+  `html='<!doctype html><meta http-equiv="Content-Security-Policy" content="'+S+'"><meta name="color-scheme" content="light">'+html;}`,
   `const target=window.parent,origin=parentOrigin;`,
   `document.open();`,
   `addEventListener("load",()=>target.postMessage({type:M.loaded,version:V},origin),{once:true});`,

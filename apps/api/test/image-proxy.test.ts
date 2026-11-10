@@ -6,7 +6,11 @@ import { createApp } from "../src/app";
 import {
   IMAGE_PROXY_MAX_BYTES,
   IMAGE_PROXY_RESPONSE_CSP,
+  IMAGE_PROXY_SVG_RESPONSE_CSP,
+  createImageProxyTicket,
+  readImageProxyTicket,
   registerImageProxyRoutes,
+  sniffImage,
   sniffRasterImage,
 } from "../src/routes/image-proxy";
 import { PublicSetupRateLimiter } from "../src/routes/managed-onboarding";
@@ -24,7 +28,12 @@ type Upstream = (url: string, init: RequestInit) => Response | Promise<Response>
 function proxy(
   upstream: Upstream,
   dns: Record<string, string> = {},
-  options: { limiter?: PublicSetupRateLimiter; timeoutMs?: number } = {},
+  options: {
+    limiter?: PublicSetupRateLimiter;
+    timeoutMs?: number;
+    ticketSecret?: string | null;
+    now?: () => number;
+  } = {},
 ) {
   const fetched: Array<{ url: string; headers: Headers }> = [];
   const app = new Hono();
@@ -156,15 +165,39 @@ describe("image proxy", () => {
     expect(final.headers.get("content-type")).toBe("image/jpeg");
   });
 
-  test("refuses SVG, HTML and other non-raster bodies whatever their Content-Type says", async () => {
-    for (const body of [SVG, HTML, new TextEncoder().encode("GIF")]) {
-      const { get } = proxy(() => new Response(body, { headers: { "content-type": "image/png" } }));
-      const response = await get("https://images.example.com/x.png");
+  test("refuses HTML and other non-image bodies whatever their Content-Type says", async () => {
+    for (const body of [
+      HTML,
+      new TextEncoder().encode("GIF"),
+      new TextEncoder().encode("<html><svg></svg></html>"),
+      new TextEncoder().encode("<!doctype html><svg></svg>"),
+    ]) {
+      const { get } = proxy(
+        () => new Response(body, { headers: { "content-type": "image/svg+xml" } }),
+      );
+      const response = await get("https://images.example.com/x.svg");
       expect(response.status).toBe(415);
       expect(response.headers.get("content-type") ?? "").not.toContain("image/");
     }
     expect(sniffRasterImage(SVG)).toBeNull();
     expect(sniffRasterImage(PNG)?.contentType).toBe("image/png");
+  });
+
+  test("serves SVG logos under a policy that blocks their scripts", async () => {
+    const svg = new TextEncoder().encode(
+      '\uFEFF<?xml version="1.0"?>\n<!-- logo --><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "x">\n<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+    );
+    expect(sniffImage(svg)?.contentType).toBe("image/svg+xml");
+    const { get } = proxy(() => new Response(svg, { headers: { "content-type": "text/plain" } }));
+    const response = await get("https://images.example.com/logo.svg");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("image/svg+xml");
+    expect(response.headers.get("content-security-policy")).toBe(IMAGE_PROXY_SVG_RESPONSE_CSP);
+    expect(IMAGE_PROXY_SVG_RESPONSE_CSP).toBe(
+      "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    );
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("content-disposition")).toBe('inline; filename="image.svg"');
   });
 
   test("caps the size, the time and upstream failures", async () => {
@@ -205,10 +238,46 @@ describe("image proxy", () => {
     expect((await get("https://images.example.com/a", { authorization: "Bearer k" })).status).toBe(
       403,
     );
+    expect(
+      (await get("https://images.example.com/a", { "x-opengeni-access-key": "k" })).status,
+    ).toBe(403);
     expect((await get("https://images.example.com/a")).status).toBe(200);
     expect((await get("https://images.example.com/a")).status).toBe(200);
     expect((await get("https://images.example.com/a")).status).toBe(429);
     expect(fetched).toHaveLength(2);
+  });
+
+  test("a ticket stands in for the sign-in cookie, only while valid", async () => {
+    const now = 1_800_000_000_000;
+    const { app } = proxy(
+      () => new Response(PNG),
+      {},
+      { ticketSecret: "s3cret", now: () => now },
+    );
+    const issued = await app.request("http://console.test/v1/image-proxy/ticket");
+    expect(issued.status).toBe(200);
+    expect(issued.headers.get("cache-control")).toBe("no-store");
+    const { ticket, expiresAt } = (await issued.json()) as { ticket: string; expiresAt: string };
+    expect(Date.parse(expiresAt)).toBe(now + 12 * 60 * 60 * 1000);
+    expect(readImageProxyTicket("s3cret", ticket, now / 1000)).toBe("person-1");
+    const withTicket = (value: string) =>
+      app.request(
+        `http://console.test/v1/image-proxy?url=${encodeURIComponent("https://images.example.com/a.png")}&ticket=${encodeURIComponent(value)}`,
+      );
+    expect((await withTicket(ticket)).status).toBe(200);
+    for (const bad of [
+      createImageProxyTicket("other-secret", "person-1", now / 1000 + 60),
+      createImageProxyTicket("s3cret", "person-1", now / 1000 - 1),
+      `${ticket}x`,
+      `${ticket}.extra`,
+      "",
+    ]) {
+      expect({ bad, status: (await withTicket(bad)).status }).toEqual({ bad, status: 401 });
+    }
+    // Without a secret there are no tickets.
+    const off = proxy(() => new Response(PNG), {}, { ticketSecret: null });
+    expect((await off.app.request("http://console.test/v1/image-proxy/ticket")).status).toBe(404);
+    expect((await off.get("https://images.example.com/a.png")).status).toBe(200);
   });
 
   test("requires a signed-in session in the real app", async () => {

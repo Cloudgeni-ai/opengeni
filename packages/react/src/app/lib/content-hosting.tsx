@@ -3,6 +3,7 @@ export {
   configureContentHosting,
   contentHosting,
   displayImageSrc,
+  setImageProxyTicket,
   useDisplayImageSrc,
   type ContentHostingConfig,
 } from "../../lib/content-hosting";

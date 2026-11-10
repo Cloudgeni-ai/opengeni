@@ -18,7 +18,19 @@ describe("API HTML page policy", () => {
   test("allows exactly the page's inline blocks by hash, never unsafe-inline", () => {
     const html =
       '<html><head><style>body{margin:0}</style></head><body><script type="application/json" id="d">{"a":1}</script><script>go()</script><script src="/x.js"></script></body></html>';
-    const policy = htmlPageContentSecurityPolicy(html, { formAction: "'self'" });
+    const policy = htmlPageContentSecurityPolicy(html, { formAction: ["'self'"] });
+    expect(
+      htmlPageContentSecurityPolicy(html, {
+        formAction: [
+          "'self'",
+          "https://github.com",
+          "https://github.com",
+          "*",
+          "https:",
+          "javascript:",
+        ],
+      }),
+    ).toContain("form-action 'self' https://github.com;");
     expect(policy).toBe(
       `default-src 'none'; script-src ${hash("go()")}; style-src ${hash("body{margin:0}")}; img-src 'self' data:; font-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
     );
@@ -57,7 +69,7 @@ describe("API HTML page policy", () => {
         status: 400,
         headers: { "content-type": "text/html; charset=utf-8", "x-extra": "1" },
       }),
-      { formAction: "'self'" },
+      { formAction: ["'self'"] },
     );
     expect(page.status).toBe(400);
     expect(page.headers.get("x-extra")).toBe("1");

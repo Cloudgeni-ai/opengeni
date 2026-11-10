@@ -308,12 +308,16 @@ describe("production web handler", () => {
     );
     expect(compressed.headers.get("content-encoding")).toBe("gzip");
     expect(compressed.headers.get("vary")).toBe("Accept-Encoding");
+    // Pages differ only in their per-response style nonce.
+    const sameNonce = (html: string) => html.replace(/nonce="[^"]+"/gu, 'nonce="n"');
     expect(
-      await new Response(compressed.body!.pipeThrough(new DecompressionStream("gzip"))).text(),
-    ).toBe(plainHtml);
+      sameNonce(
+        await new Response(compressed.body!.pipeThrough(new DecompressionStream("gzip"))).text(),
+      ),
+    ).toBe(sameNonce(plainHtml));
 
     const direct = await handler(new Request("https://internal:3000/index.html"));
-    expect(await direct.text()).toBe(plainHtml);
+    expect(sameNonce(await direct.text())).toBe(sameNonce(plainHtml));
 
     const head = await handler(new Request("https://internal:3000/", { method: "HEAD" }));
     expect(head.headers.get("content-length")).toBe(

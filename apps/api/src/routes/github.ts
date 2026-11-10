@@ -108,6 +108,14 @@ import { requestGitHubInstallationRepositorySync } from "../github-installation-
 import { errorMessage } from "@opengeni/contracts/values";
 
 const githubStateCookie = "opengeni_github_state";
+/** Where the browser pages' form submissions redirect (GitHub's own pages). */
+const GITHUB_WEB_ORIGIN = "https://github.com";
+
+function publicOrigins(publicBaseUrl: string | undefined): string[] {
+  if (!publicBaseUrl || !URL.canParse(publicBaseUrl)) return [];
+  const url = new URL(publicBaseUrl);
+  return url.protocol === "https:" || url.protocol === "http:" ? [url.origin] : [];
+}
 const githubBindingStateMaxAgeSeconds = 10 * 60;
 const legacyInstallationChooserDisabledMessage =
   "The legacy repository-admin GitHub installation chooser is disabled; use the GitHub owner-consent connect flow";
@@ -167,10 +175,13 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   };
   // Outermost: every page these routes render (including the failure pages
   // above) gets a policy that allows exactly its own inline style and script
-  // blocks; their forms submit back to the API.
+  // blocks. Their forms submit back to the API (its public origin), which
+  // answers with a redirect to GitHub; browsers check that redirect against
+  // form-action too.
+  const formAction = ["'self'", GITHUB_WEB_ORIGIN, ...publicOrigins(deps.settings.publicBaseUrl)];
   const browserPageSecurity: MiddlewareHandler = async (c, next) => {
     await next();
-    c.res = await withHtmlPageSecurity(c.res, { formAction: "'self'" });
+    c.res = await withHtmlPageSecurity(c.res, { formAction });
   };
   for (const path of GITHUB_BROWSER_ROUTES) app.use(path, browserPageSecurity, browserFailurePage);
 

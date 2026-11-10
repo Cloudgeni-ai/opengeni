@@ -12,8 +12,12 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
  * neither.
  */
 export type HtmlPageSecurityOptions = {
-  /** Where the page's forms may submit: `'none'` (default) or this origin. */
-  formAction?: "'none'" | "'self'";
+  /**
+   * Where the page's forms may submit: `'none'` (default), or exact sources
+   * such as `'self'`. Browsers also apply this to the redirects that follow a
+   * submission, so list where those redirects lead too.
+   */
+  formAction?: "'none'" | readonly string[];
 };
 
 const INLINE_BLOCK = /<(script|style)\b([^>]*)>([\s\S]*?)<\/\1\s*>/giu;
@@ -29,6 +33,14 @@ function isExecutableScript(attributes: string): boolean {
   return (
     !type || type === "module" || type === "text/javascript" || type === "application/javascript"
   );
+}
+
+function formActionSources(value: HtmlPageSecurityOptions["formAction"]): string {
+  if (!value || value === "'none'") return "'none'";
+  const sources = value.filter((source) =>
+    /^(?:'self'|https?:\/\/[a-z0-9.-]+(?::\d+)?)$/iu.test(source),
+  );
+  return sources.length > 0 ? [...new Set(sources)].join(" ") : "'none'";
 }
 
 /** The policy for one rendered page, hashing its inline blocks. */
@@ -49,7 +61,7 @@ export function htmlPageContentSecurityPolicy(
   directives.push(
     "img-src 'self' data:",
     "font-src data:",
-    `form-action ${options.formAction ?? "'none'"}`,
+    `form-action ${formActionSources(options.formAction)}`,
     "base-uri 'none'",
     "frame-ancestors 'none'",
   );

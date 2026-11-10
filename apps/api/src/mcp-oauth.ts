@@ -310,7 +310,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         })),
         selectedWorkspaceId: grant.workspaceId,
       }),
-      { formAction: "'self'" },
+      { formAction: ["'self'"] },
     );
   });
 

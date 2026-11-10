@@ -11,12 +11,15 @@ import { SETUP_ACCOUNT_PATH, SETUP_ACCOUNT_RESPONSE_HEADERS } from "./setup-acco
 import {
   OFFICE_FRAME_ANCESTORS,
   SAME_ORIGIN_HTML_FRAME_HOST_PATH,
+  STYLE_NONCE_PLACEHOLDER,
   buildContentSecurityPolicy,
   contentHostingFor,
+  createStyleNonce,
   inlineScriptHashes,
   loadContentSecuritySources,
   sameOriginHtmlFrameHostResponse,
   withContentHosting,
+  withStyleNonceBootstrap,
   type ConsoleContentSecuritySources,
   type PageKind,
 } from "./csp";
@@ -126,8 +129,8 @@ export type WebHandlerOptions = {
 };
 
 type RenderedPage = {
-  html: Uint8Array<ArrayBuffer>;
-  gzip: Uint8Array<ArrayBuffer>;
+  /** The page, with `STYLE_NONCE_PLACEHOLDER` where each response's nonce goes. */
+  text: string;
   policy: string;
   generation: number;
 };
@@ -157,7 +160,6 @@ export function createWebHandler(
   const renderedPages = new Map<string, Promise<RenderedPage>>();
   const contentSecurity = options.contentSecurity;
   const currentSources = () => contentSecurity?.current() ?? null;
-  const sameOriginFrameHost = () => !currentSources()?.htmlFrameHost;
 
   return async function webHandler(request: Request): Promise<Response> {
     const response = await routeRequest(request);
@@ -173,15 +175,20 @@ export function createWebHandler(
     // The first page waits for the deployment's sources (bounded by the
     // loader's own timeout), so it gets the deployment's policy.
     if (contentSecurity?.ready) await contentSecurity.ready;
+    // Always served (it is inert), so frames rendered before a frame-host
+    // configuration change keep working.
     if (
       url.pathname === SAME_ORIGIN_HTML_FRAME_HOST_PATH &&
-      (request.method === "GET" || request.method === "HEAD") &&
-      sameOriginFrameHost()
+      (request.method === "GET" || request.method === "HEAD")
     ) {
-      return withShellSecurityHeaders(
+      const frame = withShellSecurityHeaders(
         url.pathname,
         sameOriginHtmlFrameHostResponse(request.method),
       );
+      // Office frames the console, so X-Frame-Options (which cannot name
+      // Office's hosts) would block it there; frame-ancestors governs.
+      frame.headers.delete("x-frame-options");
+      return frame;
     }
     return withShellSecurityHeaders(url.pathname, await serveShell(request, url));
   }
@@ -309,15 +316,18 @@ export function createWebHandler(
       pending.catch(() => renderedPages.delete(path));
     }
     const page = await pending;
+    // Every response gets its own style nonce, in the page and its policy.
+    const nonce = createStyleNonce();
+    const html = new TextEncoder().encode(page.text.replaceAll(STYLE_NONCE_PLACEHOLDER, nonce));
     const gzip =
       !request.headers.has("range") &&
       acceptsEncoding(request.headers.get("accept-encoding"), "gzip");
-    const body = gzip ? page.gzip : page.html;
+    const body = gzip ? Bun.gzipSync(html, { level: 6 }) : html;
     const headers = new Headers({
       ...Object.fromEntries(new Headers(extraHeaders)),
       "cache-control": cacheControl,
       "content-type": "text/html;charset=utf-8",
-      "content-security-policy": page.policy,
+      "content-security-policy": page.policy.replaceAll(STYLE_NONCE_PLACEHOLDER, nonce),
       vary: "Accept-Encoding",
     });
     if (gzip) headers.set("content-encoding", "gzip");
@@ -338,15 +348,15 @@ export function createWebHandler(
       text = withContentHosting(text, contentHostingFor(sources, publicOrigin));
     }
     if (path === indexPath && publicOrigin) text = withAbsoluteLinkPreviewUrls(text, publicOrigin);
-    const html = new TextEncoder().encode(text);
+    text = withStyleNonceBootstrap(text);
     return {
-      html,
-      gzip: Bun.gzipSync(html, { level: 9 }),
+      text,
       policy: buildContentSecurityPolicy({
         kind,
         publicOrigin,
         sources,
         scriptHashes: inlineScriptHashes(text),
+        styleNonce: STYLE_NONCE_PLACEHOLDER,
       }),
       generation,
     };
@@ -406,17 +416,16 @@ export function noindexFromEnvironment(
 }
 
 /**
- * Where the web server reads the policy's external origins: the API inside
- * the deployment (the Helm chart sets OPENGENI_DEMO_API_URL to the API
- * service for the demo proxy), or the public API origin.
+ * Where the web server reads the policy's external origins: the deployment's
+ * own API (the Helm chart sets OPENGENI_WEB_CONTENT_SECURITY_API_URL to the
+ * API service), or the public API origin. Never the demo proxy's upstream,
+ * which may be another deployment.
  */
 export function contentSecurityApiUrlFromEnvironment(
   env: Record<string, string | undefined> = process.env,
 ): string | undefined {
   const value =
-    env.OPENGENI_WEB_CONTENT_SECURITY_API_URL?.trim() ||
-    env.OPENGENI_DEMO_API_URL?.trim() ||
-    env.OPENGENI_PUBLIC_BASE_URL?.trim();
+    env.OPENGENI_WEB_CONTENT_SECURITY_API_URL?.trim() || env.OPENGENI_PUBLIC_BASE_URL?.trim();
   if (!value || !URL.canParse(value)) return undefined;
   const url = new URL(value);
   return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : undefined;

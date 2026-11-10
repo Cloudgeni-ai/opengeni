@@ -34,6 +34,8 @@ export type ConsoleContentSecuritySources = {
   htmlFrameHost: string | null;
   /** Root-relative path of the API's image proxy. */
   imageProxyPath: string;
+  /** The proxy's absolute URL when the API is on another origin than the console. */
+  imageProxyUrl?: string;
 };
 
 const TURNSTILE_ORIGIN = "https://challenges.cloudflare.com";
@@ -93,6 +95,14 @@ export async function consoleContentSecuritySources(
   if (relay) add(["connect-src"], httpOriginOf(relay), webSocketOrigin(relay));
   // Any served backend counts, not only the default: a session may pick one.
   if (sandboxBackendServed(settings, "modal")) add(["connect-src"], ...MODAL_TUNNEL_HOSTS);
+  // OpenSandbox hands browsers endpoints on its public ingress (rewritten to
+  // the channel B base URL when one is set).
+  if (sandboxBackendServed(settings, "opensandbox")) {
+    const ingress = httpsOrHttpOrigin(
+      settings.openSandboxChannelBPublicBaseUrl ?? settings.openSandboxBaseUrl,
+    );
+    if (ingress) add(["connect-src"], ingress, webSocketOrigin(ingress));
+  }
 
   // Sign-up challenge (Cloudflare Turnstile): its script and its frame.
   if (settings.signupChallengeEnabled && settings.signupChallengeSiteKey) {
@@ -163,6 +173,9 @@ export async function consoleContentSecuritySources(
     },
     htmlFrameHost,
     imageProxyPath: IMAGE_PROXY_PATH,
+    ...(apiOrigin && webOrigin && apiOrigin !== webOrigin
+      ? { imageProxyUrl: `${apiOrigin}${IMAGE_PROXY_PATH}` }
+      : {}),
   };
 }
 

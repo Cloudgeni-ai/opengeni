@@ -9,6 +9,7 @@ import {
   HTML_FRAME_HOST_DOCUMENT,
   HTML_FRAME_HOST_LABEL,
   HTML_FRAME_HOST_PATH,
+  OFFICE_FRAME_ANCESTOR_ORIGINS,
   htmlFrameHostContentSecurityPolicy,
 } from "@opengeni/contracts/html-frame-host";
 import { normalizeSitesDomain } from "@opengeni/contracts";
@@ -20,7 +21,9 @@ export function isHtmlFrameHostRequest(hostname: string, sitesDomain: string): b
 }
 
 /**
- * Serves the frame host page. Only the console origin may frame it; it sends
+ * Serves the frame host page. Only the console origin may frame it (plus the
+ * Office hosts, because the console's Excel add-in frames it inside Office and
+ * every ancestor must pass frame-ancestors); it sends
  * no X-Frame-Options (that header cannot name another origin) and its policy
  * sandboxes the page itself, so a direct visit is just as isolated as the
  * frame. No Permissions-Policy: like the `srcdoc` frame it replaces, the
@@ -52,7 +55,10 @@ export function handleHtmlFrameHost(
     });
   }
   headers.set("Content-Type", "text/html; charset=utf-8");
-  headers.set("Content-Security-Policy", htmlFrameHostContentSecurityPolicy([options.appOrigin]));
+  headers.set(
+    "Content-Security-Policy",
+    htmlFrameHostContentSecurityPolicy([options.appOrigin, ...OFFICE_FRAME_ANCESTOR_ORIGINS]),
+  );
   // The page is the same for every console (the embedder's origin is in the
   // query string and checked by the loader), so it can be cached briefly.
   headers.set("Cache-Control", "public, max-age=3600");

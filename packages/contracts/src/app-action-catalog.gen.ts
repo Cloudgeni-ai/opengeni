@@ -2538,8 +2538,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "path": "/v1/image-proxy",
     "request": [],
     "query": [
+      "ticket",
       "url"
     ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/image-proxy/ticket",
+    "method": "GET",
+    "path": "/v1/image-proxy/ticket",
+    "request": [],
     "response": []
   },
   {

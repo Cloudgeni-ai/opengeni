@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import {
   HTML_FRAME_HOST_DOCUMENT,
+  OFFICE_FRAME_ANCESTOR_ORIGINS,
   htmlFrameHostContentSecurityPolicy,
 } from "@opengeni/contracts/html-frame-host";
 
@@ -24,12 +25,16 @@ import {
  * the HTML (`opengeni-content-hosting`), so the page and its policy always
  * agree.
  *
- * `style-src` keeps 'unsafe-inline' (style only; never for scripts): the
- * console's UI libraries create style elements and style attributes with
- * runtime-computed CSS (xterm terminal themes, the diff viewer's theme CSS,
- * Radix scroll locking, toast styles, syntax-highlighted code and math
- * rendered as HTML with style attributes), and style attributes set through
- * markup cannot be allowed by hash or nonce at all.
+ * Style elements need the page's per-response nonce (`style-src-elem`): the
+ * console's UI libraries create `<style>` elements with runtime-computed CSS
+ * (toasts, Radix scroll locking, the xterm terminal, the diff viewer, find
+ * highlights), so a small hashed bootstrap script (`STYLE_NONCE_BOOTSTRAP`)
+ * stamps the nonce on every style element the page's own code creates. A
+ * `<style>` that arrives as markup (injected HTML) gets no nonce and is
+ * refused. Style attributes stay allowed (`style-src-attr 'unsafe-inline'`):
+ * highlighted code and math are rendered as HTML with `style` attributes,
+ * and no hash or nonce can allow an attribute. Browsers without the split
+ * directives fall back to `style-src`, which carries the nonce.
  */
 
 /** What the API reports for this deployment. */
@@ -38,6 +43,8 @@ export type ConsoleContentSecuritySources = {
   directives: Partial<Record<ApiDirective, string[]>>;
   htmlFrameHost: string | null;
   imageProxyPath: string;
+  /** Absolute proxy URL when the API is on another origin than the console. */
+  imageProxyUrl?: string;
 };
 
 type ApiDirective =
@@ -55,19 +62,7 @@ export const CONTENT_HOSTING_ELEMENT_ID = "opengeni-content-hosting";
 export const SAME_ORIGIN_HTML_FRAME_HOST_PATH = "/_og/html-frame";
 
 /** The Excel add-in's pages run in Office's frames and load office.js. */
-export const OFFICE_FRAME_ANCESTORS = [
-  "'self'",
-  "https://*.officeapps.live.com",
-  "https://*.office.com",
-  "https://*.office365.com",
-  "https://*.microsoft365.com",
-  "https://*.cloud.microsoft",
-  "https://*.sharepoint.com",
-  "https://onedrive.live.com",
-  "https://*.onedrive.live.com",
-  "https://teams.microsoft.com",
-  "https://*.teams.microsoft.com",
-] as const;
+export const OFFICE_FRAME_ANCESTORS = ["'self'", ...OFFICE_FRAME_ANCESTOR_ORIGINS] as const;
 /**
  * office.js and what it loads itself: Office's host scripts from the same
  * CDN, Microsoft Ajax on older Office versions and the MSAL library for
@@ -83,6 +78,8 @@ const DIRECTIVE_ORDER = [
   "default-src",
   "script-src",
   "style-src",
+  "style-src-elem",
+  "style-src-attr",
   "img-src",
   "media-src",
   "font-src",
@@ -108,6 +105,8 @@ export type ConsolePolicyInput = {
   sources: ConsoleContentSecuritySources | null;
   /** `'sha256-…'` sources for the page's inline scripts. */
   scriptHashes: readonly string[];
+  /** This response's nonce for style elements (see `STYLE_NONCE_BOOTSTRAP`). */
+  styleNonce?: string;
   /** Whether this server serves the same-origin frame host (already 'self'). */
   sameOriginFrameHost?: boolean;
 };
@@ -118,7 +117,9 @@ function basePolicy(): Policy {
     // WebAssembly (document and spreadsheet kernels, syntax highlighting)
     // compiles under 'wasm-unsafe-eval'; JavaScript eval stays blocked.
     "script-src": ["'self'", "'wasm-unsafe-eval'"],
-    "style-src": ["'self'", "'unsafe-inline'"],
+    "style-src": ["'self'"],
+    "style-src-elem": ["'self'"],
+    "style-src-attr": ["'unsafe-inline'"],
     "img-src": ["'self'", "data:", "blob:"],
     "media-src": ["'self'", "data:", "blob:"],
     "font-src": ["'self'", "data:"],
@@ -150,6 +151,10 @@ export function buildContentSecurityPolicy(input: ConsolePolicyInput): string {
       if (isExactSource(value) && !policy[directive].includes(value)) policy[directive].push(value);
   };
   add("script-src", input.scriptHashes);
+  if (input.styleNonce) {
+    add("style-src", [`'nonce-${input.styleNonce}'`]);
+    add("style-src-elem", [`'nonce-${input.styleNonce}'`]);
+  }
   const self = input.publicOrigin ? safeOrigin(input.publicOrigin) : null;
   if (self) {
     // 'self' covers same-origin WebSockets in current browsers; the explicit
@@ -184,7 +189,10 @@ export function contentHostingFor(
   if (self) directOrigins.push(self);
   return {
     htmlFrameHost,
-    imageProxy: { url: sources?.imageProxyPath ?? DEFAULT_IMAGE_PROXY_PATH, directOrigins },
+    imageProxy: {
+      url: sources?.imageProxyUrl ?? sources?.imageProxyPath ?? DEFAULT_IMAGE_PROXY_PATH,
+      directOrigins,
+    },
   };
 }
 
@@ -206,6 +214,55 @@ export function inlineScriptHashes(html: string): string[] {
   return [...hashes].sort();
 }
 
+/**
+ * Stands in for the per-response style nonce in a rendered page and its
+ * policy; `withStyleNonce` swaps in a fresh value for every response.
+ */
+export const STYLE_NONCE_PLACEHOLDER = "__OPENGENI_STYLE_NONCE__";
+const STYLE_NONCE_META_PROPERTY = "csp-nonce";
+
+/**
+ * Runs before any other script: reads the response's style nonce from the
+ * `csp-nonce` meta element (the browser hides the attribute but keeps the
+ * `nonce` property) and stamps it on every `<style>` element the page's code
+ * creates, whichever library creates it. Static, so its hash is stable.
+ */
+export const STYLE_NONCE_BOOTSTRAP =
+  `(()=>{const m=document.querySelector('meta[property="${STYLE_NONCE_META_PROPERTY}"]');` +
+  `const n=m&&m.nonce;if(!n)return;const p=Document.prototype,c=p.createElement,s=p.createElementNS;` +
+  `const t=(e)=>{if(e instanceof Element&&e.localName==="style")e.setAttribute("nonce",n);return e};` +
+  `p.createElement=function(){return t(c.apply(this,arguments))};` +
+  `p.createElementNS=function(){return t(s.apply(this,arguments))};})();`;
+
+/**
+ * Put the style-nonce meta element and its bootstrap first in `<head>` (with
+ * the placeholder nonce), and give the page's own `<style>` blocks the nonce.
+ */
+export function withStyleNonceBootstrap(html: string): string {
+  const block =
+    `<meta property="${STYLE_NONCE_META_PROPERTY}" nonce="${STYLE_NONCE_PLACEHOLDER}">` +
+    `<script id="opengeni-style-nonce">${STYLE_NONCE_BOOTSTRAP}</script>`;
+  // Stamp `<style>` tags outside script bodies only, so a script's text (and
+  // so its hash) never contains the per-response nonce.
+  const stamped = html
+    .split(/(<script\b[\s\S]*?<\/script>)/iu)
+    .map((part, index) =>
+      index % 2 === 1
+        ? part
+        : part.replace(/<style\b(?![^>]*\bnonce=)/giu, `<style nonce="${STYLE_NONCE_PLACEHOLDER}"`),
+    )
+    .join("");
+  const head = /<head\b[^>]*>/iu.exec(stamped);
+  if (!head) return `${block}${stamped}`;
+  const at = head.index + head[0].length;
+  return `${stamped.slice(0, at)}${block}${stamped.slice(at)}`;
+}
+
+/** A fresh style nonce for one response (base64, 128 bits). */
+export function createStyleNonce(): string {
+  return randomBytes(16).toString("base64");
+}
+
 /** Write the page's content hosting into its `<head>` as inert JSON. */
 export function withContentHosting(html: string, hosting: unknown): string {
   const json = JSON.stringify(hosting)
@@ -222,12 +279,18 @@ export function sameOriginHtmlFrameHostResponse(method: string): Response {
     headers: {
       "content-type": "text/html;charset=utf-8",
       "cache-control": "public, max-age=3600",
-      "content-security-policy": htmlFrameHostContentSecurityPolicy(["'self'"]),
-      "x-frame-options": "SAMEORIGIN",
+      // The console frames it, including inside Office (the Excel add-in);
+      // X-Frame-Options cannot name Office's hosts, so it is not sent.
+      "content-security-policy": htmlFrameHostContentSecurityPolicy(OFFICE_FRAME_ANCESTORS),
       "referrer-policy": "no-referrer",
       "x-robots-tag": "noindex",
     },
   });
+}
+
+function absoluteProxyUrl(value: string): boolean {
+  const origin = safeOrigin(value);
+  return origin !== null && /^\/[A-Za-z0-9/_-]+$/u.test(value.slice(origin.length));
 }
 
 function safeOrigin(value: string): string | null {
@@ -270,7 +333,17 @@ export function parseContentSecuritySources(value: unknown): ConsoleContentSecur
     typeof record.imageProxyPath === "string" && /^\/[A-Za-z0-9/_-]+$/u.test(record.imageProxyPath)
       ? record.imageProxyPath
       : DEFAULT_IMAGE_PROXY_PATH;
-  return { version: 1, directives, htmlFrameHost, imageProxyPath };
+  const imageProxyUrl =
+    typeof record.imageProxyUrl === "string" && absoluteProxyUrl(record.imageProxyUrl)
+      ? record.imageProxyUrl
+      : undefined;
+  return {
+    version: 1,
+    directives,
+    htmlFrameHost,
+    imageProxyPath,
+    ...(imageProxyUrl ? { imageProxyUrl } : {}),
+  };
 }
 
 export type ContentSecuritySourceLoader = {
@@ -292,14 +365,31 @@ export function loadContentSecuritySources(options: {
   apiBaseUrl: string | undefined;
   fetch?: typeof fetch;
   refreshMs?: number;
+  /** Longest wait between retries after a failure; retries start at 1 second. */
   retryMs?: number;
   timeoutMs?: number;
+  /** Where failures are reported (once per run of failures). */
+  warn?: (message: string) => void;
 }): ContentSecuritySourceLoader {
   let sources: ConsoleContentSecuritySources | null = null;
   let generation = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
   const doFetch = options.fetch ?? fetch;
+  const warn = options.warn ?? ((message: string) => console.warn(message));
+  let failures = 0;
+  const failed = (reason: string): false => {
+    failures += 1;
+    if (failures === 1) {
+      warn(
+        `Opengeni web: could not read the content-security sources from the API (${reason}); ` +
+          (sources
+            ? "pages keep the last policy until it answers."
+            : "pages get the base policy until it answers."),
+      );
+    }
+    return false;
+  };
   const load = async (): Promise<boolean> => {
     if (!options.apiBaseUrl) return false;
     try {
@@ -308,23 +398,27 @@ export function loadContentSecuritySources(options: {
         headers: { accept: "application/json" },
         signal: AbortSignal.timeout(options.timeoutMs ?? 5_000),
       });
-      if (!response.ok) return false;
+      if (!response.ok) return failed(`HTTP ${response.status}`);
       const next = parseContentSecuritySources(await response.json());
-      if (!next) return false;
+      if (!next) return failed("malformed answer");
       if (JSON.stringify(next) !== JSON.stringify(sources)) {
         sources = next;
         generation += 1;
       }
+      if (failures > 0) console.info("Opengeni web: content-security sources loaded.");
+      failures = 0;
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      return failed(error instanceof Error ? error.name : "request failed");
     }
   };
   const schedule = (ok: boolean) => {
     if (stopped || !options.apiBaseUrl) return;
+    // After a failure, retry quickly at first (1, 2, 4, 8 seconds...).
+    const retry = Math.min(options.retryMs ?? 10_000, 1_000 * 2 ** Math.max(0, failures - 1));
     timer = setTimeout(
       () => void load().then(schedule),
-      ok ? (options.refreshMs ?? 5 * 60_000) : (options.retryMs ?? 10_000),
+      ok ? (options.refreshMs ?? 5 * 60_000) : retry,
     );
     (timer as { unref?: () => void }).unref?.();
   };

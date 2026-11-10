@@ -5,7 +5,12 @@ import {
   HTML_FRAME_HOST_SANDBOX,
   HTML_FRAME_HOST_VERSION,
 } from "@opengeni/contracts/html-frame-host";
-import { configureContentHosting, displayImageSrc } from "../src/lib/content-hosting";
+import {
+  configureContentHosting,
+  contentHosting,
+  displayImageSrc,
+  setImageProxyTicket,
+} from "../src/lib/content-hosting";
 import { htmlFrameHostSrc, useHtmlFrameHost } from "../src/components/artifacts/html-frame-host";
 import { PublishedHtmlArtifactFrame } from "../src/components/artifacts/published-html-artifact-frame";
 import { actRun, registerDom, renderComponent, renderHook } from "./render-hook";
@@ -41,6 +46,21 @@ test("images load directly only from listed, same-origin or inline sources", () 
   ]) {
     expect(displayImageSrc(direct, proxy, page)).toBe(direct);
   }
+});
+
+test("a page signed in with a bearer token adds its image proxy ticket", () => {
+  const page = "https://app.example.com";
+  setImageProxyTicket("t1");
+  expect(contentHosting().imageProxy).toBeUndefined();
+  configureContentHosting({
+    imageProxy: { url: "https://api.example.com/v1/image-proxy", directOrigins: [] },
+  });
+  setImageProxyTicket("a.b+c");
+  expect(displayImageSrc("https://elsewhere.example/a.png", contentHosting(), page)).toBe(
+    `https://api.example.com/v1/image-proxy?url=${encodeURIComponent("https://elsewhere.example/a.png")}&ticket=${encodeURIComponent("a.b+c")}`,
+  );
+  setImageProxyTicket(null);
+  expect(contentHosting().imageProxy?.ticket).toBeUndefined();
 });
 
 test("the frame host address names the embedding page as its parent", () => {

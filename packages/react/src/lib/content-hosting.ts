@@ -23,6 +23,11 @@ export type ContentHostingConfig = {
     url: string;
     /** Origins (`https://host[:port]`) the page loads images from directly. */
     directOrigins: readonly string[];
+    /**
+     * A ticket identifying the signed-in person, for pages that sign in with
+     * a bearer token an `<img>` cannot send (see `setImageProxyTicket`).
+     */
+    ticket?: string;
   } | null;
 };
 
@@ -37,6 +42,14 @@ export function configureContentHosting(config: ContentHostingConfig): void {
 
 export function contentHosting(): ContentHostingConfig {
   return current;
+}
+
+/** Attach (or clear) the image proxy ticket of the person signed in on this page. */
+export function setImageProxyTicket(ticket: string | null): void {
+  const proxy = current.imageProxy;
+  if (!proxy || (proxy.ticket ?? null) === ticket) return;
+  const { ticket: _previous, ...rest } = proxy;
+  configureContentHosting({ ...current, imageProxy: ticket ? { ...rest, ticket } : rest });
 }
 
 function subscribe(listener: () => void): () => void {
@@ -75,7 +88,8 @@ export function displayImageSrc(
   if (url.protocol === "http:") url.protocol = "https:";
   if (proxy.directOrigins.includes(url.origin)) return src;
   const separator = proxy.url.includes("?") ? "&" : "?";
-  return `${proxy.url}${separator}url=${encodeURIComponent(url.toString())}`;
+  const ticket = proxy.ticket ? `&ticket=${encodeURIComponent(proxy.ticket)}` : "";
+  return `${proxy.url}${separator}url=${encodeURIComponent(url.toString())}${ticket}`;
 }
 
 /** `displayImageSrc` for a component, following configuration changes. */
