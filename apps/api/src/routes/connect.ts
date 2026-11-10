@@ -2095,10 +2095,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               : {
                   installationTarget: input.installationTarget ?? {
                     instanceKey: `account-${id}`,
-                    displayName:
-                      CORE_INTEGRATION_DEFINITIONS.find(
-                        (definition) => definition.id === input.providerId,
-                      )?.name ?? input.providerId,
+                    displayName: definition?.name ?? input.providerId,
                   },
                 }),
             ...(reconnect
