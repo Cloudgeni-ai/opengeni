@@ -665,7 +665,9 @@ describe("turn-capacity Prometheus alerts", () => {
       expect(block).not.toContain("vector(0)");
     }
     expect(critical).toContain("legacy video/retry");
-    expect(ruleBlock(template, "alert", "OpenGeniTurnCapacityMonitorStale")).toContain("for: 30s");
+    // Worker rollouts leave a new or draining pod unreported for a minute or
+    // two; only sustained blindness is worth a warning.
+    expect(ruleBlock(template, "alert", "OpenGeniTurnCapacityMonitorStale")).toContain("for: 5m");
   });
 
   test("scopes sustained Pending worker alerts to the exact release, not every Pod", async () => {

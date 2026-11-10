@@ -1996,7 +1996,7 @@ spec:
         - alert: OpenGeniTurnCapacityMonitorStale
           expr: |
             absent(opengeni:turn_capacity_monitor:fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}})
-          for: 30s
+          for: 5m
           labels:
             severity: warning
             notification_policy: investigate
@@ -2005,7 +2005,7 @@ spec:
             headline: 'Turn-capacity monitoring is blind'
             user_impact: 'No direct user impact, but queue backlog alerts cannot fire until this recovers.'
             next_step: 'Check worker-turns pods and their metrics scrape, and their connection to Temporal.'
-            description: No complete healthy ready-worker projection is available for 30 seconds; at least one scrape is down/absent, a monitor value/timestamp is missing, a successful queue sample is at least 60 seconds old, or deployment availability cannot be verified. Queue threshold alerts fail closed to unknown until all required observations recover; absence is not zero backlog or zero load.
+            description: No complete healthy ready-worker projection has been available for 5 minutes, longer than a worker rollout leaves new or draining pods unreported; at least one scrape is down/absent, a monitor value/timestamp is missing, a successful queue sample is at least 60 seconds old, or deployment availability cannot be verified. Queue threshold alerts fail closed to unknown until all required observations recover; absence is not zero backlog or zero load.
             action: Check worker-turns ServiceMonitor targets, ready deployment replicas, monitor errors and Temporal DescribeTaskQueue connectivity; restore evidence before acting on queue values.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerPodPending
