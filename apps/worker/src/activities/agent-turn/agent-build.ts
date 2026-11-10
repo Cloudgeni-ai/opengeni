@@ -939,7 +939,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // only a stable notice. Maintenance turns never reach the model.
         ...(turn.source !== "compaction"
           ? {
-              publishRepositorySkills: async (index: RepositorySkillsIndex) =>
+              publishRepositorySkills: async (index: RepositorySkillsIndex | null) =>
                 await ensureSessionRepositorySkills(db, {
                   accountId: input.accountId,
                   workspaceId: input.workspaceId,
@@ -947,8 +947,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                   turnId: turn.id,
                   expectedExecutionGeneration: turn.executionGeneration,
                   expectedAttemptId: input.attemptId,
-                  index: index.text,
-                  ...(index.empty ? { omitWhenAbsent: true } : {}),
+                  // An empty index is stored too, so the model knows the
+                  // workspace has none rather than searching for them.
+                  index: index?.text ?? null,
                 }),
             }
           : {}),

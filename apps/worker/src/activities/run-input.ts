@@ -7,7 +7,6 @@ import {
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   FileResourceRef,
   resourceMountPath,
-  readRepositorySkillsContext,
   readTurnExecutionPolicyV1,
   readTurnServingPolicyV1,
   renderAppShotForModel,
@@ -1060,78 +1059,25 @@ async function openSuffixMessageInput(
 type StoredHistoryRow = Awaited<ReturnType<ActiveHistoryLoader>>["items"][number];
 
 /**
- * Find where the current turn begins in the model input. Context stored
- * during the run (the Repository skills index) is inserted before the turn's
- * first active history row, or at the end of the history without one, and
- * later turns load it from there through the same projections. A placeholder
- * of the same shape at that place goes through those projections now; where
- * it ends up is the turn start, and it is then removed.
+ * The rows as later turns load them once this run stores a Repository skills
+ * index: the item sits before the turn's first active row, or after the
+ * history when the turn has none yet.
  */
-function turnStartPlaceholder(
+function rowsWithRepositorySkills(
   rows: readonly StoredHistoryRow[],
   turnId: string,
-): { rows: StoredHistoryRow[]; marker: string } {
-  const marker = `turn start ${crypto.randomUUID()}`;
+  index: string,
+): StoredHistoryRow[] {
   const first = rows.findIndex((row) => row.turnId === turnId);
   const at = first === -1 ? rows.length : first;
-  const placeholder: StoredHistoryRow = {
+  const row: StoredHistoryRow = {
     id: crypto.randomUUID(),
     position: at < rows.length ? rows[at]!.position : (rows.at(-1)?.position ?? 0) + 1,
     turnId,
-    item: repositorySkillsContextItem(marker),
+    item: repositorySkillsContextItem(index),
     providerArtifactInvalidatedAt: null,
   };
-  return { rows: [...rows.slice(0, at), placeholder, ...rows.slice(at)], marker };
-}
-
-/**
- * Remove the placeholder and record its index, with a renderer that gives an
- * index the placeholder's projected form (for example the Responses wrapper
- * or Claude's system role). None when a projection dropped it.
- */
-function withTurnStartIndex(
-  prepared: PreparedTurnInput["input"],
-  marker: string | null,
-): PreparedTurnInput["input"] {
-  if (marker === null) return prepared;
-  const {
-    turnStartIndex: _defaultIndex,
-    renderRepositorySkillsItem: _defaultRender,
-    ...rest
-  } = prepared;
-  const items = Array.isArray(prepared.input) ? (prepared.input as unknown[]) : null;
-  const index =
-    items?.findIndex(
-      (item) =>
-        Boolean(item) &&
-        typeof item === "object" &&
-        readRepositorySkillsContext(item as Record<string, unknown>) === marker,
-    ) ?? -1;
-  if (index === -1 || !items) return rest;
-  const projected = items[index];
-  return {
-    ...rest,
-    input: [...items.slice(0, index), ...items.slice(index + 1)] as typeof prepared.input,
-    persistedHistoryCount:
-      index < prepared.persistedHistoryCount
-        ? prepared.persistedHistoryCount - 1
-        : prepared.persistedHistoryCount,
-    turnStartIndex: index,
-    renderRepositorySkillsItem: (text) =>
-      replaceText(projected, marker, text) as ReturnType<
-        NonNullable<PreparedTurnInput["input"]["renderRepositorySkillsItem"]>
-      >,
-  };
-}
-
-function replaceText(value: unknown, from: string, to: string): unknown {
-  if (typeof value === "string") return value.split(from).join(to);
-  if (Array.isArray(value)) return value.map((entry) => replaceText(entry, from, to));
-  if (value && typeof value === "object")
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [key, replaceText(entry, from, to)]),
-    );
-  return value;
+  return [...rows.slice(0, at), row, ...rows.slice(at)];
 }
 
 /** Build one inference from canonical history plus attempt-local operational context. */
@@ -1166,94 +1112,116 @@ async function messageInput(
   const stored = preparationOptions.omitRemoteCompactionItems
     ? activeHistory.items.filter((row) => row.item.type !== "compaction")
     : activeHistory.items;
-  const turnStart = preparationOptions.turnId
-    ? turnStartPlaceholder(stored, preparationOptions.turnId)
-    : null;
-  const projected = turnStart?.rows ?? stored;
-  const canonicalView = await measureHistoryPreparationPhase(
-    preparationOptions,
-    "canonical_projection",
-    async () => {
-      const provenance = preparationOptions.servingProviderId
-        ? await readSubscriptionHistoryProvenance(
-            db,
-            trigger.workspaceId,
-            trigger.sessionId,
-            stored.map((row) => row.id),
-          )
-        : null;
-      const active =
-        provenance && preparationOptions.servingProviderId
-          ? projectServingProviderArtifacts(
-              projected.map((row) => ({
-                ...row,
-                turnId: provenance.turnByHistoryId.get(row.id) ?? null,
-              })),
-              {
-                enabled: true,
-                servingProviderId: preparationOptions.servingProviderId,
-                turnMetadata: provenance.turnMetadata,
-              },
-            )
-          : projectRejectedProviderArtifacts(projected);
-      return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
-    },
-  );
   const searchRecords = preparationOptions.searchRecords;
-  if (searchRecords)
-    await settleTurnSearchRecords(
-      db,
-      trigger.workspaceId,
-      trigger.sessionId,
-      searchRecords,
-      canonicalView,
+  const storedIds = new Set(stored.map((row) => row.id));
+  /**
+   * Project durable rows for this inference. `measured` runs report their
+   * phases and settle search records; the Repository skills re-projection
+   * below repeats only the pure projection of the same rows.
+   */
+  const project = async (rows: readonly StoredHistoryRow[], measured: boolean) => {
+    const phases = measured ? preparationOptions : {};
+    const canonicalView = await measureHistoryPreparationPhase(
+      phases,
+      "canonical_projection",
+      async () => {
+        const provenance = preparationOptions.servingProviderId
+          ? await readSubscriptionHistoryProvenance(
+              db,
+              trigger.workspaceId,
+              trigger.sessionId,
+              rows.map((row) => row.id),
+            )
+          : null;
+        const active =
+          provenance && preparationOptions.servingProviderId
+            ? projectServingProviderArtifacts(
+                rows.map((row) => ({
+                  ...row,
+                  // Only the re-projection's new row is not stored yet.
+                  turnId:
+                    provenance.turnByHistoryId.get(row.id) ??
+                    (storedIds.has(row.id) ? null : row.turnId),
+                })),
+                {
+                  enabled: true,
+                  servingProviderId: preparationOptions.servingProviderId,
+                  turnMetadata: provenance.turnMetadata,
+                },
+              )
+            : projectRejectedProviderArtifacts([...rows]);
+        return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
+      },
     );
-  const providerView = await measureHistoryPreparationPhase(
-    preparationOptions,
-    "provider_projection",
-    () =>
+    if (measured && searchRecords)
+      await settleTurnSearchRecords(
+        db,
+        trigger.workspaceId,
+        trigger.sessionId,
+        searchRecords,
+        canonicalView,
+      );
+    const providerView = await measureHistoryPreparationPhase(phases, "provider_projection", () =>
       searchRecords
         ? projectTurnHistoryForProvider(canonicalView, providerApi, searchRecords)
         : projectHistoryForProvider(canonicalView, providerApi),
-  );
-  const referencedHistory = await measureHistoryPreparationPhase(
-    preparationOptions,
-    "attachment_ref_projection",
-    () => withCurrentUserAttachmentRefs(providerView, currentAttachmentRefs),
-  );
-  const materializedHistory = await measureHistoryPreparationPhase(
-    preparationOptions,
-    "screenshot_materialization",
-    async () =>
-      materializeModelHistory
-        ? await materializeModelHistory(referencedHistory)
-        : referencedHistory,
-  );
-  const historyItems = await measureHistoryPreparationPhase(
-    preparationOptions,
-    "model_attachment_projection",
-    async () =>
+    );
+    const referencedHistory = await measureHistoryPreparationPhase(
+      phases,
+      "attachment_ref_projection",
+      () => withCurrentUserAttachmentRefs(providerView, currentAttachmentRefs),
+    );
+    const materializedHistory = await measureHistoryPreparationPhase(
+      phases,
+      "screenshot_materialization",
+      async () =>
+        materializeModelHistory
+          ? await materializeModelHistory(referencedHistory)
+          : referencedHistory,
+    );
+    return await measureHistoryPreparationPhase(phases, "model_attachment_projection", async () =>
       projectModelHistory
         ? await projectModelHistory(materializedHistory, {
             inlineFiles: currentAttachments.map((attachment) => attachment.file),
           })
         : materializedHistory,
-  );
+    );
+  };
+  const historyItems = await project(stored, true);
+  const turnId = preparationOptions.turnId;
   const prepared = await measureHistoryPreparationPhase(
     preparationOptions,
     "runtime_input_assembly",
-    async () =>
-      withTurnStartIndex(
-        await runtime.prepareInput(agent, {
-          kind: "message",
-          ...(text ? { text } : {}),
-          ...(internalContext ? { internalContext } : {}),
-          historyItems: historyItems as any,
-          sandboxEnvelope: envelope,
-          ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
-        }),
-        turnStart?.marker ?? null,
-      ),
+    async () => {
+      const assembled = await runtime.prepareInput(agent, {
+        kind: "message",
+        ...(text ? { text } : {}),
+        ...(internalContext ? { internalContext } : {}),
+        historyItems: historyItems as any,
+        sandboxEnvelope: envelope,
+        ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
+      });
+      const { historyWithRepositorySkills: _atHistoryEnd, ...rest } = assembled;
+      if (!turnId) return rest;
+      return {
+        ...rest,
+        // A new index is shown in this run exactly as later turns load it:
+        // the same rows with the stored item, through the same projections.
+        historyWithRepositorySkills: async (index: string) => {
+          const withIndex = await runtime.prepareInput(agent, {
+            kind: "message",
+            historyItems: (await project(
+              rowsWithRepositorySkills(stored, turnId, index),
+              false,
+            )) as any,
+            ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
+          });
+          return Array.isArray(withIndex.input)
+            ? (withIndex.input.slice(0, withIndex.persistedHistoryCount) as any[])
+            : null;
+        },
+      };
+    },
   );
   const providerArtifactCandidates = await measureHistoryPreparationPhase(
     preparationOptions,

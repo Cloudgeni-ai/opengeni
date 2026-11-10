@@ -44449,10 +44449,11 @@ export async function ensureSessionSkillCatalog(
  * workspace, once per logical turn, as a history item before the turn's first
  * history item (with that turn's id). Retries reuse the turn's snapshot even
  * when the workspace changed meanwhile. Nothing is written while the newest
- * item already shows the same index. Null means the index could not be read:
- * nothing is written and the model keeps what it already reads. An empty
- * index (`omitWhenAbsent`) writes nothing unless an earlier index must be
- * replaced. Returns the model-visible index, or null when there is none.
+ * item already shows the same index. Null means this run did not index the
+ * workspace (a deferred run): nothing is written, and the turn keeps what the
+ * model already reads, so a later attempt of the turn cannot add an item
+ * between its requests. Returns the model-visible index, or null when there
+ * is none.
  *
  * Discovery runs inside the model run, after this turn's history was loaded,
  * so the run shows the returned item at the same place itself (see the
@@ -44468,13 +44469,12 @@ export async function ensureSessionRepositorySkills(
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
     index: string | null;
-    omitWhenAbsent?: boolean;
   },
 ): Promise<string | null> {
-  const { index, omitWhenAbsent, ...scope } = input;
+  const { index, ...scope } = input;
   return await ensureSessionContextSnapshot(
     db,
-    { ...scope, text: index, ...(omitWhenAbsent ? { omitWhenAbsent: true } : {}) },
+    { ...scope, text: index },
     REPOSITORY_SKILLS_CHANNEL,
   );
 }

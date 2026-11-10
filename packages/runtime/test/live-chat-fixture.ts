@@ -103,16 +103,22 @@ export function chat(
     async turn(text: string, options: TurnOptions = {}) {
       const turn = ++turns;
       rows.push({ turn, item: { type: "message", role: "user", content: text } });
+      // Like ensureSessionRepositorySkills: frozen per turn, written only when
+      // it changed, and null (a deferred run) keeps the latest.
       let frozen: string | null | undefined;
+      const withIndex = (stored: typeof rows, index: string) => {
+        const at = stored.findIndex((row) => row.turn === turn);
+        return [
+          ...stored.slice(0, at),
+          { turn, item: repositorySkillsContextItem(index) as AgentInputItem },
+          ...stored.slice(at),
+        ];
+      };
       const publish: PublishRepositorySkills = async (index) => {
         if (frozen !== undefined) return frozen;
         const latest = latestRepositorySkillsIndex(rows.map((row) => row.item));
-        if (index.text === latest || (index.empty && latest === null)) return (frozen = latest);
-        const at = rows.findIndex((row) => row.turn === turn);
-        rows.splice(at, 0, {
-          turn,
-          item: repositorySkillsContextItem(index.text) as AgentInputItem,
-        });
+        if (index === null || index.text === latest) return (frozen = latest);
+        rows.splice(0, rows.length, ...withIndex(rows, index.text));
         return (frozen = index.text);
       };
       const agent = buildOpenGeniAgent(settings, [REPOSITORY], {
@@ -123,6 +129,7 @@ export function chat(
         ...(api === "anthropic-messages" ? { structuredToolTransport: false } : {}),
       });
       // The worker's input: stored history, projected, plus this turn's notice.
+      const loaded = [...rows];
       const prepared = await prepareRunInput(agent, {
         kind: "message",
         historyItems: project(rows.map((row) => row.item)),
@@ -135,9 +142,8 @@ export function chat(
         {
           input,
           persistedHistoryCount: prepared.persistedHistoryCount,
-          turnStartIndex: rows.findIndex((row) => row.turn === turn),
-          renderRepositorySkillsItem: (index) =>
-            project([repositorySkillsContextItem(index) as AgentInputItem])[0]!,
+          historyWithRepositorySkills: async (index) =>
+            project(withIndex(loaded, index).map((row) => row.item)),
         },
         settings,
         { ownedSandbox: { client: box.client, session: box.session, deferredSetup: true } },

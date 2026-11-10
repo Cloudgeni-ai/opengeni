@@ -10,7 +10,8 @@
 // each turn.
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { renderSessionGoalContext } from "@opengeni/contracts";
-import { GENESIS_TITLE_DIRECTIVE } from "../src/index";
+import { testSettings } from "@opengeni/testing/settings";
+import { buildOpenGeniAgent, GENESIS_TITLE_DIRECTIVE, prepareRunInput } from "../src/index";
 import { chat, claudeModel, liveBox, responsesModel, type TurnOptions } from "./live-chat-fixture";
 
 type Box = Awaited<ReturnType<typeof liveBox>>;
@@ -137,7 +138,8 @@ describe.each([
   test(`one system prompt across turns that change ${PER_TURN_INPUTS.length} per-turn inputs`, async () => {
     const box = await liveBox();
     await box.addSkill("alpha");
-    const { api, model, bodies, system, conversation } = wire(Array(TURNS).fill("text"));
+    // The first turn calls a tool, so it sends two requests.
+    const { api, model, bodies, system, conversation } = wire(["tool"]);
     const conversationChat = chat(box, model, api);
     for (let index = 0; index < TURNS; index++) {
       const turn: Turn = { index, box, options: { build: {} }, notices: [] };
@@ -148,11 +150,11 @@ describe.each([
       });
     }
 
-    expect(bodies).toHaveLength(TURNS);
+    expect(bodies).toHaveLength(TURNS + 1);
     const prompts = bodies.map(system);
     for (const [index, prompt] of prompts.entries()) {
-      // Name the turn that differs, so a failure says which inputs to check.
-      expect({ turn: index, prompt }).toEqual({ turn: index, prompt: prompts[0]! });
+      // Name the request that differs, so a failure says which inputs to check.
+      expect({ request: index, prompt }).toEqual({ request: index, prompt: prompts[0]! });
     }
     // The per-turn content still reaches the model, as history.
     const sent = JSON.stringify(conversation(bodies.at(-1)));
@@ -165,4 +167,18 @@ describe.each([
     expect(sent).toContain("the workspace was unreachable");
     expect(sent).toContain("could not be indexed");
   }, 60_000);
+});
+
+test("a missing title is requested once per agent, in the turn notice", async () => {
+  const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+    missingSessionTitleHint: true,
+  });
+  const historyItems = [{ type: "message", role: "user", content: "Hello" }];
+  const first = await prepareRunInput(agent, { kind: "message", historyItems } as never);
+  // Input prepared again for the same agent (a nudge, a retry after
+  // compaction) follows a run that already saw the request.
+  const again = await prepareRunInput(agent, { kind: "message", historyItems } as never);
+  expect(JSON.stringify(first.input)).toContain("still needs a semantic display title");
+  expect(JSON.stringify(again.input)).not.toContain("still needs a semantic display title");
+  expect(JSON.stringify(agent.instructions)).not.toContain("still needs a semantic display title");
 });

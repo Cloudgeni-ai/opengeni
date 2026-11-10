@@ -512,7 +512,7 @@ export class WorkspaceSkillsCapability extends Capability {
    * Repository skills history item instead.
    */
   override async instructions(): Promise<string | null> {
-    if (!this.options.deferred) await this.publish();
+    await this.publish();
     return repositorySkillsNotice(this.searchPaths);
   }
 
@@ -522,11 +522,14 @@ export class WorkspaceSkillsCapability extends Capability {
     return renderRepositorySkillsIndex(await this.discover());
   }
 
-  /** Publish this run's index once per binding; a failed publication is retried. */
+  /**
+   * Publish this run's index once per binding, or null for a deferred run;
+   * a failed publication is retried.
+   */
   private publish(): Promise<void> {
     if (this.publication) return this.publication;
     const publication = this.index().then(async (index) => {
-      if (index) await this.options.publish?.(index);
+      await this.options.publish?.(index);
     });
     this.publication = publication;
     publication.catch(() => {
@@ -539,7 +542,7 @@ export class WorkspaceSkillsCapability extends Capability {
 /** A discovered index, rendered for the model. */
 export type RepositorySkillsIndex = Readonly<{
   text: string;
-  /** No repository skill and nothing to report: only replaces an earlier index. */
+  /** No repository skill and nothing to report. */
   empty: boolean;
 }>;
 
@@ -554,9 +557,10 @@ export type WorkspaceSkillsOptions = Readonly<{
   deferred?: boolean;
   /**
    * Receives the run's index once discovery finishes, before the first model
-   * request. Without it the index is discovered but never shown.
+   * request, or null when a deferred run does not index the workspace. Without
+   * it the index is discovered but never shown.
    */
-  publish?: (index: RepositorySkillsIndex) => Promise<void>;
+  publish?: (index: RepositorySkillsIndex | null) => Promise<void>;
 }>;
 
 const REPOSITORY_SKILL_READ_DESCRIPTION =

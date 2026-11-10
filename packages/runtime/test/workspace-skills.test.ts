@@ -1631,8 +1631,8 @@ describe("repository skills keep the system prompt stable", () => {
   async function run(
     session: SandboxSessionLike,
     options: { deferred?: boolean } = {},
-  ): Promise<{ instructions: string | null; published: RepositorySkillsIndex[] }> {
-    const published: RepositorySkillsIndex[] = [];
+  ): Promise<{ instructions: string | null; published: (RepositorySkillsIndex | null)[] }> {
+    const published: (RepositorySkillsIndex | null)[] = [];
     const capability = workspaceSkills(searchPaths, [], [], {
       ...options,
       publish: async (index) => {
@@ -1677,14 +1677,15 @@ describe("repository skills keep the system prompt stable", () => {
     expect(one.instructions).toContain("Repository skills context message");
     expect(one.instructions).not.toContain("alpha");
 
-    // Each indexed run publishes its index exactly once; a deferred run none.
+    // Each run publishes once: its index, or null for a deferred run, which
+    // keeps the index the model already has for the rest of the turn.
     expect(one.published).toHaveLength(1);
-    expect(one.published[0]!.text).toContain("repository:.agents/skills/alpha/SKILL.md");
-    expect(one.published[0]!.text).not.toContain("beta");
-    expect(two.published[0]!.text).toContain("repository:repos/app/.claude/skills/beta/SKILL.md");
-    expect(unreachable.published[0]!.text).toContain("the workspace was unreachable");
-    expect(degraded.published[0]!.text).toContain("this workspace cannot list files");
-    expect(deferred.published).toEqual([]);
+    expect(one.published[0]?.text).toContain("repository:.agents/skills/alpha/SKILL.md");
+    expect(one.published[0]?.text).not.toContain("beta");
+    expect(two.published[0]?.text).toContain("repository:repos/app/.claude/skills/beta/SKILL.md");
+    expect(unreachable.published[0]?.text).toContain("the workspace was unreachable");
+    expect(degraded.published[0]?.text).toContain("this workspace cannot list files");
+    expect(deferred.published).toEqual([null]);
     expect(restored.published).toEqual(one.published);
     expect(empty.published).toEqual([
       { text: "No repository skills were found in the workspace.", empty: true },

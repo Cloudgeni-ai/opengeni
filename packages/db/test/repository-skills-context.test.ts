@@ -107,12 +107,8 @@ async function fixture() {
     (await history())
       .map((row) => readRepositorySkillsContext(row.item))
       .filter((value) => value !== null);
-  const publish = (turn: Turn, index: string | null, empty = false) =>
-    ensureSessionRepositorySkills(client.db, {
-      ...identity(turn),
-      index,
-      ...(empty ? { omitWhenAbsent: true } : {}),
-    });
+  const publish = (turn: Turn, index: string | null) =>
+    ensureSessionRepositorySkills(client.db, { ...identity(turn), index });
   const catalog = (turn: Turn, text: string) =>
     ensureSessionSkillCatalog(client.db, { ...identity(turn), catalog: text });
   return { claim, settle, history, indexes, publish, catalog };
@@ -149,7 +145,7 @@ test("a changed index is a history item before its turn; earlier items never cha
   expect(updated.at(-1)!.item.role).toBe("user");
 }, 180_000);
 
-test("an index that could not be read keeps what the model has", async () => {
+test("a deferred run keeps what the model has for the whole turn", async () => {
   const f = await fixture();
   const first = await f.claim();
   expect(await f.publish(first, "Index A")).toBe("Index A");
@@ -157,6 +153,8 @@ test("an index that could not be read keeps what the model has", async () => {
   const before = await f.history();
   const second = await f.claim();
   expect(await f.publish(second, null)).toBe("Index A");
+  // A deferred run froze the turn: a later attempt that indexes adds nothing.
+  expect(await f.publish(second, "Index B")).toBe("Index A");
   expect((await f.history()).slice(0, before.length)).toEqual(before);
   expect(await f.indexes()).toEqual(["Index A"]);
   // Never indexed: nothing is written and the turn stays without an index.
@@ -179,18 +177,17 @@ test("unreachable then restored replaces the index each time it changes", async 
   expect(await f.indexes()).toEqual(["Index A", "Unreachable", "Index A"]);
 }, 180_000);
 
-test("an empty index is written only to replace an earlier one", async () => {
+test("an empty index is stored, so the model knows there are none", async () => {
   const f = await fixture();
   const first = await f.claim();
-  expect(await f.publish(first, "No skills", true)).toBeNull();
-  expect(await f.indexes()).toEqual([]);
+  expect(await f.publish(first, "No skills")).toBe("No skills");
   await f.settle(first);
   const second = await f.claim();
   expect(await f.publish(second, "Index A")).toBe("Index A");
   await f.settle(second);
   const third = await f.claim();
-  expect(await f.publish(third, "No skills", true)).toBe("No skills");
-  expect(await f.indexes()).toEqual(["Index A", "No skills"]);
+  expect(await f.publish(third, "No skills")).toBe("No skills");
+  expect(await f.indexes()).toEqual(["No skills", "Index A", "No skills"]);
 }, 180_000);
 
 test("an index written during the run goes before the turn's earlier context items", async () => {

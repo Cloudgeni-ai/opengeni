@@ -209,6 +209,7 @@ import {
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   resourceMountPath,
   renderSessionGoalContext,
+  repositorySkillsContextItem,
   signDelegatedAccessToken,
   GenerateImageToolInput,
   GenerateVideoToolInput,
@@ -665,12 +666,16 @@ import {
 } from "./workspace-skills";
 import {
   repositorySkillsContextInputFilter,
+  type HistoryWithRepositorySkills,
   type PublishRepositorySkills,
   type RepositorySkillsContextState,
 } from "./repository-skills-context";
 export { REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES } from "./workspace-skills";
 export type { RepositorySkillsIndex } from "./workspace-skills";
-export type { PublishRepositorySkills } from "./repository-skills-context";
+export type {
+  HistoryWithRepositorySkills,
+  PublishRepositorySkills,
+} from "./repository-skills-context";
 import {
   composeRuntimeSkills,
   readRuntimeSkill,
@@ -1260,17 +1265,12 @@ export type PreparedAgentInput = {
   /** Canonical durable prefix already present before this attempt adds items. */
   persistedHistoryCount: number;
   /**
-   * Index in `input` where the current turn begins: where context the run
-   * stores before this turn's first history item (the Repository skills
-   * index) is shown, matching where later turns load it. Defaults to the end
-   * of the durable history.
+   * The durable prefix (`persistedHistoryCount` items) as later turns load it
+   * once this run stores a new Repository skills index before the turn. The
+   * run shows the index only through it. Defaults to the index after the
+   * history.
    */
-  turnStartIndex?: number;
-  /**
-   * Renders a Repository skills index the way this input renders its history
-   * items (the caller's provider projection). Defaults to the stored item.
-   */
-  renderRepositorySkillsItem?: (index: string) => AgentInputItem;
+  historyWithRepositorySkills?: HistoryWithRepositorySkills;
   sandboxSessionState?: SandboxSessionState;
   modelInputAlreadyProjected?: boolean;
 };
@@ -2925,9 +2925,10 @@ export type BuildAgentOptions = {
   deferRepositorySkillIndex?: boolean;
   /**
    * Stores the run's repository Skill index durably (see
-   * `PublishRepositorySkills`). Called once per run when discovery finishes,
-   * before the first model request; never for a deferred index. Without it
-   * the run still shows its index at the turn start, but nothing keeps it.
+   * `PublishRepositorySkills`). Called once per run before the first model
+   * request: with the index when discovery finishes, or null for a deferred
+   * index. Without it the run still shows a non-empty index after its
+   * history, but nothing keeps it.
    */
   publishRepositorySkills?: PublishRepositorySkills;
   /**
@@ -4234,9 +4235,9 @@ export function buildOpenGeniAgent(
       publishRepositorySkills: async (index) => {
         repositorySkillsContext.visible = options.publishRepositorySkills
           ? await options.publishRepositorySkills(index)
-          : index.empty
-            ? null
-            : index.text;
+          : index && !index.empty
+            ? index.text
+            : null;
       },
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
@@ -5776,7 +5777,7 @@ function buildAgentCapabilitiesFromComposition(
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     deferRepositorySkillIndex?: boolean;
-    publishRepositorySkills?: (index: RepositorySkillsIndex) => Promise<void>;
+    publishRepositorySkills?: (index: RepositorySkillsIndex | null) => Promise<void>;
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
     computerToolMode?: ComputerToolMode;
@@ -11327,9 +11328,12 @@ export async function prepareRunInput(
     const trailingMessages: AgentInputItem[] = [];
     // A missing title is requested once, in this turn's operational notice: it
     // is stored where it was sent, and later turns read it as historical.
+    // Once per agent: input prepared again for the same agent (a nudge, a
+    // retry after compaction) follows a run that already saw the request.
+    const titleRequested = agentsNeedingGenesisTitleDirective.delete(agent);
     const internalContext = [
       input.internalContext?.trim() ? input.internalContext : undefined,
-      agentsNeedingGenesisTitleDirective.has(agent) ? GENESIS_TITLE_DIRECTIVE : undefined,
+      titleRequested ? GENESIS_TITLE_DIRECTIVE : undefined,
     ]
       .filter((part): part is string => part !== undefined)
       .join("\n\n");
@@ -11381,7 +11385,10 @@ export async function prepareRunInput(
           ? input.text
           : assembled,
       persistedHistoryCount: sanitizedHistory.length,
-      turnStartIndex: sanitizedHistory.length,
+      historyWithRepositorySkills: async (index) => [
+        ...sanitizedHistory,
+        repositorySkillsContextItem(index) as unknown as AgentInputItem,
+      ],
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
       ...(input.modelInputAlreadyProjected ? { modelInputAlreadyProjected: true } : {}),
     };
@@ -11571,8 +11578,8 @@ function repositorySkillsInputFilterForRun(
     ? repositorySkillsContextInputFilter(
         state,
         prepared.input,
-        prepared.turnStartIndex,
-        prepared.renderRepositorySkillsItem,
+        prepared.persistedHistoryCount,
+        prepared.historyWithRepositorySkills,
       )
     : undefined;
 }

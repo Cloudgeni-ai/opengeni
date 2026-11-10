@@ -2494,11 +2494,13 @@ empty, unreachable or degraded notice) is a durable developer history item on
 its own session context channel (`ensureSessionRepositorySkills`,
 `packages/contracts/src/repository-skills-context.ts`): the worker writes it
 only when it differs from the latest item, freezes it per turn for retries, and
-inserts it before the turn's first active history item. The current run splices
-the same item at that turn-start index of its model input, so this turn's
+inserts it before the turn's first active history item. When a run stores a new
+item, its model requests replace the run's durable history prefix with the same
+rows re-projected with that item (`historyWithRepositorySkills`), so this turn's
 requests and later turns' loaded history share one byte-identical prefix; a
-mid-run rewrite of the input skips the splice. Deferred runs discover nothing up
-front and keep the earlier item. A Skill added mid-chat, an unreachable
+mid-run rewrite of the input skips this. Deferred runs discover nothing up front:
+they publish null, which freezes the turn on the earlier item so a later
+attempt of the same turn cannot add one between its requests. A Skill added mid-chat, an unreachable
 workspace or a deferred turn therefore never changes the system prompt, which
 Claude binds signed thinking to and both providers cache. The index is fixed for
 the bound capability; reads observe live edits or report missing files, and
