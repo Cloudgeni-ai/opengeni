@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { ChatSession as Session } from "@opengeni/sdk";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { englishMessages } from "../../../messages/en";
 import {
   admissionRecheckControl,
   admissionControlNeedsRefresh,
@@ -63,6 +64,16 @@ async function render(overrides: Partial<Parameters<typeof SessionAdmissionNotic
 }
 
 describe("session admission notice", () => {
+  // The message is already visible in the chat; the notice only says what blocks
+  // it, who or what fixes it, and that it starts by itself.
+  test("no admission notice says the message is saved", () => {
+    const admission = Object.entries(englishMessages).filter(([key]) =>
+      key.startsWith("sessionAdmission."),
+    );
+    expect(admission.length).toBeGreaterThan(20);
+    expect(admission.filter(([, value]) => /\bsaved\b/i.test(value))).toEqual([]);
+  });
+
   test("a confirmed pointer change says it starts there by itself, with no button", async () => {
     const onRecheck = await render({
       session: { ...session(), activeSandboxId: "machine" },
@@ -104,7 +115,7 @@ describe("session admission notice", () => {
     });
     expect(container.textContent).toContain("This message needs a different machine");
     expect(container.textContent).toContain("Alex’s personal machine");
-    expect(container.textContent).toContain("The message is saved");
+    expect(container.textContent).not.toMatch(/saved/i);
     expect(container.textContent).toContain(
       "It starts by itself once the chat is on a machine you can use",
     );
@@ -430,7 +441,7 @@ describe("session admission notice", () => {
       expect(container.textContent).toContain(
         button ? "If it still doesn’t start" : "starts by itself",
       );
-      expect(container.textContent).toContain("message is saved");
+      expect(container.textContent).not.toMatch(/saved/i);
       expect(container.textContent).not.toContain("Recheck");
       expect(container.querySelector("button")?.textContent ?? null).toBe(button);
       expect(container.innerHTML).not.toContain("secret-database-detail");

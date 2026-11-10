@@ -464,7 +464,7 @@ export function SessionAdmissionNotice({
           ) : (
             <>
               <p>{copy.body}</p>
-              <p className="mt-1">{copy.next}</p>
+              {copy.next ? <p className="mt-1">{copy.next}</p> : null}
             </>
           )}
         </div>

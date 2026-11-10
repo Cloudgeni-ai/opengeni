@@ -900,7 +900,7 @@ function StuckCard({
       ) : copy ? (
         <>
           <Text style={textStyle}>{copy.body}</Text>
-          <Text style={textStyle}>{copy.next}</Text>
+          {copy.next ? <Text style={textStyle}>{copy.next}</Text> : null}
           {/* The owner's own words already say it starts once resumed. */}
           {paused && !allowing ? (
             <Text style={textStyle}>{t("sessionAdmission.pausedNote")}</Text>

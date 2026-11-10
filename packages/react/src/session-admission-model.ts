@@ -336,8 +336,9 @@ export function sessionAdmissionMachineAccessCopy(
 export function sessionAdmissionMachineChangedCopy(t: OpenGeniText): SessionAdmissionCopy {
   return {
     title: t("sessionAdmission.machineChangedTitle"),
-    body: t("sessionAdmission.machineChangedBody"),
-    next: t("sessionAdmission.machineChangedNext"),
+    // One line: the message is already in the chat, so only where it starts.
+    body: t("sessionAdmission.machineChangedNext"),
+    next: "",
     action: null,
   };
 }

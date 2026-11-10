@@ -3,6 +3,8 @@ import { SessionAdmissionNotice, SessionMachineAccessNotice } from "@opengeni/re
 import { Button } from "@opengeni/react/ui/button";
 import { FailedSessionBanner } from "@opengeni/react/app/components/session/failed-session-banner";
 
+import { useEffect, useState } from "react";
+
 import { KitSection, StateCell, StatesGrid } from "../kit";
 import { showPart } from "./chat-shared";
 
@@ -222,6 +224,26 @@ const MACHINE_ACCESS_FAILED: { part: string; label: string; owner: boolean }[] =
   { part: "machine-access-member", label: "Someone else's machine", owner: false },
 ];
 
+/** After a refusal, the chat moved to another machine: the notice sees the move happen. */
+function MachineChangedState() {
+  const [moved, setMoved] = useState(false);
+  useEffect(() => setMoved(true), []);
+  const session = blocked(
+    "personal_resource_grant_required",
+    moved ? "workspace-machine" : "laptop",
+  );
+  return (
+    <SessionAdmissionNotice
+      session={session}
+      machineAccess={moved ? null : access({ isOwner: false, queuedTurnBlocked: true })}
+      canControl
+      paused={false}
+      busy={false}
+      onRecheck={async () => {}}
+    />
+  );
+}
+
 export default function ChatAdmissionSection() {
   const shown = STATES.filter((state) => showPart(state.part));
   const beforeSending = BEFORE_SENDING.filter((state) => showPart(state.part));
@@ -285,6 +307,15 @@ export default function ChatAdmissionSection() {
               </div>
             </StateCell>
           ))}
+        </StatesGrid>
+      ) : null}
+      {showPart("machine-changed") ? (
+        <StatesGrid title="After the chat moved" columns={1}>
+          <StateCell label="Moved to a machine it can use" align="stretch">
+            <div className="mx-auto w-full max-w-3xl">
+              <MachineChangedState />
+            </div>
+          </StateCell>
         </StatesGrid>
       ) : null}
       {machineAccessFailed.length > 0 ? (

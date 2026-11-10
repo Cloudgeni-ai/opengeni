@@ -202,7 +202,7 @@ describe("SessionStartNotice", () => {
     );
     expect(container!.textContent).toContain("Denne meldingen trenger en annen maskin");
     expect(container!.textContent).toContain("Only Kari can start new work there.");
-    expect(container!.textContent).toContain("The message is saved.");
+    expect(container!.textContent).not.toMatch(/saved/i);
     expect(container!.textContent).toContain("It starts by itself once the chat is on a machine");
     // There is no recheck: the server starts it once the chat moves.
     expect(button("Recheck access")).toBeUndefined();
