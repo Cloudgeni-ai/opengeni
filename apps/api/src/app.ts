@@ -1005,7 +1005,7 @@ export function createAppComposition(
       // request without credentials acts as the local user, so any site could
       // otherwise read its responses. Origins outside the local policy get no
       // CORS grant (in local development the boundary above refused them).
-      return origin ? localCors(c, next) : next();
+      return origin ? localCors(c, next) : withVaryOrigin(c, next);
     }
     if (!origin) {
       // No Origin header means no cross-origin browser read: servers, CLIs,
@@ -1025,12 +1025,11 @@ export function createAppComposition(
     const middleware = allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
       ? credentialedCors
       : publicApiCors;
-    if (middleware === publicApiCors && c.req.path === DISPLAY_IDENTITY_PATH) {
-      // The answer depends on the caller's origin and cookie; caches must not
-      // share it across origins (the credentialed middlewares add Vary already).
-      return middleware(c, () => withVaryOrigin(c, next));
-    }
-    return middleware(c, next);
+    if (middleware === credentialedCors) return middleware(c, next);
+    // The wildcard answer differs from the grant-less no-Origin answer, so it
+    // varies by Origin too: a shared cache must never hand one to the other
+    // (the credentialed middleware adds Vary: Origin itself).
+    return middleware(c, () => withVaryOrigin(c, next));
   });
 
   const standardRequestBodyLimit = bodyLimit({

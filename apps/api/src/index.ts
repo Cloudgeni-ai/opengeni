@@ -99,6 +99,7 @@ import {
 import { startApiMetricsListener } from "./http/metrics-listener";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
 import { dispatchApiWebSocketUpgrade } from "./http/websocket-upgrade-dispatch";
+import { serveWithLastResortError } from "./http/nosniff";
 import {
   startComputeAgentGateway,
   type ComputeGatewayHandle,
@@ -708,10 +709,21 @@ export async function startApi(options: StartApiOptions = {}) {
         localBrowserBoundary,
       );
       if (upgrade.handled) return upgrade.response;
-      return app.fetch(request, {
-        ...apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
-        ...apiRequestBindingsForIdleTimeout((seconds) => bunServer.timeout(request, seconds)),
-      });
+      // Hono re-throws values that are not Error instances past its onError;
+      // answer those with a generic 500 that still carries nosniff.
+      return serveWithLastResortError(
+        () =>
+          app.fetch(request, {
+            ...apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
+            ...apiRequestBindingsForIdleTimeout((seconds) => bunServer.timeout(request, seconds)),
+          }),
+        () =>
+          observability.error("Opengeni API request failed outside the error handler", {
+            errorClass: "UnhandledRequestFailure",
+            errorCode: "unhandled_request_failure",
+            origin: "api",
+          }),
+      );
     },
     websocket: {
       maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,

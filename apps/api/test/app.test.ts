@@ -629,24 +629,41 @@ describe("API helpers", () => {
       expect(response.headers.get("vary")?.toLowerCase()).toContain("origin");
       expect(response.headers.get("x-opengeni-correlation-id")).toBeTruthy();
     }
+    // A preflight-shaped request without an Origin is not a browser preflight:
+    // it gets no grant either.
+    const originless = await app.request("http://localhost/v1/config/client", {
+      method: "OPTIONS",
+      headers: { "access-control-request-method": "GET" },
+    });
+    expect(originless.headers.get("access-control-allow-origin")).toBeNull();
+    expect(originless.headers.get("access-control-allow-methods")).toBeNull();
     // Browser requests keep their grants: wildcard without credentials for any
-    // origin, credentialed CORS for allowlisted console origins.
+    // origin, credentialed CORS for allowlisted console origins. Both vary by
+    // Origin so a cache never serves one to the other or to a no-Origin caller.
     const external = await app.request("http://localhost/v1/config/client", {
       headers: { origin: "https://product.example" },
     });
     expect(external.headers.get("access-control-allow-origin")).toBe("*");
     expect(external.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(external.headers.get("vary")?.toLowerCase()).toContain("origin");
+    const nullOrigin = await app.request("http://localhost/v1/config/client", {
+      headers: { origin: "null" },
+    });
+    expect(nullOrigin.headers.get("access-control-allow-origin")).toBe("*");
+    expect(nullOrigin.headers.get("access-control-allow-credentials")).toBeNull();
     const allowlisted = await app.request("http://localhost/v1/config/client", {
       headers: { origin: "http://localhost:5173" },
     });
     expect(allowlisted.headers.get("access-control-allow-origin")).toBe("http://localhost:5173");
     expect(allowlisted.headers.get("access-control-allow-credentials")).toBe("true");
+    expect(allowlisted.headers.get("vary")?.toLowerCase()).toContain("origin");
     const preflight = await app.request("http://localhost/v1/config/client", {
       method: "OPTIONS",
       headers: { origin: "https://product.example", "access-control-request-method": "GET" },
     });
     expect(preflight.status).toBe(204);
     expect(preflight.headers.get("access-control-allow-origin")).toBe("*");
+    expect(preflight.headers.get("access-control-allow-credentials")).toBeNull();
   });
 
   test("sends nosniff on every API response", async () => {
@@ -706,13 +723,25 @@ describe("API helpers", () => {
     );
     routed.get(
       "/v1/test-only/own",
-      () => new Response("x", { headers: { "x-content-type-options": "nosniff" } }),
+      () => new Response("x", { headers: { "x-content-type-options": "route-value" } }),
     );
-    for (const path of ["/v1/test-only/stream", "/v1/test-only/immutable", "/v1/test-only/own"]) {
+    routed.get("/v1/test-only/throws", () => {
+      throw new Error("deliberate failure");
+    });
+    for (const path of [
+      "/v1/test-only/stream",
+      "/v1/test-only/immutable",
+      "/v1/test-only/throws",
+    ]) {
       const response = await routed.request(`http://localhost${path}`);
       expect({ path, status: response.status }).not.toEqual({ path, status: 404 });
       expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("x-opengeni-correlation-id")).toBeTruthy();
     }
+    // A route's own value wins.
+    const own = await routed.request("http://localhost/v1/test-only/own");
+    expect(own.headers.get("x-content-type-options")).toBe("route-value");
+    expect((await routed.request("http://localhost/v1/test-only/throws")).status).toBe(500);
     const stream = await routed.request("http://localhost/v1/test-only/stream");
     expect(await stream.text()).toBe("data: ready\n\n");
   });
