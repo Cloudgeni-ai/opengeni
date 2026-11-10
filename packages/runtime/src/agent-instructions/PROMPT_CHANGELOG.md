@@ -1,5 +1,16 @@
 # Modular prompt changelog
 
+An agent can change who can see an existing Site through the artifactId and
+visibility path `sandbox_file_publish` already offers for files, instead of
+publishing a copy to share it. Its description names Sites only for a grant
+that may publish them (`artifacts:publish`): +8 bytes, " or Site". No prompt
+module or Skill changes.
+
+```text
+- … To change who can open an existing file, such as a generated image, pass its artifactId and visibility instead of path. …
++ … To change who can open an existing file or Site, such as a generated image, pass its artifactId and visibility instead of path. …   (with artifacts:publish)
+```
+
 A configured session without a sandbox or Connected Machine no longer gets
 text it cannot act on: editing files in the sandbox, publishing new files,
 workspace file links, sandbox paths, background-command acknowledgement and
