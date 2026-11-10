@@ -254,27 +254,32 @@ for (const stream of [false, true]) {
   });
 }
 
-test("Azure OpenAI's 'could not be verified' refusal of another issuer's ciphertext is recovered", async () => {
-  // Azure words the same refusal differently from api.openai.com.
-  const refusal = {
-    error: {
-      message:
-        "The encrypted content gAAA...aiQ= could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
-      type: "invalid_request_error",
-      param: null,
-      code: "invalid_encrypted_content",
-    },
-  };
-  const requests: Record<string, any>[] = [];
-  const model = responsesModel("origin-azure-wording", requests, {
-    refuses: (wire) =>
-      wire.includes("encrypted_content") ? Response.json(refusal, { status: 400 }) : null,
+for (const code of ["invalid_encrypted_content", null]) {
+  test(`Azure OpenAI's 'could not be verified' refusal of another issuer's ciphertext is recovered (code ${code})`, async () => {
+    // Azure words the same refusal differently from api.openai.com.
+    const refusal = {
+      error: {
+        message:
+          "The encrypted content gAAA...aiQ= could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
+        type: "invalid_request_error",
+        param: null,
+        code,
+      },
+    };
+    const requests: Record<string, any>[] = [];
+    const model = responsesModel(`origin-azure-wording-${code}`, requests, {
+      refuses: (wire) =>
+        wire.includes("encrypted_content") ? Response.json(refusal, { status: 400 }) : null,
+    });
+    const result = await runner.run(
+      new Agent({ name: "Fixture", model }),
+      legacyHistory() as never,
+    );
+    expect(result.finalOutput).toBe("Done.");
+    expect(requests).toHaveLength(2);
+    expect(JSON.stringify(requests[1])).not.toContain("encrypted_content");
   });
-  const result = await runner.run(new Agent({ name: "Fixture", model }), legacyHistory() as never);
-  expect(result.finalOutput).toBe("Done.");
-  expect(requests).toHaveLength(2);
-  expect(JSON.stringify(requests[1])).not.toContain("encrypted_content");
-});
+}
 
 const rawThought = "Raw chain of thought from an open-weight model.";
 // What OpenAI and Azure OpenAI answer for reasoning `content` they did not issue.
@@ -369,6 +374,49 @@ test("untagged raw reasoning from another provider is sent as readable text, nev
   expect(wire).toContain(
     JSON.stringify(`[Historical reasoning from another model]\n${rawThought}`),
   );
+});
+
+test("untagged raw reasoning becomes bounded readable text on every other route", () => {
+  const longThought = "x".repeat(40_000);
+  const untagged = (text: string, withCiphertext: boolean) => ({
+    type: "reasoning",
+    id: "rs_raw_fixture",
+    content: [],
+    providerData: {
+      id: "rs_raw_fixture",
+      type: "reasoning",
+      content: [{ type: "reasoning_text", text }],
+      encrypted_content: withCiphertext ? ciphertext : null,
+    },
+  });
+  const user = { type: "message", role: "user", content: "Start" };
+
+  // Raw content is refused for its shape, so ciphertext does not keep it native.
+  const mixed = projectHistoryForProvider([user, untagged(rawThought, true)], "responses", {
+    artifactScope: "raw-receiver",
+  });
+  const mixedWire = JSON.stringify(mixed);
+  expect(mixedWire).not.toContain("reasoning_text");
+  expect(mixedWire).not.toContain(ciphertext);
+  expect(mixedWire).toContain(rawThought);
+
+  for (const api of ["chat", "anthropic-messages"] as const) {
+    const wire = JSON.stringify(
+      projectHistoryForProvider([user, untagged(rawThought, false)], api),
+    );
+    expect(wire).not.toContain("reasoning_text");
+    expect(wire).toContain(rawThought);
+  }
+
+  for (const api of ["responses", "chat", "anthropic-messages"] as const) {
+    const wire = JSON.stringify(
+      projectHistoryForProvider([user, untagged(longThought, false)], api, {
+        artifactScope: "raw-receiver",
+      }),
+    );
+    expect(wire).toContain("x".repeat(32_000));
+    expect(wire).not.toContain("x".repeat(32_001));
+  }
 });
 
 test("an unrelated bad request is not resent", async () => {

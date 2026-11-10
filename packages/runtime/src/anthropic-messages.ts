@@ -1235,16 +1235,18 @@ export class AnthropicMessagesModel implements Model {
     // strip signatures ourselves. An unchanged prefix drops nothing. Every
     // request that already asks for thinking opts in, so the setting never
     // flips inside a conversation; a request without thinking is moved into it
-    // only when it rewrote the prefix itself (checkpoint or resized image).
+    // only while its input carries a checkpoint summary or a resized image, and
+    // never when it forces a tool (Claude refuses thinking with a forced tool).
     // A summary request that reuses the prepared ordinary prefix therefore
     // keeps its thinking mode unchanged (the mode is part of the cache key).
     const resetsPrefix =
       projection.resized ||
       request.modelSettings.providerData?.opengeni_portable_compaction === true ||
       (Array.isArray(request.input) && request.input.some(isCompactionSummary));
+    const forcesTool = body.tool_choice?.type === "any" || body.tool_choice?.type === "tool";
     if (
       claudeNativeModelProfile(this.model)?.prefixBoundThinking &&
-      (resetsPrefix || Boolean(body.thinking))
+      (Boolean(body.thinking) || (resetsPrefix && !forcesTool))
     ) {
       body.thinking = {
         type: "adaptive",

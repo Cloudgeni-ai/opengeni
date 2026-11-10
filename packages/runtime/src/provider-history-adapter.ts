@@ -240,9 +240,18 @@ function rawResponsesReasoning(item: Record<string, unknown>): unknown[] | undef
   return Array.isArray(raw) && raw.length > 0 ? raw : undefined;
 }
 
-/** The readable form of a Responses reasoning item: its summary, else its raw reasoning. */
+/**
+ * The readable form of a Responses reasoning item: its summary, else its raw
+ * reasoning, which can be far longer than a summary and is bounded like other
+ * historical facts.
+ */
 function reasoningSummaryText(item: Record<string, unknown>): string {
-  return partsText(item.content) || partsText(rawResponsesReasoning(item));
+  const summary = partsText(item.content);
+  if (summary) return summary;
+  const raw = partsText(rawResponsesReasoning(item));
+  return raw.length <= HISTORICAL_FACT_MAX_CHARS
+    ? raw
+    : `${raw.slice(0, HISTORICAL_FACT_MAX_CHARS)}…`;
 }
 
 /** The provider-issued ciphertext of a Responses reasoning item, if any. */
@@ -314,9 +323,10 @@ function withoutArtifactOrigin(item: Record<string, unknown>): Record<string, un
  * the readable summary instead, exactly as Claude and Chat routes already do.
  * Untagged items (stored before origins were recorded) stay native until the
  * provider refuses them. Raw reasoning `content` follows the same rule, except
- * that an untagged item carrying it without ciphertext is always readable
- * text: no refusal names it (providers reject its shape, not a ciphertext), so
- * it could otherwise fail every retry on a provider that did not issue it.
+ * that an untagged item carrying it is always readable text, with or without
+ * ciphertext: no refusal names it (providers reject its shape, not a
+ * ciphertext), so it could otherwise fail every retry on a provider that did
+ * not issue it.
  */
 function scopedOpaqueArtifact(
   item: Record<string, unknown>,
@@ -330,7 +340,7 @@ function scopedOpaqueArtifact(
   if (
     (ciphertext || raw) &&
     ((origin !== undefined && origin !== scope) ||
-      (origin === undefined && !ciphertext) ||
+      (origin === undefined && raw) ||
       options.isRejectedArtifact?.(item) === true)
   )
     return memoized(foreignArtifactProjections, item, () =>

@@ -244,8 +244,9 @@ limit alone cannot bound an accumulating conversation.
 
 On models with prefix-bound thinking, every request that asks for thinking opts
 into the documented `thinking-binding-controls-2026-08-01` beta with
-`prefix_mismatch_behavior: "drop_block"`; a checkpoint or resized-image
-projection without thinking is also moved into it. The prefix can change
+`prefix_mismatch_behavior: "drop_block"`. A request without thinking is moved
+into it only while its input carries a checkpoint summary or a resized image,
+and never when it forces a tool, which Claude refuses together with thinking. The prefix can change
 between ordinary turns too: the system prompt follows live workspace state,
 such as the repository Skills index after a branch checkout, and a strict
 request would then be rejected on every retry. The provider, not the client,

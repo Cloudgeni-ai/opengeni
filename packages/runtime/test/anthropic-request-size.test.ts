@@ -284,3 +284,30 @@ test("a prefix-bound request without thinking is not moved into thinking", async
     modelSettings: { reasoning: { effort: "none" } },
   } as ModelRequest);
 });
+
+test("a forced tool after a checkpoint is never moved into thinking", async () => {
+  // Claude refuses thinking together with a forced tool choice.
+  const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    expect(body.tool_choice).toMatchObject({ type: "any" });
+    expect(body.thinking).toBeUndefined();
+    return response();
+  }) as typeof fetch);
+  await model.getResponse({
+    ...request(""),
+    input: [
+      buildSummaryItem("Earlier work is checkpointed."),
+      { type: "message", role: "user", content: "Inspect" },
+    ],
+    tools: [
+      {
+        type: "function",
+        name: "inspect",
+        description: "Inspect",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        strict: false,
+      },
+    ],
+    modelSettings: { toolChoice: "required", reasoning: { effort: "high" } },
+  } as ModelRequest);
+});
