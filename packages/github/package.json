@@ -34,7 +34,7 @@
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/network": "workspace:*",
-    "jose": "^6.1.3"
+    "jose": "^6.2.15"
   },
   "devDependencies": {
     "tsup": "^8.5.0",

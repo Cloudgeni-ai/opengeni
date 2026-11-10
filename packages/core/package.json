@@ -53,7 +53,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
-    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@opengeni/capabilities": "workspace:*",
     "@opengeni/codex": "workspace:*",
@@ -73,7 +73,7 @@
     "zod": "^4.2.1"
   },
   "devDependencies": {
-    "better-auth": "^1.7.16",
+    "better-auth": "^1.7.18",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   },

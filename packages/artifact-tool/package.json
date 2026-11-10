@@ -117,14 +117,14 @@
   "dependencies": {
     "@opengeni/contracts": "workspace:*",
     "@resvg/resvg-js": "^2.6.2",
-    "docx": "9.7.1",
+    "docx": "9.15.3",
     "exceljs": "^4.4.0",
     "pptxgenjs": "^4.0.1",
     "saxes": "5.0.1",
     "sharp": "^0.35.5"
   },
   "devDependencies": {
-    "jszip": "^3.10.1",
+    "jszip": "^3.10.2",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   },

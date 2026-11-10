@@ -236,7 +236,7 @@
     "@opengeni/artifact-kernel-wasm-spreadsheet": "workspace:*",
     "@opengeni/codex": "workspace:*",
     "@opengeni/deployment": "workspace:*",
-    "fake-indexeddb": "^6.2.5",
+    "fake-indexeddb": "^6.2.7",
     "openai": "6.47.0",
     "tsup": "^8.5.0",
     "typescript": "7.0.2",

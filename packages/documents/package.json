@@ -31,13 +31,13 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
-    "@llamaindex/liteparse": "2.14.2",
+    "@llamaindex/liteparse": "2.18.0",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/db": "workspace:*",
     "@opengeni/network": "workspace:*",
     "@opengeni/storage": "workspace:*",
-    "drizzle-orm": "^0.45.2",
+    "drizzle-orm": "^0.45.4",
     "openai": "6.47.0"
   },
   "devDependencies": {

@@ -35,7 +35,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
-    "@openai/agents": "0.14.3",
+    "@openai/agents": "0.21.0",
     "@opengeni/contracts": "workspace:*",
     "@opengeni/network": "workspace:*",
     "graphql": "^16.12.0",

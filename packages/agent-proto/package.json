@@ -35,10 +35,10 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
-    "@bufbuild/protobuf": "^2.2.0"
+    "@bufbuild/protobuf": "^2.17.0"
   },
   "devDependencies": {
-    "ts-proto": "^2.7.7",
+    "ts-proto": "^2.18.4",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   },

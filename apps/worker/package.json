@@ -55,7 +55,7 @@
   "dependencies": {
     "@1password/sdk": "0.5.0",
     "@keeper-security/secrets-manager-core": "17.6.0",
-    "@llamaindex/liteparse": "2.14.2",
+    "@llamaindex/liteparse": "2.18.0",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/capabilities": "workspace:*",
     "@opengeni/codemode": "workspace:*",
@@ -83,16 +83,16 @@
     "@opengeni/vaults-onepassword": "workspace:*",
     "@opengeni/vaults-protonpass": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
-    "@temporalio/activity": "^1.17.0",
+    "@temporalio/activity": "^1.25.0",
     "@temporalio/client": "^1.17.0",
-    "@temporalio/worker": "^1.17.0",
+    "@temporalio/worker": "^1.25.0",
     "@temporalio/workflow": "^1.17.0",
     "sharp": "^0.35.5",
-    "ws": "8.21.1"
+    "ws": "8.22.1"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
-    "@openai/agents-core": "0.14.3",
+    "@openai/agents-core": "0.21.0",
     "@opengeni/testing": "workspace:*",
     "openai": "6.47.0",
     "postgres": "^3.4.9",

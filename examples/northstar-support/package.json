@@ -14,19 +14,19 @@
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@opengeni/react": "workspace:*",
     "@opengeni/sdk": "workspace:*",
-    "@tailwindcss/vite": "^4.2.4",
-    "@vitejs/plugin-react": "^6.0.1",
-    "lucide-react": "^1.8.0",
+    "@tailwindcss/vite": "^4.3.5",
+    "@vitejs/plugin-react": "^6.2.1",
+    "lucide-react": "^1.70.0",
     "motion": "^12.0.0",
     "react": "^19.2.5",
-    "react-dom": "^19.2.5",
+    "react-dom": "^19.3.1",
     "tailwindcss": "^4.2.4",
-    "vite": "^8.0.9",
+    "vite": "^8.3.6",
     "zod": "^4.2.1"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
+    "@types/react-dom": "^19.3.0",
     "typescript": "7.0.2"
   }
 }
