@@ -1612,6 +1612,13 @@ export const englishMessages = {
   "desktopDictation.host.cantRecord": "This computer can't record audio.",
   "desktopDictation.host.couldNotStart": "Dictation couldn't start. Try again.",
   "desktopDictation.host.microphoneBlocked": "{product} isn't allowed to use the microphone.",
+  "desktopDictation.host.modelUnavailable":
+    "This shortcut's model isn't available. Choose another in Settings.",
+  "desktopDictation.host.modelUnavailableBrief": "This shortcut's model isn't available.",
+  "desktopDictation.host.modelUnavailableIn":
+    "{workspace} doesn't offer this shortcut's model. Choose another in Settings.",
+  "desktopDictation.host.modelUnavailableInBrief":
+    "{workspace} doesn't offer this shortcut's model.",
   "desktopDictation.host.needsCredits": "Voice input needs credits. Your speech is saved.",
   "desktopDictation.host.notAllowed": "Voice input isn't allowed in this workspace.",
   "desktopDictation.host.notSaved": "The audio couldn't be saved. Try again.",
@@ -1621,6 +1628,12 @@ export const englishMessages = {
   "desktopDictation.host.unreadable": "The audio couldn't be read. Try again.",
   "desktopDictation.host.usageLimit": "Usage limit reached. Your speech is saved.",
   "desktopDictation.host.voiceInputOff": "Voice input is off for this workspace.",
+  "desktopDictation.host.voiceInputOffIn":
+    "Voice input is off in {workspace}. Choose another workspace in Settings.",
+  "desktopDictation.host.voiceInputOffInBrief": "Voice input is off in {workspace}.",
+  "desktopDictation.host.workspaceGone":
+    "You're no longer in {workspace}. Choose a workspace in Settings.",
+  "desktopDictation.host.workspaceGoneBrief": "You're no longer in {workspace}.",
   "desktopDictation.settings.accessibilityDescription":
     "Lets {product} type the text into other apps. Without it, the text is only copied.",
   "desktopDictation.settings.accessibilityLabel": "Accessibility",
@@ -1653,11 +1666,17 @@ export const englishMessages = {
   "desktopDictation.settings.keyCombinationDescription": "Press the keys you want to use.",
   "desktopDictation.settings.languageDescription": "The language you speak with this shortcut.",
   "desktopDictation.settings.languageLabel": "Language",
-  "desktopDictation.settings.modelDescription":
-    "The speech-to-text model that hears this shortcut.",
+  "desktopDictation.settings.modelDescription": "Which model listens for this shortcut.",
   "desktopDictation.settings.modelLabel": "Model",
+  "desktopDictation.settings.modelNotOffered":
+    "This workspace doesn't offer this model. Choose another.",
+  "desktopDictation.settings.modelNotOfferedIn":
+    "{workspace} doesn't offer this model. Choose another.",
   "desktopDictation.settings.modelUnavailable": "Not available in this workspace now.",
+  "desktopDictation.settings.modelUnavailableIn": "Not offered in {workspace}.",
   "desktopDictation.settings.workspaceModel": "Workspace default",
+  "desktopDictation.settings.workspaceModelIn": "Default for {workspace}",
+  "desktopDictation.settings.workspaceModelPersonal": "Default for your Personal workspace",
   "desktopDictation.settings.modeHold": "Hold while speaking",
   "desktopDictation.settings.modeHoldDescription": "Dictates while you hold the keys down.",
   "desktopDictation.settings.modeLabel": "How the keys work",
@@ -1716,6 +1735,17 @@ export const englishMessages = {
   "desktopDictation.settings.vocabularyTermTooLong":
     "“{term}” is too long. Keep each to {max} characters.",
   "desktopDictation.settings.vocabularyTooMany": "Keep the list to {max} names and words.",
+  "desktopDictation.settings.workspaceDescription":
+    "Shortcut dictations go to this workspace and are billed to it, even when another one is open.",
+  "desktopDictation.settings.workspaceGone":
+    "You're no longer in {workspace}. Choose a workspace to keep dictating.",
+  "desktopDictation.settings.workspaceLabel": "Workspace",
+  "desktopDictation.settings.workspacePrivate": "Private",
+  "desktopDictation.settings.workspacePlaceholder": "Choose a workspace",
+  "desktopDictation.settings.workspaceSearch": "Search workspaces",
+  "desktopDictation.settings.workspaceVoiceOff":
+    "Voice input is off in {workspace}. Choose another workspace.",
+  "desktopDictation.settings.workspaceVoiceOffOption": "Voice input is turned off.",
   "desktopViewer.clickReturnControlOrCtrl": "· click Return control (or Ctrl+Alt+Shift)",
   "desktopViewer.connectingToTheDesktop": "Connecting to the desktop…",
   "desktopViewer.couldnTConnect": "Couldn’t connect",
