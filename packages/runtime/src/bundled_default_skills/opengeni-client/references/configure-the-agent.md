@@ -4,6 +4,8 @@ One `agent` object sets who the agent is and what it can do. The proxy's
 `createSession` hook, `og.client.createSession`, scheduled tasks, and the chat
 facade all accept it, and every session reports it back as `session.agent`.
 
+<!-- doc-snippets: excerpt CreateSessionRequest from "@opengeni/sdk" -->
+
 ```ts
 agent: {
   identity: "You are Acme Analytics' assistant. You help customers read their dashboards.",

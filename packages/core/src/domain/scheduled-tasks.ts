@@ -97,6 +97,10 @@ import {
 } from "../site-session-origin";
 
 import { personalGitHubRepositoryResources } from "./resources";
+import {
+  agentPersonalGitHubRepositoryServices,
+  resolveAgentPersonalGitHubRepositoryResources,
+} from "./agent-personal-github-resources";
 import { knowledgeContextForAccess } from "./knowledge";
 import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
 import { isDeepStrictEqual } from "node:util";
@@ -357,6 +361,8 @@ export async function createValidatedScheduledTask(input: {
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
   /** Reads event sources (MCP servers and Gmail) while checking triggers; for tests. */
   eventSourceFetch?: typeof fetch | undefined;
+  /** Asks GitHub as the person in All my repositories; tests replace it. */
+  githubPersonalFetch?: typeof fetch | undefined;
 }): Promise<ScheduledTask> {
   // Integration Knowledge sync was removed. The request field stays in the
   // public schema until the next SDK major, so refuse it clearly.
@@ -1583,6 +1589,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
   /** See createValidatedScheduledTask. */
   eventSourceFetch?: typeof fetch | undefined;
+  /** See createValidatedScheduledTask. */
+  githubPersonalFetch?: typeof fetch | undefined;
 }): Promise<UpdateScheduledTaskInput> {
   const requestedPrompt =
     input.payload.prompt ??
@@ -1824,6 +1832,7 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       ...(input.existing.agentConfig.toolPolicy
         ? { existingToolPolicy: input.existing.agentConfig.toolPolicy }
         : {}),
+      githubPersonalFetch: input.githubPersonalFetch,
     });
     if (
       materializedReusable &&
@@ -2433,6 +2442,8 @@ async function validateScheduledTaskAgentConfig(input: {
    * the tools a read returned) never turns the defaults into a fixed list.
    */
   existingToolPolicy?: ScheduledTaskAgentConfig["toolPolicy"];
+  /** Asks GitHub as the person in All my repositories; tests replace it. */
+  githubPersonalFetch?: typeof fetch | undefined;
 }): Promise<ScheduledTaskAgentConfig> {
   const existingChat = input.payload.runMode === "existing_session";
   if (existingChat)
@@ -2482,7 +2493,23 @@ async function validateScheduledTaskAgentConfig(input: {
   // through session creation later, where the effective default is vetted.
   if (!unchangedCreationField("model"))
     await assertWorkspaceModelPolicyAllows(input.db, input.settings, input.workspaceId, model);
-  const resources = normalizeResources(input.payload.agentConfig.resources ?? []);
+  // An agent may name a repository as the person with just uri, ref and
+  // connectionType; its own turn's Your GitHub delegation fills in the rest.
+  const resources = normalizeResources(
+    await resolveAgentPersonalGitHubRepositoryResources({
+      grant: input.grant,
+      workspaceId: input.workspaceId,
+      settings: input.settings,
+      resources: input.payload.agentConfig.resources ?? [],
+      services: agentPersonalGitHubRepositoryServices({
+        db: input.db,
+        settings: input.settings,
+        workspaceId: input.workspaceId,
+        accountId: input.grant.accountId,
+        githubPersonalFetch: input.githubPersonalFetch,
+      }),
+    }),
+  );
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
     input.db,
     input.workspaceId,

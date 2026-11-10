@@ -29,6 +29,8 @@ Chats are private to the user who started them. Set `chats: "shared"` on the pro
 
 Private chats must be enabled for your organization. If they are off, the proxy returns an error that says who can turn them on.
 
+A private chat keeps the conversation private, not its attachments: files people attach in the stock conversation components are uploaded as workspace files, which other users in the workspace with file access can read. Use a workspace per user when uploads must stay private.
+
 ## Removing a user
 
 Stop resolving them: a user your `resolve` rejects can't reach Opengeni. Delete their sessions too if you also want their data gone. Removing a tenant: delete its workspace (see [Going to production](/integrate/production#clean-up)).

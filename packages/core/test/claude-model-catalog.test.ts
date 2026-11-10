@@ -421,3 +421,30 @@ test("Claude Fable 5.2 is a full native model on API keys and subscriptions", ()
     });
   }
 });
+
+test.each([
+  "sk-ant-api03-synthetic",
+  "sk-ant-usr-synthetic",
+  "sk-ant-svc-synthetic",
+  "sk-ant-new07-synthetic",
+  // Even a subscription-shaped value keeps the API-key wire auth: the
+  // connection kind, never the key prefix, decides x-api-key versus OAuth.
+  "sk-ant-oat01-synthetic",
+])("an Anthropic API connection uses API-key auth for %s at both scopes", (key) => {
+  const connections = {
+    anthropic: { active: true, models: [{ upstreamModelId: "claude-opus-5-5" }] },
+  };
+  for (const scope of ["organization", "workspace"] as const) {
+    const settings = withClaudeConnectionCredential(
+      withClaudeConnectionCatalog(testSettings(), connections, scope),
+      "anthropic",
+      key,
+      scope,
+    );
+    const provider = configuredProviders(settings).find(
+      (candidate) => candidate.id === `${scope}-anthropic`,
+    );
+    expect(provider?.apiKey).toBe(key);
+    expect(provider?.anthropic?.auth).toBe("api-key");
+  }
+});

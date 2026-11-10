@@ -33,7 +33,7 @@ import { ChatComposer } from "@opengeni/react";
 import { UsageLimitNotice, UsageMeter } from "@opengeni/react/usage";
 
 <UsageMeter workspaceId={workspaceId} />              // "38% left · Resets Nov 1"
-<ChatComposer header={<UsageLimitNotice workspaceId={workspaceId} />} />
+<ChatComposer composer={composer} header={<UsageLimitNotice workspaceId={workspaceId} />} />
 ```
 
 - `useUsage()` returns the raw reading and which limit applies first.
