@@ -5851,7 +5851,16 @@ describe("credit exhaustion", () => {
     );
     const turnGroup = groups.find((group) => group.kind === "turn");
     expect(turnGroup?.outcome).toBe("failed");
-    expect(turnGroup?.failureText).toBe(CREDIT_EXHAUSTION_MESSAGE(englishText));
+    // The credit notice tells it once; the folded turn keeps only its outcome.
+    expect(turnGroup?.failureText).toBeUndefined();
+    expect(
+      groups.some(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "notice" &&
+          group.item.text === CREDIT_EXHAUSTION_MESSAGE(englishText),
+      ),
+    ).toBe(true);
   });
 });
 

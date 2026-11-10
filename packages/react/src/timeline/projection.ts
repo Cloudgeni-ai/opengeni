@@ -3010,10 +3010,28 @@ export function groupTimeline(
   if (options.readableTurns || options.foldExchanges)
     return groupReadableTurns(t, items, options.pauses ?? []);
   const groups: TimelineGroup[] = [];
-  const retriedNoticeIds = new Set(
-    items.flatMap((item) => (item.kind === "notice" && item.retriedAttempt ? [item.id] : [])),
+  // A failure's own notice (a turn that failed before any work, keyed by the
+  // failure event like its turn end) carries its text; the turn header then
+  // keeps only the outcome.
+  const failureNoticeIds = new Set(
+    items.flatMap((item) =>
+      item.kind === "notice" &&
+      item.tone === "failed" &&
+      !item.allowance &&
+      !item.sessionUsageLimit &&
+      !item.learningRefusal
+        ? [item.id]
+        : [],
+    ),
   );
-  for (const item of items) {
+  // Where each turn's last settlement or step is: an attempt a Retry replaced
+  // folds with the attempt that followed it only when one did.
+  const lastOfTurn = new Map<string, number>();
+  items.forEach((item, index) => {
+    if ((item.kind === "turn-end" || isActivityItem(item)) && item.turnId !== null)
+      lastOfTurn.set(item.turnId, index);
+  });
+  for (const [index, item] of items.entries()) {
     // A recovered capacity wait is over; it leaves no warning behind.
     if (item.kind === "notice" && item.capacityWait && item.resolvedAt) continue;
     if (isActivityItem(item)) {
@@ -3030,17 +3048,33 @@ export function groupTimeline(
       continue;
     }
     if (item.kind === "turn-end") {
-      // An attempt a Retry replaced is one quiet step; the turn's final
-      // settlement folds it together with the rest of the turn.
-      if (item.resumedAt && item.outcome === "failed") {
-        // An attempt that failed before any work already has its own quiet
-        // step: the failure's notice (`buildTimeline` keys its turn end by it).
-        if (!retriedNoticeIds.has(item.id.replace(/-turn-end$/, "")))
+      const ownNotice =
+        item.outcome === "failed" && failureNoticeIds.has(item.id.replace(/-turn-end$/, ""));
+      // An attempt a Retry replaced, followed by more of the same turn, is one
+      // quiet step; the turn's final settlement folds both attempts together.
+      // Its own steps keep its own outcome.
+      if (
+        item.resumedAt &&
+        item.outcome === "failed" &&
+        item.turnId !== null &&
+        (lastOfTurn.get(item.turnId) ?? -1) > index
+      ) {
+        const hadWork = groups.some(
+          (group) =>
+            group.kind === "activity" &&
+            group.outcome === undefined &&
+            group.items.some((activity) => activity.turnId === item.turnId),
+        );
+        stampTurnOutcome(groups, item);
+        // Without work, the failure's own row (its notice, a compaction
+        // landmark or a usage-limit row) is already that step.
+        if (hadWork && !ownNotice)
           groups.push({ kind: "item", item: retriedAttemptNotice(t, item) });
         continue;
       }
-      stampTurnOutcome(groups, item);
-      foldSettledTurn(groups, item);
+      const settled = ownNotice ? withoutFailureText(item) : item;
+      stampTurnOutcome(groups, settled);
+      foldSettledTurn(groups, settled);
       continue;
     }
     if (isBlankAgentMessage(item)) continue;
@@ -3070,11 +3104,16 @@ function withoutPresentedFailureText(
     if (item.kind === "turn-end" && item.outcome === "failed" && turnEnds.has(item.id)) {
       // A retried attempt keeps its own text on its quiet step.
       if (item.resumedAt) return [item];
-      const { failureDetail: _detail, ...rest } = item;
-      return [{ ...rest, failureText: null }];
+      return [withoutFailureText(item)];
     }
     return [item];
   });
+}
+
+/** A failed settlement that keeps its outcome but leaves its text to another row. */
+function withoutFailureText(item: TurnEndItem): TurnEndItem {
+  const { failureDetail: _detail, ...rest } = item;
+  return { ...rest, failureText: null };
 }
 
 /** The quiet "Attempt failed · retried" step for an attempt a Retry replaced. */

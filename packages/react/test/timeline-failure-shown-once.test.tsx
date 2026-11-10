@@ -255,6 +255,88 @@ describe("a failure is shown once", () => {
   });
 });
 
+describe("the non-rolling timeline", () => {
+  const nonRolling = (events: SessionEvent[]) => groupTimeline(t, buildTimeline(t, events));
+
+  test("a failure before any work is told by its notice, not again on the turn header", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Go" }, null),
+      event("turn.started", {}),
+      event("turn.failed", { error: ERROR, detail: DETAIL }),
+    ];
+    const groups = nonRolling(events);
+    expect(flatten(groups).filter((item) => item.kind === "notice")).toHaveLength(1);
+    expect(occurrences(JSON.stringify(groups), ERROR)).toBe(1);
+  });
+
+  test("an attempt whose failure has its own row gets no second quiet step", () => {
+    sequence = 0;
+    const skipped = () =>
+      event("session.context.compaction.skipped", {
+        trigger: "auto",
+        reason: "summarization_failed",
+        providerRejection: { httpStatus: 400, type: "invalid_request_error" },
+      });
+    const compactionFailed = () =>
+      event("turn.failed", {
+        error: "compaction summarization failed: 400",
+        code: "context_compaction_failed",
+      });
+    const events = [
+      event("user.message", { text: "Go" }, null),
+      event("turn.started", {}),
+      skipped(),
+      compactionFailed(),
+      event("turn.recovery.requested", { reason: "human_retry" }),
+      skipped(),
+      compactionFailed(),
+    ];
+    const notices = flatten(nonRolling(events)).filter(
+      (item) => item.kind === "notice" && item.retriedAttempt,
+    );
+    expect(notices).toEqual([]);
+  });
+
+  test("a Retry that never ran leaves the attempt folded with its outcome", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Go" }, null),
+      ...attempt(),
+      ...failure(),
+      event("turn.recovery.requested", { reason: "human_retry" }),
+      event("session.status.changed", { status: "failed", code: "pre_claim_failure" }),
+    ];
+    const turns = nonRolling(events).filter((group) => group.kind === "turn");
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ outcome: "failed" });
+  });
+
+  test("each attempt's steps keep their own outcome", () => {
+    sequence = 0;
+    const second = "SECOND ATTEMPT ERROR";
+    const work = (id: string) => [
+      event("agent.toolCall.created", { id, name: "exec_command", arguments: {} }),
+      event("agent.toolCall.output", { id, output: "ok" }),
+    ];
+    const events = [
+      event("user.message", { text: "Go" }, null),
+      event("turn.started", {}),
+      ...work("a"),
+      event("turn.failed", { error: ERROR, detail: DETAIL }),
+      event("turn.recovery.requested", { reason: "human_retry" }),
+      ...work("b"),
+      event("turn.failed", { error: second }),
+    ];
+    const turn = nonRolling(events).find((group) => group.kind === "turn")!;
+    const clusters = (turn.kind === "turn" ? turn.groups : []).filter(
+      (group) => group.kind === "activity",
+    );
+    expect(clusters).toHaveLength(2);
+    expect(JSON.stringify(clusters[0])).not.toContain(second);
+  });
+});
+
 describe("the rendered timeline (web and the desktop app)", () => {
   test("with the failed banner, the error text appears only behind the retried attempt", async () => {
     const { events, finalFailureId } = retriedTwice();
