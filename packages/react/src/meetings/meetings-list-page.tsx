@@ -42,7 +42,7 @@ import { RelativeTime } from "../ui/relative-time";
 import { StatusBadge } from "../ui/status-badge";
 
 import { DeleteMeetingDialog } from "./delete-meeting-dialog";
-import { RecorderPanel, useOnline } from "./recorder-panel";
+import { nothingRecording, RecorderPanel, useOnline } from "./recorder-panel";
 import { useMeetingRecorder, usePendingMeetingStart } from "./recorder-context";
 import { MeetingsOverlayScope } from "./overlay-scope";
 
@@ -340,6 +340,11 @@ function MeetingsListPageContent({
                         here === "paused" ? (
                           <StatusBadge variant="dot" tone="neutral">
                             {msg("meetings.recorderPanel.paused")}
+                          </StatusBadge>
+                        ) : recorder && nothingRecording(recorder) ? (
+                          // Every source went away: the clock runs, but nothing is heard.
+                          <StatusBadge variant="dot" tone="attention">
+                            {msg("meetings.recorderPanel.notRecording")}
                           </StatusBadge>
                         ) : (
                           <StatusBadge variant="dot" tone="danger" pulse>

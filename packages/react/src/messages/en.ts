@@ -1612,15 +1612,32 @@ export const englishMessages = {
   "desktopDictation.host.cantRecord": "This computer can't record audio.",
   "desktopDictation.host.couldNotStart": "Dictation couldn't start. Try again.",
   "desktopDictation.host.microphoneBlocked": "{product} isn't allowed to use the microphone.",
+  "desktopDictation.host.modelUnavailable":
+    "This shortcut's model isn't available. Choose another in Settings.",
+  "desktopDictation.host.modelUnavailableBrief": "This shortcut's model isn't available.",
+  "desktopDictation.host.modelUnavailableIn":
+    "{workspace} doesn't offer this shortcut's model. Choose another in Settings.",
+  "desktopDictation.host.modelUnavailableInBrief":
+    "{workspace} doesn't offer this shortcut's model.",
   "desktopDictation.host.needsCredits": "Voice input needs credits. Your speech is saved.",
   "desktopDictation.host.notAllowed": "Voice input isn't allowed in this workspace.",
+  "desktopDictation.host.notInRegion":
+    "This model isn't available in your workspace's region. Your speech is saved.",
   "desktopDictation.host.notSaved": "The audio couldn't be saved. Try again.",
+  "desktopDictation.host.serviceOutOfCredit":
+    "The speech service is out of credit. Your speech is saved.",
   "desktopDictation.host.stopped": "Dictation stopped. Try again.",
   "desktopDictation.host.tooLong": "Too long to transcribe. Try a shorter one.",
   "desktopDictation.host.transcriptionFailed": "Transcription failed. Your speech is saved.",
   "desktopDictation.host.unreadable": "The audio couldn't be read. Try again.",
   "desktopDictation.host.usageLimit": "Usage limit reached. Your speech is saved.",
   "desktopDictation.host.voiceInputOff": "Voice input is off for this workspace.",
+  "desktopDictation.host.voiceInputOffIn":
+    "Voice input is off in {workspace}. Choose another workspace in Settings.",
+  "desktopDictation.host.voiceInputOffInBrief": "Voice input is off in {workspace}.",
+  "desktopDictation.host.workspaceGone":
+    "You're no longer in {workspace}. Choose a workspace in Settings.",
+  "desktopDictation.host.workspaceGoneBrief": "You're no longer in {workspace}.",
   "desktopDictation.settings.accessibilityDescription":
     "Lets {product} type the text into other apps. Without it, the text is only copied.",
   "desktopDictation.settings.accessibilityLabel": "Accessibility",
@@ -1653,11 +1670,17 @@ export const englishMessages = {
   "desktopDictation.settings.keyCombinationDescription": "Press the keys you want to use.",
   "desktopDictation.settings.languageDescription": "The language you speak with this shortcut.",
   "desktopDictation.settings.languageLabel": "Language",
-  "desktopDictation.settings.modelDescription":
-    "The speech-to-text model that hears this shortcut.",
+  "desktopDictation.settings.modelDescription": "Which model listens for this shortcut.",
   "desktopDictation.settings.modelLabel": "Model",
+  "desktopDictation.settings.modelNotOffered":
+    "This workspace doesn't offer this model. Choose another.",
+  "desktopDictation.settings.modelNotOfferedIn":
+    "{workspace} doesn't offer this model. Choose another.",
   "desktopDictation.settings.modelUnavailable": "Not available in this workspace now.",
+  "desktopDictation.settings.modelUnavailableIn": "Not offered in {workspace}.",
   "desktopDictation.settings.workspaceModel": "Workspace default",
+  "desktopDictation.settings.workspaceModelIn": "Default for {workspace}",
+  "desktopDictation.settings.workspaceModelPersonal": "Default for your Personal workspace",
   "desktopDictation.settings.modeHold": "Hold while speaking",
   "desktopDictation.settings.modeHoldDescription": "Dictates while you hold the keys down.",
   "desktopDictation.settings.modeLabel": "How the keys work",
@@ -1716,6 +1739,17 @@ export const englishMessages = {
   "desktopDictation.settings.vocabularyTermTooLong":
     "“{term}” is too long. Keep each to {max} characters.",
   "desktopDictation.settings.vocabularyTooMany": "Keep the list to {max} names and words.",
+  "desktopDictation.settings.workspaceDescription":
+    "Shortcut dictations go to this workspace and are billed to it, even when another one is open.",
+  "desktopDictation.settings.workspaceGone":
+    "You're no longer in {workspace}. Choose a workspace to keep dictating.",
+  "desktopDictation.settings.workspaceLabel": "Workspace",
+  "desktopDictation.settings.workspacePrivate": "Private",
+  "desktopDictation.settings.workspacePlaceholder": "Choose a workspace",
+  "desktopDictation.settings.workspaceSearch": "Search workspaces",
+  "desktopDictation.settings.workspaceVoiceOff":
+    "Voice input is off in {workspace}. Choose another workspace.",
+  "desktopDictation.settings.workspaceVoiceOffOption": "Voice input is turned off.",
   "desktopViewer.clickReturnControlOrCtrl": "· click Return control (or Ctrl+Alt+Shift)",
   "desktopViewer.connectingToTheDesktop": "Connecting to the desktop…",
   "desktopViewer.couldnTConnect": "Couldn’t connect",
@@ -2112,44 +2146,40 @@ export const englishMessages = {
   "lib.format.capacityRecoveryExhausted":
     "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
   "lib.format.composerApiCreditsRequired":
-    "API usage uses credits, not your plan credit. Add credits to continue. Your message and attachments are saved.",
+    "API usage uses credits, not your plan credit. Add credits to continue.",
   "lib.format.composerApiCreditsRequiredAskOwner":
-    "API usage uses credits, not your plan credit. Ask an organization owner to add credits. Your message and attachments are saved.",
-  "lib.format.composerByokPaidCreditRequired":
-    "Add credits to use your own key. Your message and attachments are saved.",
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+  "lib.format.composerByokPaidCreditRequired": "Add credits to use your own key.",
   "lib.format.composerByokPaidCreditRequiredAskOwner":
-    "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
-  "lib.format.composerByokUpgradeRequired":
-    "Upgrade to Pro to use your own key. Your message and attachments are saved.",
+    "Ask an organization owner to add credits to use your own key.",
+  "lib.format.composerByokUpgradeRequired": "Upgrade to Pro to use your own key.",
   "lib.format.composerByokUpgradeRequiredAskOwner":
-    "Ask an organization owner to upgrade to Pro to use your own key. Your message and attachments are saved.",
-  "lib.format.composerSubscriptionUpgradeRequired":
-    "Upgrade to Pro to use your own subscription. Your message and attachments are saved.",
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  "lib.format.composerSubscriptionUpgradeRequired": "Upgrade to Pro to use your own subscription.",
   "lib.format.composerSubscriptionUpgradeRequiredAskOwner":
-    "Ask an organization owner to upgrade to Pro to use your own subscription. Your message and attachments are saved.",
+    "Ask an organization owner to upgrade to Pro to use your own subscription.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "lib.format.minutes": "{count}m",
   "lib.format.accountUnavailable":
-    "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.",
+    "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your message.",
   "lib.format.modelUnavailable":
-    "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
-  "lib.format.newChatModelUnavailable":
-    "This model isn't available to you. Choose another model. Your message is saved.",
+    "This chat's model is no longer available. Choose another model to continue.",
+  "lib.format.newChatModelUnavailable": "This model isn't available to you. Choose another model.",
   "lib.format.modelPolicyCredits":
-    "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key. Your message is saved.",
+    "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key.",
   "lib.format.modelPolicyRefused":
-    "This workspace's model policy doesn't allow this model. Choose another model. Your message is saved.",
+    "This workspace's model policy doesn't allow this model. Choose another model.",
   "lib.format.repositoryUnavailable":
-    "{repository} is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry. Your message is saved.",
+    "{repository} is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry.",
   "lib.format.repositoriesUnavailable":
-    "These repositories are no longer available to this workspace: {repositories}. Remove them from this chat, or restore their GitHub access, then retry. Your message is saved.",
+    "These repositories are no longer available to this workspace: {repositories}. Remove them from this chat, or restore their GitHub access, then retry.",
   "lib.format.someRepositoryUnavailable":
-    "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry. Your message is saved.",
+    "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry.",
   "lib.format.now": "now",
   "lib.format.speedUnavailable":
-    "This model can't run at the selected speed. Choose another speed. Your message is saved.",
+    "This model can't run at the selected speed. Choose another speed.",
   "lib.format.outOfCreditsThisWorkspace":
     "There aren't enough credits for this model. Add credits, or choose another model. The conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
@@ -2157,8 +2187,7 @@ export const englishMessages = {
   "lib.format.reconcileBeforeRetry":
     "This client cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
   "lib.format.seconds": "{count}s",
-  "lib.format.sessionUsageLimitReached":
-    "This task's usage limit is reached. Your message is saved.",
+  "lib.format.sessionUsageLimitReached": "This task's usage limit is reached.",
   "lib.format.subscriptionUpgradeRequired":
     "Upgrade to Pro to use your own subscription. The conversation is preserved.",
   "lib.format.subscriptionUpgradeRequiredAskOwner":
@@ -2171,20 +2200,16 @@ export const englishMessages = {
   "lib.format.theServiceEncounteredADatabase": "The service encountered a database error.",
   "lib.format.thisClientCannotResumeThe":
     "This client cannot resume the workspace. Ask your administrator for a control-capable client.",
-  "lib.format.thisSiteSAssistantCan":
-    "This Site's assistant can't do that for you. Your message is saved.",
-  "lib.format.thisSiteSAssistantHas":
-    "This Site's assistant has reached its usage limit for now. Your message is saved.",
-  "lib.format.thisSiteSAssistantIs":
-    "This Site's assistant is busy. Try again in a moment. Your message is saved.",
-  "lib.format.thisSiteSAssistantIs2":
-    "This Site's assistant is paused for visitors right now. Your message is saved.",
+  "lib.format.thisSiteSAssistantCan": "This Site's assistant can't do that for you.",
+  "lib.format.thisSiteSAssistantHas": "This Site's assistant has reached its usage limit for now.",
+  "lib.format.thisSiteSAssistantIs": "This Site's assistant is busy. Try again in a moment.",
+  "lib.format.thisSiteSAssistantIs2": "This Site's assistant is paused for visitors right now.",
   "lib.format.usageLimitReachedAWorkspace":
     "Usage limit reached. A workspace admin can raise this limit. Your draft is preserved.",
   "lib.format.workspaceUsageLimitReachedAn":
     "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.",
   "lib.format.yourOrganizationDoesnTHave":
-    "There aren't enough credits for this model. Add credits, or choose another model. Your message and attachments are saved.",
+    "There aren't enough credits for this model. Add credits, or choose another model.",
   "lib.providerRecovery.anImageFromEarlierIn":
     "An image from earlier in this conversation can't be read from storage",
   "lib.providerRecovery.opengeniToolServiceUnavailable":
@@ -2825,6 +2850,7 @@ export const englishMessages = {
   "meetings.player.playbackSpeedRate": "Playback speed {rate}×",
   "meetings.player.position": "Position",
   "meetings.player.rate": "{rate}×",
+  "meetings.recorderPanel.allowMicrophone": "Allow microphone",
   "meetings.recorderPanel.allowMicrophoneAccessForThis":
     "Allow microphone access for this site in your browser's address bar or settings, then start again.",
   "meetings.recorderPanel.allowThisAppToUse":
@@ -2838,6 +2864,8 @@ export const englishMessages = {
   "meetings.recorderPanel.canTRecordComputerAudio": "Can't record computer audio",
   "meetings.recorderPanel.capturingwhatValue": "{capturingWhat} {value}",
   "meetings.recorderPanel.computerAudio": "Computer audio",
+  "meetings.recorderPanel.computerAudioInSentence": "computer audio",
+  "meetings.recorderPanel.couldNotReconnect": "Couldn't start that audio again",
   "meetings.recorderPanel.computerAudioDidnTStart":
     "Computer audio didn't start. Start again, or record without computer audio.",
   "meetings.recorderPanel.computerAudioIsnTAllowed": "Computer audio isn't allowed",
@@ -2853,6 +2881,20 @@ export const englishMessages = {
   "meetings.recorderPanel.liveTextIsnTAvailable":
     "No live text this time.{value} You still get the transcript after you stop.",
   "meetings.recorderPanel.liveTranscript": "Live transcript",
+  "meetings.recorderPanel.lostComputerAudio":
+    "Computer audio stopped, so the call isn't being recorded.",
+  "meetings.recorderPanel.lostMicrophoneOff":
+    "Your voice isn't being recorded: microphone access was turned off.",
+  "meetings.recorderPanel.lostMicrophoneWaiting":
+    "Your voice isn't being recorded: no microphone is connected. Recording picks up again as soon as one is.",
+  "meetings.recorderPanel.lostReasonComputerAudio": "computer audio stopped",
+  "meetings.recorderPanel.lostReasonJoin": ", and ",
+  "meetings.recorderPanel.lostReasonMicrophoneOff": "microphone access is off",
+  "meetings.recorderPanel.lostReasonMicrophoneWaiting":
+    "no microphone is connected (it comes back by itself when one is)",
+  "meetings.recorderPanel.lostReasonTabAudio": "tab sharing ended",
+  "meetings.recorderPanel.lostTabAudio": "Tab sharing ended, so the call isn't being recorded.",
+  "meetings.recorderPanel.lostTrackStillRecording": "{lost} {track} is still recording.",
   "meetings.recorderPanel.meetingLanguage": "Meeting language",
   "meetings.recorderPanel.meetingTitle": "Meeting title",
   "meetings.recorderPanel.microphone": "Microphone",
@@ -2860,6 +2902,8 @@ export const englishMessages = {
   "meetings.recorderPanel.microphoneOnlySoPeopleOn":
     "Microphone only: other people on a call won't be heard.",
   "meetings.recorderPanel.nameIt": "Name it",
+  "meetings.recorderPanel.nothingRecordingReasons": "Nothing is being recorded. {reasons}.",
+  "meetings.recorderPanel.notRecording": "Not recording",
   "meetings.recorderPanel.nameThisMeeting": "Name this meeting",
   "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting, or it's named for you",
   "meetings.recorderPanel.namedForYou": "Named for you",
@@ -2877,7 +2921,18 @@ export const englishMessages = {
     "Offline. The audio uploads when you're back online.",
   "meetings.recorderPanel.pause": "Pause",
   "meetings.recorderPanel.paused": "Paused",
+  "meetings.recorderPanel.pausedComputerAudio":
+    "Paused. Computer audio stopped, so after you resume only {track} will be recorded.",
+  "meetings.recorderPanel.pausedLostReasons":
+    "Paused. {reasons}. Until one is back, nothing will be recorded when you resume.",
+  "meetings.recorderPanel.pausedMicrophoneOff":
+    "Paused. Microphone access is off, so after you resume only {track} will be recorded.",
+  "meetings.recorderPanel.pausedMicrophoneWaiting":
+    "Paused. No microphone is connected. Connect one before you resume, or only {track} will be recorded.",
+  "meetings.recorderPanel.pausedTabAudio":
+    "Paused. Tab sharing ended, so after you resume only {track} will be recorded.",
   "meetings.recorderPanel.pausedNothingIsHeardUntil": "Paused.",
+  "meetings.recorderPanel.recordComputerAudioAgain": "Record computer audio",
   "meetings.recorderPanel.recording": "Recording.",
   "meetings.recorderPanel.recording2": "Recording",
   "meetings.recorderPanel.recordingNotUploading": "Recording · not uploading",
@@ -2913,7 +2968,9 @@ export const englishMessages = {
     "Starting… Allow the microphone if asked.",
   "meetings.recorderPanel.startRecording": "Start recording",
   "meetings.recorderPanel.stop": "Stop",
+  "meetings.recorderPanel.shareTabAgain": "Share tab again",
   "meetings.recorderPanel.tabAudio": "Tab audio",
+  "meetings.recorderPanel.tabAudioInSentence": "tab audio",
   "meetings.recorderPanel.takeNotes": "Take notes",
   "meetings.recorderPanel.theLiveTranscriptAddsAbout": "About ${value} per hour.",
   "meetings.recorderPanel.theLiveTranscriptionAccountHas":
@@ -2932,6 +2989,11 @@ export const englishMessages = {
     "This browser can't share a tab's audio. Record with the microphone only, or use Chrome or Edge on a computer.",
   "meetings.recorderPanel.thisComputerCanTRecordItsOwnAudio":
     "This computer can't record its own audio. Record without computer audio instead.",
+  "meetings.recorderPanel.trackAccessOff": "Access off",
+  "meetings.recorderPanel.trackDisconnected": "Disconnected",
+  "meetings.recorderPanel.trackRecordingAgain": "{track} is recording again.",
+  "meetings.recorderPanel.trackSharingEnded": "Sharing ended",
+  "meetings.recorderPanel.trackStopped": "Stopped",
   "meetings.recorderPanel.uploaded": "Uploaded",
   "meetings.recorderPanel.uploadFailedMessage": "Upload failed: {message}",
   "meetings.recorderPanel.uploadfailurereasonTheRecordingIsSaved":
@@ -2943,6 +3005,7 @@ export const englishMessages = {
     "Use a current version of Chrome, Edge, Safari or Firefox to record meetings.",
   "meetings.recorderPanel.whenYourBrowserAsksWhat":
     "When your browser asks what to share, pick the meeting tab and turn on Share tab audio. Or record without it.",
+  "meetings.recorderPanel.yourMicrophone": "your microphone",
   "meetings.recorderPanel.youCanUseOtherPages": "Closing this tab stops the recording.",
   "meetings.recorderPanel.youNoLongerHavePermission":
     "You no longer have permission to add recordings to this workspace.",
@@ -4080,7 +4143,7 @@ export const englishMessages = {
   "providerRecoveryNotice.theTurnContinuesAutomaticallyOnceItsBack":
     "The turn continues automatically as soon as it's back.",
   "providerRecoveryNotice.yourMessageIsSavedOpengeni":
-    "Your message is saved. {product} keeps retrying automatically for a few minutes.",
+    "{product} keeps retrying automatically for a few minutes.",
   "queueItemContent.contentUnavailable": "Content unavailable",
   "queuePresentationModel.contentOmittedAtSafeBoundary":
     "Content omitted at safe boundary · ref {reference}",
@@ -5226,7 +5289,7 @@ export const englishMessages = {
   "timeline.activityRail.preference": "Preference",
   "timeline.activityRail.procedure": "Procedure",
   "timeline.activityRail.savedToMemory": "Saved to memory",
-  "timeline.activityRail.unableToStartYetYour": "Unable to start yet. Your messages are saved.",
+  "timeline.activityRail.unableToStartYetYour": "Unable to start yet.",
   "timeline.activityRail.updatedInPlace": "Updated in place.",
   "timeline.activityRail.updatedMemory": "Updated memory",
   "timeline.activityRail.viewInMemory": "View in memory",
@@ -5755,8 +5818,7 @@ export const englishMessages = {
     "Start confirmation is unavailable.",
   "timeline.startupDispatchDetails.theStartRequestWasAccepted":
     "The start request was accepted; a worker has not started the turn yet.",
-  "timeline.startupDispatchDetails.yourMessagesAreSavedNo":
-    "Your messages are saved. No agent turn is running yet.",
+  "timeline.startupDispatchDetails.yourMessagesAreSavedNo": "No agent turn is running yet.",
   "timeline.startupTimings.conversationHistory": "Conversation history",
   "timeline.startupTimings.duration": "Duration",
   "timeline.startupTimings.eachTurnHasItsOwn":

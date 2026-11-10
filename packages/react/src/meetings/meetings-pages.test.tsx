@@ -2181,6 +2181,144 @@ describe("Live transcript", () => {
     }
   });
 
+  test("a track whose source went away says so, what still records, and how to bring it back", async () => {
+    const { RecorderPanel } = await import("./recorder-panel");
+    const reconnected: number[] = [];
+    const panel = (tracks: unknown[], systemAudioKind: string | null = "display") =>
+      ({
+        state: "recording",
+        recordingId: "r1",
+        title: "Weekly",
+        elapsedMilliseconds: 61_000,
+        tracks,
+        upload: null,
+        error: null,
+        live: null,
+        supported: true,
+        systemAudioSupported: true,
+        systemAudioKind,
+        recovered: [],
+        uploads: {},
+        retryUpload: () => false,
+        start: async () => {},
+        pause: () => {},
+        resume: () => {},
+        stop: async () => {},
+        discard: async () => {},
+        rename: async () => {},
+        reconnectTrack: async (trackNumber: number) => {
+          reconnected.push(trackNumber);
+        },
+        levels: () => ({}),
+      }) as unknown as Parameters<typeof RecorderPanel>[0]["recorder"];
+    const microphone = { trackNumber: 0, source: "microphone", label: "MacBook Microphone" };
+    const tab = { trackNumber: 1, source: "system", label: "Tab" };
+    const buttons = (container: HTMLElement) =>
+      [...container.querySelectorAll("button")].map((button) => button.textContent?.trim());
+
+    // Unplugged: it comes back by itself, so there is nothing to click.
+    let view = await render(
+      <RecorderPanel recorder={panel([{ ...microphone, lost: "reconnecting" }, tab])} />,
+    );
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Disconnected");
+      expect(text).toContain(
+        "Your voice isn't being recorded: no microphone is connected. Recording picks up again as soon as one is. Tab audio is still recording.",
+      );
+      expect(text).toContain("Recording");
+      expect(text).not.toContain("Recording your microphone and the tab's audio.");
+      expect(buttons(view.container)).not.toContain("Allow microphone");
+      // Plugged back in: it says so, briefly.
+      await view.rerender(<RecorderPanel recorder={panel([{ ...microphone }, tab])} />);
+      expect(view.container.textContent).toContain("Microphone is recording again.");
+      expect(view.container.textContent).not.toContain("Your voice isn't being recorded");
+    } finally {
+      await view.unmount();
+    }
+
+    // Sharing ended: only the person can share again.
+    view = await render(
+      <RecorderPanel recorder={panel([microphone, { ...tab, lost: "stopped" }])} />,
+    );
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Sharing ended");
+      expect(text).toContain(
+        "Tab sharing ended, so the call isn't being recorded. Microphone is still recording.",
+      );
+      const share = [...view.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Share tab again",
+      )!;
+      await act(async () => share.click());
+      expect(reconnected).toEqual([1]);
+    } finally {
+      await view.unmount();
+    }
+
+    // A microphone alone, gone: nothing is being recorded, and the header says so.
+    view = await render(
+      <RecorderPanel recorder={panel([{ ...microphone, lost: "stopped" }], "desktop")} />,
+    );
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain("Not recording");
+      expect(text).toContain("Access off");
+      expect(text).toContain("Nothing is being recorded. Microphone access is off.");
+      expect(text).not.toContain("still recording");
+      expect(buttons(view.container)).toContain("Allow microphone");
+    } finally {
+      await view.unmount();
+    }
+
+    // Both gone: what needs the person comes first, beside its button.
+    view = await render(
+      <RecorderPanel
+        recorder={panel([
+          { ...microphone, lost: "reconnecting" },
+          { ...tab, lost: "stopped" },
+        ])}
+      />,
+    );
+    try {
+      expect(view.container.textContent).toContain(
+        "Nothing is being recorded. Tab sharing ended, and no microphone is connected (it comes back by itself when one is).",
+      );
+      expect(buttons(view.container)).toContain("Share tab again");
+    } finally {
+      await view.unmount();
+    }
+
+    // Paused, nothing records: it says what resuming will record.
+    const paused = (tracks: unknown[]) =>
+      ({ ...panel(tracks), state: "paused" }) as unknown as Parameters<
+        typeof RecorderPanel
+      >[0]["recorder"];
+    view = await render(
+      <RecorderPanel recorder={paused([{ ...microphone, lost: "reconnecting" }, tab])} />,
+    );
+    try {
+      const text = view.container.textContent ?? "";
+      expect(text).toContain(
+        "Paused. No microphone is connected. Connect one before you resume, or only tab audio will be recorded.",
+      );
+      expect(text).not.toContain("still recording");
+    } finally {
+      await view.unmount();
+    }
+    view = await render(
+      <RecorderPanel recorder={paused([microphone, { ...tab, lost: "stopped" }])} />,
+    );
+    try {
+      expect(view.container.textContent).toContain(
+        "Paused. Tab sharing ended, so after you resume only your microphone will be recorded.",
+      );
+      expect(buttons(view.container)).toContain("Share tab again");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a meeting recorded elsewhere shows the saved live text as a preview", async () => {
     const { LIVE_RECORDING_ID } = await import("../testing/meetings-fixture");
     const fixture = createMeetingsFixture();

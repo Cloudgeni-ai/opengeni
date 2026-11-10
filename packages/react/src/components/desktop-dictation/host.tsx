@@ -28,8 +28,23 @@ export type DesktopDictationClient = Pick<ChatClient<OpenGeniClient>, "transcrib
 export type DesktopDictationHostProps = {
   /** The signed-in SDK client; dictations are recordings of this account. */
   client: DesktopDictationClient | null;
-  /** The workspace that hears dictations; null records nothing. */
+  /**
+   * The workspace every dictation belongs to, whichever one the page shows
+   * (see `dictationWorkspace`); null records nothing.
+   */
   workspaceId: string | null;
+  /** Its name, so a problem says where to fix it ("Voice input is off in Acme."). */
+  workspaceName?: string | null | undefined;
+  /**
+   * The workspace saved for dictation is no longer the person's: every press
+   * is answered with that (naming `workspaceName`) instead of recording.
+   */
+  workspaceGone?: boolean | undefined;
+  /**
+   * Shows the dictation settings, for Open settings on a dictation that
+   * failed for a reason fixed there. Without it the app offers no such button.
+   */
+  onOpenSettings?: (() => void) | undefined;
   /** The workspace's voice input. Read from the client's config when omitted. */
   capability?: ClientVoiceInputConfig | null | undefined;
   /** The workspace allows voice input. Read from its settings when omitted. */
@@ -179,6 +194,16 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
   availableRef.current = available;
   const capabilityRef = useRef(voiceInput?.capability ?? null);
   capabilityRef.current = voiceInput?.capability ?? null;
+  const place = useRef({
+    name: props.workspaceName ?? null,
+    gone: props.workspaceGone ?? false,
+    openSettings: props.onOpenSettings ?? null,
+  });
+  place.current = {
+    name: props.workspaceName ?? null,
+    gone: props.workspaceGone ?? false,
+    openSettings: props.onOpenSettings ?? null,
+  };
 
   const words = useRef({ t, report });
   words.current = { t, report };
@@ -186,14 +211,64 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
   const handle = useCallback((request: DesktopDictationRequest) => {
     const voiceNow = voiceRef.current;
     const { t: text, report: send } = words.current;
+    const { name, gone, openSettings } = place.current;
+    if (request.kind === "settings") {
+      openSettings?.();
+      return;
+    }
     if (request.kind === "start" || request.kind === "transcribe") {
-      if (!availableRef.current) {
+      // Each of these is fixed in the dictation settings, so the app offers them.
+      const fail = (message: string) =>
         send({
           dictationId: request.dictationId,
           phase: "failed",
-          message: text("desktopDictation.host.voiceInputOff"),
+          message,
           retryable: false,
+          ...(openSettings ? { fix: "settings" as const } : {}),
         });
+      // With Open settings beside it, the message only says what is wrong:
+      // the popup is one line.
+      if (gone) {
+        fail(
+          text(
+            openSettings
+              ? "desktopDictation.host.workspaceGoneBrief"
+              : "desktopDictation.host.workspaceGone",
+            { workspace: name ?? "" },
+          ),
+        );
+        return;
+      }
+      if (!availableRef.current) {
+        fail(
+          name
+            ? text(
+                openSettings
+                  ? "desktopDictation.host.voiceInputOffInBrief"
+                  : "desktopDictation.host.voiceInputOffIn",
+                { workspace: name },
+              )
+            : text("desktopDictation.host.voiceInputOff"),
+        );
+        return;
+      }
+      const heardBy = offeredModel(request.model, capabilityRef.current);
+      if (heardBy === undefined) {
+        // Never another model in its place: the person picks one in the settings.
+        fail(
+          name
+            ? text(
+                openSettings
+                  ? "desktopDictation.host.modelUnavailableInBrief"
+                  : "desktopDictation.host.modelUnavailableIn",
+                { workspace: name },
+              )
+            : text(
+                openSettings
+                  ? "desktopDictation.host.modelUnavailableBrief"
+                  : "desktopDictation.host.modelUnavailable",
+              ),
+        );
         return;
       }
       // A dictation still held here (one that failed) stays saved for the
@@ -203,7 +278,7 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
       current.current = { id: request.dictationId, phase: "starting", declined: false, again };
       kept.current = null;
       setLanguage(request.language);
-      setModel(offeredModel(request.model, capabilityRef.current));
+      setModel(heardBy);
       setVocabulary(request.vocabulary ?? NO_WORDS);
       setPending({ id: request.dictationId, audio: again ? request.audio : null });
       return;
@@ -258,7 +333,8 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
 
   // Record for the app's shortcut once this workspace's voice input is known,
   // so a press that opened this page waits for it rather than failing.
-  const listening = Boolean(dictation && workspaceId && voiceInput);
+  // Blocked, it answers each press with why rather than leaving it waiting.
+  const listening = Boolean(dictation && ((workspaceId && voiceInput) || props.workspaceGone));
   useEffect(() => {
     if (!dictation || !listening) return;
     const off = dictation.onRequest(handle);
@@ -454,6 +530,12 @@ export function dictationErrorMessage(code: string | null, t: OpenGeniText): str
       return t("desktopDictation.host.voiceInputOff");
     case "insufficient_credits":
       return t("desktopDictation.host.needsCredits");
+    // The provider's own account is empty: trying again won't help until
+    // someone tops it up, and nothing about starting failed.
+    case "provider_quota_exceeded":
+      return t("desktopDictation.host.serviceOutOfCredit");
+    case "region_restricted":
+      return t("desktopDictation.host.notInRegion");
     case "allowance_exhausted":
     case "monthly_model_cost_limit":
       return t("desktopDictation.host.usageLimit");
@@ -492,16 +574,20 @@ function readSpeech(
 }
 
 /**
- * The shortcut's own model when this workspace offers it; otherwise null, so
- * the workspace's voice input model hears it rather than the dictation failing.
+ * The model that hears a shortcut: null for the workspace's voice input model
+ * (the shortcut has none of its own, or the server lists no models), and
+ * undefined when the workspace doesn't offer the shortcut's model, so the
+ * dictation fails with that rather than another model hearing it.
  */
 function offeredModel(
   wanted: DesktopDictationModel | null | undefined,
   capability: ClientVoiceInputConfig | null | undefined,
-): DesktopDictationModel | null {
+): DesktopDictationModel | null | undefined {
   if (!wanted) return null;
-  const offered = capability?.models?.some(
+  const models = capability?.models;
+  if (!models) return null;
+  const offered = models.some(
     (entry) => entry.providerId === wanted.providerId && entry.model === wanted.model,
   );
-  return offered ? { providerId: wanted.providerId, model: wanted.model } : null;
+  return offered ? { providerId: wanted.providerId, model: wanted.model } : undefined;
 }

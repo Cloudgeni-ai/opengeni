@@ -40,6 +40,28 @@ describe("organization app approval", () => {
     expect(approval!.approvalUrl).not.toContain("pkce-challenge");
   });
 
+  test("the server's link for every service of the app is preferred over this sign-in's scopes", () => {
+    const everyService = microsoftAdminConsentUrl({
+      clientId: "app-1",
+      redirectUri: redirect,
+      scopes: ["User.Read", "Mail.ReadWrite", "Calendars.ReadWrite"],
+    });
+    expect(organizationAppApproval(microsoftSignIn("common"), everyService)?.approvalUrl).toBe(
+      everyService,
+    );
+    // A link for another app, or not Microsoft's approval page, is never offered.
+    for (const foreign of [
+      everyService.replace("client_id=app-1", "client_id=app-2"),
+      "https://login.example.com/organizations/v2.0/adminconsent?client_id=app-1",
+      "not a url",
+    ])
+      expect(
+        new URL(
+          organizationAppApproval(microsoftSignIn("common"), foreign)!.approvalUrl!,
+        ).searchParams.get("scope"),
+      ).toBe("https://graph.microsoft.com/User.Read https://graph.microsoft.com/Mail.ReadWrite");
+  });
+
   test("a sign-in pinned to one organization keeps that organization", () => {
     const approval = organizationAppApproval(microsoftSignIn("contoso.onmicrosoft.com"));
     expect(new URL(approval!.approvalUrl!).pathname).toBe(
