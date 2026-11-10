@@ -969,6 +969,40 @@ export const ErrorEnvelope = /* @__PURE__ */ defineSchema(() =>
 );
 export type ErrorEnvelope = z.infer<typeof ErrorEnvelope>;
 
+/**
+ * Why a request was refused as `unauthenticated` (HTTP 401) for want of a
+ * sign-in, carried as the error envelope's `details.code`:
+ *
+ * - `session_missing`: the request carried no sign-in cookie, app credential
+ *   or other credential.
+ * - `session_expired`: it carried a sign-in cookie or app credential that no
+ *   longer signs anyone in (expired, signed out or revoked).
+ * - `credential_invalid`: it carried another credential, such as an API key
+ *   or a delegated token, that was not accepted.
+ *
+ * The first two mean the caller's own sign-in is gone: a signed-in client
+ * should stop its background work and sign in again.
+ */
+export const AUTHENTICATION_REQUIRED_REASONS = [
+  "session_missing",
+  "session_expired",
+  "credential_invalid",
+] as const;
+export type AuthenticationRequiredReason = (typeof AUTHENTICATION_REQUIRED_REASONS)[number];
+
+/** Does this error envelope say the caller's own sign-in is gone? */
+export function isSignInLostRejection(envelope: unknown): boolean {
+  const error =
+    envelope && typeof envelope === "object" ? (envelope as { error?: unknown }).error : undefined;
+  if (!error || typeof error !== "object") return false;
+  const { code, details } = error as { code?: unknown; details?: unknown };
+  const reason =
+    details && typeof details === "object" ? (details as { code?: unknown }).code : undefined;
+  return (
+    code === "unauthenticated" && (reason === "session_missing" || reason === "session_expired")
+  );
+}
+
 /** A denied child can be one greater than the persisted PostgreSQL int ceiling. */
 export const NestedAgentDepthAttemptValue = /* @__PURE__ */ defineSchema(() =>
   primitives.nonnegativeInteger.max(MAX_NESTED_AGENT_DEPTH + 1),
