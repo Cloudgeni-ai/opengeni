@@ -363,7 +363,8 @@ export type SessionProxyHandlerOptions = {
         route: SessionProxyRoute,
         response: Response,
         context: SessionProxyContext,
-      ) => Response | undefined | Promise<Response | undefined>)
+        // `void` lets a record-only `async` hook end without `return undefined`.
+      ) => Response | undefined | void | Promise<Response | undefined | void>)
     | undefined;
   /**
    * Attach your product's MCP tool server to every chat this relay creates,
@@ -814,7 +815,8 @@ export function createSessionProxyHandler(
           upstream = await send();
         }
         const relayed = relayResponse(upstream, heartbeatMs, rejectedKeyNotice);
-        return (await options.afterForward?.(routeInfo, relayed, context)) ?? relayed;
+        const answered = await options.afterForward?.(routeInfo, relayed, context);
+        return answered instanceof Response ? answered : relayed;
       };
 
       // --- Server-owned additions: the few routes whose body the relay reads.

@@ -133,7 +133,9 @@ read it in `resolve`.
 Workspaces and memberships are created on first use (the key needs
 `members:manage`, which full-access keys have). To remove a user, stop
 resolving them. Chats are private to the user who started them;
-`chats: "shared"` on the handler shares them with the workspace. A tenant is
+`chats: "shared"` on the handler shares them with the workspace. Files attached
+in the stock UI are workspace files even in a private chat; use a workspace per
+user when uploads must stay private. A tenant is
 the product's team, organization, or customer: the group that shares data and
 tools. Derive `user` and `tenant` from the product's session, never from the
 request body or path. Anonymous visitors on a public site share one fixed
@@ -158,9 +160,11 @@ Per-message facts such as today's date or the current page go in
 Without `reasoningEffort`, chats use the deployment default, which can be high:
 deeper answers, slower replies. A lighter effort (`"medium"` or `"low"`) suits
 quick end-user chat; keep the default where answer quality matters more than
-speed. End users do not choose models unless the handler sets
+speed. The stock UI shows end users a model picker only when the handler sets
 `modelSelection: true`; the picker then lists the workspace's model catalog, so
-the workspace's allowed-model settings decide which models appear.
+the workspace's allowed-model settings decide which models appear. The option
+itself defaults to `true`, so the relay accepts model choices a custom browser
+client sends; set `modelSelection: false` to remove them.
 
 ### The product's tools
 
