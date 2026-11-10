@@ -73,6 +73,7 @@ import {
   ensureRunAllowed,
   AllowanceExhaustedError,
   SessionUsageLimitReachedError,
+  TurnAdmissionRefusedError,
   sessionUsageLimitStopEvents,
   type AllowanceRefusal,
 } from "./admission";
@@ -621,6 +622,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   // the local credit read). Unset port → today's local-ledger path.
   let allowanceRefusal: AllowanceRefusal | null = null;
   let sessionUsageLimitRefusal: SessionUsageLimitReachedRefusal | null = null;
+  let creditsRefusal: string | null = null;
   let sessionUsageCustodyWait = false;
   try {
     await waitForTurnOperation(
@@ -649,6 +651,8 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       recordSessionUsageLimitEvent(observability, "claim", "reached");
     } else if (error instanceof AllowanceExhaustedError) {
       allowanceRefusal = error.refusal;
+    } else if (error instanceof TurnAdmissionRefusedError && error.creditsExhausted) {
+      creditsRefusal = error.message;
     } else if (sessionUsageCustodyPending(error)) {
       // An earlier single call's receipt is still owed: wait, not a failure.
       sessionUsageCustodyWait = true;
@@ -932,6 +936,31 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
         sessionStatus: "idle",
         activeTurnId: null,
         allowanceGoalPause: { rationale: allowanceRefusal.message },
+      }))
+    ) {
+      return { exit: claimedResult({ status: "cancelled" }) };
+    }
+    control.turnMetricOutcome = "completed";
+    control.activityStatus = "idle";
+    return { exit: claimedResult({ status: "idle" }) };
+  }
+  if (creditsRefusal) {
+    // Out of credits before any provider or sandbox work: the same stop as
+    // running out between model calls. The session stays usable (a failed
+    // session would end a parent's work and hide the credits notice), and an
+    // active goal pauses for limits at the next continuation evaluation.
+    if (
+      !(await eventing.settle({
+        events: [
+          {
+            type: "turn.completed",
+            payload: { output: "", segmentLimit: "budget_exhausted", detail: creditsRefusal },
+          },
+          { type: "session.status.changed", payload: { status: "idle" } },
+        ],
+        turnStatus: "completed",
+        sessionStatus: "idle",
+        activeTurnId: null,
       }))
     ) {
       return { exit: claimedResult({ status: "cancelled" }) };
