@@ -2,8 +2,8 @@
 
 An agent is one channel-independent record that replaces two older concepts:
 [Slack agents](slack-bot.md#slack-agents) and [bot templates](bots.md#bot-templates).
-It has a name, an icon, a description, Instructions, an optional First message,
-Memory, a home workspace (where its chats run) and a visibility: Only me
+It has a name, an icon, a description, Instructions (the one text saying
+what it does and how), Memory, a home workspace (where its chats run) and a visibility: Only me
 (`private`) or the home workspace (`workspace`). Slack is one place an agent can
 be available, per connected Slack installation.
 
@@ -27,8 +27,8 @@ Slack routes, interactions, proposals, intro posts, suggestions, the
   for optimistic concurrency. `UNIQUE (id, account_id)` anchors the composite
   foreign keys below.
 - `agent_revisions`: immutable content per revision: Instructions (up to
-  20,000 characters), First message (up to 20,000) and the name and
-  description as of that revision. The runtime role may only `SELECT` and
+  20,000 characters), the older First message (up to 20,000; see
+  [One text](#one-text)) and the name and description as of that revision. The runtime role may only `SELECT` and
   `INSERT`; deleting the agent cascades.
 - `agent_slack_installs`: where an agent is available in Slack, one row per
   agent and Slack connection, owned by the agent's home workspace so a rename
@@ -125,10 +125,10 @@ path is the agent's home.
 | `PUT` and `DELETE /agents/:id/slack/:connectionId` | `workspace:admin`; turning `open` on also needs an organization admin |
 | `GET /agents/:id/slack/:connectionId/channels`, `POST .../intro` | `workspace:admin` |
 
-- Limits: name 1 to 120 characters, description up to 280, Instructions and
-  First message up to 20,000 each. Validation is lenient (trimmed, clear
+- Limits: name 1 to 120 characters, description up to 280, Instructions up
+  to 20,000 (an older client's `firstMessage` too, which joins them). Validation is lenient (trimmed, clear
   messages); refusals carry `error.details.code` from `AGENT_ERROR_CODES`.
-- Every change to Instructions or the First message adds a revision recording
+- Every change to Instructions adds a revision recording
   who made it; name and description changes are stored with the next one.
   Every change bumps `version`, including turning Slack on or off; recording
   the Memory collection once it exists does not.
@@ -160,8 +160,9 @@ the legacy rows in the same transaction, with
 `set_config('opengeni.agents_dual_write', '1', true)` so the sync triggers
 stand aside:
 
-- `bot_templates` for agents whose origin is a bot template (First message as
-  `setup_instructions`);
+- `bot_templates` for agents whose origin is a bot template (the stored
+  First message as `setup_instructions`, or the joined Instructions once it
+  has joined them);
 - `slack_agents` while the agent is available in Slack, in the installation's
   workspace and targeting the home workspace (Instructions, `open`, Memory
   collection, `version` mirrored). Turning Slack off deletes that row, not the
@@ -183,8 +184,8 @@ only for their owner and only in Only me chats, which is the default when
 child chats, `agent_child_chat`). The chat gets
 `sessions.agent_id` and `agent_prompt_revision` = the agent's current
 revision, so its Instructions reach the model through the worker's agent layer
-([run lifecycle](run-lifecycle.md#agent-instructions)). The First message is
-only prefilled by the app, never sent. Slack agent chats are bound the same
+([run lifecycle](run-lifecycle.md#agent-instructions)). Agents have no First
+message; the app selects the agent and leaves the composer as it is. Slack agent chats are bound the same
 way and no longer copy the agent's Instructions into `sessions.instructions`;
 the Slack-specific text (how the chat was reached, the other agents, handoff)
 stays there. Post identity and an agent's chat list use `sessions.agent_id`,
@@ -203,7 +204,10 @@ agent needs Only me chats enabled in the organization to be used.
 
 One switch, "Remember across chats" (`memoryEnabled`). On: the agent has its
 own Knowledge collection and its chats may read its other shared chats
-(`slack_agent_chats`). Off: neither. The rules live in
+(`slack_agent_chats`). Off: neither. New agents start with it on in the app
+form, from a chat (`bot_template_save`) and from Slack; existing agents keep
+their setting, and the API's `CreateAgentRequest.memoryEnabled` still
+defaults to off when omitted. The rules live in
 `packages/core/src/domain/agent-memory.ts` and are enforced by the tools:
 
 - Every chat of the agent with Knowledge tools reads its Memory, including
@@ -239,21 +243,55 @@ own Knowledge collection and its chats may read its other shared chats
   chat's own instructions leave no room, the guidance is left out rather than
   cutting them.
 
+### One text
+
+Agents used to have a second text, a First message the app put in the
+composer. Now Instructions are the one text saying what an agent does, and
+the First message is read as part of them: `agentInstructionsWithFirstMessage`
+(`@opengeni/contracts`) joins it after the Instructions as its own paragraph
+led by "When a chat starts:" (it was what a new chat opened with, so it stays
+something for the start of a chat rather than a standing rule), unless they
+already contain it, and `agentInstructionsSql` reads stored
+revisions the same way for Slack routing and a chat's agent prompt. Nothing
+is migrated and the column stays:
+
+- Every read (the API, the editor, Slack, a chat's agent layer) shows the
+  joined text; `firstMessage` is always empty and `hasFirstMessage` false.
+- The next change to an agent stores the joined text as a new revision with
+  an empty First message. Instructions sent with the change replace a stored
+  First message, because they were written over the joined text. Only when
+  the two together would pass the 20,000-character Instructions limit does
+  the revision keep both as sent (readers still see them joined).
+- A `firstMessage` from an older client, `bot_template_save`'s older
+  `firstMessage`/`setupInstructions`, and `/bot-templates`
+  `setupInstructions` all become Instructions. The legacy rows copy what is
+  stored, never a cut text: `bot_templates.setup_instructions` holds the
+  stored First message, or the joined Instructions once it has joined them,
+  and `slack_agents.instructions` the joined text when it fits, else the
+  stored Instructions. An older release writing either row back keeps the
+  stored First message, so no text is lost or repeated during a rollout.
+- A chat with an agent whose current revision has a First message gets it as
+  part of its Instructions from then on.
+- Rollback: an older release reads agents stored this way as Instructions
+  with no First message, and keeps working; agents never changed since still
+  have their First message for it.
+
 ### Compatibility
 
 `/bot-templates`, `/integrations/slack/agents`, the MCP tools
 `bot_template_save` and `slack_agent_*`, `?botTemplateId=` links and
 `slack-agent:<id>` principals keep working on top of `agents`:
 
-- Bot templates list the agents the reader can see that have a First message
-  (or were made as templates), with the First message as `setupInstructions`;
-  the old gallery opens a template in a chat not bound to the agent, so other
-  agents' Instructions would not apply. Get, change and delete by id work for
-  every agent. A new template is an agent with empty Instructions.
+- Bot templates list the agents the reader can see that were made as
+  templates, with their Instructions as `setupInstructions` (the old gallery
+  opens a template in a chat not bound to the agent, as composer text). Get,
+  change and delete by id work for every agent. A new or changed template's
+  `setupInstructions` are its Instructions.
 - `bot_template_save` ("Make this an agent") creates an agent from the chat
-  with standing `instructions` and an optional `firstMessage` (the older
-  `setupInstructions` argument is taken as the First message), shared like
-  the chat it was made from, with Memory off.
+  with standing `instructions` (the older `firstMessage` and
+  `setupInstructions` arguments join them), shared like the chat it was made
+  from, with Memory on and its collection saved by the chat's live turn (under
+  that chat's Agent learning).
 - Slack agents are the agents available in that installation. Deleting one
   through the old endpoint deletes the agent.
 
@@ -273,31 +311,32 @@ templates** and the Slack agents list; `/bot-templates` redirects there.
 
 - Agents page: All / Yours, one row per agent (icon, name, what it helps with,
   an Only me or Slack badge), **New agent** and **Import** (`.agent.json`, or an
-  older `.bot.json` whose setup instructions become the First message). Banners
+  older `.bot.json` whose setup instructions become the Instructions). Banners
   say that templates and Slack agents became agents (shown when such agents
   exist, dismissible per browser), and a notice suggests renaming when names
   repeat.
 - Agent page: **Chat** (`/sessions?agent=<id>`), **Export** (an `.agent.json`
-  file with its name, icon, description, Instructions, First message and Memory
-  switch; no ids, chats, Memory contents or Slack), its chats (Yours /
-  Everyone's, each marked with where it started), Instructions, First message,
-  **Remember across chats**, who can use it, and **Available in**: the app
+  file with its name, icon, description, Instructions and Memory switch; no
+  ids, chats, Memory contents or Slack; an older file's First message joins
+  the Instructions on import), its chats (Yours / Everyone's, each marked with
+  where it started), Instructions, **Remember across chats**, who can use it, and **Available in**: the app
   always, and one row per connected Slack workspace (`@Opengeni +handle`, open
   use, **Introduce in channels** at `/agents/:agentId/introduce/:connectionId`).
   While an agent is on in one Slack workspace, the others' switches are off
   with a reason (`agent_slack_single_install`). Controls follow the agent's
   `viewer` access.
-- Form: only the name is required. Lengths are checked on save with a count
+- Form: icon, name, what it helps with, Instructions, **Remember across
+  chats** (a switch, on for a new agent) and who can use it. Only the name is
+  required. Lengths are checked on save with a count
   near each limit, never cut while typing. **Only me** is off with a reason
   where Only me chats aren't available.
 - Composer: an agent chip ("Opengeni ▾" with a **Chat with** list and
-  **Browse agents**) sets `?agent=<id>`; `?botTemplateId=` still works. A
-  chosen agent's First message fills the composer; the chat starts with
-  `agentId` (`app/lib/composer-agent.tsx`). Send waits while the agent loads;
-  an agent that failed to load, or an Only me agent where Only me chats aren't
-  available, shows why on the chip and blocks Send. An untouched First message
-  is not saved in the server-side draft, so another tab or device never sees
-  it without its agent. An Only me agent makes the chat Only me (Workspace is
+  **Browse agents**) sets `?agent=<id>`; `?botTemplateId=` still works. The
+  agent is selected and the composer is left as it is (empty for a new chat);
+  the chat starts with `agentId` (`app/lib/composer-agent.tsx`). Send waits
+  while the agent loads; an agent that failed to load, or an Only me agent
+  where Only me chats aren't available, shows why on the chip and blocks Send.
+  An Only me agent makes the chat Only me (Workspace is
   off with a reason) and going back restores the earlier choice.
 - Agent chats show the agent's icon and name beside the title and a source
   line such as "Started in Slack by Kari". **Make this an agent** in the chat

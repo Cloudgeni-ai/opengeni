@@ -75,10 +75,10 @@ offering plugins and connections, creating schedules and event triggers,
 choosing a machine) and the chat simply continues as the bot.
 
 Bot templates are being merged with Slack agents into [agents](agents.md).
-The routes below are a compatibility layer over `agents`: they list every
-agent the reader can see, a template's setup instructions are the agent's
-First message, and a new template is an agent with empty Instructions (the
-legacy `bot_templates` row is still written for older releases).
+The routes below are a compatibility layer over `agents`: they list the
+agents made as templates, and a template's setup instructions are the
+agent's Instructions (the legacy `bot_templates` row is still written for
+older releases).
 
 Setup instructions can be exact ("install these Skills and create this
 schedule") so the agent sets itself up without asking, or open-ended ("ask how
@@ -122,13 +122,12 @@ A workspace keeps at most 500 agents, templates included (they share the limit w
 
 In the web app, templates are agents: the sidebar's **Agents** page replaces
 **Bot templates** (the old `/bot-templates` URL opens it), and a template's
-setup instructions are its First message. See [agents, "App"](agents.md#app).
+setup instructions are its Instructions. See [agents, "App"](agents.md#app).
 
 The agent makes an agent of itself with `bot_template_save` (capability
 `subagents`, needs `sessions:create`), usually when the person asks. It writes
-standing Instructions from what the chat has established, puts one-time setup
-in an optional First message, and leaves out one-off tasks, history, personal
-details and secrets ([agents](agents.md#compatibility)).
+standing Instructions from what the chat has established and leaves out
+one-off tasks and one-time setup, history, personal details and secrets ([agents](agents.md#compatibility)).
 
 ### Sharing a template as a file
 

@@ -40,7 +40,7 @@ export function makeAgent(patch: Partial<Agent> = {}): Agent {
     sourceSessionId: null,
     createdBySubjectId: "user-me",
     revision: 1,
-    hasFirstMessage: Boolean(patch.firstMessage),
+    hasFirstMessage: false,
     memory: { enabled: false, collectionId: null, scope: "workspace", reviewFirst: false },
     slack: [],
     viewer: { canEdit: true, canManageSlack: true, canOpenInSlack: true },

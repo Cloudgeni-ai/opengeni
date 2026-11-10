@@ -246,7 +246,7 @@ import { useUiEventTarget } from "../lib/ui-events";
 import { ComposerAgentChip } from "../components/agents/composer-agent-chip";
 import { agentAvatar } from "../lib/agent-avatar";
 import { useAgents } from "../lib/agents";
-import { AGENT_ONLY_ME_CHAT, useAgentFirstMessage, useComposerAgent } from "../lib/composer-agent";
+import { AGENT_ONLY_ME_CHAT, useComposerAgent } from "../lib/composer-agent";
 import { useWindowBarTitle } from "../../ui/window-bar-title";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -364,8 +364,8 @@ function SessionsIndexRouteContent({
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   // ?agent= (or an older ?botTemplateId= link) starts this chat with an
-  // agent (useComposerAgent, after the draft below): its First message fills
-  // the composer, and the chat follows its Instructions and shows its icon.
+  // agent (useComposerAgent, after the draft below): the composer stays as it
+  // is, and the chat follows its Instructions and shows its icon.
   const launchAgentId = composerLaunchAgentId(launch);
   const workspaceAgents = useAgents(workspaceId);
   const [creditTopupOpen, setCreditTopupOpen] = useState(false);
@@ -798,7 +798,6 @@ function SessionsIndexRouteContent({
   const composerAgent = useComposerAgent({
     workspaceId,
     agentId: launchAgentId,
-    message,
     canCreatePrivateChat: tenancyCapabilities === null ? null : canCreatePrivateChat,
     visibility: draft.visibility,
     setVisibility: setDraftVisibility,
@@ -859,8 +858,7 @@ function SessionsIndexRouteContent({
   );
   const persistedValue = useMemo(
     () => ({
-      // An untouched First message stays out of the saved draft (useComposerAgent).
-      text: composerAgent.draftText,
+      text: message,
       resources: [
         ...(draft.compute.kind === "machine" ? [] : context.currentResources),
         ...attachments.readyResources,
@@ -891,7 +889,7 @@ function SessionsIndexRouteContent({
       context.currentResources,
       draft,
       defaultFirstPartyMcpTools,
-      composerAgent.draftText,
+      message,
       modelProvided,
       createVisibility,
       persistedToolPolicy,
@@ -1357,10 +1355,7 @@ function SessionsIndexRouteContent({
         },
       );
       const preserveNewerLocalDraft = async () => {
-        // Send saved the composer text; an untouched First message goes back
-        // out of the saved draft (it never travels without its agent).
-        const firstMessageSaved = !realtimeModel && composerAgent.draftText !== message;
-        if (!newSessionDraft.isCurrentSignature(visibleSignature) || firstMessageSaved) {
+        if (!newSessionDraft.isCurrentSignature(visibleSignature)) {
           // A definitive create failure must not leave text typed during the
           // attempt unsaved after a retry persisted the clicked snapshot.
           await (realtimeModel ? newSessionDraft.flush() : newSessionDraft.flushForSend());
@@ -1633,11 +1628,6 @@ function SessionsIndexRouteContent({
     },
   );
 
-  useAgentFirstMessage(composerAgent, {
-    message,
-    setMessage,
-    draftLoading: newSessionDraft.loading,
-  });
   // ?continueSessionId= (an archived chat's "Continue in a new chat") starts
   // the composer with a link to that chat once the saved draft has loaded,
   // ahead of anything the person already typed, then leaves the URL.

@@ -1,28 +1,17 @@
 /**
  * The agent a new chat starts with, as the new-chat page uses it: `?agent=`
- * (or an older `?botTemplateId=` link) loads it, its First message fills the
- * composer, and Send waits until it is ready or says why it can't start.
- *
- * The First message this page put in the composer stays out of the saved
- * draft until the person changes it. The saved draft follows them to other
- * tabs and devices, where an untouched First message without its agent would
- * otherwise start an ordinary chat.
+ * (or an older `?botTemplateId=` link) loads it and selects it, the composer
+ * stays as it is (an agent's Instructions say what it does, so there is
+ * nothing to fill in), and Send waits until it is ready or says why it can't
+ * start.
  */
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type Dispatch,
-  type SetStateAction,
-} from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Agent } from "@opengeni/sdk";
 
 import { userErrorText } from "../../ui/api-error";
 import { useAppContext } from "../app-context";
 import type { ComposerAgentSelection } from "../components/agents/composer-agent-chip";
 import { agentAvatar } from "./agent-avatar";
-import { toast } from "./toast";
 
 export const AGENT_ONLY_ME_UNAVAILABLE =
   "Only me agents need Only me chats, which aren't available here.";
@@ -48,18 +37,13 @@ export type ComposerAgent = {
   blocker: string | null;
   /** The chosen agent's chats are Only me, so the chat can't be shared. */
   onlyMe: boolean;
-  /** The composer text the saved draft keeps: none while it is the untouched First message. */
-  draftText: string;
   /** The person chose who can see the chat; their choice stays when the agent changes. */
   visibilityChosen: () => void;
-  /** The First message this page put in the composer, kept by useAgentFirstMessage. */
-  prefill: { text: string | null; set: Dispatch<SetStateAction<string | null>> };
 };
 
 export function useComposerAgent({
   workspaceId,
   agentId,
-  message,
   canCreatePrivateChat,
   visibility,
   setVisibility,
@@ -68,8 +52,6 @@ export function useComposerAgent({
   workspaceId: string;
   /** `?agent=` (or `?botTemplateId=`); undefined for Opengeni. */
   agentId: string | undefined;
-  /** The composer's text, for what the saved draft keeps. */
-  message: string;
   /** Whether this workspace can start Only me chats; null until known. */
   canCreatePrivateChat: boolean | null;
   visibility: Visibility;
@@ -160,9 +142,6 @@ export function useComposerAgent({
     restoreVisibilityRef.current = null;
   }, []);
 
-  // The First message this page put in the composer (see useAgentFirstMessage).
-  const [prefilled, setPrefilled] = useState<string | null>(null);
-  const draftText = prefilled !== null && message === prefilled ? "" : message;
   return {
     agentId,
     selection,
@@ -170,71 +149,6 @@ export function useComposerAgent({
     loading,
     blocker,
     onlyMe,
-    draftText,
     visibilityChosen,
-    prefill: { text: prefilled, set: setPrefilled },
   };
-}
-
-/**
- * The chosen agent's First message in the composer: it fills an empty
- * composer once the saved draft has loaded (so the draft can't overwrite it),
- * is replaced when another agent is chosen, and goes when the person goes
- * back to Opengeni, unless they changed it. Text they typed themselves stays;
- * they can still start the chat with it.
- */
-export function useAgentFirstMessage(
-  composerAgent: ComposerAgent,
-  {
-    message,
-    setMessage,
-    draftLoading,
-  }: {
-    message: string;
-    setMessage: Dispatch<SetStateAction<string>>;
-    /** The saved draft is still loading. */
-    draftLoading: boolean;
-  },
-): void {
-  const { agentId, agent: ready } = composerAgent;
-  const setPrefilled = composerAgent.prefill.set;
-  const prefilledRef = useRef<string | null>(null);
-  const prefilledForRef = useRef<string | null>(null);
-  const fill = useCallback(
-    (text: string) => {
-      prefilledRef.current = text || null;
-      setPrefilled(text || null);
-      setMessage(text);
-    },
-    [setMessage, setPrefilled],
-  );
-  useEffect(() => {
-    if (!ready || draftLoading) return;
-    if (prefilledForRef.current === ready.id) return;
-    prefilledForRef.current = ready.id;
-    const firstMessage = ready.firstMessage;
-    if (
-      message.trim().length === 0 ||
-      message === firstMessage ||
-      message === prefilledRef.current
-    ) {
-      // Switching agents replaces the previous one's untouched First message.
-      if (firstMessage || prefilledRef.current !== null) fill(firstMessage);
-    } else if (firstMessage) {
-      toast.info("Kept your unsent message", {
-        description: `Clear it to use ${ready.name}'s first message instead.`,
-        action: { label: "Use first message", onClick: () => fill(firstMessage) },
-      });
-    }
-  }, [draftLoading, fill, message, ready]);
-  // Back to Opengeni: an untouched First message goes too.
-  useEffect(() => {
-    if (agentId) return;
-    prefilledForRef.current = null;
-    const text = prefilledRef.current;
-    if (text === null) return;
-    prefilledRef.current = null;
-    setPrefilled(null);
-    setMessage((value) => (value === text ? "" : value));
-  }, [agentId, setMessage, setPrefilled]);
 }
