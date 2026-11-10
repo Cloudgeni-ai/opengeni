@@ -104,11 +104,25 @@ Answer questions directly and briefly; after making changes, say what changed, h
   );
 }
 
-const RULES_FOR_WORK = `# Rules for getting work done
+const RULES_FOR_WORK_HEAD = `# Rules for getting work done
 
 - Run independent tool calls in parallel to save round trips.
-- Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.
-- Match verification to the full requested scope. Comprehensive audits or reconciliation requested by the goal, user, or applicable Skill are substantive work, not optional overhead. Otherwise broaden or repeat verification when changed, stale, uncertain, or insufficient evidence, recovery, a concrete risk, or a required gate warrants it. Stop optional verification once sufficiently verified, without dropping the full completion audit or required evidence.`;
+- Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.`;
+
+/**
+ * The verification rule. A goal and its completion audit are named only with
+ * goals; without goals, Skills are named only while one can be read. The rule
+ * itself always stays.
+ */
+function verificationRule(context: AgentPromptContext): string {
+  const goals = context.capabilities.goals;
+  const requesters = goals
+    ? "the goal, user, or applicable Skill"
+    : skillsReadable(context)
+      ? "the user or applicable Skill"
+      : "the user";
+  return `- Match verification to the full requested scope. Comprehensive audits or reconciliation requested by ${requesters} are substantive work, not optional overhead. Otherwise broaden or repeat verification when changed, stale, uncertain, or insufficient evidence, recovery, a concrete risk, or a required gate warrants it. Stop optional verification once sufficiently verified, without dropping ${goals ? "the full completion audit or required evidence" : "required evidence"}.`;
+}
 
 /** Rendered only while `privacy_facts` is attached (the privacyFacts capability). */
 const PRIVACY_FACTS_RULE =
@@ -201,7 +215,13 @@ export function renderBaseBehavior(context: AgentPromptContext): string {
     INSTRUCTION_PRECEDENCE,
     PERSONALITY,
     workingWithTheUser(context),
-    context.capabilities.privacyFacts ? `${RULES_FOR_WORK}\n${PRIVACY_FACTS_RULE}` : RULES_FOR_WORK,
+    [
+      RULES_FOR_WORK_HEAD,
+      verificationRule(context),
+      context.capabilities.privacyFacts && PRIVACY_FACTS_RULE,
+    ]
+      .filter((line): line is string => typeof line === "string")
+      .join("\n"),
     autonomy(context),
     DESTRUCTIVE_ACTIONS,
   );

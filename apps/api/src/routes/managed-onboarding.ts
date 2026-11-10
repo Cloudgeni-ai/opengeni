@@ -33,12 +33,21 @@ import {
 } from "../auth/organization-user-setup";
 import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
+import {
+  MANAGED_AUTH_PASSWORD_COMPROMISED_CODE,
+  MANAGED_AUTH_PASSWORD_COMPROMISED_MESSAGE,
+  managedAuthBreachedPasswordCheckEnabled,
+  managedAuthPasswordBreached,
+  type PasswordBreachLookup,
+} from "../auth/password-breach";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 
 export type ManagedOnboardingRouteOptions = {
   accountSetupLimiter?: { take(key: string): boolean };
   hashPassword?: (password: string) => Promise<string>;
+  /** Breached-password lookup; Have I Been Pwned unless a test replaces it. */
+  passwordBreachLookup?: PasswordBreachLookup;
 };
 
 const completedSetupReplayPasswordHash = `completed-replay:${"0".repeat(64)}`;
@@ -232,6 +241,23 @@ export function registerManagedOnboardingRoutes(
       name,
       password: parsed.password,
     });
+    if (
+      preflight !== "completed" &&
+      (await managedAuthPasswordBreached(parsed.password, {
+        enabled: managedAuthBreachedPasswordCheckEnabled(deps.settings),
+        ...(options.passwordBreachLookup ? { lookup: options.passwordBreachLookup } : {}),
+        onUnavailable: (reason) =>
+          deps.observability?.warn("Breached-password lookup unavailable", { reason }),
+      }))
+    ) {
+      return context.json(
+        {
+          code: MANAGED_AUTH_PASSWORD_COMPROMISED_CODE,
+          message: MANAGED_AUTH_PASSWORD_COMPROMISED_MESSAGE,
+        },
+        422,
+      );
+    }
     const passwordHash =
       preflight === "completed"
         ? completedSetupReplayPasswordHash

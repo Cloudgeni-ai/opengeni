@@ -150,6 +150,9 @@ const DIAGNOSABLE_TURN_FAILURE_TYPES = new Set([
   "TurnExecutionPolicyDefinitionMismatchError",
   // The chat's model was retired or removed from the catalog after it was chosen.
   "TurnExecutionPolicyModelUnavailableError",
+  // A fixed admission refusal: a connected subscription used for API work, no
+  // credits, no paid plan, or a monthly limit reached.
+  "TurnAdmissionRefusedError",
 ]);
 
 export function workflowFailureMessage(error: unknown): string {

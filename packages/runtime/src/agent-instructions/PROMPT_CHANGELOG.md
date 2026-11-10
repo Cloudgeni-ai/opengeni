@@ -13,6 +13,42 @@ render it; legacy bytes are unchanged.
 + When most of the user's requests in a chat are the same kind of work, including the last three or more in a row, call `agent_suggest` once in that chat, preferring an agent that already does the work: it offers them an agent as a card and changes nothing until they accept.
 ```
 
+A configured session without a sandbox or Connected Machine no longer gets
+text it cannot act on: editing files in the sandbox, publishing new files,
+workspace file links, sandbox paths, background-command acknowledgement and
+sandbox CLI lists. Site guidance stays, because the Site tools create a Site
+from inline HTML without compute. Without compute, the document rule instead
+says to export a native document when the user asks for a Word, Excel, PDF or
+PowerPoint file and the export tool lists that format. The verification rule
+names a goal and its completion audit only with goals, and an applicable Skill
+only with goals or a readable Skill. It is unchanged whenever goals are on, so
+a session with goals and a sandbox or Connected Machine keeps its bytes; a
+session with compute but without goals gets the goal-free verification rule.
+Measured with the Sonnet 5.5 tokenizer: "none" without compute 2,772 → 2,754
+system tokens; "all" without compute 8,963 → 8,702; "all" with a managed sandbox
+10,405 (unchanged).
+
+```text
+- … Read the documents Skill and create the native document artifact before authoring it; do not write a sandbox Markdown report first or treat publishing a file as native document creation. A Word, Excel, PDF or PowerPoint file the user sends to be changed is edited in the sandbox … unless the artifact export tool lists that format. Then give …
++ … Read the documents Skill and create the native document artifact before authoring it. When the user asks for a Word, Excel, PDF or PowerPoint file, export the native document if the artifact export tool lists that format. Then give …   (no compute)
+- … A sandbox path, a raw file ID, or an assertion that a report exists is not completed report delivery.
++ … A raw file ID or an assertion that a report exists is not completed report delivery.   (no compute)
+- Do not silently fall back to a sandbox link, invent an artifact reference, or claim success. Ordinary in-chat answers, brief progress updates, internal worker findings, source-code navigation, and explicitly requested local-file workflows do not become report deliverables merely because they contain Markdown or a file link.
++ Do not invent an artifact reference or claim success. Ordinary in-chat answers, brief progress updates, and internal worker findings do not become report deliverables merely because they contain Markdown.   (no compute)
+- Publish files you deliberately deliver so they are retained and discoverable in Artifacts; do not publish every temporary file.   (no compute)
+- Source-code navigation may still use workspace file links.   (no compute)
+- Never substitute a storage URL or a sandbox path for a published artifact reference.
++ Never substitute a storage URL for a published artifact reference.   (no compute)
+- For a sandbox image, publish the file first; a sandbox path is not an inline image source.   (no compute; also "A sandbox path is not an inline image source." without sandbox_file_publish)
+- Audit reads do not acknowledge command completion.   (no compute)
+- … rather than looping while holding the inference and sandbox.
++ … rather than looping while holding the inference.   (no compute)
+- `generate_image` is a runtime tool; integration catalogs and sandbox CLI lists do not enumerate it.
++ `generate_image` is a runtime tool; integration catalogs do not enumerate it.   (no compute)
+- Comprehensive audits or reconciliation requested by the goal, user, or applicable Skill … without dropping the full completion audit or required evidence.
++ Comprehensive audits or reconciliation requested by the user or applicable Skill … without dropping required evidence.   (no goals, with or without compute; "by the user" without a readable Skill)
+```
+
 A new first-party tool, `github_repository_attach`, lets the agent ask to
 attach a repository the workspace GitHub App offers to its own chat. It is
 registered only for a chat's own signed attempt with `github:use`, so other
@@ -1285,6 +1321,11 @@ unchanged.
   Integration setup drops "(see Session coordination)".
 - `workspaceAdmin` off: the rig `rig_propose_change`/`rig_get` sentences are
   omitted.
+- No sandbox or Connected Machine: the documents, file-publishing,
+  sandbox-path, command-acknowledgement and CLI-list clauses listed at the top
+  of this file are omitted or use their no-compute wording.
+- `goals` off: the verification rule names "the user or applicable Skill"
+  ("the user" without a readable Skill) and drops "the full completion audit".
 - Managed sandbox only: "Use the active workspace path exactly as exposed to
   you. Managed sandboxes normally use `/workspace`."
 - Connected Machine only: "… A Connected Machine uses its host-native workspace
