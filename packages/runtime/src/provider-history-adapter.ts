@@ -34,9 +34,9 @@ export type ProviderHistoryOptions = {
   searchRecordForm?: SearchRecordForm;
   /**
    * The provider that receives this Responses request. Opaque reasoning (its
-   * `encrypted_content`) that another provider issued, or that
-   * `isRejectedArtifact` reports, reaches it only as readable historical text:
-   * only the issuing provider can decrypt it. The origin record
+   * `encrypted_content`, or raw reasoning `content`) that another provider
+   * issued, or that `isRejectedArtifact` reports, reaches it only as readable
+   * historical text: only the issuing provider accepts it. The origin record
    * ({@link ARTIFACT_ORIGIN_KEY}) is removed from every item, so the issuing
    * provider receives exactly the item it returned.
    */
@@ -212,19 +212,37 @@ function historicalReasoningMessage(text: string): Record<string, unknown> {
   };
 }
 
-function reasoningSummaryText(item: Record<string, unknown>): string {
-  return Array.isArray(item.content)
-    ? item.content
+function providerDataOf(item: Record<string, unknown>): Record<string, unknown> | undefined {
+  return item.providerData && typeof item.providerData === "object"
+    ? (item.providerData as Record<string, unknown>)
+    : undefined;
+}
+
+function partsText(parts: unknown): string {
+  return Array.isArray(parts)
+    ? parts
         .filter((part) => typeof part?.text === "string")
         .map((part) => part.text)
         .join("")
     : "";
 }
 
-function providerDataOf(item: Record<string, unknown>): Record<string, unknown> | undefined {
-  return item.providerData && typeof item.providerData === "object"
-    ? (item.providerData as Record<string, unknown>)
-    : undefined;
+/**
+ * Plain reasoning a Responses provider returned in the reasoning item's own
+ * `content` (for example an open-weight model behind a compatible endpoint).
+ * The SDK keeps it in providerData and spreads it back onto the wire item.
+ * OpenAI and Azure OpenAI accept no reasoning `content` at all, so it is as
+ * provider-specific as ciphertext.
+ */
+function rawResponsesReasoning(item: Record<string, unknown>): unknown[] | undefined {
+  if (item.type !== "reasoning") return undefined;
+  const raw = providerDataOf(item)?.content;
+  return Array.isArray(raw) && raw.length > 0 ? raw : undefined;
+}
+
+/** The readable form of a Responses reasoning item: its summary, else its raw reasoning. */
+function reasoningSummaryText(item: Record<string, unknown>): string {
+  return partsText(item.content) || partsText(rawResponsesReasoning(item));
 }
 
 /** The provider-issued ciphertext of a Responses reasoning item, if any. */
@@ -248,13 +266,18 @@ export function artifactOrigin(item: Record<string, unknown>): string | undefine
 }
 
 /**
- * Record the issuing provider on a reasoning item that carries ciphertext.
- * Every other item, and one already recorded, is returned by reference.
+ * Record the issuing provider on a reasoning item that carries ciphertext or
+ * raw provider reasoning. Every other item, and one already recorded, is
+ * returned by reference.
  */
 export function withArtifactOrigin<T>(item: T, origin: string): T {
   if (!item || typeof item !== "object") return item;
   const record = item as Record<string, unknown>;
-  if (!opaqueReasoningCiphertext(record) || artifactOrigin(record) !== undefined) return item;
+  if (
+    (!opaqueReasoningCiphertext(record) && !rawResponsesReasoning(record)) ||
+    artifactOrigin(record) !== undefined
+  )
+    return item;
   return {
     ...record,
     providerData: { ...providerDataOf(record), [ARTIFACT_ORIGIN_KEY]: origin },
@@ -290,7 +313,10 @@ function withoutArtifactOrigin(item: Record<string, unknown>): Record<string, un
  * Another provider cannot decrypt it and rejects the whole request, so it gets
  * the readable summary instead, exactly as Claude and Chat routes already do.
  * Untagged items (stored before origins were recorded) stay native until the
- * provider refuses them.
+ * provider refuses them. Raw reasoning `content` follows the same rule, except
+ * that an untagged item carrying it without ciphertext is always readable
+ * text: no refusal names it (providers reject its shape, not a ciphertext), so
+ * it could otherwise fail every retry on a provider that did not issue it.
  */
 function scopedOpaqueArtifact(
   item: Record<string, unknown>,
@@ -299,9 +325,13 @@ function scopedOpaqueArtifact(
   const scope = options.artifactScope;
   if (scope === undefined || item.type !== "reasoning") return undefined;
   const origin = artifactOrigin(item);
+  const ciphertext = opaqueReasoningCiphertext(item);
+  const raw = rawResponsesReasoning(item) !== undefined;
   if (
-    opaqueReasoningCiphertext(item) &&
-    ((origin !== undefined && origin !== scope) || options.isRejectedArtifact?.(item) === true)
+    (ciphertext || raw) &&
+    ((origin !== undefined && origin !== scope) ||
+      (origin === undefined && !ciphertext) ||
+      options.isRejectedArtifact?.(item) === true)
   )
     return memoized(foreignArtifactProjections, item, () =>
       historicalReasoningMessage(reasoningSummaryText(item)),

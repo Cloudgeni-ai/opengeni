@@ -29,23 +29,29 @@ const DECRYPT_REFUSAL = {
   },
 };
 
-function reply(withReasoning: boolean) {
+function reply(withReasoning: boolean, reasoning?: unknown[]) {
   return {
     id: "response-fixture",
     object: "response",
     status: "completed",
     output: [
-      ...(withReasoning
-        ? [
-            {
-              id: "reason-fixture",
-              type: "reasoning",
-              summary: [{ type: "summary_text", text: summary }],
-              encrypted_content: ciphertext,
-            },
-            { id: "opaque-reason-fixture", type: "reasoning", summary: [], encrypted_content: "x" },
-          ]
-        : []),
+      ...(reasoning ??
+        (withReasoning
+          ? [
+              {
+                id: "reason-fixture",
+                type: "reasoning",
+                summary: [{ type: "summary_text", text: summary }],
+                encrypted_content: ciphertext,
+              },
+              {
+                id: "opaque-reason-fixture",
+                type: "reasoning",
+                summary: [],
+                encrypted_content: "x",
+              },
+            ]
+          : [])),
       {
         id: "message-fixture",
         type: "message",
@@ -73,7 +79,11 @@ function sse(body: Record<string, unknown>): Response {
 function responsesModel(
   providerId: string,
   requests: Record<string, any>[],
-  options: { withReasoning?: boolean; refuses?: (wire: string) => Response | null } = {},
+  options: {
+    withReasoning?: boolean;
+    reasoning?: unknown[];
+    refuses?: (wire: string) => Response | null;
+  } = {},
 ) {
   const provider: ResolvedModelProvider = {
     id: providerId,
@@ -90,7 +100,7 @@ function responsesModel(
     requests.push(body);
     const refusal = options.refuses?.(text);
     if (refusal) return refusal;
-    const response = reply(options.withReasoning === true);
+    const response = reply(options.withReasoning === true, options.reasoning);
     return body.stream ? sse(response) : Response.json(response);
   }) as typeof globalThis.fetch;
   const client = new ReplayableJsonOpenAI(
@@ -243,6 +253,123 @@ for (const stream of [false, true]) {
     expect(await wireFor(`${providerId}-peer`, history, stream)).toContain(ciphertext);
   });
 }
+
+test("Azure OpenAI's 'could not be verified' refusal of another issuer's ciphertext is recovered", async () => {
+  // Azure words the same refusal differently from api.openai.com.
+  const refusal = {
+    error: {
+      message:
+        "The encrypted content gAAA...aiQ= could not be verified. Reason: Encrypted content could not be decrypted or parsed.",
+      type: "invalid_request_error",
+      param: null,
+      code: "invalid_encrypted_content",
+    },
+  };
+  const requests: Record<string, any>[] = [];
+  const model = responsesModel("origin-azure-wording", requests, {
+    refuses: (wire) =>
+      wire.includes("encrypted_content") ? Response.json(refusal, { status: 400 }) : null,
+  });
+  const result = await runner.run(new Agent({ name: "Fixture", model }), legacyHistory() as never);
+  expect(result.finalOutput).toBe("Done.");
+  expect(requests).toHaveLength(2);
+  expect(JSON.stringify(requests[1])).not.toContain("encrypted_content");
+});
+
+const rawThought = "Raw chain of thought from an open-weight model.";
+// What OpenAI and Azure OpenAI answer for reasoning `content` they did not issue.
+const rejectsRawReasoning = (wire: string) =>
+  wire.includes("reasoning_text")
+    ? Response.json(
+        {
+          error: {
+            message:
+              "Invalid 'input[2].content': array too long. Expected an array with maximum length 0, but got an array with length 1 instead.",
+            type: "invalid_request_error",
+            param: "input[2].content",
+            code: "array_above_max_length",
+          },
+        },
+        { status: 400 },
+      )
+    : null;
+
+for (const stream of [false, true]) {
+  test(`raw reasoning content goes back natively only to the provider that issued it (${stream ? "streamed" : "single"} reply)`, async () => {
+    const issuer = responsesModel("raw-issuer", [], {
+      reasoning: [
+        {
+          id: "raw-reason-fixture",
+          type: "reasoning",
+          summary: [],
+          content: [{ type: "reasoning_text", text: rawThought }],
+          encrypted_content: null,
+        },
+      ],
+    });
+    let output: unknown[] = [];
+    if (stream) {
+      await getOrCreateTrace(async () => {
+        for await (const event of issuer.getStreamedResponse({ ...base, input: "Start" }))
+          if (event.type === "response_done") output = event.response.output;
+      });
+    } else {
+      output = (await getOrCreateTrace(() => issuer.getResponse({ ...base, input: "Start" })))
+        .output;
+    }
+    const history = persisted(output);
+    const reasoning = history.find((item) => item.type === "reasoning");
+    expect(reasoning?.providerData).toHaveProperty([ARTIFACT_ORIGIN_KEY], "raw-issuer");
+
+    const native = await wireFor("raw-issuer", history, stream);
+    expect(native).toContain("reasoning_text");
+    expect(native).not.toContain("artifact_origin");
+    expect(native).not.toContain("Historical reasoning");
+
+    const foreign = await wireFor("raw-other", history, stream);
+    expect(foreign).not.toContain("reasoning_text");
+    expect(foreign).not.toContain('"type":"reasoning"');
+    expect(foreign).toContain(
+      JSON.stringify(`[Historical reasoning from another model]\n${rawThought}`),
+    );
+  });
+}
+
+test("untagged raw reasoning from another provider is sent as readable text, never its content", async () => {
+  // The stored shape of reasoning from a Responses-compatible custom provider
+  // before origins covered raw reasoning: the raw text sits in providerData.
+  const history = persisted([
+    {
+      id: "raw-legacy-fixture",
+      type: "reasoning",
+      content: [],
+      providerData: {
+        id: "raw-legacy-fixture",
+        type: "reasoning",
+        content: [{ type: "reasoning_text", text: rawThought }],
+        encrypted_content: null,
+      },
+    },
+    {
+      id: "message-legacy-fixture",
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "Hello.", annotations: [] }],
+    },
+  ]);
+  expect(JSON.stringify(history)).toContain("reasoning_text");
+  const requests: Record<string, any>[] = [];
+  const model = responsesModel("raw-legacy-receiver", requests, { refuses: rejectsRawReasoning });
+  const result = await runner.run(new Agent({ name: "Fixture", model }), history as never);
+  expect(result.finalOutput).toBe("Done.");
+  expect(requests).toHaveLength(1);
+  const wire = JSON.stringify(requests[0]);
+  expect(wire).not.toContain("reasoning_text");
+  expect(wire).toContain(
+    JSON.stringify(`[Historical reasoning from another model]\n${rawThought}`),
+  );
+});
 
 test("an unrelated bad request is not resent", async () => {
   const requests: Record<string, any>[] = [];
