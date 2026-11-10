@@ -669,6 +669,10 @@ describe("stated membership", () => {
 
 describe("authenticating a known external user before its read is granted", () => {
   test("keeps taking the membership fence exclusively", async () => {
+    // Reproduce the old grant state explicitly: current migrations activate it.
+    await shared.admin.unsafe(
+      `REVOKE EXECUTE ON FUNCTION opengeni_private.read_external_identity_v1(uuid, text, text) FROM "${appRole}"`,
+    );
     const org = await organization();
     const externalId = `withheld-${crypto.randomUUID()}`;
     expect((await org.request(externalId, CHAT)).status).toBe(200);
@@ -686,6 +690,9 @@ describe("authenticating a known external user before its read is granted", () =
       expect(settled).toBe(false);
     });
     expect((await pending).status).toBe(200);
+    await shared.admin.unsafe(
+      `GRANT EXECUTE ON FUNCTION opengeni_private.read_external_identity_v1(uuid, text, text) TO "${appRole}"`,
+    );
   });
 });
 

@@ -428,19 +428,36 @@
     {
       "id": 3,
       "type": "timeseries",
-      "title": "Turn failure and recovery ratios",
-      "description": "Failures and recoveries divided by all observed turn outcomes over the selected rate interval.",
-      "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1 }, "overrides": [] },
+      "title": "Platform failures, customer provider failures and recoveries",
+      "description": "Platform failure ratio excludes proven customer-managed quota, billing and upstream availability failures from numerator and denominator. Unknown failures still count as platform failures. Customer provider failures remain visible separately; historical unlabeled series remain unclassified.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
-          "legendFormat": "failed",
+          "expr": "(sum(rate(opengeni_turns_total{failure_origin!=\"customer_provider\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(opengeni_turns_total{failure_origin!=\"customer_provider\",namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
+          "legendFormat": "platform / unclassified failures",
           "editorMode": "code",
           "range": true
         },
@@ -450,9 +467,21 @@
           "legendFormat": "recovering",
           "editorMode": "code",
           "range": true
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",outcome=\"failed\",failure_origin=\"customer_provider\"}[$__rate_interval])) or vector(0)) / clamp_min(sum(rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__rate_interval])), 0.000000001)",
+          "legendFormat": "customer provider failures (all outcomes denominator)",
+          "editorMode": "code",
+          "range": true
         }
       ],
-      "gridPos": { "x": 12, "y": 11, "w": 12, "h": 8 }
+      "gridPos": {
+        "x": 12,
+        "y": 11,
+        "w": 12,
+        "h": 8
+      }
     },
     {
       "id": 4,
@@ -994,7 +1023,7 @@
       "id": 29,
       "type": "timeseries",
       "title": "Provider invalid requests by path",
-      "description": "Provider 400 invalid-request answers to model calls, by the request path the provider names (indices collapsed, such as input[].tools[].name) and its error code. A new path is a new class of malformed request, usually one failing a chat on every retry. Monitoring only: nothing is blocked because of it. A rejected tool name also gets one strict resend (see Tool-name repairs).",
+      "description": "Provider 400 invalid-request answers to model calls, by the request path the provider names (indices collapsed, such as input[].tools[].name) and its error code. A new path is a new class of malformed request, usually one failing a chat on every retry. Monitoring only: nothing is blocked or retried because of it.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1029,56 +1058,6 @@
       "gridPos": {
         "x": 0,
         "y": 85,
-        "w": 24,
-        "h": 8
-      }
-    },
-    {
-      "id": 30,
-      "type": "timeseries",
-      "title": "Tool-name repairs",
-      "description": "Model requests in which the outbound guard gave a tool name a provider could reject its alias, by provider, wire API and field (tools, tool_choice, history), and the strict resends after a provider still rejected a tool name, by outcome. Repairs are expected for chats whose history holds such names; a failed resend is a tool name no alias satisfied.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": ["last", "sum"]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "sum by (provider, api, field) (increase(opengeni_model_tool_name_repairs_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
-          "legendFormat": "repaired \u00b7 {{provider}} \u00b7 {{api}} \u00b7 {{field}}",
-          "editorMode": "code",
-          "range": true
-        },
-        {
-          "refId": "B",
-          "expr": "sum by (provider, api, outcome) (increase(opengeni_model_tool_name_retries_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[$__range]))",
-          "legendFormat": "strict resend \u00b7 {{provider}} \u00b7 {{api}} \u00b7 {{outcome}}",
-          "editorMode": "code",
-          "range": true
-        }
-      ],
-      "gridPos": {
-        "x": 0,
-        "y": 93,
         "w": 24,
         "h": 8
       }

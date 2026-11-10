@@ -294,6 +294,62 @@ export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
 /** `details.code` the API sets on a 422 for a model the workspace's policy refuses. */
 export const MODEL_POLICY_DETAIL_CODE = "model_policy";
 
+/** `details.code` the API sets on a 422 for GitHub repositories the workspace can no longer use. */
+export const GITHUB_REPOSITORY_UNAVAILABLE_DETAIL_CODE = "github_repository_unavailable";
+
+/**
+ * A Send refused because repositories it would use lost their GitHub access
+ * (the App was uninstalled, or the repository was taken out of it). Names
+ * them, so the person knows what to remove or restore; Retry then succeeds.
+ */
+export function repositoryUnavailableRefusalMessage(t: OpenGeniText, error: Error): string | null {
+  if (
+    !(error instanceof OpenGeniApiError) ||
+    error.details?.code !== GITHUB_REPOSITORY_UNAVAILABLE_DETAIL_CODE
+  ) {
+    return null;
+  }
+  const listed = error.details.repositories;
+  const names = (Array.isArray(listed) ? listed : [])
+    .filter((name): name is string => typeof name === "string" && name.trim() !== "")
+    .map((name) => name.trim().slice(0, 200));
+  if (names.length === 1) {
+    return t("lib.format.repositoryUnavailable", { repository: names[0]! });
+  }
+  if (names.length > 1) {
+    const shown = names.slice(0, 3).join(", ");
+    return t("lib.format.repositoriesUnavailable", {
+      repositories: names.length > 3 ? `${shown}, …` : shown,
+    });
+  }
+  return t("lib.format.someRepositoryUnavailable");
+}
+
+/**
+ * The server's own reason for a refused request, as a sentence, or null when
+ * the response carries none. Reads both the API envelope (`error.message`)
+ * and a route's own top-level `{ code, message }` body.
+ */
+function serverRefusalReason(error: OpenGeniApiError): string | null {
+  let body: unknown;
+  try {
+    body = JSON.parse(error.body);
+  } catch {
+    return null;
+  }
+  const record = body && typeof body === "object" ? (body as Record<string, unknown>) : null;
+  const envelope =
+    record?.error && typeof record.error === "object"
+      ? (record.error as Record<string, unknown>)
+      : record;
+  const message = envelope?.message;
+  if (typeof message !== "string") return null;
+  const text = message.trim().slice(0, 300);
+  if (!text) return null;
+  const sentence = text.charAt(0).toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+}
+
 /**
  * The reason a refused new chat gives. The refusals a person can hit (a model
  * that isn't available to them, the workspace's model policy, a speed the
@@ -316,17 +372,7 @@ export function sessionCreateRefusalMessage(t: OpenGeniText, error: Error): stri
       ? t("lib.format.modelPolicyCredits")
       : t("lib.format.modelPolicyRefused");
   }
-  let message: unknown;
-  try {
-    message = (JSON.parse(error.body) as { message?: unknown } | null)?.message;
-  } catch {
-    return null;
-  }
-  if (typeof message !== "string") return null;
-  const text = message.trim().slice(0, 300);
-  if (!text) return null;
-  const sentence = text.charAt(0).toUpperCase() + text.slice(1);
-  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+  return serverRefusalReason(error);
 }
 
 /**
@@ -420,6 +466,8 @@ export function composerSubmissionErrorMessage(
   }
   if (isConnectionAccountSubmissionError(error)) return t("lib.format.accountUnavailable");
   if (isSessionUsageLimitSubmissionError(error)) return t("lib.format.sessionUsageLimitReached");
+  const repositoryRefusal = repositoryUnavailableRefusalMessage(t, error);
+  if (repositoryRefusal) return repositoryRefusal;
   const createRefusal = sessionCreateRefusalMessage(t, error);
   if (createRefusal) return createRefusal;
   const siteRefusal = siteRefusalCode(error);
@@ -433,7 +481,13 @@ export function composerSubmissionErrorMessage(
         : COMPOSER_MEMBER_ALLOWANCE_MESSAGE(t);
     return composerErrorReference(t, error, message);
   }
-  if (!isComposerCreditRefusal(error)) return formatErrorMessage(error);
+  if (!isComposerCreditRefusal(error)) {
+    // A refusal the server explains says why, never a generic "check your input".
+    if (error instanceof OpenGeniApiError && (error.status === 400 || error.status === 422)) {
+      return serverRefusalReason(error) ?? formatErrorMessage(error);
+    }
+    return formatErrorMessage(error);
+  }
   // Own-key and API refusals name their one fix; no model choice helps.
   const kind = creditRefusalKind(error) ?? creditRefusalKindFromText(error.message);
   return composerErrorReference(
@@ -673,6 +727,8 @@ const AUTHORED_ONLY_FAILURE_CODES: ReadonlySet<string> = new Set([
   "sandbox_capacity_unavailable",
   "sandbox_service_unavailable",
   "sandbox_service_refused",
+  // The detail is the machine agent's own text (the program, the OS error).
+  "sandbox_process_start_failed",
 ]);
 
 /** Server failure codes whose recorded text is operator English, not end-user copy. */

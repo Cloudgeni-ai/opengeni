@@ -9,6 +9,9 @@ import { sql } from "drizzle-orm";
 import {
   acceptOrganizationInvitation,
   applySessionTurnSettlement,
+  blockSessionWorkBeforeAttemptClaim,
+  isPersonalMachineAccessRefusal,
+  releaseSessionAdmissionBlocksAfterAccessChange,
   claimSessionWorkForAttempt,
   confirmDrainCold,
   createDb,
@@ -198,7 +201,7 @@ async function submitAs(
   subjectId: string,
   text: string,
   delivery: "send" | "steer" = "send",
-  mode: "session" | "always" = "session",
+  mode: "once" | "session" | "always" = "session",
 ) {
   const [authority] =
     await shared.admin`select authority_epoch from sessions where id = ${sessionId}`;
@@ -1174,6 +1177,132 @@ describe("the owner's own machine runs their turns wherever they have it on", ()
     expect(
       (await standingGrants(f, f.enrollmentId)).filter((grant) => grant.status === "active"),
     ).toEqual([]);
+  }, 120_000);
+
+  test("a saved message refused for the machine starts by itself once the owner allows it for the chat", async () => {
+    const f = await fixture();
+    await turnOffHere(f, f.enrollmentId);
+    const session = await chatOnOwnersMachine(f);
+    const sent = await submitWithoutApproval(f, session.id, "Keep going");
+    // The claim is refused for the machine's approval, which the worker names
+    // as machine access, not a bare permission check.
+    let refused: unknown;
+    try {
+      await claim(f.workspaceId, session.id);
+    } catch (error) {
+      refused = error;
+    }
+    expect(isPersonalMachineAccessRefusal(refused)).toBe(true);
+    const peek = await peekSessionWork(client.db, f.workspaceId, session.id, true);
+    if (peek.kind !== "runnable" || !peek.admissionFence) throw new Error("expected runnable");
+    expect(
+      await blockSessionWorkBeforeAttemptClaim(client.db, f.workspaceId, {
+        accountId: f.accountId,
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        attemptId: crypto.randomUUID(),
+        fence: peek.admissionFence,
+        wakeRevision: peek.admissionWakeRevision!,
+        reason: "personal_resource_grant_required",
+        sqlState: "42501",
+      }),
+    ).toMatchObject({ action: "blocked" });
+    // Nothing changed yet: the block holds.
+    expect(
+      (
+        await releaseSessionAdmissionBlocksAfterAccessChange(client.db, {
+          accountId: f.accountId,
+          workspaceId: f.workspaceId,
+          change: "membership",
+          sessionIds: [session.id],
+        })
+      ).released,
+    ).toHaveLength(0);
+
+    // "Allow for this chat": one approval for this chat, then the release the
+    // grant API runs after it.
+    const [authority] = await shared.admin`select authority_epoch, visibility from sessions
+      where id = ${session.id}`;
+    await issueSelfUserResourceGrant(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId: f.owner,
+      authorityId: await machineAuthorityId(f.enrollmentId),
+      resourceKind: "connected_machine",
+      mode: "session",
+      context: authority!.visibility,
+      sessionId: session.id,
+      expectedAuthorityEpoch: Number(authority!.authority_epoch),
+      workspaceSharedAcknowledged: authority!.visibility === "workspace_shared",
+    });
+    const released = await releaseSessionAdmissionBlocksAfterAccessChange(client.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      change: "personal_resource",
+      sessionIds: [session.id],
+    });
+    expect(released.released.map((entry) => entry.sessionId)).toEqual([session.id]);
+    // The saved message itself starts, once.
+    expect((await claim(f.workspaceId, session.id)).turnId).toBe(sent.turnId);
+  }, 120_000);
+
+  test("a message sent with Allow once runs on the machine, including its retry, and the next message needs approval again", async () => {
+    const f = await fixture();
+    // Off here, so only the message's own approval can admit the machine.
+    await turnOffHere(f, f.enrollmentId);
+    const session = await chatOnOwnersMachine(f);
+    const sent = await submitAs(f, session.id, f.owner, "Run the build once", "send", "once");
+    const first = await claimTurn(f.workspaceId, session.id);
+    expect(first.turn.id).toBe(sent.turnId);
+    const runtime = {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      subjectId: f.owner,
+      sessionId: session.id,
+      turnId: first.turn.id,
+      enrollmentId: f.enrollmentId,
+    };
+    // The check right before the turn uses the machine accepts the receipt
+    // filed against the message when it was accepted.
+    expect(
+      await resolvePersonalMachineRouteForAttempt(client.db, {
+        ...runtime,
+        attemptId: first.attemptId,
+        executionGeneration: first.turn.executionGeneration,
+      }),
+    ).toMatchObject({ enrollment: { id: f.enrollmentId } });
+    const [used] = await shared.admin`select grant_value.status
+      from organization_user_resource_grants grant_value
+      join session_attempt_connected_machine_authorizations authorization_value
+        on authorization_value.grant_id = grant_value.id
+      where authorization_value.attempt_id = ${first.attemptId}`;
+    expect(used).toMatchObject({ status: "consumed" });
+
+    // A replacement attempt of the same message is still covered.
+    await recover(f.workspaceId, session.id, first.attemptId);
+    const second = await claimTurn(f.workspaceId, session.id);
+    expect(second.turn.id).toBe(first.turn.id);
+    expect(second.attemptId).not.toBe(first.attemptId);
+    expect(
+      await resolvePersonalMachineRouteForAttempt(client.db, {
+        ...runtime,
+        attemptId: second.attemptId,
+        executionGeneration: second.turn.executionGeneration,
+      }),
+    ).toMatchObject({ enrollment: { id: f.enrollmentId } });
+    // The transient capability that let the check read the receipt is gone.
+    const [leftover] = await shared.admin`select count(*)::int as count
+      from opengeni_private.personal_resource_delegation_capabilities
+      where capability_kind = 'resolve'`;
+    expect(leftover).toMatchObject({ count: 0 });
+
+    // The approval was for that message only.
+    await completeTurn(f.workspaceId, session.id, second);
+    await submitWithoutApproval(f, session.id, "Keep going");
+    expect(await rejectedClaimCause(f.workspaceId, session.id)).toMatchObject({
+      sqlState: "42501",
+      message: "personal machine use requires explicit grant",
+    });
   }, 120_000);
 
   test("in another workspace it waits until the owner turns it on there, for private and shared chats alike", async () => {

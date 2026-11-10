@@ -5,12 +5,12 @@ import {
   bootstrapWorkspace,
   createDb,
   getWorkspace,
-  withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
   listDueWorkspacePauseTimers,
   setWorkspacePauseTimerInTransaction,
   fireWorkspacePauseTimerInTransaction,
   mutateWorkspaceControlInTransaction,
-  type Database,
+  type SessionActivityDatabase,
 } from "../src/index";
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -36,9 +36,9 @@ async function fixture() {
   });
   const grant = access.workspaceGrants[0]!;
   const context = { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId: id };
-  const transaction = <T>(fn: (db: Database) => Promise<T>) =>
-    withWorkspaceRls(client.db, context.workspaceId, (scoped) =>
-      scoped.transaction((tx) => fn(tx as unknown as Database)),
+  const transaction = <T>(fn: (db: SessionActivityDatabase) => Promise<T>) =>
+    withWorkspaceSessionActivityRls(client.db, context.workspaceId, (scoped) =>
+      scoped.transaction((tx) => fn(tx as unknown as typeof scoped)),
     );
   const control = async () =>
     (await getWorkspace(client.db, context.workspaceId))!.inferenceControl;
@@ -202,12 +202,8 @@ test("RLS denies a cross-workspace mutation", async () => {
 });
 
 test("timer resume preserves an independently paused session", async () => {
-  const {
-    createSession,
-    mutateSessionControlInTransaction,
-    evaluateSessionControl,
-    withWorkspaceSessionActivityRls,
-  } = await import("../src/index");
+  const { createSession, mutateSessionControlInTransaction, evaluateSessionControl } =
+    await import("../src/index");
   const f = await fixture();
   const session = await createSession(client.db, {
     accountId: f.accountId,

@@ -228,6 +228,10 @@ describe("managed auth rate limits with Better Auth and PostgreSQL", () => {
       });
       expect(response.status).toBe(401);
     }
+    // One source's per-email budget equals Better Auth's per-minute address
+    // limit, so clear the address counter: the refusals below must come from
+    // the per-(email, address) window alone.
+    await shared.admin`delete from auth_rate_limits where key = ${`${attacker}|/sign-in/email`}`;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const refused = await postFromClient(app, "/v1/auth/sign-in/email", attacker, {
         email,

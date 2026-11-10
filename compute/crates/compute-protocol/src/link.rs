@@ -104,8 +104,17 @@ pub enum HostFrame {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         headers: Option<Headers>,
     },
-    /// Whether the sandbox runs, for display only.
-    State { s: u32, state: Running },
+    /// Whether the sandbox runs, for display only, and whether its host is
+    /// busy with it in a way that keeps it from running for now.
+    State {
+        s: u32,
+        state: Running,
+        /// Set while its host is busy with it, as a hand-off: a wake is
+        /// refused until that ends, which is not its agent failing.
+        /// Omitted while it is not, as a gateway from before it reads.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        busy: Option<Busy>,
+    },
     /// End the session.
     Close { s: u32 },
 }
@@ -116,6 +125,16 @@ pub enum HostFrame {
 pub enum Running {
     Awake,
     Asleep,
+}
+
+/// What a host is busy with that keeps a sandbox from running for now, as
+/// a `state` frame reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Busy {
+    /// Handing it off to another host: storing its copy, which refuses
+    /// wakes for a bounded time.
+    HandingOff,
 }
 
 /// A frame a gateway sends.
@@ -368,6 +387,28 @@ fn within(prefix: &str, subject: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_state_frame_names_busy_only_while_the_host_is() {
+        let frame = HostFrame::State {
+            s: 1,
+            state: Running::Asleep,
+            busy: None,
+        };
+        let encoded = encode(&frame, &[]).unwrap();
+        let text = String::from_utf8(encoded).unwrap();
+        assert!(!text.contains("busy"), "{text}");
+        let frame = HostFrame::State {
+            s: 1,
+            state: Running::Asleep,
+            busy: Some(Busy::HandingOff),
+        };
+        let encoded = encode(&frame, &[]).unwrap();
+        let text = String::from_utf8(encoded.clone()).unwrap();
+        assert!(text.contains(r#""busy":"handing_off""#), "{text}");
+        let (decoded, _): (HostFrame, _) = decode(&encoded).unwrap();
+        assert_eq!(decoded, frame);
+    }
 
     #[test]
     fn frames_round_trip_with_their_payload() {

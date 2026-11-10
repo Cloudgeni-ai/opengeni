@@ -34,6 +34,7 @@ export function OrganizationAccessFields({
   onRetryWorkspaces,
   ceiling,
   includesPersonal = false,
+  forEachPerson = false,
   errors,
   disabled = false,
 }: {
@@ -47,6 +48,11 @@ export function OrganizationAccessFields({
   ceiling?: ReadonlySet<string>;
   /** Acting as a person reaches their Personal workspace too. */
   includesPersonal?: boolean;
+  /**
+   * One setting for everyone's agents (auto-connect): each acts as its own
+   * person, capped by what they can do, in their own Personal workspace too.
+   */
+  forEachPerson?: boolean;
   errors?: { permissions?: string; workspaces?: string };
   disabled?: boolean;
 }) {
@@ -58,6 +64,7 @@ export function OrganizationAccessFields({
         {...(ceiling ? { ceiling } : {})}
         {...(errors?.permissions ? { error: errors.permissions } : {})}
         actsAsPerson={includesPersonal}
+        forEachPerson={forEachPerson}
         disabled={disabled}
       />
       <WorkspaceScopeFields
@@ -65,13 +72,14 @@ export function OrganizationAccessFields({
         scope={policy.workspaceScope}
         onScopeChange={(workspaceScope) => onPolicyChange({ ...policy, workspaceScope })}
         workspaces={
-          includesPersonal
+          includesPersonal && !forEachPerson
             ? workspaces
             : (workspaces?.filter((workspace) => !workspace.personal) ?? null)
         }
         workspacesError={workspacesError}
         {...(onRetryWorkspaces ? { onRetryWorkspaces } : {})}
         includesPersonal={includesPersonal}
+        forEachPerson={forEachPerson}
         {...(errors?.workspaces ? { error: errors.workspaces } : {})}
         disabled={disabled}
       />
@@ -85,6 +93,7 @@ export function AccessPresetFields({
   onPolicyChange,
   ceiling,
   actsAsPerson = false,
+  forEachPerson = false,
   error,
   disabled = false,
 }: {
@@ -92,6 +101,7 @@ export function AccessPresetFields({
   onPolicyChange: (next: OrganizationAccessPolicy) => void;
   ceiling?: ReadonlySet<string>;
   actsAsPerson?: boolean;
+  forEachPerson?: boolean;
   error?: string;
   disabled?: boolean;
 }) {
@@ -119,9 +129,11 @@ export function AccessPresetFields({
             value={preset}
             title={ACCESS_PRESET_COPY[preset].label}
             description={
-              actsAsPerson && preset === "full"
-                ? "Everything you can do yourself, including people, keys, billing and secret values."
-                : ACCESS_PRESET_COPY[preset].description
+              forEachPerson && preset === "full"
+                ? "Everything each person can do themselves, including people, keys, billing and secret values."
+                : actsAsPerson && preset === "full"
+                  ? "Everything you can do yourself, including people, keys, billing and secret values."
+                  : ACCESS_PRESET_COPY[preset].description
             }
           />
         ))}
@@ -155,6 +167,7 @@ export function WorkspaceScopeFields({
   workspacesError = false,
   onRetryWorkspaces,
   includesPersonal = false,
+  forEachPerson = false,
   error,
   disabled = false,
 }: {
@@ -166,6 +179,7 @@ export function WorkspaceScopeFields({
   workspacesError?: boolean;
   onRetryWorkspaces?: () => void;
   includesPersonal?: boolean;
+  forEachPerson?: boolean;
   error?: string;
   disabled?: boolean;
 }) {
@@ -186,9 +200,11 @@ export function WorkspaceScopeFields({
           value="all"
           title={`All workspaces in ${organizationName}`}
           description={
-            includesPersonal
-              ? "Every workspace you can open, including new ones and your Personal workspace."
-              : "Every shared workspace, including new ones."
+            forEachPerson
+              ? "Every workspace each person can open, including new ones and their Personal workspace."
+              : includesPersonal
+                ? "Every workspace you can open, including new ones and your Personal workspace."
+                : "Every shared workspace, including new ones."
           }
         />
         <ChoiceCard
@@ -216,11 +232,14 @@ export function WorkspaceScopeFields({
 export function PermissionChecklist({
   selected,
   canGrant,
+  withheldHint = "beyond your own access",
   disabled = false,
   onChange,
 }: {
   selected: readonly string[];
   canGrant: (permission: string) => boolean;
+  /** Why a permission is off, naming who can give it. */
+  withheldHint?: string;
   disabled?: boolean;
   onChange: (next: string[]) => void;
 }) {
@@ -242,9 +261,7 @@ export function PermissionChecklist({
                     description={
                       <span className="font-mono">
                         {permission}
-                        {allowed ? null : (
-                          <span className="font-sans"> · beyond your own access</span>
-                        )}
+                        {allowed ? null : <span className="font-sans"> · {withheldHint}</span>}
                       </span>
                     }
                     checked={allowed && selected.includes(permission)}

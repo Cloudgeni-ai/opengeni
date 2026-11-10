@@ -64,6 +64,42 @@ test("the notice says the chat is archived and offers to continue in a new chat"
   ).toBe("");
 });
 
+test("a chat this person can restore offers Restore, and a restore in progress says so", () => {
+  const archived = { state: "archived" as const, archivedAt: "2026-01-01T00:00:00.000Z" };
+  const restorable = renderToStaticMarkup(
+    <ReadOnlySessionNotice
+      session={session({ keepLive: false, archive: archived })}
+      onContinue={() => undefined}
+      onRestore={async () => true}
+    />,
+  );
+  expect(restorable).toContain("Restore chat");
+  expect(restorable).toContain("Restore it to continue here.");
+  expect(restorable).not.toContain("but not continue it here");
+
+  const restoring = renderToStaticMarkup(
+    <ReadOnlySessionNotice
+      session={session({ keepLive: false, archive: { ...archived, restoring: true } })}
+      onContinue={() => undefined}
+      onRestore={async () => true}
+    />,
+  );
+  expect(restoring).toContain("Restoring this chat");
+  expect(restoring).toContain("Restoring…");
+  expect(restoring).toContain('data-read-only-session="restoring"');
+  expect(restoring).toContain("coming back from long-term storage");
+
+  // Without the option (no permission, or a sub-chat) there is no Restore.
+  expect(
+    renderToStaticMarkup(
+      <ReadOnlySessionNotice
+        session={session({ keepLive: false, archive: archived })}
+        onContinue={() => undefined}
+      />,
+    ),
+  ).not.toContain("Restore chat");
+});
+
 test("the Archived page names the deployment's idle period", () => {
   expect(readOnlyChatsDescription(1)).toContain("no activity for 1 day are archived too");
   expect(readOnlyChatsDescription(30)).toContain("no activity for 30 days are archived too");

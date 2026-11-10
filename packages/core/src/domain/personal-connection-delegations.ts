@@ -40,8 +40,11 @@ import {
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 import { personalGitHubRepositoryResources } from "./resources";
+import { connectAutoConnectLoginsForTurn } from "./mcp-auto-connect";
+import { releaseAdmissionBlocksAfterAccessChange } from "../application/admission-release";
 import { ConnectionAccountSelectionError } from "./connection-account-selection-error";
 export { ConnectionAccountSelectionError } from "./connection-account-selection-error";
+import type { ConnectionAccountReads } from "./connection-account-reads";
 import {
   mcpAccountBindingsFromVisibleConnections,
   personalDelegationsForAccountBindings,
@@ -97,8 +100,15 @@ export type PersonalConnectionDelegationSource =
 async function ownerStillBelongsToWorkspace(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string },
+  reads?: ConnectionAccountReads,
 ): Promise<boolean> {
-  return await namedSubjectHasLiveWorkspaceAuthority(db, input);
+  return reads
+    ? await reads.ownerHasLiveWorkspaceAuthority(ownerOf(input))
+    : await namedSubjectHasLiveWorkspaceAuthority(db, input);
+}
+
+function ownerOf(input: { accountId: string; workspaceId: string; subjectId: string }) {
+  return { accountId: input.accountId, workspaceId: input.workspaceId, subjectId: input.subjectId };
 }
 export type AuthorizedSocialConnection = { connection: SocialConnection; subjectId: string | null };
 
@@ -218,11 +228,20 @@ export type PersonalWorkspaceOriginConnections = {
 export async function personalWorkspaceOwnerOriginConnections(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string },
+  /** One resolution's shared reads (see `ConnectionAccountReads`). */
+  reads?: ConnectionAccountReads,
 ): Promise<PersonalWorkspaceOriginConnections[]> {
   // Shared workspaces stop here, before any membership or connection read.
-  if (!(await isSubjectOwnPersonalWorkspace(db, input))) return [];
+  const personalWorkspace = reads
+    ? await reads.isOwnPersonalWorkspace(ownerOf(input))
+    : await isSubjectOwnPersonalWorkspace(db, input);
+  if (!personalWorkspace) return [];
   const byOrigin = new Map<string, ConnectionMetadata[]>();
-  for (const connection of await listOwnConnectionMetadata(db, { ...input, reach: "anywhere" })) {
+  for (const connection of await listOwnConnectionMetadata(db, {
+    ...input,
+    reach: "anywhere",
+    ...(reads ? { reads } : {}),
+  })) {
     if (
       connection.workspaceId === input.workspaceId ||
       connection.accountId !== input.accountId ||
@@ -239,11 +258,11 @@ export async function personalWorkspaceOwnerOriginConnections(
   // `db` may be one bounded transaction: these reads must not overlap.
   for (const originWorkspaceId of [...byOrigin.keys()].sort()) {
     if (
-      !(await ownerStillBelongsToWorkspace(db, {
-        accountId: input.accountId,
-        workspaceId: originWorkspaceId,
-        subjectId: input.subjectId,
-      }))
+      !(await ownerStillBelongsToWorkspace(
+        db,
+        { accountId: input.accountId, workspaceId: originWorkspaceId, subjectId: input.subjectId },
+        reads,
+      ))
     )
       continue;
     origins.push({ originWorkspaceId, connections: byOrigin.get(originWorkspaceId)! });
@@ -271,8 +290,11 @@ export async function listOwnConnectionMetadata(
     includeInactive?: boolean;
     /** Read only these owned accounts (a live target fence); omit for all. */
     connectionIds?: ReadonlySet<string>;
+    /** One resolution's shared reads (see `ConnectionAccountReads`). */
+    reads?: ConnectionAccountReads;
   },
 ): Promise<ConnectionMetadata[]> {
+  if (input.reads) return await listOwnConnectionMetadataFromReads(input.reads, input);
   const accounts = (await listOwnedConnectionAccounts(db, input)).filter(
     (account) => !input.connectionIds || input.connectionIds.has(account.connectionId),
   );
@@ -311,6 +333,65 @@ export async function listOwnConnectionMetadata(
 }
 
 /**
+ * `listOwnConnectionMetadata` from one resolution's shared reads: the same
+ * accounts, Personal-workspace check, turned-on logins and per-connection
+ * metadata, filtered and ordered the same way. Metadata is read by ids, one
+ * scope per origin workspace, in the order the accounts first name it.
+ */
+async function listOwnConnectionMetadataFromReads(
+  reads: ConnectionAccountReads,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    reach: "turned_on_here" | "anywhere";
+    includeInactive?: boolean;
+    connectionIds?: ReadonlySet<string>;
+  },
+): Promise<ConnectionMetadata[]> {
+  const own = await reads.ownConnectionAccounts(ownerOf(input));
+  const accounts = own.accounts.filter(
+    (account) => !input.connectionIds || input.connectionIds.has(account.connectionId),
+  );
+  if (accounts.length === 0) return [];
+  const { personalWorkspace, turnedOn } = own;
+  const turnedOnHere = (connectionId: string) => personalWorkspace || turnedOn.has(connectionId);
+  const used = accounts.filter(
+    (account) => input.reach !== "turned_on_here" || turnedOnHere(account.connectionId),
+  );
+  const idsByOrigin = new Map<string, string[]>();
+  for (const account of used) {
+    idsByOrigin.set(account.originWorkspaceId, [
+      ...(idsByOrigin.get(account.originWorkspaceId) ?? []),
+      account.connectionId,
+    ]);
+  }
+  const metadata = new Map<string, ConnectionMetadata | null>();
+  for (const [originWorkspaceId, connectionIds] of idsByOrigin) {
+    const read = await reads.connectionMetadata(originWorkspaceId, connectionIds, input.subjectId);
+    for (const [connectionId, connection] of read) {
+      metadata.set(`${originWorkspaceId}\u0000${connectionId}`, connection);
+    }
+  }
+  const connections: ConnectionMetadata[] = [];
+  for (const account of used) {
+    const connection = metadata.get(`${account.originWorkspaceId}\u0000${account.connectionId}`);
+    if (
+      connection?.accountId === input.accountId &&
+      connection.subjectId === input.subjectId &&
+      connection.authorityId != null &&
+      (input.includeInactive === true || connection.status === "active")
+    )
+      connections.push({
+        ...connection,
+        turnedOnHere: turnedOnHere(account.connectionId),
+        turnedOnHereGrantId: turnedOn.get(account.connectionId) ?? null,
+      });
+  }
+  return connections;
+}
+
+/**
  * Turn the owner's own login on for their messages in this workspace (D-54):
  * their standing `connection.use` grant here. A login starts on where it is
  * added; this covers connecting it again, or reconnecting it, from another
@@ -329,6 +410,11 @@ export async function turnOnOwnLoginHere(
     context: "workspace_shared",
     workspaceSharedAcknowledged: true,
   });
+  // A saved message may have been waiting for this login.
+  await releaseAdmissionBlocksAfterAccessChange(
+    { db },
+    { accountId: input.accountId, workspaceId: input.workspaceId, change: "personal_resource" },
+  );
 }
 
 export async function authorizedSocialConnectionsForGrant(input: {
@@ -520,9 +606,12 @@ export function personalConnectionDelegationsFromParent(input: {
   const requestedGitHub = personalGitHubRepositoryResources(input.personalGitHubResources ?? []);
   const inherited = projected.flatMap((delegation) => {
     if (delegation.connectionType !== "github_personal") return [delegation];
-    if (requestedGitHub.length === 0) return [];
     const snapshot = delegation.personalGitHubRepositorySelection;
     if (!snapshot) return [];
+    const allRepositoriesAccess = snapshot.allRepositoriesAccess;
+    // All my repositories travels with child work even without attached
+    // repositories, so the child can use the github_personal tools too.
+    if (requestedGitHub.length === 0 && !allRepositoriesAccess) return [];
     const repositories = requestedGitHub.map((resource) => {
       const parent = snapshot.repositories.find(
         (candidate) =>
@@ -530,14 +619,27 @@ export function personalConnectionDelegationsFromParent(input: {
           candidate.canonicalUrl === resource.uri &&
           candidate.ref === resource.ref,
       );
-      if (
-        !parent ||
-        resource.credentialBindingId !== snapshot.credentialBindingId ||
-        (resource.access === "write" && parent.access !== "write")
-      ) {
+      if (resource.credentialBindingId !== snapshot.credentialBindingId) {
         throw new Error("agent-created personal GitHub repository exceeds parent authority");
       }
-      return { ...parent, access: resource.access };
+      if (parent && (resource.access !== "write" || parent.access === "write")) {
+        return { ...parent, access: resource.access };
+      }
+      // Not covered by the parent's own list: All my repositories decides.
+      if (
+        allRepositoriesAccess &&
+        (resource.access !== "write" || allRepositoriesAccess === "write")
+      ) {
+        return {
+          repositoryId: resource.repositoryId,
+          fullName: personalGitHubFullNameFromUri(resource.uri),
+          canonicalUrl: resource.uri,
+          ref: resource.ref,
+          access: resource.access,
+          selectionGeneration: snapshot.selectionGeneration,
+        };
+      }
+      throw new Error("agent-created personal GitHub repository exceeds parent authority");
     });
     return [
       {
@@ -555,20 +657,110 @@ export function personalConnectionDelegationsFromParent(input: {
   return inherited;
 }
 
+function personalGitHubFullNameFromUri(uri: string): string {
+  return new URL(uri).pathname.split("/").filter(Boolean).join("/");
+}
+
+function usablePersonalGitHubConnection(candidate: ConnectionMetadata, subjectId: string): boolean {
+  return (
+    candidate.subjectId === subjectId &&
+    candidate.status === "active" &&
+    isPersonalGitHubConnection(candidate) &&
+    Boolean(candidate.authorityId) &&
+    candidate.grantedScopes.length === 1 &&
+    candidate.grantedScopes[0] === "repo" &&
+    PersonalGitHubConnectionMetadata.safeParse(candidate.metadata).success
+  );
+}
+
+/**
+ * Work with no attached personal repositories still gets Your GitHub when the
+ * person chose All my repositories, so the github_personal tools can find and
+ * read anything they can. Best effort: any problem leaves the turn without it.
+ */
+async function personalGitHubAllRepositoriesDelegation(input: {
+  db: Database;
+  accountId: string;
+  subjectId: string;
+  connections: ConnectionMetadata[];
+  authoritySelection?: McpConnectionAccountSelection;
+}): Promise<McpPersonalConnectionDelegation | null> {
+  const candidates = input.connections.filter(
+    (candidate) =>
+      (!input.authoritySelection || candidate.id === input.authoritySelection.connectionId) &&
+      usablePersonalGitHubConnection(candidate, input.subjectId),
+  );
+  const delegations: McpPersonalConnectionDelegation[] = [];
+  for (const connection of candidates) {
+    try {
+      const metadata = PersonalGitHubConnectionMetadata.parse(connection.metadata);
+      const selection = await getPersonalGitHubRepositorySelectionState(input.db, {
+        accountId: input.accountId,
+        originWorkspaceId: connection.workspaceId,
+        subjectId: input.subjectId,
+        connectionId: connection.id,
+      });
+      if (
+        !selection?.allRepositoriesAccess ||
+        selection.selectionGeneration <= 0 ||
+        selection.credentialBindingId !== metadata.credentialBindingId ||
+        selection.providerPrincipalId !== metadata.providerPrincipalId
+      ) {
+        continue;
+      }
+      delegations.push({
+        serverId: PERSONAL_GITHUB_CONNECTION_SURFACE_ID,
+        connectionId: connection.id,
+        originWorkspaceId: connection.workspaceId,
+        ownerSubjectId: input.subjectId,
+        providerDomain: "github.com",
+        kind: "oauth2",
+        connectionType: "github_personal",
+        personalGitHubRepositorySelection: {
+          credentialBindingId: metadata.credentialBindingId,
+          connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
+          selectionGeneration: selection.selectionGeneration,
+          allRepositoriesAccess: selection.allRepositoriesAccess,
+          repositories: [],
+        },
+      });
+    } catch {
+      // A connection that cannot be read is simply not used for this turn.
+    }
+  }
+  // With several accounts and no choice, none is guessed.
+  return delegations.length === 1 ? delegations[0]! : null;
+}
+
 async function personalGitHubDelegationFromVisibleConnections(input: {
   db: Database;
   accountId: string;
   subjectId: string;
   connections: ConnectionMetadata[];
   resources: ResourceRef[];
+  /** The deployment offers All my repositories. */
+  allRepositoriesEnabled: boolean;
   authoritySelection?: McpConnectionAccountSelection;
 }): Promise<McpPersonalConnectionDelegation | null> {
   const resources = personalGitHubRepositoryResources(input.resources);
   if (resources.length === 0) {
-    if (input.authoritySelection) {
+    if (!input.allRepositoriesEnabled) {
+      if (input.authoritySelection) {
+        throw new Error("personal GitHub connection authority requires selected repositories");
+      }
+      return null;
+    }
+    const all = await personalGitHubAllRepositoriesDelegation({
+      db: input.db,
+      accountId: input.accountId,
+      subjectId: input.subjectId,
+      connections: input.connections,
+      ...(input.authoritySelection ? { authoritySelection: input.authoritySelection } : {}),
+    });
+    if (!all && input.authoritySelection) {
       throw new Error("personal GitHub connection authority requires selected repositories");
     }
-    return null;
+    return all;
   }
   const bindingIds = new Set(resources.map((resource) => resource.credentialBindingId));
   if (bindingIds.size !== 1) {
@@ -630,7 +822,30 @@ async function personalGitHubDelegationFromVisibleConnections(input: {
   const selectedById = new Map(
     selection.repositories.map((repository) => [repository.repositoryId, repository]),
   );
+  const allRepositoriesAccess = input.allRepositoriesEnabled
+    ? selection.allRepositoriesAccess
+    : null;
   const repositories = resources.map((resource) => {
+    if (allRepositoriesAccess) {
+      // All my repositories: GitHub decides on every use (the Git broker,
+      // credentials and tools recheck it live), so admission does not wait
+      // on GitHub here.
+      if (resource.access === "write" && allRepositoriesAccess !== "write") {
+        throw new Error("personal GitHub repository resource is outside the selected authority");
+      }
+      const selected = selectedById.get(resource.repositoryId);
+      return {
+        repositoryId: resource.repositoryId,
+        fullName:
+          selected && selected.canonicalUrl === resource.uri
+            ? selected.fullName
+            : personalGitHubFullNameFromUri(resource.uri),
+        canonicalUrl: resource.uri,
+        ref: resource.ref,
+        access: resource.access,
+        selectionGeneration: selection.selectionGeneration,
+      };
+    }
     const selected = selectedById.get(resource.repositoryId);
     if (
       !selected ||
@@ -660,6 +875,7 @@ async function personalGitHubDelegationFromVisibleConnections(input: {
       credentialBindingId,
       connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
       selectionGeneration: selection.selectionGeneration,
+      ...(allRepositoriesAccess ? { allRepositoriesAccess } : {}),
       repositories,
     },
   };
@@ -804,8 +1020,43 @@ export function withFrozenPersonalConnectionDelegations(input: {
 
 /** Freeze all native account routes without conflating workspace ownership
  * with the exact causal human required for personal connections. */
+/** The longest a turn waits for auto-connect before it starts without it. */
+const AUTO_CONNECT_TURN_BUDGET_MS = 8_000;
+
+async function connectAutoConnectLoginsBeforeTurn(input: {
+  db: Database;
+  settings: Settings;
+  fetchImpl?: typeof fetch | undefined;
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  servers: readonly McpServerConfig[];
+}): Promise<void> {
+  const providerDomains = new Set(
+    input.servers
+      .filter((server) => server.connectionRef?.subjectScope === "subject")
+      .map((server) => server.connectionRef!.providerDomain.toLowerCase()),
+  );
+  if (providerDomains.size === 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    connectAutoConnectLoginsForTurn({ ...input, providerDomains }).catch(() => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, AUTO_CONNECT_TURN_BUDGET_MS);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+}
+
 export async function freezeConnectionAccounts(
-  input: Parameters<typeof freezePersonalConnectionDelegations>[0] & { accountId: string },
+  input: Parameters<typeof freezePersonalConnectionDelegations>[0] & {
+    accountId: string;
+    /**
+     * A person's own turn: connect them first to the auto-connect connectors
+     * it may use (docs/integrations-design.md, "Auto-connect").
+     */
+    autoConnect?: { settings: Settings; fetchImpl?: typeof fetch | undefined } | undefined;
+  },
 ): Promise<{
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
@@ -863,6 +1114,16 @@ export async function freezeConnectionAccounts(
           : { kind: "none" },
       selections: [...(input.authoritySelections ?? [])],
     };
+    if (input.autoConnect && input.source.kind === "subject" && servers.length > 0)
+      await connectAutoConnectLoginsBeforeTurn({
+        db: input.db,
+        settings: input.autoConnect.settings,
+        fetchImpl: input.autoConnect.fetchImpl,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.source.subjectId,
+        servers,
+      });
     mcpAccountBindings = mcpAccountBindingsFromVisibleConnections({
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -878,6 +1139,7 @@ export async function freezeConnectionAccounts(
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               source: input.source,
+              ...(input.reads ? { reads: input.reads } : {}),
             }),
       ...(input.authoritySelections
         ? {
@@ -921,20 +1183,27 @@ export async function visibleMcpAccountConnections(
     accountId: string;
     workspaceId: string;
     source: Exclude<PersonalConnectionDelegationSource, { kind: "turn" }>;
+    /** One resolution's shared reads (see `ConnectionAccountReads`). */
+    reads?: ConnectionAccountReads;
   },
 ): Promise<ConnectionMetadata[]> {
   const personal =
     input.source.kind === "subject" &&
-    (await ownerStillBelongsToWorkspace(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      subjectId: input.source.subjectId,
-    }))
+    (await ownerStillBelongsToWorkspace(
+      db,
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.source.subjectId,
+      },
+      input.reads,
+    ))
       ? await listOwnConnectionMetadata(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           subjectId: input.source.subjectId,
           reach: "turned_on_here",
+          ...(input.reads ? { reads: input.reads } : {}),
         })
       : [];
   const workspace = await listConnectionsMetadata(db, input.workspaceId, null);
@@ -1021,13 +1290,19 @@ export async function availableMcpAccountBindings(input: {
 export async function freezePersonalConnectionDelegations(input: {
   db: Database;
   workspaceId: string;
-  settings: Pick<Settings, "mcpServers"> & Partial<Pick<Settings, "githubPersonalOauthEnabled">>;
+  settings: Pick<Settings, "mcpServers"> &
+    Partial<Pick<Settings, "githubPersonalOauthEnabled" | "githubPersonalAllRepositoriesEnabled">>;
   tools: ToolRef[];
   resources?: ResourceRef[];
   source: PersonalConnectionDelegationSource;
   authoritySelections?: McpConnectionAccountSelection[];
   /** Exact target for successor-mode projection (`session` never crosses it). */
   targetSessionId?: string;
+  /**
+   * One resolution's shared reads (see `ConnectionAccountReads`), when every
+   * read of this call runs on that resolution's transaction.
+   */
+  reads?: ConnectionAccountReads;
 }): Promise<McpPersonalConnectionDelegation[]> {
   const retiredSelections = (input.authoritySelections ?? []).filter(
     (selection) => selection.serverId === GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
@@ -1054,11 +1329,14 @@ export async function freezePersonalConnectionDelegations(input: {
   if (personalGitHubResources.length > 0 && input.source.kind === "none") {
     throw new Error("personal GitHub repository authority requires an authenticated causal human");
   }
-  if (
-    servers.length === 0 &&
-    !includeFirstPartyConnections &&
-    personalGitHubResources.length === 0
-  ) {
+  // All my repositories can give any of the person's chats Your GitHub. Until
+  // the deployment offers it, no turn is given that delegation shape (older
+  // releases cannot read it), even for a person who chose it earlier.
+  const allRepositoriesEnabled =
+    input.settings.githubPersonalOauthEnabled === true &&
+    input.settings.githubPersonalAllRepositoriesEnabled === true;
+  const mayUsePersonalGitHub = personalGitHubResources.length > 0 || allRepositoriesEnabled;
+  if (servers.length === 0 && !includeFirstPartyConnections && !mayUsePersonalGitHub) {
     return [];
   }
   if (input.source.kind === "none") {
@@ -1095,11 +1373,15 @@ export async function freezePersonalConnectionDelegations(input: {
     });
   }
   const ownerSubjectId = input.source.subjectId;
-  const membership = await ownerStillBelongsToWorkspace(input.db, {
-    accountId: input.source.accountId,
-    workspaceId: input.workspaceId,
-    subjectId: ownerSubjectId,
-  });
+  const membership = await ownerStillBelongsToWorkspace(
+    input.db,
+    {
+      accountId: input.source.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: ownerSubjectId,
+    },
+    input.reads,
+  );
   if (!membership) {
     if ((input.authoritySelections?.length ?? 0) > 0) {
       throw new ConnectionAccountSelectionError(
@@ -1116,7 +1398,7 @@ export async function freezePersonalConnectionDelegations(input: {
   // is used only by MCP and personal repositories.
   // The live membership check above remains mandatory for every personal path.
   const visibleConnections =
-    servers.length > 0 || personalGitHubResources.length > 0
+    servers.length > 0 || mayUsePersonalGitHub
       ? await listOwnConnectionMetadata(input.db, {
           accountId: input.source.accountId,
           workspaceId: input.workspaceId,
@@ -1124,11 +1406,12 @@ export async function freezePersonalConnectionDelegations(input: {
           // Personal GitHub keeps its own per-chat repository choice; MCP
           // logins below are bound only where they are turned on (D-54).
           reach: "anywhere",
+          ...(input.reads ? { reads: input.reads } : {}),
         })
       : [];
   const selectedMcpServerIds = new Set(servers.map((server) => server.id));
   const supportedSelectionIds = new Set(selectedMcpServerIds);
-  if (personalGitHubResources.length > 0) {
+  if (mayUsePersonalGitHub) {
     supportedSelectionIds.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
   }
   const unsupportedSelections = (input.authoritySelections ?? []).filter(
@@ -1160,16 +1443,19 @@ export async function freezePersonalConnectionDelegations(input: {
   const personalGitHubAuthoritySelection = (input.authoritySelections ?? []).find(
     (selection) => selection.serverId === PERSONAL_GITHUB_CONNECTION_SURFACE_ID,
   );
-  const personalGitHub = await personalGitHubDelegationFromVisibleConnections({
-    db: input.db,
-    accountId: input.source.accountId,
-    subjectId: ownerSubjectId,
-    connections: visibleConnections,
-    resources: input.resources ?? [],
-    ...(personalGitHubAuthoritySelection
-      ? { authoritySelection: personalGitHubAuthoritySelection }
-      : {}),
-  });
+  const personalGitHub = !mayUsePersonalGitHub
+    ? null
+    : await personalGitHubDelegationFromVisibleConnections({
+        db: input.db,
+        accountId: input.source.accountId,
+        subjectId: ownerSubjectId,
+        connections: visibleConnections,
+        resources: input.resources ?? [],
+        allRepositoriesEnabled,
+        ...(personalGitHubAuthoritySelection
+          ? { authoritySelection: personalGitHubAuthoritySelection }
+          : {}),
+      });
   if (!includeFirstPartyConnections) {
     return [...mcp, ...(personalGitHub ? [personalGitHub] : [])];
   }

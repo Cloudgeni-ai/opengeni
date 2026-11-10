@@ -4,7 +4,7 @@
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ControlRequest, ControlResponse, ErrorCode } from "@opengeni/agent-proto";
+import { ControlRequest, ControlResponse, ErrorCode, ExecRequest } from "@opengeni/agent-proto";
 import {
   connect,
   createNatsEventBus,
@@ -15,6 +15,9 @@ import {
 } from "@opengeni/events";
 import { freePort } from "@opengeni/testing/compose";
 import { NatsControlRpc } from "../src/sandbox/selfhosted/control-rpc";
+import { OpStreamExecClient } from "../src/sandbox/selfhosted/op-stream";
+import { NatsOpStreamTransport } from "../src/sandbox/selfhosted/op-transport";
+import { defaultSelfhostedRetryClock } from "../src/sandbox/selfhosted/retry-policy";
 
 const agentBinary = process.env.OPENGENI_ROTATION_PROBE_BINARY;
 const brokerBinary = process.env.OPENGENI_NATS_SERVER_BIN;
@@ -48,6 +51,7 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
     const url = `nats://127.0.0.1:${port}`;
     let auth: Awaited<ReturnType<typeof connect>> | undefined;
     let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
+    let controller: Awaited<ReturnType<typeof connect>> | undefined;
     let child: ReturnType<typeof Bun.spawn> | undefined;
     try {
       for (let attempt = 0; ; attempt++) {
@@ -90,7 +94,10 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
       });
       await auth.flush();
       bus = await createNatsEventBus(url, undefined, {
-        connect: (options) => connect({ ...options, user: "auth", pass: "auth" }),
+        connect: async (options) => {
+          controller = await connect({ ...options, user: "auth", pass: "auth" });
+          return controller;
+        },
       });
       const connection = bus.getRequestConnection();
       const subject =
@@ -244,6 +251,63 @@ authorization { auth_callout { issuer: ${account.getPublicKey()}, auth_users: [a
       }
       if (baseline) expect(Math.max(...latencies)).toBeGreaterThan(55_000);
       else expect(Math.max(...latencies)).toBeLessThan(5_000);
+      const stream = new OpStreamExecClient({
+        workspaceId: "hx-test-ws",
+        agentId: "hx-test-agent",
+        connectionInstanceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        epoch: 0,
+        controlRpc: rpc,
+        rpcSubject: subject,
+        transport: new NatsOpStreamTransport(async () => bus!.getOpStreamConnection!()),
+        controlTimeoutMs: 5_000,
+        retryClock: defaultSelfhostedRetryClock,
+      });
+      const streamStarted = performance.now();
+      const streaming = stream.exec(
+        crypto.randomUUID(),
+        ExecRequest.fromPartial({
+          command: [
+            "/bin/sh",
+            "-c",
+            "printf x >> stream-executions; printf before; sleep 4; printf after",
+          ],
+          cwd: root,
+          timeoutMs: 10_000,
+        }),
+        10_000,
+        45_000,
+      );
+      // Lose the controller's side too, while the same physical exec continues.
+      // Its shared-bus reconnect and the runner's subsequent Hello both heal
+      // the existing subscription; neither starts another process.
+      await Bun.sleep(1_000);
+      await controller!.reconnect();
+      const streamed = await streaming;
+      const streamMs = Math.round(performance.now() - streamStarted);
+      console.info(
+        JSON.stringify({ streamMs, heals: streamed.heals, exitCode: streamed.response.exitCode }),
+      );
+      expect(streamed.response.exitCode).toBe(0);
+      expect(new TextDecoder().decode(streamed.response.stdout)).toBe("beforeafter");
+      expect(await readFile(join(root, "stream-executions"), "utf8")).toBe("x");
+      expect(streamMs).toBeLessThan(10_000);
+      const boundedStarted = performance.now();
+      const bounded = stream.exec(
+        crypto.randomUUID(),
+        ExecRequest.fromPartial({
+          command: ["/bin/sh", "-c", "printf x >> deadline-executions; sleep 10"],
+          cwd: root,
+          timeoutMs: 1_000,
+        }),
+        1_000,
+        4_000,
+      );
+      await Bun.sleep(100);
+      await controller!.reconnect();
+      const timed = await bounded;
+      expect(timed.response.timedOut).toBe(true);
+      expect(performance.now() - boundedStarted).toBeLessThan(3_000);
+      expect(await readFile(join(root, "deadline-executions"), "utf8")).toBe("x");
       if (clockShim) {
         const lease = await connection.request(
           subject,

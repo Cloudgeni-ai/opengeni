@@ -42,7 +42,7 @@ import {
   reclassifyDocumentAuthority,
   runDocumentDefaultCollectionBackfill,
 } from "@opengeni/documents";
-import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { createApiMcpTransport } from "../mcp/transport";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
@@ -776,7 +776,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
           oauthAccess.grant,
           oauthAccess.allowedToolIdentities,
         );
-        const transport = new WebStandardStreamableHTTPServerTransport({
+        const transport = createApiMcpTransport({
           enableJsonResponse: true,
         });
         const server = buildWorkspaceToolGatewayMcpServer(
@@ -807,7 +807,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId: grant.workspaceId,
     });
     return await withAccessGrantSessionRlsContext(deps, grant, async () => {
-      const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+      const transport = createApiMcpTransport({ enableJsonResponse: true });
       const server = buildDocumentsMcpServer(
         db,
         grant.accountId,

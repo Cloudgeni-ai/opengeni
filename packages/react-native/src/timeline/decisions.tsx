@@ -74,6 +74,7 @@ import {
 import { Selector } from "./selector";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { useApprovalReviews, type ApprovalReviewLoader } from "./approval-reviews";
 import { errorMessage } from "@opengeni/contracts/values";
 import {
   initialMcpQuestionDraft,
@@ -866,6 +867,16 @@ export interface ApprovalStripProps {
     answer?: McpElicitationAnswer,
   ) => void | Promise<void>;
   messages?: Partial<ApprovalStripMessages> | undefined;
+  /**
+   * The review each card shows, as the web `ApprovalSurface`'s `loadReview`
+   * reads it: the server's (`client.getToolActionReview`) or the host's own
+   * `ToolActionReview`, with a plain title, consequence and the fields worth
+   * reading. While it loads the card shows its standard title and holds
+   * Approve; resolving `null` (or a 404) keeps the standard card, and a failed
+   * read shows the standard card with Try again. The approval decided never
+   * changes.
+   */
+  loadReview?: ApprovalReviewLoader | undefined;
 }
 
 /**
@@ -901,12 +912,18 @@ function ReviewBody({ maxHeight, children }: { maxHeight: number; children: Reac
   );
 }
 
-export function ApprovalStrip({ approvals, onDecide, messages: overrides }: ApprovalStripProps) {
+export function ApprovalStrip({
+  approvals,
+  onDecide,
+  messages: overrides,
+  loadReview,
+}: ApprovalStripProps) {
   const t = useOpenGeniText();
   const messages = { ...defaultApprovalStripMessages(t), ...overrides };
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const { height } = useWindowDimensions();
+  const reviews = useApprovalReviews(approvals, loadReview);
   const [pending, setPending] = useState<Record<string, "approve" | "reject">>({});
   const [settled, setSettled] = useState<Record<string, "approve" | "reject">>({});
   const [details, setDetails] = useState<Record<string, boolean>>({});
@@ -975,19 +992,38 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
         const busy = Boolean(pending[key]) || Boolean(settled[key]);
         const toolName = approvalToolName(approval);
         const answer = approvalAnswerLabels(t, toolName);
-        const review = pendingApprovalReview(approval, {
+        const fallback = pendingApprovalReview(approval, {
           formatToolName: messages.formatToolName,
           approveLabel: answer?.approve ?? messages.approve,
         });
+        const read = reviews.state(approval);
+        const loading = read.status === "loading";
+        const loaded = read.status === "loaded" ? read.review : undefined;
+        // An app action's question keeps its Allow / Cancel answers.
+        const review = loaded
+          ? answer
+            ? { ...loaded, approveLabel: answer.approve }
+            : loaded
+          : fallback;
         const facts = reviewFacts(review);
         const note = review.consequence;
+        const samples = review.samples ?? [];
+        const selectionCount = review.selectionCount ?? 0;
+        // A loaded review that offers a decision says whether Approve is
+        // offered (only an account's owner may approve some actions). One
+        // read between states offers none: the approval's own facts decide.
         // A request without recorded arguments keeps its Approve, as it
         // always had here; only the readable summary is unavailable.
-        const canApprove =
-          review.availableActions.includes("approve") || approval.arguments === undefined;
+        const reviewDecides =
+          loaded !== undefined &&
+          (loaded.availableActions.includes("approve") ||
+            loaded.availableActions.includes("reject"));
+        const canApprove = reviewDecides
+          ? loaded.availableActions.includes("approve")
+          : fallback.availableActions.includes("approve") || approval.arguments === undefined;
         const showDetails = details[approval.id] === true;
         const payload = showDetails ? approvalArgumentsText(approval) : "";
-        const approveLabel = answer?.approve ?? messages.approve;
+        const approveLabel = loaded ? review.approveLabel : (answer?.approve ?? messages.approve);
         const rejectLabel = answer?.reject ?? messages.reject;
         const answering =
           approval.elicitation && question
@@ -1084,10 +1120,52 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                     {failures[key]}
                   </Text>
                 ) : null}
-                {note && !answering ? (
+                {loading ? (
+                  // The host's summary is on its way; Approve waits for it.
+                  <View
+                    accessibilityRole="progressbar"
+                    accessibilityLabel={t("approvalSurface.loadingActionDetails")}
+                    accessibilityState={{ busy: true }}
+                    style={{ gap: 8 }}
+                  >
+                    <View
+                      style={{
+                        height: 12,
+                        width: "75%",
+                        borderRadius: theme.radius.sm,
+                        backgroundColor: withAlpha(c.fg, 0.08),
+                      }}
+                    />
+                    <View
+                      style={{
+                        height: 12,
+                        width: "50%",
+                        borderRadius: theme.radius.sm,
+                        backgroundColor: withAlpha(c.fg, 0.08),
+                      }}
+                    />
+                  </View>
+                ) : null}
+                {read.status === "failed" ? (
+                  <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center" }}>
+                    <Text accessibilityRole="alert" style={{ ...small, color: c["fg-muted"] }}>
+                      {t("native.timeline.decisions.summaryUnavailable")}{" "}
+                    </Text>
+                    <DecisionLink
+                      label={t("approvalSurface.tryAgain")}
+                      onPress={() => reviews.retry(approval.id)}
+                    />
+                  </View>
+                ) : null}
+                {canApprove && review.approvedBy === "you" && !loading && !answering ? (
+                  <Text style={{ ...body, color: c.fg }}>
+                    {t("toolActionReview.onlyYouCanApprove")}
+                  </Text>
+                ) : null}
+                {note && !loading && !answering ? (
                   <Text style={{ ...body, color: c["fg-muted"] }}>{note}</Text>
                 ) : null}
-                {facts.effects.length > 0 && !answering ? (
+                {facts.effects.length > 0 && !loading && !answering ? (
                   <View accessibilityLabel={t("toolActionReview.alsoChanges")} style={{ gap: 2 }}>
                     {facts.effects.map((effect) => (
                       <Text key={effect} style={{ ...body, color: c.fg }}>
@@ -1097,7 +1175,58 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                     ))}
                   </View>
                 ) : null}
-                {facts.shown.length > 0 && !answering ? (
+                {facts.selection && samples.length > 0 && !loading && !answering ? (
+                  <View style={{ gap: 4 }}>
+                    <Text style={{ ...small, color: c["fg-muted"] }}>
+                      {t("toolActionReview.includes")}
+                    </Text>
+                    <View
+                      style={{
+                        borderRadius: theme.radius.md,
+                        borderWidth: 1,
+                        borderColor: c.border,
+                      }}
+                    >
+                      {samples.map((sample, index) => (
+                        <View
+                          key={sample.id}
+                          style={{
+                            paddingHorizontal: 12,
+                            paddingVertical: 8,
+                            borderTopWidth: index === 0 ? 0 : 1,
+                            borderColor: c.border,
+                          }}
+                        >
+                          <Text numberOfLines={1} style={{ ...body, color: c.fg }}>
+                            {sample.title}
+                          </Text>
+                          {sample.subtitle ? (
+                            <Text numberOfLines={1} style={{ ...small, color: c["fg-muted"] }}>
+                              {sample.subtitle}
+                            </Text>
+                          ) : null}
+                        </View>
+                      ))}
+                      {selectionCount > samples.length ? (
+                        <Text
+                          style={{
+                            ...small,
+                            color: c["fg-muted"],
+                            paddingHorizontal: 12,
+                            paddingVertical: 8,
+                            borderTopWidth: 1,
+                            borderColor: c.border,
+                          }}
+                        >
+                          {t("toolActionReview.and")}{" "}
+                          {(selectionCount - samples.length).toLocaleString(t.locale)}{" "}
+                          {t("toolActionReview.more")}
+                        </Text>
+                      ) : null}
+                    </View>
+                  </View>
+                ) : null}
+                {facts.shown.length > 0 && !loading && !answering ? (
                   <View
                     style={{
                       gap: 10,
@@ -1114,9 +1243,9 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                             clamped, with all of it under Show details. */}
                         <Text
                           numberOfLines={field.truncated ? 6 : undefined}
-                          style={{ ...body, color: c.fg }}
+                          style={{ ...body, color: field.protected ? c["fg-muted"] : c.fg }}
                         >
-                          {field.preview}
+                          {field.protected ? t("toolActionReview.hidden") : field.preview}
                         </Text>
                       </View>
                     ))}
@@ -1131,9 +1260,15 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                     ) : null}
                   </View>
                 ) : null}
-                {!canApprove && !answering ? (
+                {!canApprove && !loading && !answering ? (
                   <Text style={{ ...body, color: c.fg }}>
-                    {t("toolActionReview.theDetailsOfThisOlder")}
+                    {review.approvedBy === "account_owner"
+                      ? review.accountOwnerLabel
+                        ? t("toolActionReview.onlyNameCanApprove", {
+                            name: review.accountOwnerLabel,
+                          })
+                        : t("toolActionReview.onlyTheAccountOwnerCanApprove")
+                      : t("toolActionReview.theDetailsOfThisOlder")}
                   </Text>
                 ) : null}
                 {showDetails ? (
@@ -1176,7 +1311,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                             : approveLabel
                       }
                       busy={pending[key] === "approve"}
-                      disabled={busy}
+                      disabled={busy || loading}
                       onPress={send}
                     />
                   ) : undefined
@@ -1196,7 +1331,7 @@ export function ApprovalStrip({ approvals, onDecide, messages: overrides }: Appr
                   />
                 }
                 lead={
-                  review.detailsAvailable ? (
+                  review.detailsAvailable && !loading ? (
                     <DecisionLink
                       label={
                         showDetails

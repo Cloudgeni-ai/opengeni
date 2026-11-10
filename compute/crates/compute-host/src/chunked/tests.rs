@@ -1,4 +1,6 @@
+use std::fs;
 use std::io::{Seek, SeekFrom, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +12,8 @@ use super::*;
 use crate::image::overlaps;
 use crate::protocol::Id;
 use futures::TryStreamExt as _;
+
+mod packs;
 
 /// The key `chunk` is stored under by an archive of `store` this hour.
 fn stored_key(store: &Chunked, chunk: &EncodedChunk) -> String {
@@ -299,6 +303,14 @@ fn a_dense_manifest_of_the_largest_sandbox_fits() {
     reference.plain_len = u32::try_from(CHUNK_BYTES).unwrap();
     reference.stored_len = reference.plain_len;
     reference.checksums = Some(format!("crc32c={},md5={}", "A".repeat(8), "A".repeat(24)));
+    // In a pack named by an hour centuries away, at the largest offset
+    // and length one may have.
+    reference.day = Some(9_999_999);
+    reference.pack = Some(compute_storage::chunk::Packed {
+        digest: "f".repeat(64),
+        offset: compute_storage::chunk::MAX_PACK - u64::from(reference.stored_len),
+        len: compute_storage::chunk::MAX_PACK,
+    });
     let manifest = DiskManifest {
         version: 1,
         disk_len: SAMPLE * CHUNK_BYTES,
@@ -362,7 +374,8 @@ async fn a_disk_fetched_over_its_base_downloads_only_what_differs() {
         ],
     );
     let backend = Arc::new(InMemory::new());
-    let store = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
+    let store =
+        Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")).with_packs(false));
     let mut base_files = files(dir.path(), false);
     base_files.disk = crate::store::JailedFile::new(&base);
     store
@@ -524,7 +537,8 @@ async fn a_sandbox_comes_back_byte_for_byte_and_unchanged_chunks_are_not_stored_
     saved.profile = Some(dir.path().join("profile"));
 
     let backend = Arc::new(InMemory::new());
-    let store = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
+    let store =
+        Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")).with_packs(false));
     let sandbox = id("0123456789abcdef0123456789abcdef");
     let first = store
         .archive(sandbox, save(), &saved, &CancellationToken::new())
@@ -850,7 +864,8 @@ async fn a_copy_missing_a_chunk_fails_verification_until_archived_again() {
     sparse(&image.state, 10, &[(0, b"s")]);
     sparse(&image.memory, 3 * CHUNK_BYTES, &[(CHUNK_BYTES, b"memory")]);
     let backend = Arc::new(InMemory::new());
-    let store = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
+    let store =
+        Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")).with_packs(false));
     let sandbox = id("00000000000000000000000000000005");
     let archive = |store: &Chunked| {
         let store = store.clone();
@@ -1011,10 +1026,10 @@ async fn a_stored_copy_of_another_version_is_refused() {
         }))
         .unwrap()
     };
-    for version in [copy::VERSION_DIGESTS, copy::VERSION] {
+    for version in [copy::VERSION_DIGESTS, copy::VERSION, copy::VERSION_PACKS] {
         assert_eq!(parse_head("test", &head(version)).unwrap().version, version);
     }
-    for version in [0, 1, 2, copy::VERSION + 1] {
+    for version in [0, 1, 2, copy::VERSION_PACKS + 1] {
         assert!(
             parse_head("test", &head(version)).is_err(),
             "version {version}"
@@ -1036,6 +1051,17 @@ struct Counted {
     inner: InMemory,
     reads: std::sync::atomic::AtomicUsize,
     writes: std::sync::atomic::AtomicUsize,
+    /// Done before the next pack is written, once.
+    before_pack: BeforePack,
+}
+
+#[derive(Default)]
+struct BeforePack(std::sync::Mutex<Option<futures::future::BoxFuture<'static, ()>>>);
+
+impl std::fmt::Debug for BeforePack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BeforePack")
+    }
 }
 
 impl Counted {
@@ -1044,10 +1070,17 @@ impl Counted {
         use std::sync::atomic::Ordering::SeqCst;
         (self.reads.swap(0, SeqCst), self.writes.swap(0, SeqCst))
     }
+
+    /// Does `work` before the next pack is written, as a sweep's taking
+    /// stock while an archive uploads would.
+    fn before_pack(&self, work: impl std::future::Future<Output = ()> + Send + 'static) {
+        *self.before_pack.0.lock().unwrap() = Some(Box::pin(work));
+    }
 }
 
 fn is_chunk(location: &ObjectPath) -> bool {
-    location.as_ref().contains("/chunks/")
+    let location = location.as_ref();
+    location.contains("/chunks/") || location.contains("/packs/")
 }
 
 impl std::fmt::Display for Counted {
@@ -1067,6 +1100,12 @@ impl ObjectStore for Counted {
         if is_chunk(location) {
             self.writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        if location.as_ref().contains("/packs/") {
+            let work = self.before_pack.0.lock().unwrap().take();
+            if let Some(work) = work {
+                work.await;
+            }
         }
         self.inner.put_opts(location, payload, opts).await
     }
@@ -1141,7 +1180,8 @@ async fn stored_image(dir: &Path) -> (PathBuf, ImageId, Arc<Counted>, Chunked) {
         ],
     );
     let backend = Arc::new(Counted::default());
-    let store = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
+    let store =
+        Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")).with_packs(false));
     let image = store.put_rootfs(&path).await.unwrap();
     backend.take();
     (path, image, backend, store)
@@ -1234,7 +1274,8 @@ async fn a_disk_made_from_a_stored_image_stores_only_what_it_changed() {
     // A host that confirmed nothing (another one, or this one restarted)
     // checks the image, and asks about the two chunks of the copy the image
     // does not hold.
-    let fresh = Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")));
+    let fresh =
+        Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")).with_packs(false));
     archived(&fresh, a, &a_files).await;
     assert_eq!(backend.take(), (4 + 2, 0));
 }
@@ -1265,8 +1306,11 @@ async fn reused_chunks_are_asked_about_again_after_a_day_or_a_failed_verificatio
         })
     };
     let backend = Arc::new(Counted::default());
-    let store =
-        Chunked::new(ChunkStore::new(backend.clone(), ObjectPath::from("t")).with_clock(clock));
+    let store = Chunked::new(
+        ChunkStore::new(backend.clone(), ObjectPath::from("t"))
+            .with_clock(clock)
+            .with_packs(false),
+    );
     let sandbox = id("00000000000000000000000000000c01");
     archived(&store, sandbox, &saved).await;
     assert_eq!(backend.take(), (3, 3), "stored and read back");
@@ -1362,8 +1406,9 @@ async fn an_archive_holds_what_it_stores_until_it_publishes() {
         let now = Arc::clone(&now);
         Clock::from_fn(move || *now.lock().unwrap())
     };
-    let chunks =
-        ChunkStore::new(Arc::new(InMemory::new()), ObjectPath::from("t")).with_clock(clock);
+    let chunks = ChunkStore::new(Arc::new(InMemory::new()), ObjectPath::from("t"))
+        .with_clock(clock)
+        .with_packs(false);
     let store = Chunked::new(chunks.clone());
     let dir = tempfile::tempdir().unwrap();
     let saved = files(dir.path(), false);
@@ -1380,6 +1425,7 @@ async fn an_archive_holds_what_it_stores_until_it_publishes() {
         .archive_once(sandbox, save(), &saved, &CancellationToken::new())
         .await
         .unwrap()
+        .expect("no sweep took stock")
         .stored()
         .unwrap();
     assert_eq!(held.len(), 2, "both chunks, not the zeros");

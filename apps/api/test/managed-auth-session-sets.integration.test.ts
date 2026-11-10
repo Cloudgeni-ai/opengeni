@@ -556,6 +556,16 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
     });
     expect(selectedRead.status).toBe(200);
     expect(await selectedRead.json()).toMatchObject({ user: { email } });
+    // A marketing-site tab sends the cookies but not the app's actor epoch.
+    const displayRead = await app.request("/v1/auth/display-identity", {
+      headers: { cookie: `${authority}; ${selectedCookie}` },
+    });
+    expect(displayRead.status).toBe(200);
+    expect(await displayRead.json()).toEqual({
+      signedIn: true,
+      name: "Dual Empty User",
+      image: null,
+    });
 
     const brokerApp = createApp({
       settings: testSettings({
@@ -580,6 +590,18 @@ describe("managed session-set API with Better Auth and PostgreSQL", () => {
       selectedSlotId: projection.selectedSlotId,
     });
     expect(oneCookie(brokerRead, "better-auth.session_token")).toBe("better-auth.session_token=");
+    const brokerDisplayRead = await brokerApp.request("/v1/auth/display-identity", {
+      headers: { cookie: cutoverCookies },
+    });
+    expect(await brokerDisplayRead.json()).toEqual({
+      signedIn: true,
+      name: "Dual Empty User",
+      image: null,
+    });
+    // Broker mode clears the legacy ambient cookie here too, as get-session does.
+    expect(oneCookie(brokerDisplayRead, "better-auth.session_token")).toBe(
+      "better-auth.session_token=",
+    );
 
     const brokerBegin = await brokerApp.request("/v1/auth/session-set/transactions", {
       method: "POST",

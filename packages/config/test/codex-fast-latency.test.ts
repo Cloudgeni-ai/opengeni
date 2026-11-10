@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { LatencyMode } from "@opengeni/contracts";
 import {
   applyModelCatalogDocument,
   assertTurnExecutionPolicyMatchesConfigV1,
@@ -180,9 +181,62 @@ describe("Ultrafast", () => {
     );
   });
 
-  test("the built-in API model offers it too", () => {
+  test("the built-in model offers it only on the direct OpenAI API", () => {
     const settings = { ...base, openaiModel: "gpt-6.1-sol", openaiAllowedModels: "gpt-6.1-sol" };
     expect(policy(settings, "gpt-6.1-sol", "ultrafast").latencyMode).toBe("ultrafast");
+    expect(
+      policy(
+        { ...settings, openaiBaseUrl: "https://api.openai.com/v1" },
+        "gpt-6.1-sol",
+        "ultrafast",
+      ).latencyMode,
+    ).toBe("ultrafast");
+    // OpenAI serves Ultrafast only on its own API: not on Azure OpenAI, and not
+    // through another base URL (a proxy or a regional endpoint).
+    for (const route of [
+      { openaiProvider: "azure" as const, azureOpenaiApiKey: "azure-key" },
+      { openaiBaseUrl: "https://eu.api.openai.com/v1" },
+      { openaiBaseUrl: "https://proxy.example.test/v1" },
+    ]) {
+      const routed = { ...settings, ...route };
+      const [model] = configuredModels(routed);
+      expect(model!.capabilities.latencyModes.map((mode) => mode.id)).toEqual(["standard", "fast"]);
+      expect(policy(routed, "gpt-6.1-sol", "fast").latencyMode).toBe("fast");
+      expect(() => policy(routed, "gpt-6.1-sol", "ultrafast")).toThrow(UnsupportedLatencyModeError);
+    }
+  });
+
+  test("Azure turns accepted while the built-in model still declared Ultrafast keep running", () => {
+    const azure = getSettings({
+      OPENGENI_ENV: "test",
+      OPENGENI_OPENAI_PROVIDER: "azure",
+      OPENGENI_AZURE_OPENAI_API_KEY: "azure-key",
+      OPENGENI_AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1",
+      OPENGENI_OPENAI_MODEL: "gpt-6-astra",
+      OPENGENI_OPENAI_ALLOWED_MODELS: "gpt-6-astra",
+    });
+    const request = {
+      modelId: "gpt-6-astra",
+      requestedModelId: "gpt-6-astra",
+      modelSource: "explicit" as const,
+      reasoningEffort: "medium" as const,
+      reasoningSource: "explicit" as const,
+      latencyModeSource: "explicit" as const,
+    };
+    for (const latencyMode of ["standard", "fast"] as const) {
+      const current = policy(azure, "gpt-6-astra", latencyMode);
+      // The digest the previous release froze for this exact configuration,
+      // when gpt-6-astra on Azure declared standard, fast and ultrafast.
+      const accepted = {
+        ...current,
+        definitionVersion:
+          "sha256:b2d51a24c5122568e23b4a28a90955e3946d18a21124bc6d2a003875c67e8e7c",
+      };
+      expect(
+        assertTurnExecutionPolicyMatchesConfigV1(azure, accepted, { ...request, latencyMode })
+          .policy,
+      ).toEqual(accepted);
+    }
   });
 
   test("wire tier and response verification are exact", () => {
@@ -193,6 +247,27 @@ describe("Ultrafast", () => {
     expect(responseSatisfiesLatencyMode("ultrafast", "priority")).toBe(false);
     expect(responseSatisfiesLatencyMode("ultrafast", "fast")).toBe(false);
     expect(responseSatisfiesLatencyMode("fast", "ultrafast")).toBe(false);
+  });
+
+  test("every speed any model offers is a LatencyMode with a wire tier its response satisfies", () => {
+    const direct = codexDocument("gpt-6-astra");
+    const azure = { ...direct, openaiProvider: "azure" as const, azureOpenaiApiKey: "azure-key" };
+    const offered = new Set<string>();
+    for (const settings of [
+      { ...direct, openaiModel: "gpt-6-astra", openaiAllowedModels: "gpt-6-astra,gpt-6.1-sol" },
+      { ...azure, openaiModel: "gpt-6-astra", openaiAllowedModels: "gpt-6-astra,gpt-6.1-sol" },
+    ]) {
+      for (const model of configuredModels(settings)) {
+        for (const mode of model.capabilities.latencyModes.filter((entry) => entry.runnable)) {
+          offered.add(mode.id);
+          expect(LatencyMode.options).toContain(mode.id);
+          const tier = serviceTierForLatencyMode(model.providerId, mode.id);
+          if (mode.id === "standard") expect(tier).toBeUndefined();
+          else expect(responseSatisfiesLatencyMode(mode.id, tier)).toBe(true);
+        }
+      }
+    }
+    expect([...offered].sort()).toEqual(["fast", "standard", "ultrafast"]);
   });
 
   test("turns accepted before Ultrafast was declared stay runnable", () => {

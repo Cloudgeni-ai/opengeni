@@ -1,5 +1,6 @@
 import {
   configuredModelPricingSchedules,
+  organizationCompatibleConnectionIdOf,
   type Settings,
   type ResolvedModelProvider,
 } from "@opengeni/config";
@@ -9,6 +10,7 @@ import {
   getWorkspaceProviderApiKeyConnectionMetadata,
   loadConnectionCredentialForBroker,
   loadDirectModelProviderConnection,
+  loadOrganizationCompatibleEndpointApiKey,
   loadOrganizationModelProviderApiKey,
   loadOrganizationModelProviderCredential,
   workspaceProviderApiKeyConnectionSpec,
@@ -132,6 +134,20 @@ export async function sessionTitleApiConnectionId(input: {
     if (!connection || connection.apiKey !== provider.apiKey)
       throw new SessionTitleRouteUnavailableError("Title model connection changed");
     return connection.id;
+  }
+  if (provider.kind === "direct-compatible-organization") {
+    // One of the organization's own endpoints: pin that exact connection.
+    const connectionId = organizationCompatibleConnectionIdOf(provider.id);
+    const apiKey =
+      connectionId &&
+      (await loadOrganizationCompatibleEndpointApiKey(db, settings, {
+        accountId,
+        workspaceId,
+        connectionId,
+      }));
+    if (!connectionId || !apiKey || apiKey !== provider.apiKey)
+      throw new SessionTitleRouteUnavailableError("Title model connection changed");
+    return connectionId;
   }
   const kind = providerKinds[provider.kind as keyof typeof providerKinds];
   if (provider.credentialSource.kind === "workspace_connection") {

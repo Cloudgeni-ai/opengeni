@@ -1,11 +1,12 @@
 //! Setting up the guest's system: mounts, network, identity and clock.
 
-use std::fs::{self, File, OpenOptions, Permissions};
+use std::fs::{self, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
-use super::{log, sys};
+use super::{devices, log, log_change, sys};
 use crate::agent::STATE_DIR;
 use crate::cmdline::Network;
 use crate::given::GIVEN_FILE;
@@ -59,14 +60,6 @@ const MOUNTS: &[(&str, &str, &str, libc::c_ulong, &str)] = &[
     ),
 ];
 
-/// Links in `/dev` that programs expect and `devtmpfs` does not make.
-const DEV_LINKS: &[(&str, &str)] = &[
-    ("/proc/self/fd", "/dev/fd"),
-    ("/proc/self/fd/0", "/dev/stdin"),
-    ("/proc/self/fd/1", "/dev/stdout"),
-    ("/proc/self/fd/2", "/dev/stderr"),
-];
-
 /// Mounts the basics and makes what programs expect around them.
 pub fn mount_basics() {
     for &(source, target, kind, flags, data) in MOUNTS {
@@ -78,14 +71,10 @@ pub fn mount_basics() {
             _ => {}
         }
     }
-    for (target, link) in DEV_LINKS {
-        if fs::symlink_metadata(link).is_err() {
-            let _ = symlink(target, link);
-        }
-    }
-    // Every terminal comes from this instance of devpts.
-    let _ = fs::remove_file("/dev/ptmx");
-    let _ = symlink("pts/ptmx", "/dev/ptmx");
+    // The links programs expect and devtmpfs does not make, and `ptmx`
+    // into this instance of devpts, so every terminal comes from it; and
+    // any device node a kernel did not make.
+    devices::keep();
     for dir in ["/tmp", "/var/tmp"] {
         let _ = fs::create_dir_all(dir);
         let _ = fs::set_permissions(dir, Permissions::from_mode(0o1777));
@@ -94,6 +83,45 @@ pub fn mount_basics() {
     for controller in ["+cpu", "+memory", "+io", "+pids"] {
         let _ = fs::write("/sys/fs/cgroup/cgroup.subtree_control", controller);
     }
+}
+
+/// The file systems under `/dev` that a command can unmount or remove
+/// the mount point of: terminals and shared memory.
+const DEV_MOUNTS: &[&str] = &["/dev/pts", "/dev/shm"];
+
+/// Keeps `/dev` as [`mount_basics`] made it: puts back a device node or
+/// link a command removed or replaced, and mounts again devpts or the
+/// shared memory file system when one is no longer mounted. Cheap enough
+/// to run every few seconds.
+pub fn keep_dev() {
+    // PID 1's loop, both supervisors and a reseed may all ask at once.
+    static KEEPING: Mutex<()> = Mutex::new(());
+    let _keeping = KEEPING.lock().unwrap_or_else(PoisonError::into_inner);
+    let dev = fs::metadata("/dev").map(|meta| meta.dev()).ok();
+    for &(source, target, kind, flags, data) in MOUNTS {
+        if !DEV_MOUNTS.contains(&target) {
+            continue;
+        }
+        // A mount point is on another device than the directory it is in.
+        let mounted = match (dev, fs::metadata(target)) {
+            (Some(dev), Ok(meta)) => meta.dev() != dev,
+            (_, Ok(_)) => true,
+            (_, Err(_)) => false,
+        };
+        if mounted {
+            log_change(target, None);
+            continue;
+        }
+        let _ = fs::create_dir_all(target);
+        match sys::mount(source, target, kind, flags, data) {
+            Ok(()) => {
+                log(&format!("{target} was not mounted; mounted it again"));
+                log_change(target, None);
+            }
+            Err(error) => log_change(target, Some(&format!("mount {target}: {error}"))),
+        }
+    }
+    devices::keep();
 }
 
 /// Sets up the network from the kernel's `ip=` argument. The lab kernel
@@ -124,9 +152,6 @@ pub fn network(network: Option<&Network>) {
     }
     if !network.dns.is_empty() {
         write_resolv_conf(&network.resolv_conf());
-    }
-    if fs::symlink_metadata("/etc/hosts").is_err() {
-        let _ = fs::write("/etc/hosts", "127.0.0.1\tlocalhost\n::1\tlocalhost\n");
     }
 }
 
@@ -159,7 +184,7 @@ pub fn replace(path: &str, text: &str, mode: u32) -> io::Result<()> {
 pub fn boot_identity(sandbox: &str) {
     let fresh_id = || {
         let mut bytes = [0_u8; 16];
-        io::Read::read_exact(&mut File::open("/dev/urandom")?, &mut bytes)?;
+        sys::random_bytes(&mut bytes)?;
         Ok(identity::random_machine_id(&bytes))
     };
     if let Err(error) = own_disk(Path::new("/"), sandbox, fresh_id) {
@@ -168,7 +193,7 @@ pub fn boot_identity(sandbox: &str) {
     if let Err(error) = sys::set_host_name(identity::host_name(sandbox)) {
         log(&format!("host name: {error}"));
     }
-    name_self(identity::host_name(sandbox));
+    write_hosts(Path::new("/"), Some(identity::host_name(sandbox)));
 }
 
 /// Makes the disk under `root` sandbox `sandbox`'s: if it was made for
@@ -199,6 +224,7 @@ pub fn boot_unowned() {
     if let Err(error) = disown_disk(Path::new("/")) {
         log(&format!("identity: {error}"));
     }
+    write_hosts(Path::new("/"), None);
 }
 
 /// Forgets the sandbox the disk under `root` was made for, if any. The
@@ -248,24 +274,25 @@ fn remove_tree(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Makes the guest's own host name `name` resolve locally (see
-/// [`identity::hosts_naming`]). The file need not survive a crash: every
+/// Makes `localhost`, and the guest's own host name `name` when it has
+/// one, resolve locally in the hosts file under `root` (see
+/// [`identity::hosts_file`]). The file need not survive a crash: every
 /// boot and new identity writes it again. A symlinked hosts file belongs
 /// to whatever manages it and is left alone.
-fn name_self(name: &str) {
-    let path = Path::new(identity::HOSTS_FILE);
-    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+fn write_hosts(root: &Path, name: Option<&str>) {
+    let path = under(root, identity::HOSTS_FILE);
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
         return;
     }
-    let hosts = fs::read_to_string(path).ok();
-    let named = identity::hosts_naming(hosts.as_deref(), name);
-    if hosts.as_deref() == Some(named.as_str()) {
+    let hosts = fs::read_to_string(&path).ok();
+    let next_hosts = identity::hosts_file(hosts.as_deref(), name);
+    if hosts.as_deref() == Some(next_hosts.as_str()) {
         return;
     }
     let next = path.with_extension("opengeni-next");
-    let result = fs::write(&next, &named).and_then(|()| {
+    let result = fs::write(&next, &next_hosts).and_then(|()| {
         fs::set_permissions(&next, Permissions::from_mode(0o644))?;
-        fs::rename(&next, path)
+        fs::rename(&next, &path)
     });
     if let Err(error) = result {
         let _ = fs::remove_file(&next);
@@ -303,7 +330,7 @@ pub fn renew_identity(sandbox: &str, seed_hex: &str) -> io::Result<()> {
     let machine_id = identity::derived_machine_id(seed_hex, sandbox);
     replace(MACHINE_ID_FILE, &format!("{machine_id}\n"), 0o444)?;
     sys::set_host_name(identity::host_name(sandbox))?;
-    name_self(identity::host_name(sandbox));
+    write_hosts(Path::new("/"), Some(identity::host_name(sandbox)));
     replace(OWNER_FILE, &format!("{sandbox}\n"), 0o644)?;
     replace(SANDBOX_FILE, &format!("{sandbox}\n"), 0o644)
 }
@@ -311,6 +338,8 @@ pub fn renew_identity(sandbox: &str, seed_hex: &str) -> io::Result<()> {
 /// Mixes `seed` into the kernel's input pool and reseeds its generator
 /// from it at once. Returns whether it did.
 pub fn reseed(seed: &[u8]) -> bool {
+    // Writing to the pool and asking for a reseed need the device node.
+    keep_dev();
     let result = (|| {
         let mut pool = OpenOptions::new().write(true).open("/dev/urandom")?;
         pool.write_all(seed)?;
@@ -406,6 +435,47 @@ mod tests {
         disown_disk(&root).unwrap();
         assert!(under(&root, STATE_DIR).exists());
         assert!(read(&root, GIVEN_FILE).is_some());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn every_boot_gives_localhost_its_loopback_addresses() {
+        const LOOPBACK: &str = "127.0.0.1\tlocalhost\n::1\tlocalhost\n";
+        // A disk whose image brought an empty hosts file, and one captured
+        // from a sandbox whose file earlier guests named it in alone.
+        for image in ["", "127.0.1.1\tsource\n"] {
+            let root = disk_of(Some("source"));
+            fs::write(under(&root, identity::HOSTS_FILE), image).unwrap();
+            write_hosts(&root, Some("clone"));
+            assert_eq!(
+                read(&root, identity::HOSTS_FILE),
+                Some(format!("{LOOPBACK}127.0.1.1\tclone\n"))
+            );
+            // A template's builder, with no name of its own.
+            fs::write(under(&root, identity::HOSTS_FILE), image).unwrap();
+            write_hosts(&root, None);
+            assert_eq!(
+                read(&root, identity::HOSTS_FILE),
+                Some(format!("{LOOPBACK}{image}"))
+            );
+            fs::remove_dir_all(&root).unwrap();
+        }
+
+        // An image with no hosts file gets one; a symlinked one is left
+        // to whatever manages it.
+        let root = disk_of(None);
+        write_hosts(&root, Some("abc"));
+        assert_eq!(
+            read(&root, identity::HOSTS_FILE),
+            Some(format!("{LOOPBACK}127.0.1.1\tabc\n"))
+        );
+        fs::remove_file(under(&root, identity::HOSTS_FILE)).unwrap();
+        std::os::unix::fs::symlink("managed", under(&root, identity::HOSTS_FILE)).unwrap();
+        write_hosts(&root, Some("abc"));
+        assert_eq!(
+            fs::read_link(under(&root, identity::HOSTS_FILE)).unwrap(),
+            Path::new("managed")
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 }

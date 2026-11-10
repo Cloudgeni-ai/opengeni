@@ -1,7 +1,7 @@
 // The rail's desktop app pieces: switching between the app's accounts and
 // telling the app which workspace is open. Each renders nothing outside the
 // desktop app. Offering this computer to agents lives in ./this-computer.
-import type { DesktopAccountsSnapshot } from "@opengeni/sdk/desktop-bridge";
+import type { DesktopAccount, DesktopAccountsSnapshot } from "@opengeni/sdk/desktop-bridge";
 import { CheckIcon, LogOutIcon, PlusIcon, UsersIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -73,9 +73,7 @@ export function DesktopAccountMenuItems() {
             >
               <span className="grid min-w-0 flex-1 gap-0.5">
                 <span className="truncate text-sm text-fg">{account.email}</span>
-                <span className="truncate text-xs text-fg-muted">
-                  {account.signedOut ? `${account.serverLabel} · Signed out` : account.serverLabel}
-                </span>
+                <DesktopAccountDetail account={account} />
               </span>
               {account.id === activeId ? (
                 <CheckIcon className="mt-0.5 size-4 shrink-0" aria-label="Current account" />
@@ -101,5 +99,25 @@ export function DesktopAccountMenuItems() {
         {others.length > 0 ? "Sign out of this account" : "Sign out"}
       </DropdownMenuItem>
     </>
+  );
+}
+
+/**
+ * An account's server, under its email: signed out, or recording a meeting,
+ * so the person can tell which account a recording belongs to.
+ */
+export function DesktopAccountDetail({ account }: { account: DesktopAccount }) {
+  return (
+    <span className="flex min-w-0 items-center gap-1.5 text-xs text-fg-muted">
+      <span className="truncate">
+        {account.signedOut ? `${account.serverLabel} · Signed out` : account.serverLabel}
+      </span>
+      {account.recording ? (
+        <span className="flex shrink-0 items-center gap-1 text-fg">
+          <span aria-hidden className="size-1.5 rounded-full bg-status-failed" />
+          Recording
+        </span>
+      ) : null}
+    </span>
   );
 }

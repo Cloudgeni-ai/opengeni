@@ -22,12 +22,14 @@ import {
   ensureManagedAccessForUser,
   finalizeRecording,
   freezeAgentLearningPolicy,
+  markRecordingDeleting,
   getSessionForSubject,
   markRecordingChunksUploaded,
   reserveRecordingChunks,
   saveRecordingNote,
   setScheduledTaskEvents,
   updateWorkspaceSettings,
+  withBillingOriginOverride,
   type DbClient,
   type SessionCreateInput,
 } from "@opengeni/db";
@@ -35,6 +37,8 @@ import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { meetingSummaryModel, startMeetingSummary } from "../src/activities/meeting-summary";
+import { createRecordingActivities } from "../src/activities/recordings";
+import { createSessionArchiveActivities } from "../src/activities/session-archive";
 import type { ControlActivityServices } from "../src/activities/types";
 
 // The built-in meeting summary (docs/recordings.md, "Notes") against real
@@ -296,6 +300,19 @@ async function workspace(options: { subscription: boolean }) {
 }
 
 describe("built-in meeting summary", () => {
+  test("an API-origin recording cannot start notes on a connected subscription", async () => {
+    if (!realDb) return;
+    serveCodex();
+    const scope = await workspace({ subscription: true });
+    const input = await scope.meeting("private");
+    expect(
+      await withBillingOriginOverride("api", () => startMeetingSummary(services(), input)),
+    ).toEqual({
+      started: false,
+      reason: "subscription_api_unavailable",
+    });
+    expect(await scope.sessionsFor(input.recordingId)).toEqual([]);
+  });
   test("a ready transcript starts exactly one Only me chat for the owner, on the chat's subscription model", async () => {
     if (!realDb) return;
     serveCodex();
@@ -332,9 +349,9 @@ describe("built-in meeting summary", () => {
       firstPartyMcpTools: ["meeting_read", "meeting_notes_save"],
       resources: [],
     });
-    // What the agent can call: the two meeting tools and the runtime's own
-    // wait_for_input and privacy_facts (agent-config: mechanics every agent
-    // has, reaching nothing).
+    // What the agent can call: the two meeting tools and privacy_facts, which
+    // the chat turns on. No wait_for_input: with no compute, children, goal,
+    // automation, browser, media or question to answer, nothing could wake it.
     const projected = projectAgentEffectiveTools(
       sessionEffectiveToolProjectionInput(session as never, session!.tools, {
         settings,
@@ -346,7 +363,6 @@ describe("built-in meeting summary", () => {
     expect(projected.tools.map((tool) => tool.name).sort()).toEqual([
       "opengeni__meeting_notes_save",
       "opengeni__meeting_read",
-      "opengeni__wait_for_input",
       "privacy_facts",
     ]);
     const [turn] = await shared!.admin<{ count: number; authority: string; codex: string }[]>`
@@ -383,6 +399,61 @@ describe("built-in meeting summary", () => {
     const run = await freezeFirstTurnLearning(scope, started.sessionId);
     expect(run.human).toBeNull();
     expect(run.policy).toMatchObject({ defaultScope: "workspace" });
+  }, 180_000);
+
+  test("deleting a meeting archives its summary chat and stops its waiting turn, unless someone wrote in it", async () => {
+    if (!realDb) return;
+    serveCodex();
+    const scope = await workspace({ subscription: true });
+    const untouched = await scope.meeting("private");
+    const written = await scope.meeting("private");
+    const first = await startMeetingSummary(services(), untouched);
+    const second = await startMeetingSummary(services(), written);
+    if (!first.started || !second.started) throw new Error(JSON.stringify({ first, second }));
+    // Someone wrote in the second meeting's summary chat: it is theirs now.
+    await shared!.admin`
+      insert into session_turns
+      select (jsonb_populate_record(null::session_turns, to_jsonb(t) || jsonb_build_object(
+        'id', gen_random_uuid(),
+        'trigger_event_id', gen_random_uuid(),
+        'temporal_workflow_id', 'talked-' || gen_random_uuid(),
+        'position', t.position + 1,
+        'status', 'completed',
+        'active_attempt_id', null,
+        'initiator_kind', 'subject',
+        'initiator_subject_id', ${scope.owner}::text,
+        'initiating_human_subject_id', ${scope.owner}::text
+      ))).*
+      from session_turns t where t.session_id = ${second.sessionId}::uuid`;
+
+    const recordings = createRecordingActivities(async () => services());
+    for (const input of [untouched, written]) {
+      await markRecordingDeleting(client.db, {
+        workspaceId: input.workspaceId,
+        subjectId: input.ownerSubjectId,
+        recordingId: input.recordingId,
+      });
+    }
+    const archived = await recordings.archiveDeletedMeetingSummaries(untouched);
+    expect(archived.map((each) => each.sessionId)).toEqual([first.sessionId]);
+    expect(await recordings.archiveDeletedMeetingSummaries(written)).toEqual([]);
+    // Repeating it finds nothing new.
+    expect(await recordings.archiveDeletedMeetingSummaries(untouched)).toEqual([]);
+
+    const stop = createSessionArchiveActivities(async () => services());
+    expect(await stop.stopArchivedSessionWork(archived[0]!)).toEqual({ pending: true });
+    const rows = await shared!.admin<
+      { id: string; archived: boolean; by: string | null; open: number }[]
+    >`
+      select s.id::text as id, s.archived_at is not null as archived, s.archive_requested_by as by,
+        (select count(*)::int from session_turns t
+          where t.session_id = s.id and t.status in ('queued', 'running')) as open
+      from sessions s where s.id in (${first.sessionId}::uuid, ${second.sessionId}::uuid)
+      order by s.id = ${first.sessionId}::uuid desc`;
+    expect(rows).toEqual([
+      { id: first.sessionId, archived: true, by: scope.owner, open: 0 },
+      { id: second.sessionId, archived: false, by: null, open: 1 },
+    ]);
   }, 180_000);
 
   test("nothing starts when the setting is off or notes exist; the owner's automations don't stop it", async () => {

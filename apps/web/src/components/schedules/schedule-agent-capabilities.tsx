@@ -47,7 +47,8 @@ export function ScheduleAgentCapabilities({
     [workspace?.settings],
   );
   const custom = value !== undefined;
-  const draft = custom ? draftFromRequest(value) : workspaceDraft;
+  // A schedule's stored request is a saved request (see savedRequestBaseCapabilities).
+  const draft = custom ? draftFromRequest(value, { saved: true }) : workspaceDraft;
   const summary = capabilitySummary(draft.values, availability);
   const content = (
     <div className="flex min-w-0 flex-col gap-6">
@@ -59,7 +60,11 @@ export function ScheduleAgentCapabilities({
           value={custom ? "custom" : "default"}
           disabled={disabled}
           onValueChange={(next) =>
-            onChange(next === "custom" ? requestFromDraft(workspaceDraft, availability) : undefined)
+            onChange(
+              next === "custom"
+                ? requestFromDraft(workspaceDraft, availability, { saved: true })
+                : undefined,
+            )
           }
           options={[
             { value: "default", label: "Workspace defaults" },
@@ -78,7 +83,7 @@ export function ScheduleAgentCapabilities({
           draft={draft}
           availability={availability}
           disabled={disabled}
-          onChange={(next) => onChange(requestFromDraft(next, availability))}
+          onChange={(next) => onChange(requestFromDraft(next, availability, { saved: true }))}
         />
       ) : null}
     </div>

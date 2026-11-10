@@ -362,6 +362,9 @@ export function buildGitHubAppManifest(input: {
     "pull_request_review_comment",
     "push",
     "release",
+    // New repositories of an "All repositories" installation, which no
+    // installation event reports: workspace allowlists follow them.
+    "repository",
   ];
   if (input.includeCiPermissions) {
     permissions.actions = "read";
@@ -540,10 +543,13 @@ export async function getGitHubAppInstallationSummary(
   settings: Settings,
   installationId: number,
 ): Promise<GitHubAppInstallationSummary | null> {
-  const installations = await listGitHubAppInstallationSummaries(settings);
-  return (
-    installations.find((installation) => installation.installationId === installationId) ?? null
-  );
+  const missing = githubAppMissingSettings(settings);
+  if (missing.length > 0) {
+    throw new GitHubAppConfigurationError(missing);
+  }
+  const jwt = await createGitHubAppJwt(settings);
+  const installation = await getInstallation(jwt, installationId);
+  return installation ? installationSummaryFromPayload(installation) : null;
 }
 
 export async function verifyGitHubInstallationAccessForUser(
@@ -794,7 +800,19 @@ export async function listGitHubAppRepositoriesWithSigningSettings(
     return [];
   }
   const jwt = await createGitHubAppJwt(settings);
-  const installations = await listInstallations(jwt);
+  // Named installations are read one by one rather than paging through every
+  // installation of the App.
+  const installations = allowedInstallations
+    ? (
+        await Promise.all(
+          [...allowedInstallations].map(async (installationId) =>
+            Number.isSafeInteger(installationId) && installationId > 0
+              ? await getInstallation(jwt, installationId)
+              : null,
+          ),
+        )
+      ).filter((installation): installation is Record<string, unknown> => installation !== null)
+    : await listInstallations(jwt);
   const repositories: GitHubRepository[] = [];
   for (const installation of installations) {
     if (installation.suspended_at) {
@@ -923,8 +941,9 @@ export function createGitHubAppInstallationRepositoryLookup(
  */
 export async function findInaccessibleGitHubAppInstallationRepositories(
   settings: Settings,
-  input: { installationId: number; repositoryIds: number[] },
+  input: { installationId: number; repositoryIds: number[]; signal?: AbortSignal },
 ): Promise<number[]> {
+  input.signal?.throwIfAborted();
   const missing = githubAppMissingSettings(settings);
   if (missing.length > 0) {
     throw new GitHubAppConfigurationError(missing);
@@ -940,15 +959,18 @@ export async function findInaccessibleGitHubAppInstallationRepositories(
   if (repositoryIds.length === 0) return [];
   const jwt = await createGitHubAppJwt(settings);
   const probe = async (ids: number[]): Promise<"accessible" | "inaccessible" | "gone"> => {
+    input.signal?.throwIfAborted();
     try {
       await createInstallationToken(jwt, {
         installationId: input.installationId,
         repositoryIds: ids,
         permissions: { metadata: "read" },
         timeoutMs: githubRepositoryLookupTimeoutMs,
+        ...(input.signal ? { signal: input.signal } : {}),
       });
       return "accessible";
     } catch (error) {
+      input.signal?.throwIfAborted();
       if (error instanceof GitHubAppApiError) {
         // 422: at least one repository does not exist or is not accessible to
         // the installation. 404: the installation itself no longer exists.
@@ -961,9 +983,31 @@ export async function findInaccessibleGitHubAppInstallationRepositories(
   const all = await probe(repositoryIds);
   if (all === "accessible") return [];
   if (all === "gone" || repositoryIds.length === 1) return repositoryIds;
-  const outcomes = await Promise.all(
-    repositoryIds.map(async (id) => ({ id, outcome: await probe([id]) })),
+  // Healthy installations still take exactly one batch probe. A 422 is the
+  // expensive exceptional path: admit individual probes lazily, stop admitting
+  // after cancellation/outage, and join every request already sent.
+  const outcomes: Array<{ id: number; outcome: "accessible" | "inaccessible" | "gone" }> = [];
+  let next = 0;
+  let failed = false;
+  const settled = await Promise.allSettled(
+    Array.from({ length: Math.min(8, repositoryIds.length) }, async () => {
+      while (!failed && next < repositoryIds.length) {
+        const index = next++;
+        const id = repositoryIds[index]!;
+        try {
+          outcomes[index] = { id, outcome: await probe([id]) };
+        } catch (error) {
+          failed = true;
+          throw error;
+        }
+      }
+    }),
   );
+  const failure = settled.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) throw failure.reason;
+  input.signal?.throwIfAborted();
   if (outcomes.some(({ outcome }) => outcome === "gone")) return repositoryIds;
   return outcomes.flatMap(({ id, outcome }) => (outcome === "accessible" ? [] : [id]));
 }
@@ -1373,6 +1417,24 @@ async function listInstallations(token: string): Promise<Array<Record<string, un
   }
 }
 
+/** One installation of the App, or null when GitHub does not know it. */
+async function getInstallation(
+  jwt: string,
+  installationId: number,
+): Promise<Record<string, unknown> | null> {
+  let payload: unknown;
+  try {
+    payload = await githubGet(`/app/installations/${installationId}`, jwt);
+  } catch (error) {
+    if (error instanceof GitHubAppApiError && error.status === 404) return null;
+    throw error;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new GitHubAppApiError("GitHub returned an invalid installation payload");
+  }
+  return payload as Record<string, unknown>;
+}
+
 async function exchangeGitHubOAuthCodeForUserToken(
   settings: Settings,
   code: string,
@@ -1548,6 +1610,7 @@ async function createInstallationToken(
     /** Narrow the token below the installation's granted permissions. */
     permissions?: Record<string, "read" | "write">;
     timeoutMs?: number;
+    signal?: AbortSignal;
   },
 ): Promise<GitHubAppInstallationToken> {
   const body: Record<string, unknown> = {};
@@ -1567,7 +1630,12 @@ async function createInstallationToken(
         ...(scoped ? { "Content-Type": "application/json" } : {}),
       },
       redirect: "manual",
-      signal: AbortSignal.timeout(input.timeoutMs ?? githubTokenMintTimeoutMs),
+      signal: input.signal
+        ? AbortSignal.any([
+            input.signal,
+            AbortSignal.timeout(input.timeoutMs ?? githubTokenMintTimeoutMs),
+          ])
+        : AbortSignal.timeout(input.timeoutMs ?? githubTokenMintTimeoutMs),
       ...(scoped ? { body: JSON.stringify(body) } : {}),
     },
   );

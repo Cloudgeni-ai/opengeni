@@ -2,6 +2,7 @@ import {
   useNewSessionDraft,
   type NewSessionDraftEditable,
 } from "@opengeni/react/new-session-draft";
+import type { ChatClient } from "@opengeni/sdk";
 import type { NativeFileAttachmentsResult } from "@opengeni/react-native";
 import type { LatencyMode, OpenGeniClient, ReasoningEffort, ResourceRef } from "@opengeni/sdk";
 import { useMemo } from "react";
@@ -13,7 +14,7 @@ import { gitHubRepositoryResource, type NewSessionOptions } from "@/new-session-
  * across leaving the screen, relaunching and other devices (and the web).
  */
 export function useHomeDraftSync(input: {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string | null;
   text: string;
   setText(text: string): void;

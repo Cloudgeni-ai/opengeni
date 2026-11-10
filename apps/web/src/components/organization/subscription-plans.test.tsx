@@ -1,4 +1,5 @@
 import { afterEach, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import type { Root } from "react-dom/client";
@@ -86,7 +87,7 @@ function plans(
   const plan = previewPlan(key);
   return (
     <SubscriptionPlans
-      client={client as unknown as OpenGeniBrowserClient}
+      client={client as unknown as ChatClient<OpenGeniBrowserClient>}
       accountId="org-a"
       returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
       catalog={{ accountId: "org-a", revision: 1, plans: previewPlans, plan }}
@@ -246,7 +247,7 @@ function Gate({
   ownerKey = "a",
   hasPlan = true,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   ownerKey?: string;
   hasPlan?: boolean;
 }) {
@@ -260,7 +261,7 @@ function Gate({
 }
 test("plan UI stays hidden for a missing balance plan or disabled endpoint", async () => {
   const client = clientFixture();
-  const typed = client as unknown as OpenGeniBrowserClient;
+  const typed = client as unknown as ChatClient<OpenGeniBrowserClient>;
   await mount(<Gate client={typed} hasPlan={false} />);
   expect(client.getBillingSubscriptionPlans).not.toHaveBeenCalled();
   client.getBillingSubscriptionPlans.mockImplementation(async () => {
@@ -272,7 +273,7 @@ test("plan UI stays hidden for a missing balance plan or disabled endpoint", asy
 
 test("late catalog reads cannot display another organization's plan", async () => {
   const client = clientFixture();
-  const typed = client as unknown as OpenGeniBrowserClient;
+  const typed = client as unknown as ChatClient<OpenGeniBrowserClient>;
   let resolve!: (value: Awaited<ReturnType<typeof client.getBillingSubscriptionPlans>>) => void;
   client.getBillingSubscriptionPlans.mockImplementation(
     () =>
@@ -479,7 +480,7 @@ test("with the plan row hidden, plan credit stays in Credits so the rows add up"
 test("the Plans section states the two pricing lines", async () => {
   await mount(
     <SubscriptionPlans
-      client={clientFixture() as unknown as OpenGeniBrowserClient}
+      client={clientFixture() as unknown as ChatClient<OpenGeniBrowserClient>}
       accountId="org-a"
       returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
       catalog={{ accountId: "org-a", revision: 1, plans: previewPlans, plan: previewPlan("free") }}
@@ -490,11 +491,12 @@ test("the Plans section states the two pricing lines", async () => {
     />,
   );
   expect(document.body.textContent).toContain(
-    "Subscriptions give 5x the plan price in credits for the Opengeni apps, and you can bring your own keys.",
+    "Plan credit is for the Opengeni apps. Paid plans include your own AI subscriptions, with no usage fee.",
   );
   expect(document.body.textContent).toContain(
-    "API use in your own product is pay-as-you-go at cost plus 5%, own keys welcome.",
+    "API use spends credits, not plan credit, and cannot use connected subscriptions.",
   );
+  expect(document.body.textContent).not.toContain("5%");
 });
 
 test("plans of at least $20 a month include own subscriptions with no fee, Free does not", async () => {
@@ -508,7 +510,7 @@ test("plans of at least $20 a month include own subscriptions with no fee, Free 
   const catalogPlans = [...previewPlans, lite];
   await mount(
     <SubscriptionPlans
-      client={clientFixture() as unknown as OpenGeniBrowserClient}
+      client={clientFixture() as unknown as ChatClient<OpenGeniBrowserClient>}
       accountId="org-a"
       returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
       catalog={{ accountId: "org-a", revision: 1, plans: catalogPlans, plan: previewPlan("free") }}
@@ -530,7 +532,7 @@ test("an organization without a monthly grant shows no empty plan credit meter o
   const ungranted = { ...previewPlan("free"), creditGrantedMicros: 0, creditRemainingMicros: 0 };
   await mount(
     <SubscriptionPlans
-      client={client as unknown as OpenGeniBrowserClient}
+      client={client as unknown as ChatClient<OpenGeniBrowserClient>}
       accountId="org-a"
       returnUrl="https://console.example.test/workspaces/a/organization?section=billing"
       catalog={{ accountId: "org-a", revision: 1, plans: previewPlans, plan: ungranted }}

@@ -1,3 +1,11 @@
+import { betterAuthLogArguments, betterAuthLogText } from "./better-auth-log";
+import {
+  MANAGED_AUTH_NEW_PASSWORD_FIELDS,
+  ManagedAuthPasswordCompromisedError,
+  managedAuthBreachedPasswordCheckEnabled,
+  managedAuthPasswordBreached,
+  type PasswordBreachLookup,
+} from "./password-breach";
 import { requireSignupChallenge } from "./signup-challenge";
 import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
 import {
@@ -53,6 +61,15 @@ import {
   createManagedAuthNewSignupsGate,
   type ManagedAuthNewSignupsGate,
 } from "./new-signups-gate";
+import {
+  currentManagedSignUpPasswordHash,
+  invalidManagedVerificationLink,
+  managedSignUpOfVerificationRequest,
+  managedSignUpRequestFields,
+  managedSignUpVerificationClaims,
+  replaceManagedSignUpPassword,
+  verifyManagedSignUpEmail,
+} from "./managed-sign-up-verification";
 import { createSignupFunnelMetrics } from "./signup-funnel-metrics";
 import {
   currentManagedAuthProviderId,
@@ -256,20 +273,23 @@ export async function verifyManagedAuthPassword(password: string, hash: string):
 type ManagedAuthPoolObservability = Pick<Observability, "warn" | "incrementCounter">;
 
 /**
- * Better Auth's default console output, plus handing logged failures to the
+ * Better Auth's console output with every argument projected through
+ * `betterAuthLogArguments`, so request bodies, tokens, links and addresses
+ * never reach the log. The raw failures still go, in process only, to the
  * session-lookup boundary so a lost database connection behind its generic
  * INTERNAL_SERVER_ERROR stays recognizable (see `withManagedAuthSessionLookup`).
  */
-function logBetterAuthMessage(
+export function logBetterAuthMessage(
   level: "debug" | "info" | "warn" | "error",
   message: string,
   ...args: unknown[]
 ): void {
   if (level === "error") recordManagedAuthLoggedFailure(args);
-  const line = `${new Date().toISOString()} ${level.toUpperCase()} [Better Auth]: ${message}`;
-  if (level === "error") console.error(line, ...args);
-  else if (level === "warn") console.warn(line, ...args);
-  else console.log(line, ...args);
+  const line = `${new Date().toISOString()} ${level.toUpperCase()} [Better Auth]: ${betterAuthLogText(String(message))}`;
+  const logged = betterAuthLogArguments(args);
+  if (level === "error") console.error(line, ...logged);
+  else if (level === "warn") console.warn(line, ...logged);
+  else console.log(line, ...logged);
 }
 
 /**
@@ -444,6 +464,8 @@ export function createManagedAuth(
   options: {
     observability?: ManagedAuthPoolObservability;
     newSignupsGate?: ManagedAuthNewSignupsGate;
+    /** Breached-password lookup; Have I Been Pwned unless a test replaces it. */
+    passwordBreachLookup?: PasswordBreachLookup;
   } = {},
 ): ManagedAuth | null {
   if (settings.productAccessMode !== "managed") {
@@ -489,6 +511,26 @@ export function createManagedAuth(
         db,
         settings.betterAuthSecret ?? MANAGED_AUTH_EMAIL_THROTTLE_FALLBACK_KEY,
         async ({ path, body }) => {
+          // A new password found in a breach is refused before Better Auth
+          // hashes it (sign-up, including a repeated unverified sign-up, and
+          // password reset).
+          const newPasswordField = Object.hasOwn(MANAGED_AUTH_NEW_PASSWORD_FIELDS, path)
+            ? MANAGED_AUTH_NEW_PASSWORD_FIELDS[path]!
+            : null;
+          const newPassword = newPasswordField
+            ? (body as Record<string, unknown> | undefined)?.[newPasswordField]
+            : undefined;
+          if (
+            typeof newPassword === "string" &&
+            (await managedAuthPasswordBreached(newPassword, {
+              enabled: managedAuthBreachedPasswordCheckEnabled(settings),
+              ...(options.passwordBreachLookup ? { lookup: options.passwordBreachLookup } : {}),
+              onUnavailable: (reason) =>
+                options.observability?.warn("Breached-password lookup unavailable", { reason }),
+            }))
+          ) {
+            throw new ManagedAuthPasswordCompromisedError();
+          }
           // An address the deployment doesn't allow can never get a session,
           // so email sign-in says so before the password is checked: the
           // answer is the same for a right or wrong password. The session
@@ -692,9 +734,27 @@ export function createManagedAuth(
       // Non-local deployments require verification unless explicitly overridden.
       requireEmailVerification,
       revokeSessionsOnPasswordReset: true,
-      onExistingUserSignUp: async ({ user }) => {
+      onExistingUserSignUp: async ({ user }, request) => {
         if (requireEmailVerification && !user.emailVerified) {
-          const url = await verificationUrl(settings, user.email);
+          // The newest sign-up for an unverified address replaces its
+          // password, and only its link verifies the address (see
+          // managed-sign-up-verification.ts).
+          const { password, callbackURL } = await managedSignUpRequestFields(request);
+          const context = await auth.$context;
+          const passwordHash =
+            password === null
+              ? await currentManagedSignUpPasswordHash(pool, user.id)
+              : await replaceManagedSignUpPassword(pool, {
+                  userId: user.id,
+                  passwordHash: await context.password.hash(password),
+                });
+          if (passwordHash === "verified") return;
+          const url = await verificationUrl(
+            settings,
+            user.email,
+            managedSignUpVerificationClaims(context.secret, user.id, passwordHash),
+            callbackURL ?? "/",
+          );
           await sendManagedAuthEmail(
             managedEmailTransport,
             emailVerificationMessage(user.email, url),
@@ -718,11 +778,40 @@ export function createManagedAuth(
       // bind sign-in to an isolated browser transaction, and the provider
       // session this would create is discarded there by design.
       autoSignInAfterVerification: settings.managedAuthSessionSetMode === "legacy",
-      sendVerificationEmail: async ({ user, url }) => {
+      // A link Better Auth builds (sign-up, resend) keeps its address and
+      // callback, with a token bound to the password the account holds now,
+      // like a repeated sign-up's.
+      sendVerificationEmail: async ({ user, url: providerUrl }) => {
+        const { secret } = await auth.$context;
+        const url = new URL(providerUrl);
+        url.searchParams.set(
+          "token",
+          await createEmailVerificationToken(
+            secret,
+            user.email,
+            undefined,
+            undefined,
+            managedSignUpVerificationClaims(
+              secret,
+              user.id,
+              await currentManagedSignUpPasswordHash(pool, user.id),
+            ),
+          ),
+        );
         await sendManagedAuthEmail(
           managedEmailTransport,
-          emailVerificationMessage(user.email, url),
+          emailVerificationMessage(user.email, url.toString()),
         );
+      },
+      // Only the newest sign-up's link verifies the address, keeping that
+      // sign-up's password; an earlier link is refused like an invalid one.
+      beforeEmailVerification: async (user, request) => {
+        const outcome = await verifyManagedSignUpEmail(pool, {
+          secret: (await auth.$context).secret,
+          userId: user.id,
+          signUp: managedSignUpOfVerificationRequest(request),
+        });
+        if (outcome === "superseded") throw invalidManagedVerificationLink(request);
       },
       afterEmailVerification: async (user) => {
         funnel?.recordEmailVerified();
@@ -876,7 +965,6 @@ export function createManagedAuth(
         create: {
           before: async (user, context) => {
             try {
-              requireSignupChallenge(settings);
               const admission = managedAuthUserCreateAdmission(
                 settings,
                 user,
@@ -891,6 +979,9 @@ export function createManagedAuth(
               if (!(await newSignupsGate.signupsOpen())) {
                 throw new ManagedAuthNewSignupsPausedError();
               }
+              // After the refusals a retry can't fix, so a social click that
+              // skipped the challenge while sign-ups are paused says so.
+              requireSignupChallenge(settings);
               return admission;
             } catch (error) {
               throw managedAuthOAuthCallbackRefusal(error, context?.path);
@@ -1099,7 +1190,12 @@ function emailVerificationMessage(to: string, url: string): Omit<ManagedEmailMes
   };
 }
 
-async function verificationUrl(settings: Settings, email: string): Promise<string> {
+async function verificationUrl(
+  settings: Settings,
+  email: string,
+  claims: Record<string, string>,
+  callbackURL: string,
+): Promise<string> {
   if (!settings.betterAuthSecret) {
     throw new Error(
       "OPENGENI_BETTER_AUTH_SECRET is required to send managed auth verification email",
@@ -1108,10 +1204,16 @@ async function verificationUrl(settings: Settings, email: string): Promise<strin
   if (!settings.publicBaseUrl) {
     throw new Error("OPENGENI_PUBLIC_BASE_URL is required to send managed auth verification email");
   }
-  const token = await createEmailVerificationToken(settings.betterAuthSecret, email);
+  const token = await createEmailVerificationToken(
+    settings.betterAuthSecret,
+    email,
+    undefined,
+    undefined,
+    claims,
+  );
   const url = new URL("/v1/auth/verify-email", settings.publicBaseUrl);
   url.searchParams.set("token", token);
-  url.searchParams.set("callbackURL", "/");
+  url.searchParams.set("callbackURL", callbackURL);
   return url.toString();
 }
 

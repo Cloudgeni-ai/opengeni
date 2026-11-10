@@ -17,7 +17,17 @@ export function requireDeveloperSetupDelegatedPermissions(
   policy: TurnExecutionPolicyV1,
   permissions: readonly Permission[] | undefined,
 ): void {
-  if (policy.credentialRestriction !== "developer_setup") return;
+  requireDeveloperSetupDelegatablePermissions(
+    policy.credentialRestriction === "developer_setup",
+    permissions,
+  );
+}
+
+export function requireDeveloperSetupDelegatablePermissions(
+  restricted: boolean,
+  permissions: readonly Permission[] | undefined,
+): void {
+  if (!restricted) return;
   const forbidden = permissions?.find(
     (permission) => !isDeveloperSetupDelegatedPermissionAllowed(permission),
   );
@@ -37,8 +47,22 @@ export function withDeveloperSetupCredentialRestriction(
     trustedMetadata?: readonly unknown[];
   },
 ): TurnExecutionPolicyV1 {
-  let restricted =
+  const restricted =
     policy.credentialRestriction === "developer_setup" ||
+    developerSetupCredentialRestricted(source);
+  return restricted ? { ...policy, credentialRestriction: "developer_setup" } : policy;
+}
+
+/**
+ * Whether the caller or the frozen session policy carries the developer-setup
+ * credential ceiling. Only pass server-owned persisted session metadata.
+ */
+export function developerSetupCredentialRestricted(source: {
+  grant?: AccessGrant;
+  authorization?: AccessGrantAuthorization | undefined;
+  trustedMetadata?: readonly unknown[];
+}): boolean {
+  let restricted =
     isDeveloperSetupAuthorization(source.authorization) ||
     (source.grant !== undefined && isDeveloperSetupGrant(source.grant));
   for (const metadata of source.trustedMetadata ?? []) {
@@ -56,5 +80,5 @@ export function withDeveloperSetupCredentialRestriction(
       restricted = true;
     }
   }
-  return restricted ? { ...policy, credentialRestriction: "developer_setup" } : policy;
+  return restricted;
 }

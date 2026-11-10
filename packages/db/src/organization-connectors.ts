@@ -76,6 +76,14 @@ export function organizationConnectorIntegrationKey(
 export function organizationConnectorLogin(
   config: Record<string, unknown>,
 ): OrganizationConnectorLogin {
+  // Auto-connect keeps each person's own sign-in as its fallback.
+  if (
+    config.connectionRef &&
+    typeof config.connectionRef === "object" &&
+    config.autoConnect &&
+    typeof config.autoConnect === "object"
+  )
+    return "auto_connect";
   if (config.connectionRef && typeof config.connectionRef === "object") return "each_person";
   const headers = config.headersEncrypted;
   if (headers && typeof headers === "object" && Object.keys(headers).length > 0)
@@ -138,6 +146,13 @@ async function withAdministrator<T>(
     "none",
   );
 }
+
+/**
+ * Runs `use` as a live organization owner or admin, with no workspace: the
+ * context organization-level settings (connectors, auto-connect issuers) are
+ * written in.
+ */
+export const withOrganizationAdministrator = withAdministrator;
 
 /**
  * Turning a connector on is an acquisition: hold the shared policy fence (the

@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { AttachedBrowserDeviceNotFoundError } from "@opengeni/db";
 import { Hono } from "hono";
 
 import { registeredApiRoutes } from "../../../scripts/public-api/action-catalog";
 import surface from "../../../scripts/public-api/surface.gen.json";
-import { registerComputerSessionRoutes } from "../src/routes/computer-sessions";
+import { computerRouteError, registerComputerSessionRoutes } from "../src/routes/computer-sessions";
 
 const routeUrl = new URL("../src/routes/computer-sessions.ts", import.meta.url);
 const computerSessionRoot = "/v1/workspaces/:workspaceId/computer-sessions";
@@ -32,6 +33,16 @@ function assertComputerRouteSurface(actual: readonly Route[], expected: readonly
 }
 
 describe("ComputerSession route discipline", () => {
+  test("an unknown attached device is a 404 that names the connected-machine placement", () => {
+    const error = computerRouteError(
+      new AttachedBrowserDeviceNotFoundError("Attached browser not found"),
+      "open",
+    );
+    expect(error.status).toBe(404);
+    expect(error.message).toContain("connected_machine");
+    expect(error.message).toContain("sandboxId");
+  });
+
   test("registers the entire public ComputerSession contract in the module and composed API", () => {
     const app = new Hono();
     // Registration must not perform resource access or start a controller.
@@ -136,7 +147,7 @@ describe("ComputerSession route discipline", () => {
     expect(source).toContain('operation === "computer.end" && expectedPlacementInstanceId');
   });
 
-  test("retires a stale Connected Machine placement instead of advertising a retryable 409", async () => {
+  test("keeps a Desktop its task left on another machine, with a final 409 that says where it is", async () => {
     const source = await readFile(routeUrl, "utf8");
     const placement = source.slice(
       source.indexOf("async function withComputerPlacement"),
@@ -146,13 +157,12 @@ describe("ComputerSession route discipline", () => {
       source.indexOf("async function withActiveComputerController"),
       source.indexOf("async function ensureInteractionHolder"),
     );
-    expect(placement).toContain("throwComputerSourcePlacementChanged");
-    expect(active).toContain("terminalizeStaleConnectedInteractionPlacement");
-    expect(active.indexOf("terminalizeStaleConnectedInteractionPlacement")).toBeLessThan(
-      active.indexOf('sourcePlacementChangedApiError("computer_session")'),
-    );
-    expect(source).toContain('interactionFailureCode: "source_placement_changed"');
-    expect(source).toContain('interactionLifecycle: "lost"');
+    // Using it while the task runs elsewhere must not end or retire it: the
+    // task gets it back when it returns to that machine.
+    expect(placement).toContain("sourcePlacementElsewhereApiError(");
+    expect(active).toContain("sourcePlacementElsewhereApiError(");
+    expect(source).not.toContain("terminalizeStaleConnectedInteractionPlacement");
+    expect(source).toContain('interactionFailureCode: "source_placement_elsewhere"');
     expect(source).toContain("retryable: false");
   });
 
@@ -169,7 +179,7 @@ describe("ComputerSession route discipline", () => {
     expect(routed.indexOf("wrongInteractionPlacementMessage(")).toBeLessThan(
       routed.indexOf("assertConnectedMachineComputerAccess("),
     );
-    expect(routed.indexOf("throwComputerSourcePlacementChanged(")).toBeLessThan(
+    expect(routed.indexOf("sourcePlacementElsewhereApiError(")).toBeLessThan(
       routed.indexOf("assertConnectedMachineComputerAccess("),
     );
   });

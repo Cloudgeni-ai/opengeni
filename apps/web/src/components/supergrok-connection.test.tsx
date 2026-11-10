@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -72,7 +73,7 @@ describe("SuperGrok device login", () => {
         connected = true;
         return { status: "connected", accountId: account.id, scope: "workspace" };
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const retain = retainSharedQueries(client);
     const open = spyOn(window, "open").mockReturnValue(null);
     let state!: ReturnType<typeof useSuperGrokSubscriptions>;
@@ -142,7 +143,7 @@ describe("SuperGrok device login", () => {
           },
         };
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const retain = retainSharedQueries(client);
     let state!: ReturnType<typeof useSuperGrokSubscriptions>;
     function Harness() {
@@ -181,7 +182,7 @@ describe("SuperGrok device login", () => {
         settings: { rotationEnabled: false },
         activeAccountId: "account",
       }),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     let state!: ReturnType<typeof useSuperGrokSubscriptions>;
     function Harness() {
       state = useSuperGrokSubscriptions({ client, workspaceId: "workspace", canManage: true });
@@ -210,7 +211,7 @@ describe("SuperGrok device login", () => {
         reads++;
         return { accounts: [], settings: { rotationEnabled: false }, activeAccountId: null };
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     function Harness() {
       useSuperGrokSubscriptions({ client, organizationId: "org", canManage: true });
       return <ModelsRefreshControl client={client} />;

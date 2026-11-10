@@ -1,4 +1,5 @@
 import type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -45,10 +46,11 @@ export type ConnectionAccessKind =
   | "openai"
   | "azure_openai"
   | "anthropic"
-  | "claude_subscription";
+  | "claude_subscription"
+  | "openai_compatible";
 
 export interface ConnectionAccessTarget {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId?: string | undefined;
   workspaceId?: string | undefined;
   kind: ConnectionAccessKind;

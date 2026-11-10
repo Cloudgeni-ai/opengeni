@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { artifactKey, type ArtifactCatalogFilters } from "./artifact-catalog";
@@ -7,7 +8,7 @@ import { retainArtifactsAfterRefreshFailure } from "./artifact-refresh";
 
 const FRESH_FOR_MS = 30_000;
 const MAX_CACHED_QUERIES = 40;
-type CatalogClient = Pick<OpenGeniBrowserClient, "listArtifactCatalog">;
+type CatalogClient = Pick<ChatClient<OpenGeniBrowserClient>, "listArtifactCatalog">;
 type CatalogPages = Pick<CachedArtifactCatalog, "items" | "nextCursor" | "pages">;
 
 /** Drop every cached view of a workspace, e.g. after a Site mutation. */

@@ -65,7 +65,7 @@ mock.module("@opengeni/db", () => ({
   }),
 }));
 
-const { ToolResultSpill, toolResultSpillIdentity } =
+const { ToolResultSpill, spilledToolResultReadersForTurn, toolResultSpillIdentity } =
   await import("../src/activities/agent-turn/tool-result-spill");
 type SpillPort = InstanceType<typeof ToolResultSpill>;
 
@@ -167,7 +167,7 @@ describe("tool result spill identity", () => {
 });
 
 describe("tool result spill port", () => {
-  test("the spilled copy has secret-shaped values masked (C review finding 4)", async () => {
+  test("the spilled copy keeps the tool output exactly as written", async () => {
     filesById.clear();
     putObjectCalls.length = 0;
     const fakePassword = "FAKE-Pw-0000-not-real";
@@ -182,8 +182,7 @@ describe("tool result spill port", () => {
     await spill("none").spill({ operationId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", result });
     expect(putObjectCalls).toHaveLength(1);
     const stored = Buffer.from(putObjectCalls[0]!.body).toString();
-    expect(stored).not.toContain(fakePassword);
-    expect(stored).toContain("postgres://user:[masked url password]@host:5432/db?sslmode=require");
+    expect(stored).toContain(`postgres://user:${fakePassword}@host:5432/db?sslmode=require`);
   });
 
   test("persists one File without rematerializing when there is no sandbox", async () => {
@@ -290,6 +289,75 @@ describe("tool result spill port", () => {
       );
     }
     expect(failing.commands).toHaveLength(1);
+  });
+
+  test("a session with neither a shell nor the download tool is not told to use them", async () => {
+    filesById.clear();
+    const projected = await spill("none").spill({
+      operationId: OPERATION_ID,
+      result: bigResult,
+      readers: spilledToolResultReadersForTurn({
+        tools: [{ kind: "mcp", id: "customer-product" }],
+        mcpServers: [{ id: "customer-product" }],
+        sandboxBackend: "none",
+      }),
+    });
+    const fileId = (projected.structuredContent as { fileId: string }).fileId;
+    expect(projected.structuredContent).toMatchObject({ sandboxPath: null, fileId });
+    expect(guidance(projected)).toBe(
+      `The result was too large to show (${JSON.stringify(bigResult).length} bytes), so none of it is shown here. Its exact JSON is saved as workspace file ${fileId}, but no tool in this session can open it. If the tool can narrow its result, for example with a filter, a smaller page or fewer fields, call it again so the result fits; otherwise continue without it.`,
+    );
+    expect(guidance(projected)).not.toMatch(/files_get_download_url|shell/);
+  });
+});
+
+describe("spilled result readers for a turn", () => {
+  const files = { id: "files", allowedTools: ["files_get_download_url"] };
+  test("follow attached compute and the selected Files server", () => {
+    const filesTool = { kind: "mcp", id: "files" };
+    expect(
+      spilledToolResultReadersForTurn({
+        tools: [filesTool],
+        mcpServers: [files],
+        sandboxBackend: "modal",
+      }),
+    ).toEqual({ shell: true, fileDownload: true });
+    expect(
+      spilledToolResultReadersForTurn({ tools: [], mcpServers: [files], sandboxBackend: "none" }),
+    ).toEqual({ shell: false, fileDownload: false });
+    // A deployment Files server that does not allow the download tool.
+    expect(
+      spilledToolResultReadersForTurn({
+        tools: [filesTool],
+        mcpServers: [{ id: "files", allowedTools: ["files_list"] }],
+        sandboxBackend: "selfhosted",
+      }),
+    ).toEqual({ shell: true, fileDownload: false });
+    // A Files server without an allow-list serves every tool.
+    expect(
+      spilledToolResultReadersForTurn({
+        tools: [filesTool],
+        mcpServers: [{ id: "files" }],
+        sandboxBackend: "none",
+      }),
+    ).toEqual({ shell: false, fileDownload: true });
+    // A tool ref that narrows the Files server away from the download tool.
+    for (const allowedTools of [[], ["files_list"]]) {
+      expect(
+        spilledToolResultReadersForTurn({
+          tools: [{ ...filesTool, allowedTools }],
+          mcpServers: [files],
+          sandboxBackend: "modal",
+        }),
+      ).toEqual({ shell: true, fileDownload: false });
+    }
+    expect(
+      spilledToolResultReadersForTurn({
+        tools: [{ kind: "mcp", id: "files", allowedTools: ["files_get_download_url"] }],
+        mcpServers: [files],
+        sandboxBackend: "modal",
+      }),
+    ).toEqual({ shell: true, fileDownload: true });
   });
 });
 

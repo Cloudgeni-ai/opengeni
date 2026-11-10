@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/documents",
-  "version": "6.8.0",
+  "version": "6.13.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -19,14 +19,6 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
-    },
-    "./google-drive": {
-      "types": "./src/google-drive.ts",
-      "default": "./src/google-drive.ts"
-    },
-    "./atlassian": {
-      "types": "./src/atlassian.ts",
-      "default": "./src/atlassian.ts"
     }
   },
   "publishConfig": {
@@ -50,7 +42,7 @@
   },
   "devDependencies": {
     "@opengeni/testing": "workspace:*",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.5",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"
   }

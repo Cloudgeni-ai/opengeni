@@ -11,10 +11,12 @@ import {
 import {
   isStoredVerbatimAsLosslessJsonString,
   recordModelCallFact,
+  setSessionLastInputTokensInTransaction,
   type AppendEventInput,
   type CanonicalTurnStartupMilestoneReceipt,
   type ModelCallTiming,
   type SessionEventMutation,
+  type SessionEventProjection,
 } from "@opengeni/db";
 import {
   modelResponseServiceTierFromSdkEvent,
@@ -135,6 +137,7 @@ export type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
   mutate?: SessionEventMutation<"event">,
+  project?: SessionEventProjection,
 ) => Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -320,6 +323,12 @@ export async function processModelResponseTerminalEvent(input: {
   leaseLost: () => boolean;
   leaseLostMessage: string;
   setLastInputTokens: (tokens: number | null) => Promise<void>;
+  completionEvents?: () => Parameters<TurnEventPublisher>[0];
+  onCompletionCommitted?: () => void;
+  /** Prepare stable history, then commit it with canonical usage and token signals. */
+  checkpoint?: (
+    persist: (history: SessionEventMutation<"event">) => Promise<boolean>,
+  ) => Promise<unknown>;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
   /** Timing of the call this terminal response completes; read once per claimed response. */
   responseTiming?: () => ModelCallTiming | null;
@@ -376,6 +385,11 @@ export async function processModelResponseTerminalEvent(input: {
   // A terminal response without usage still authoritatively replaces the
   // attempt-owned context signal. There is simply no billing event to claim.
   let authoritative = responseUsage === null;
+  const finalRequest = normalizedUsage.requestUsageEntries?.at(-1);
+  const finalInputTokens = finalRequest?.inputTokens ?? normalizedUsage.telemetry.inputTokens;
+  const lastInputTokens =
+    finalInputTokens !== null && finalInputTokens > 0 ? finalInputTokens : null;
+  let signalsCommitted = false;
   await recordCompletedModelCallBeforeOwnershipFences({
     renewLease: input.renewLease,
     leaseLost: input.leaseLost,
@@ -417,51 +431,83 @@ export async function processModelResponseTerminalEvent(input: {
         observability: input.observability,
         metricProvider: input.provider,
       });
-      authoritative = await emitModelCallUsage({
-        observability: input.observability,
-        publish: input.publish,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        provider: input.provider,
-        providerApi: input.providerApi,
-        model: input.model,
-        purpose: "main",
-        sourceKey,
-        usage: responseUsage,
-        normalizedUsage,
-        ...(billing ? { billingPath: billing.billingPath } : {}),
-        ...(billing ? { billingSnapshot: billing } : {}),
-        ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
-        servingAccountHash: accountContext.servingAccountHash,
-        accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
-        emittedSourceKeys: input.emittedSourceKeys,
-        timing,
-        processingResidency: input.processingResidency,
-      });
-      if (authoritative && billing) {
-        await recordAuthoritativeModelCallFact({
-          timing,
-          db: input.db,
+      const recordFact = (factDb: ActivityServices["db"]) =>
+        billing
+          ? recordAuthoritativeModelCallFact({
+              timing,
+              db: factDb,
+              observability: input.observability,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              turnAttemptId: input.turnAttemptId,
+              sourceKey,
+              provider: input.provider,
+              providerApi: input.providerApi,
+              model: input.model,
+              billing,
+              subscriptionConnectionId: input.subscriptionConnectionId ?? null,
+              ...(input.contextContributions !== undefined
+                ? { contextContributions: input.contextContributions }
+                : {}),
+              promptCache: cacheObservation,
+              processingResidency: input.processingResidency,
+            })
+          : Promise.resolve();
+      const cacheObservation = await promptCacheObservation(responseUsage, promptCacheRequest);
+      const commitUsage = async (history?: SessionEventMutation<"event">) => {
+        const completionEvents = input.completionEvents?.() ?? [];
+        authoritative = await emitModelCallUsage({
           observability: input.observability,
+          publish: input.publish,
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           turnId: input.turnId,
-          turnAttemptId: input.turnAttemptId,
-          sourceKey,
           provider: input.provider,
           providerApi: input.providerApi,
           model: input.model,
-          billing,
-          subscriptionConnectionId: input.subscriptionConnectionId ?? null,
-          ...(input.contextContributions !== undefined
-            ? { contextContributions: input.contextContributions }
-            : {}),
-          promptCache: await promptCacheObservation(responseUsage, promptCacheRequest),
+          purpose: "main",
+          sourceKey,
+          usage: responseUsage,
+          normalizedUsage,
+          ...(billing ? { billingPath: billing.billingPath } : {}),
+          ...(billing ? { billingSnapshot: billing } : {}),
+          ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
+          servingAccountHash: accountContext.servingAccountHash,
+          accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
+          emittedSourceKeys: input.emittedSourceKeys,
+          timing,
           processingResidency: input.processingResidency,
+          additionalEvents: completionEvents,
+          ...(input.checkpoint
+            ? {
+                project: async (tx, fence, events) => {
+                  signalsCommitted = false;
+                  // A replayed provider response cannot replace context signals.
+                  if (!fence.allowed || !isCanonicalModelUsage(events, sourceKey)) return;
+                  // The fact remains best-effort in its own savepoint, but completes
+                  // before the same lost-lease checkpoint as the standalone path.
+                  await recordFact(tx);
+                  if (input.leaseLost()) return;
+                  await setSessionLastInputTokensInTransaction(tx, fence, lastInputTokens);
+                  if (history) await history(tx, fence);
+                  signalsCommitted = true;
+                },
+              }
+            : {}),
         });
+        if (completionEvents.length > 0) input.onCompletionCommitted?.();
+        // Already-incurred usage commits even when the credential was lost.
+        // Do not acknowledge a prepared history checkpoint in that case.
+        if (input.checkpoint && input.leaseLost()) throw new Error(input.leaseLostMessage);
+        return authoritative && signalsCommitted;
+      };
+      if (input.checkpoint && !input.leaseLost()) await input.checkpoint(commitUsage);
+      else await commitUsage();
+      if (authoritative && billing) {
+        if (!input.checkpoint) await recordFact(input.db);
         recordAuthoritativeModelUsageMetrics({
           observability: input.observability,
           settings: input.settings,
@@ -481,16 +527,12 @@ export async function processModelResponseTerminalEvent(input: {
       if (!authoritative) return;
       // Context is what the last request sent, not the sum of a response that
       // took several requests (each re-sends the whole prefix).
-      const finalRequest = normalizedUsage.requestUsageEntries?.at(-1);
       const observedTotal = finalRequest?.totalTokens ?? normalizedUsage.totalTokens;
       input.state.contextSignal =
         observedTotal !== null && observedTotal > 0
           ? { revision: responseOrdinal, totalTokens: observedTotal }
           : null;
-      const observedInput = finalRequest?.inputTokens ?? normalizedUsage.telemetry.inputTokens;
-      await input.setLastInputTokens(
-        observedInput !== null && observedInput > 0 ? observedInput : null,
-      );
+      if (!signalsCommitted) await input.setLastInputTokens(lastInputTokens);
     },
   });
   return {
@@ -715,6 +757,8 @@ export async function processSessionTitleModelUsageEvent(
 export async function emitModelCallUsage(input: {
   observability: ActivityServices["observability"];
   publish: TurnEventPublisher | null;
+  project?: SessionEventProjection;
+  additionalEvents?: Parameters<TurnEventPublisher>[0];
   accountId: string;
   workspaceId: string;
   sessionId: string;
@@ -797,18 +841,14 @@ export async function emitModelCallUsage(input: {
           ...telemetry,
         },
       },
+      ...(input.additionalEvents ?? []),
     ],
     true,
+    undefined,
+    input.project,
   );
   input.emittedSourceKeys?.add(input.sourceKey);
-  const authoritative = appended?.events.some(
-    (event) =>
-      event.type === "agent.model.usage" &&
-      event.turnAssociation === "current" &&
-      event.payload !== null &&
-      typeof event.payload === "object" &&
-      (event.payload as Record<string, unknown>).sourceKey === input.sourceKey,
-  );
+  const authoritative = isCanonicalModelUsage(appended?.events ?? [], input.sourceKey);
   if (!authoritative) return false;
   releaseReceiptMeteredByCommittedEvent(input, telemetry);
   try {
@@ -846,6 +886,17 @@ export async function emitModelCallUsage(input: {
     // Durable event + billing already committed; metrics are best-effort only.
   }
   return true;
+}
+
+function isCanonicalModelUsage(events: SessionEvent[], sourceKey: string): boolean {
+  return events.some(
+    (event) =>
+      event.type === "agent.model.usage" &&
+      event.turnAssociation === "current" &&
+      event.payload !== null &&
+      typeof event.payload === "object" &&
+      (event.payload as Record<string, unknown>).sourceKey === sourceKey,
+  );
 }
 
 const METERED_PRICING_SOURCES = new Set(["configured_list_price", "gateway_reported"]);
@@ -915,10 +966,20 @@ export function applyCodexCacheTelemetry(
   provider: string,
   normalizedUsage: ModelCallUsageNormalization,
 ): void {
+  const { telemetry } = normalizedUsage;
   recordModelCacheTokens(observability, provider, {
-    cachedTokens: normalizedUsage.telemetry.cachedTokens,
-    cacheWriteTokens: normalizedUsage.telemetry.cacheWriteTokens,
-    promptTokens: normalizedUsage.telemetry.inputTokens,
+    cachedTokens: telemetry.cachedTokens,
+    cacheWriteTokens: telemetry.cacheWriteTokens,
+    promptTokens: telemetry.inputTokens,
+    // A Responses terminal event without a usage object reaches here as the
+    // SDK's all-zero usage with empty details; it reported nothing. Malformed
+    // counts were reported, so they stay a missing cache field.
+    usageReported: !(
+      normalizedUsage.rejectedFields.length === 0 &&
+      telemetry.cachedTokens === null &&
+      !telemetry.inputTokens &&
+      !telemetry.outputTokens
+    ),
   });
 }
 

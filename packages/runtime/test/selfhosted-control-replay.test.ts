@@ -19,12 +19,16 @@ const mutation = ControlRequest.fromPartial({
   op: { $case: "fsRemove", fsRemove: { path: "/tmp/synthetic", recursive: false } },
 });
 const result = ControlResponse.encode({ requestId: mutation.requestId }).finish();
+/** An older machine's answer to a request: it names the request it answers. */
+const answer = (payload: Uint8Array) =>
+  ControlResponse.encode({ requestId: ControlRequest.decode(payload).requestId }).finish();
 const timeout = () => Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" });
-function leaseReply() {
+/** The machine's answer to a negotiation probe: it names the probe it answers. */
+function leaseReply(payload: Uint8Array) {
   return {
     data: ControlResponse.encode(
       ControlResponse.fromPartial({
-        requestId: "probe",
+        requestId: ControlRequest.decode(payload).requestId,
         result: {
           $case: "ping",
           ping: { controlReplayTokens: Array.from({ length: 64 }, () => crypto.randomUUID()) },
@@ -42,14 +46,14 @@ describe("control reply recovery", () => {
     const deliveries: string[] = [];
     const connection = {
       supportsHeaders: true,
-      async request(target: string) {
+      async request(target: string, payload: Uint8Array) {
         if (target.endsWith(".rpc")) {
           probes++;
           if (probes === 2)
             await new Promise<void>((resolve) => {
               releaseRefill = resolve;
             });
-          return leaseReply();
+          return leaseReply(payload);
         }
         deliveries.push(target);
         return { data: result };
@@ -90,10 +94,10 @@ describe("control reply recovery", () => {
     let probes = 0;
     const connection = {
       supportsHeaders: true,
-      async request(target: string) {
+      async request(target: string, payload: Uint8Array) {
         if (target === subject) {
           probes++;
-          return leaseReply();
+          return leaseReply(payload);
         }
         return { data: result };
       },
@@ -121,9 +125,9 @@ describe("control reply recovery", () => {
       const offsets: number[] = [];
       const connection = {
         supportsHeaders: true,
-        async request(target: string) {
+        async request(target: string, payload: Uint8Array) {
           if (target === subject) {
-            const reply = leaseReply();
+            const reply = leaseReply(payload);
             const ping = ControlResponse.decode(reply.data).result;
             if (ping?.$case === "ping")
               for (const token of ping.ping.controlReplayTokens) issued.set(token, machineNow());
@@ -178,7 +182,7 @@ describe("control reply recovery", () => {
               const ping = ControlRequest.decode(payload).op;
               expect(ping?.$case).toBe("ping");
               if (ping?.$case === "ping") expect(ping.ping.controlReplayWindowMs).toBe("240200");
-              return leaseReply();
+              return leaseReply(payload);
             }
             deliveries.push(target);
             if (deliveries.length === 1) {
@@ -214,10 +218,10 @@ describe("control reply recovery", () => {
     });
     const rpc = new NatsControlRpc(async () => ({
       supportsHeaders: true,
-      async request(target) {
+      async request(target, payload) {
         if (target === subject) {
           probes++;
-          return leaseReply();
+          return leaseReply(payload);
         }
         deliveries++;
         if (deliveries === 1) throw timeout();
@@ -250,10 +254,10 @@ describe("control reply recovery", () => {
     });
     const rpc = new NatsControlRpc(async () => ({
       supportsHeaders: true,
-      async request(target, _payload, options) {
+      async request(target, payload, options) {
         if (target === subject) {
           probes++;
-          return leaseReply();
+          return leaseReply(payload);
         }
         // The predecessor ran this delivery; the successor answered its resend.
         deliveries.push({ target, resendOn: options.resendOn });
@@ -386,8 +390,8 @@ describe("control reply recovery", () => {
     const rpc = new NatsControlRpc(
       async () => ({
         supportsHeaders: true,
-        async request() {
-          if (probes++ === 0) return { data: result, headers: { get: () => "" } };
+        async request(_target: string, payload: Uint8Array) {
+          if (probes++ === 0) return { data: answer(payload), headers: { get: () => "" } };
           throw Object.assign(new Error("no responders"), { code: "503" });
         },
       }),
@@ -434,9 +438,9 @@ describe("control reply recovery", () => {
       const calls: Array<{ target: string; resendOn?: string }> = [];
       const rpc = new NatsControlRpc(async () => ({
         supportsHeaders: true,
-        async request(target, _payload, options) {
+        async request(target, payload, options) {
           calls.push({ target, resendOn: options.resendOn });
-          return journaled ? leaseReply() : { data: result, headers: { get: () => "1" } };
+          return journaled ? leaseReply(payload) : { data: result, headers: { get: () => "1" } };
         },
       }));
       await rpc.request(subject, mutation, { timeoutMs: 60_000 });
@@ -452,8 +456,8 @@ describe("control reply recovery", () => {
       recovery.request(
         {
           supportsHeaders: true,
-          async request(target) {
-            if (target === subject) return leaseReply();
+          async request(target, payload) {
+            if (target === subject) return leaseReply(payload);
             deliveries += 1;
             throw Object.assign(timeout(), { cause: { code: "PERMISSIONS_VIOLATION" } });
           },
@@ -473,8 +477,8 @@ describe("control reply recovery", () => {
         recovery.request(
           {
             supportsHeaders: true,
-            async request(target: string) {
-              if (target === subject) return leaseReply();
+            async request(target: string, payload: Uint8Array) {
+              if (target === subject) return leaseReply(payload);
               deliveries += 1;
               if (deliveries === 1) throw timeout();
               throw Object.assign(new Error(code), { code });
@@ -494,8 +498,8 @@ describe("control reply recovery", () => {
     const recovery = new ControlReplyRecovery(15, 1);
     const connection = {
       supportsHeaders: true,
-      async request(target: string) {
-        if (target === subject) return leaseReply();
+      async request(target: string, payload: Uint8Array) {
+        if (target === subject) return leaseReply(payload);
         deliveries += 1;
         if (deliveries === 1) throw timeout();
         throw Object.assign(new Error("no responders"), { code: "503" });
@@ -514,8 +518,8 @@ describe("control reply recovery", () => {
       recovery.request(
         {
           supportsHeaders: true,
-          async request(target: string) {
-            if (target === subject) return leaseReply();
+          async request(target: string, payload: Uint8Array) {
+            if (target === subject) return leaseReply(payload);
             deliveries += 1;
             throw Object.assign(new Error("denied"), { code: "PERMISSIONS_VIOLATION" });
           },
@@ -534,11 +538,11 @@ describe("control reply recovery", () => {
     const recovery = new ControlReplyRecovery(100, 1);
     const connection = {
       supportsHeaders: true,
-      async request(target: string) {
+      async request(target: string, payload: Uint8Array) {
         if (target === subject) {
           probes += 1;
           if (probes === 1) throw Object.assign(new Error("disconnected"), { code: "503" });
-          return leaseReply();
+          return leaseReply(payload);
         }
         deliveries.push(target);
         return { data: result };
@@ -563,7 +567,7 @@ describe("control reply recovery", () => {
       async request(target: string, payload: Uint8Array) {
         const request = ControlRequest.decode(payload);
         if (request.op?.$case === "ping") {
-          return leaseReply();
+          return leaseReply(payload);
         }
         deliveries.push(target);
         const receipt = receipts.get(target);
@@ -587,7 +591,7 @@ describe("control reply recovery", () => {
     const rpc = new NatsControlRpc(async () => ({
       supportsHeaders: true,
       async request(_target: string, payload: Uint8Array) {
-        if (ControlRequest.decode(payload).op?.$case === "ping") return { data: result };
+        if (ControlRequest.decode(payload).op?.$case === "ping") return { data: answer(payload) };
         executions += 1;
         throw timeout();
       },
@@ -606,7 +610,7 @@ describe("control reply recovery", () => {
       supportsHeaders: true,
       async request(_target: string, payload: Uint8Array) {
         if (ControlRequest.decode(payload).op?.$case === "ping") {
-          return leaseReply();
+          return leaseReply(payload);
         }
         executions += 1;
         return { data: ControlResponse.encode(failure).finish() };
@@ -629,7 +633,7 @@ describe("a request whose agent link ends before the answer", () => {
       supportsHeaders: true,
       async request(target: string, payload: Uint8Array) {
         if (ControlRequest.decode(payload).op?.$case === "ping") {
-          return leaseReply();
+          return leaseReply(payload);
         }
         deliveries.push(target);
         // The gateway that held the link answers for it as the link ends.
@@ -652,7 +656,7 @@ describe("a request whose agent link ends before the answer", () => {
       supportsHeaders: true,
       async request(target: string, payload: Uint8Array) {
         if (ControlRequest.decode(payload).op?.$case === "ping") {
-          return leaseReply();
+          return leaseReply(payload);
         }
         deliveries.push(target);
         // The link ends, and the sandbox comes back as a new agent process.
@@ -693,5 +697,92 @@ describe("a request whose agent link ends before the answer", () => {
       10,
     );
     expect(reply.data).toEqual(result);
+  });
+});
+
+describe("a reply that answers a different request", () => {
+  const otherAnswer = ControlResponse.fromPartial({
+    requestId: "another-request",
+    result: { $case: "fsRemove", fsRemove: {} },
+  });
+  const malformed = {
+    code: ErrorCode.ERROR_CODE_PROTOCOL,
+    message: "The machine returned a malformed control response.",
+    retryable: false,
+  };
+
+  test("is refused, never returned as this request's result", async () => {
+    const rpc = new NatsControlRpc(async () => ({
+      async request() {
+        return { data: ControlResponse.encode(otherAnswer).finish() };
+      },
+    }));
+    const response = await rpc.request(subject, mutation, { timeoutMs: 100 });
+    expect(response.requestId).toBe(mutation.requestId);
+    expect(response.result).toBeUndefined();
+    expect(response.error).toMatchObject(malformed);
+  });
+
+  test("is refused for a request that never wakes its sandbox", async () => {
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      async request() {
+        return { data: ControlResponse.encode(otherAnswer).finish() };
+      },
+    }));
+    const response = await rpc.request(subject, mutation, { timeoutMs: 100, noWake: true });
+    expect(response.result).toBeUndefined();
+    expect(response.error).toMatchObject(malformed);
+  });
+
+  test("an answer naming no request is refused too", async () => {
+    const rpc = new NatsControlRpc(async () => ({
+      async request() {
+        return {
+          data: ControlResponse.encode({ ...otherAnswer, requestId: "" }).finish(),
+        };
+      },
+    }));
+    const response = await rpc.request(subject, mutation, { timeoutMs: 100 });
+    expect(response.result).toBeUndefined();
+    expect(response.error).toMatchObject(malformed);
+  });
+
+  test("to the negotiation probe issues no tokens, sends nothing and keeps delivery recovery", async () => {
+    const deliveries: string[] = [];
+    let probes = 0;
+    const lease = (payload: Uint8Array, requestId = ControlRequest.decode(payload).requestId) => ({
+      data: ControlResponse.encode(
+        ControlResponse.fromPartial({
+          requestId,
+          result: { $case: "ping", ping: { controlReplayTokens: [crypto.randomUUID()] } },
+        }),
+      ).finish(),
+      headers: { get: () => "" },
+    });
+    const connection = {
+      supportsHeaders: true,
+      async request(target: string, payload: Uint8Array) {
+        if (target === subject) {
+          probes++;
+          // The first answer to arrive names some other probe, and has no
+          // replay header, as an older machine's would not.
+          return probes === 1 ? lease(payload, "another-probe") : leaseReply(payload);
+        }
+        deliveries.push(target);
+        return { data: answer(payload) };
+      },
+    };
+    const rpc = new NatsControlRpc(async () => connection);
+    const refused = await rpc.request(subject, mutation, { timeoutMs: 100 });
+    expect(refused.requestId).toBe(mutation.requestId);
+    expect(refused.error).toMatchObject(malformed);
+    expect(deliveries).toEqual([]);
+    // The subject was not downgraded to one-shot delivery: the next request
+    // negotiates again and is sent under a delivery token.
+    const next = await rpc.request(subject, mutation, { timeoutMs: 100 });
+    expect(next.error).toBeUndefined();
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]!.startsWith(`${subject}.replay.`)).toBe(true);
   });
 });

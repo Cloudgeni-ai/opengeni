@@ -9,6 +9,11 @@
 //! holds. A registration's rulings are carried out before the deadline it
 //! brings is written: until then the guard keeps the VMs frozen.
 //!
+//! The renewer runs on a thread of its own, with a runtime of its own:
+//! nothing else the agent does, such as a write its threads wait on while
+//! the disk or the journal stalls, holds up a renewal or the taking in of
+//! its answer.
+//!
 //! Renewals never wait on the agent: what the host can take on is read
 //! from the agent's status on a task of its own, once a second, and each
 //! renewal carries the latest reading. An agent busy for seconds, as one
@@ -147,6 +152,12 @@ struct Running {
 }
 
 impl Renewer {
+    /// Renews as [`Self::run`] does, on a thread of its own with a runtime
+    /// of its own ([`apart`]).
+    pub(crate) async fn run_apart(self) -> anyhow::Result<()> {
+        apart("lease", self.run()).await
+    }
+
     /// Renews until the agent stops; fails if the lease file cannot be
     /// written, since then the guard would act on a stale lease, and if the
     /// agent serves but is gone.
@@ -237,21 +248,43 @@ impl Running {
                 }
                 Err(_) => anyhow::bail!("the agent stopped"),
             };
-            if !status.blocked.is_empty() {
+            // A sandbox whose VM the guard holds frozen is listed under the
+            // owner epoch its record names: the service rules on it, and
+            // the deadline that would thaw it is written only once a drop
+            // has ended its VM (see `registered`). Waiting for it to
+            // answer instead would wait for good, since only that
+            // deadline thaws it.
+            let unruled = status
+                .blocked
+                .iter()
+                .filter(|blocked| blocked.frozen_owner_epoch.is_none())
+                .count();
+            if unruled > 0 {
                 // It cannot rule on what it cannot manage: wait until they
                 // can be read again, or someone removes them.
                 tracing::warn!(
-                    blocked = status.blocked.len(),
+                    blocked = unruled,
                     "not registering while sandboxes are blocked"
                 );
                 self.attempt = None;
                 return Ok(());
             }
+            let frozen = status.blocked.iter().filter_map(|blocked| {
+                Some(Held {
+                    id: blocked.id,
+                    owner_epoch: blocked.frozen_owner_epoch?,
+                })
+            });
             self.attempt = Some(Register {
                 host: renewer.host,
                 attempt: renewal.attempt,
                 info,
-                capacity: capacity(&status, renewer),
+                capacity: capacity(
+                    &status,
+                    &renewer.info,
+                    &renewer.image,
+                    renewer.guest.as_deref(),
+                ),
                 held: status
                     .sandboxes
                     .iter()
@@ -259,6 +292,7 @@ impl Running {
                         id: sandbox.id,
                         owner_epoch: sandbox.owner_epoch,
                     })
+                    .chain(frozen)
                     .collect(),
             });
         }
@@ -542,7 +576,12 @@ impl Running {
         let Ok(status) = reading else {
             anyhow::bail!("the agent stopped");
         };
-        let capacity = capacity(&status, renewer);
+        let capacity = capacity(
+            &status,
+            &renewer.info,
+            &renewer.image,
+            renewer.guest.as_deref(),
+        );
         self.capacity = Some(capacity.clone());
         let (Some(host), Some(epoch)) = (renewer.host, renewer.lease.epoch()) else {
             return Ok(());
@@ -573,15 +612,45 @@ impl Running {
     }
 }
 
+/// Runs `work` to its end on a thread named `name` with a runtime of its
+/// own, so that nothing the caller's runtime runs holds it up, until it
+/// ends or the future returned is dropped, which drops `work` too.
+pub(crate) async fn apart(
+    name: &str,
+    work: impl Future<Output = anyhow::Result<()>> + Send + 'static,
+) -> anyhow::Result<()> {
+    let (ended, end) = tokio::sync::oneshot::channel();
+    // Dropped with the future returned, which ends the work.
+    let (_stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(anyhow::Error::from)
+                .and_then(|runtime| {
+                    runtime.block_on(async move {
+                        tokio::select! {
+                            result = work => result,
+                            _ = stopped => Ok(()),
+                        }
+                    })
+                });
+            let _ = ended.send(result);
+        })?;
+    end.await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("the {name} thread ended")))
+}
+
 /// Whole milliseconds, for logs.
 fn ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// What the host can take on, from its status; its ready clones all start
-/// from `renewer`'s image, and it builds images with `renewer`'s guest
-/// programs.
-fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
+/// What the host can take on, from its status and configured image and
+/// guest programs. The host description is refreshed when the agent starts.
+fn capacity(status: &HostStatus, info: &HostInfo, image: &str, guest: Option<&str>) -> Capacity {
     let mib = |bytes: u64| bytes >> 20;
     Capacity {
         memory_free_mib: status.capacity.as_ref().map_or(0, |held| mib(held.free)),
@@ -592,12 +661,14 @@ fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
         cpu_millis: status.cpu.as_ref().map_or(0, |cpu| cpu.total),
         cpu_free_millis: status.cpu.as_ref().map_or(0, |cpu| cpu.free),
         disk_free_mib: status.disk.as_ref().map_or(0, |disk| mib(disk.free)),
+        disk_available_mib: status.disk.as_ref().map(|disk| mib(disk.available)),
+        disk_reclaimable_mib: status.disk.as_ref().map_or(0, |disk| mib(disk.reclaimable)),
         ready: status
             .templates
             .iter()
             .filter(|template| template.ready > 0)
             .map(|template| ReadyClones {
-                image: renewer.image.clone(),
+                image: image.to_owned(),
                 vcpus: u32::from(template.vcpus),
                 memory_mib: template.memory_mib,
                 count: template.ready,
@@ -605,12 +676,17 @@ fn capacity(status: &HostStatus, renewer: &Renewer) -> Capacity {
             .collect(),
         awake: status.capacity.as_ref().map_or(0, |held| held.awake),
         sandboxes: u32::try_from(status.sandboxes.len()).unwrap_or(u32::MAX),
-        guest: renewer.guest.clone(),
+        guest: guest.map(str::to_owned),
         // A host of this release keeps its pointers in the service.
         pointers_in_service: true,
+        // And it reads copies whose chunks are in packs (ADR 31).
+        reads_packs: true,
+        // And it sets aside a copy the service will not let it keep but
+        // that may be newer than any other.
+        sets_aside: true,
         // What it is configured with now, which a restart in place may
         // have changed under the registration it kept.
-        info: Some(renewer.info.clone()),
+        info: Some(info.clone()),
     }
 }
 
@@ -651,9 +727,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn physical_disk_readings_are_not_booking_headroom() {
+        use compute_protocol::host::{About, DiskStatus};
+        let info: HostInfo = serde_json::from_str(r#"{"name":"h","address":"h:1","zone":"z","profile":"nested","cpu_template":"","memory_mib":1000,"cpu_millis":1000,"disk_mib":100000}"#).unwrap();
+        let mut status = HostStatus {
+            sandboxes: Vec::new(),
+            steps: Vec::new(),
+            available_memory: None,
+            reclaimable_memory: 0,
+            blocked: Vec::new(),
+            capacity: None,
+            cpu: None,
+            disk: None,
+            templates: Vec::new(),
+            store_stalled_ms: None,
+            unseen_activity: 0,
+            about: About::default(),
+        };
+        assert_eq!(
+            capacity(&status, &info, "image", None).disk_available_mib,
+            None
+        );
+        for available_mib in [0, 95_000] {
+            status.disk = Some(DiskStatus {
+                available: available_mib << 20,
+                booked: 90_000 << 20,
+                reserve: 1000 << 20,
+                free: 1 << 20,
+                reclaimable: 2000 << 20,
+                inodes_available: 10,
+                inodes_booked: 5,
+                inodes_free: 5,
+            });
+            let capacity = capacity(&status, &info, "image", None);
+            assert_eq!(capacity.disk_available_mib, Some(available_mib));
+            assert_eq!(capacity.disk_free_mib, 1);
+            assert_eq!(capacity.disk_reclaimable_mib, 2000);
+        }
+    }
+
+    #[test]
     fn terms_survive_the_wire() {
         let terms = LeaseTerms::RECOMMENDED;
         assert_eq!(terms_of(wire_terms(terms)), terms);
+    }
+
+    /// Work run apart goes on while every thread of the caller's runtime
+    /// is held up, as an agent's are by writes to a stalled journal or
+    /// disk; on the caller's runtime it would not run at all meanwhile.
+    #[tokio::test(flavor = "current_thread")]
+    async fn work_run_apart_goes_on_while_the_callers_runtime_is_held_up() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let ticks = Arc::new(AtomicU32::new(0));
+        let counting = Arc::clone(&ticks);
+        let running = tokio::spawn(apart("ticking", async move {
+            loop {
+                counting.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }));
+        // Let it start, then hold up this runtime's only thread.
+        while ticks.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+        let before = ticks.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(500));
+        let during = ticks.load(Ordering::SeqCst) - before;
+        assert!(during >= 10, "ticked {during} times while held up");
+        // Dropped, it ends.
+        running.abort();
+        let _ = running.await;
+        let stopped = ticks.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(ticks.load(Ordering::SeqCst) <= stopped + 1, "it ended");
+    }
+
+    /// Work run apart that fails fails the caller.
+    #[tokio::test]
+    async fn work_run_apart_says_how_it_ended() {
+        let failed = apart("failing", async { anyhow::bail!("broken") }).await;
+        assert_eq!(failed.unwrap_err().to_string(), "broken");
+        apart("ending", async { Ok(()) }).await.unwrap();
     }
 
     /// A reading whose task ends without an answer still says so, so the

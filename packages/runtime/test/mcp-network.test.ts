@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import { CODEMODE_ARGUMENTS_MAX_BYTES } from "@opengeni/contracts";
 import {
@@ -23,7 +23,10 @@ import {
   boundedMcpRequest,
   boundedParallelMap,
   boundMcpResponseBody,
+  describeMcpToolListDrops,
+  fitMcpToolListWithinBounds,
   guardedMcpFetch,
+  isMcpPayloadTooLargeError,
   mcpJsonRpcErrorPayloadForRequest,
   mcpOuterConnectTimeoutMs,
   mcpRequestReplayInfo,
@@ -36,6 +39,34 @@ const testSettings = {
 };
 
 describe("MCP network and payload boundary", () => {
+  test("tool-call transport checks the actual host against the operator private allowlist", async () => {
+    const calls: string[] = [];
+    const guarded = guardedMcpFetch(
+      {
+        environment: "production",
+        integrationsAllowPrivateNetworkTargets: false,
+        integrationsPrivateNetworkAllowedHosts: ["admin-api.example.com:443"],
+      },
+      async (input: string, init) => {
+        calls.push(input);
+        expect(init?.redirect).toBe("manual");
+        return new Response("tool result");
+      },
+      { dnsLookup: async () => [{ address: "10.0.0.8", family: 4 }] },
+    );
+    const init = {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call" }),
+    };
+    expect(await (await guarded("https://admin-api.example.com/mcp", init)).text()).toBe(
+      "tool result",
+    );
+    await expect(guarded("https://other.example.com/mcp", init)).rejects.toMatchObject({
+      reason: "private_or_special_use",
+    });
+    expect(calls).toEqual(["https://admin-api.example.com/mcp"]);
+  });
+
   test("trace propagation preserves Fetch header replacement semantics and never adopts caller identity", async () => {
     const captured: Headers[] = [];
     const guarded = guardedMcpFetch(
@@ -612,5 +643,152 @@ describe("MCP network and payload boundary", () => {
     );
     expect(maxActive).toBe(3);
     expect(output).toEqual(Array.from({ length: 19 }, (_, index) => `value-${index}`));
+  });
+});
+
+describe("tool lists over a limit are trimmed, never fatal", () => {
+  const tools = (count: number, prefix = "tool") =>
+    Array.from({ length: count }, (_, index) => ({
+      name: `${prefix}_${String(index).padStart(4, "0")}`,
+    }));
+
+  test("a list over the entry limit keeps tools by name, with keepFirst tools ahead", () => {
+    const listed = tools(MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES + 2);
+    const pinned = listed.at(-1)!.name;
+    const fitted = fitMcpToolListWithinBounds(listed, {
+      keepFirst: (tool) => tool.name === pinned,
+    });
+    expect(fitted.tools).toHaveLength(MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES);
+    // Listing order is kept; the pinned tool is in, the last unpinned names are out.
+    expect(fitted.tools.at(-1)!.name).toBe(pinned);
+    expect(fitted.dropped).toEqual([
+      { name: "tool_4095", reason: "list_entry_limit" },
+      { name: "tool_4096", reason: "list_entry_limit" },
+    ]);
+  });
+
+  test("the kept set does not depend on the order a provider lists its tools in", () => {
+    const listed = tools(MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES + 50);
+    const shuffled = [...listed].sort(() => Math.random() - 0.5);
+    const kept = (list: typeof listed) =>
+      fitMcpToolListWithinBounds(list)
+        .tools.map((tool) => tool.name)
+        .sort();
+    expect(kept(shuffled)).toEqual(kept(listed));
+    expect(kept([...listed].reverse())).toEqual(kept(listed));
+  });
+
+  test("an oversized definition is dropped alone and the byte limit is exact", () => {
+    const huge = { name: "huge", description: "x".repeat(MCP_MAX_TOOL_DEFINITION_BYTES) };
+    const small = tools(3);
+    const exact = Buffer.byteLength(JSON.stringify(small.slice(0, 2)));
+    const fitted = fitMcpToolListWithinBounds([small[0]!, huge, small[1]!, small[2]!], {
+      maxBytes: exact,
+    });
+    expect(fitted.tools).toEqual(small.slice(0, 2));
+    expect(Buffer.byteLength(JSON.stringify(fitted.tools))).toBe(exact);
+    expect(fitted.dropped).toEqual([
+      { name: "huge", reason: "definition_too_large" },
+      { name: "tool_0002", reason: "list_byte_limit" },
+    ]);
+    expect(describeMcpToolListDrops(fitted.dropped)).toBe(
+      "connected, but 2 of its tools are unavailable this turn (1 because their definitions are too large or unreadable; 1 because the integration lists more tools than one turn can hold), for example huge, tool_0002. Its other tools work.",
+    );
+  });
+
+  test("the aggregate budget gives a later server what is left instead of throwing", () => {
+    const budget = new McpAggregateToolListBudget("test aggregate", 5, Number.MAX_SAFE_INTEGER);
+    expect(budget.admit("one", tools(3, "one")).dropped).toEqual([]);
+    const second = budget.admit("two", tools(4, "two"));
+    expect(second.tools.map((tool) => tool.name)).toEqual(["two_0000", "two_0001"]);
+    expect(second.dropped.map((drop) => drop.reason)).toEqual([
+      "aggregate_entry_limit",
+      "aggregate_entry_limit",
+    ]);
+    expect(budget.snapshot().entries).toBe(5);
+    // A relist replaces the source's own contribution rather than ratcheting.
+    expect(budget.admit("two", tools(4, "two")).tools).toHaveLength(2);
+    budget.remove("one");
+    expect(budget.admit("two", tools(4, "two")).tools).toHaveLength(4);
+  });
+
+  test("a model name another server already lists is left out; first listing wins", () => {
+    const budget = new McpAggregateToolListBudget();
+    budget.admit("local", [{ name: "a__b__c" }, { name: "local_only" }]);
+    const later = budget.admit("connector", [{ name: "a__b__c" }, { name: "connector_only" }]);
+    expect(later.tools).toEqual([{ name: "connector_only" }]);
+    expect(later.dropped).toEqual([{ name: "a__b__c", reason: "model_name_taken" }]);
+    // The same source relisting keeps its own names.
+    expect(budget.admit("local", [{ name: "a__b__c" }]).tools).toEqual([{ name: "a__b__c" }]);
+    // Removing the owner releases its names.
+    budget.remove("local");
+    expect(budget.admit("connector", [{ name: "a__b__c" }]).tools).toEqual([{ name: "a__b__c" }]);
+  });
+
+  test("ordered admission keeps the same tools whichever server finishes listing first", async () => {
+    const run = async (lateFirst: boolean) => {
+      const budget = new McpAggregateToolListBudget("ordered", 3, Number.MAX_SAFE_INTEGER);
+      budget.sequence(["early", "late"]);
+      const early = async () => {
+        if (lateFirst) await new Promise((resolve) => setTimeout(resolve, 20));
+        return budget.admitInOrder("early", [{ name: "shared" }, { name: "e1" }]);
+      };
+      const late = () =>
+        budget.admitInOrder("late", [{ name: "shared" }, { name: "l1" }, { name: "l2" }]);
+      const [first, second] = await Promise.all([early(), late()]);
+      return { early: first.tools, late: second.tools, dropped: second.dropped };
+    };
+    const expected = {
+      early: [{ name: "shared" }, { name: "e1" }],
+      late: [{ name: "l1" }],
+      dropped: [
+        { name: "shared", reason: "model_name_taken" },
+        { name: "l2", reason: "aggregate_entry_limit" },
+      ],
+    };
+    expect(await run(false)).toEqual(expected);
+    expect(await run(true)).toEqual(expected);
+  });
+
+  test("a waiting server starts an earlier server's listing instead of waiting idle", async () => {
+    const budget = new McpAggregateToolListBudget();
+    let started = 0;
+    budget.sequence([
+      {
+        sourceId: "earlier",
+        start: () => {
+          started += 1;
+          budget.admit("earlier", [{ name: "e" }]);
+        },
+      },
+      "later",
+    ]);
+    const fitted = await budget.admitInOrder("later", [{ name: "l" }], {}, 60_000);
+    expect(fitted.tools).toEqual([{ name: "l" }]);
+    expect(started).toBe(1);
+    // A settled predecessor is not started again.
+    await budget.admitInOrder("later", [{ name: "l" }], {}, 60_000);
+    expect(started).toBe(1);
+  });
+
+  test("ordered admission stops waiting on a predecessor that is removed or never settles", async () => {
+    const budget = new McpAggregateToolListBudget();
+    budget.sequence(["gone", "stuck", "next"]);
+    budget.remove("gone");
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const fitted = await budget.admitInOrder("next", [{ name: "x" }], {}, 10);
+      expect(fitted.tools).toEqual([{ name: "x" }]);
+      expect(warn.mock.calls[0]![1]).toMatchObject({ code: "admission_order_timeout" });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("size refusals are recognised through wrapped causes", () => {
+    const refusal = new McpPayloadTooLargeError("MCP response", 9, 8);
+    expect(isMcpPayloadTooLargeError(refusal)).toBe(true);
+    expect(isMcpPayloadTooLargeError(new Error("wrapped", { cause: refusal }))).toBe(true);
+    expect(isMcpPayloadTooLargeError(new Error("other"))).toBe(false);
   });
 });

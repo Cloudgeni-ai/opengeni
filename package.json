@@ -45,6 +45,8 @@
     "db:backfill-session-ownership": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/backfill-session-ownership.ts",
     "db:backfill-organization-memberships": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/backfill-organization-memberships.ts",
     "db:backfill-connection-authority": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/backfill-connection-authority.ts",
+    "db:backfill-turn-timing-profiles": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/backfill-turn-timing-profiles.ts",
+    "db:repair-invalid-tool-names": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/operator/repair-invalid-tool-names.ts",
     "db:verify-resource-classification": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/verify-resource-classification.ts",
     "db:sweep-organization-retention": "set -a; [ -f .env ] && . ./.env; [ -f .env.runtime ] && . ./.env.runtime; set +a; bun scripts/sweep-organization-retention.ts",
     "catalog:refresh": "bun scripts/refresh-integrations-catalog.ts",
@@ -115,6 +117,7 @@
     "acceptance:interaction-ui-live": "bun scripts/interaction-ui-live-acceptance.ts",
     "bench:work-discovery": "bun scripts/bench-work-discovery.ts",
     "eval:behavior": "bun --no-env-file scripts/agent-behavior-eval/run.ts",
+    "eval:integrations": "bun --no-env-file scripts/integration-eval/run.ts",
     "check:web-bundle-budget": "bun scripts/check-web-bundle-budget.ts",
     "check:generated-fonts": "bun scripts/generate-noto-jp-loader.ts --check && bun scripts/generate-github-page-fonts.ts --check",
     "check:observability-render": "bun scripts/check-observability-render.ts",
@@ -157,6 +160,7 @@
     "check:migration-test-budgets": "bun scripts/check-migration-test-budgets.ts",
     "check:public-api": "bun scripts/public-api/check.ts",
     "public-api:refresh": "bun scripts/public-api/check.ts --write",
+    "public-api:published-refresh": "bun scripts/public-api/published-sdk.ts",
     "migration:renumber": "bun scripts/renumber-migration.ts",
     "check:variable-set-removal": "bun scripts/check-variable-set-removal.ts",
     "check:workspace-billing": "bun run typecheck && bun run test:unit && bun run test:integration && bun scripts/check-workspace-billing-static.ts && cd apps/web && bun run build && cd ../.. && bun run test:e2e",
@@ -218,7 +222,7 @@
     "oxlint": "1.73.0",
     "playwright": "^1.61.1",
     "postgres": "^3.4.9",
-    "sharp": "0.34.5",
+    "sharp": "0.35.5",
     "sigstore": "5.0.0",
     "tsrs": "0.18.0-ts7.1.0-dev.20260929",
     "typescript": "7.0.2",
@@ -228,20 +232,56 @@
   "overrides": {
     "@codemirror/state": "6.7.1",
     "@codemirror/view": "6.43.6",
-    "@grpc/grpc-js": "1.14.4",
+    "@daytonaio/sdk": {
+      "@opentelemetry/sdk-node": "0.223.0",
+      "@opentelemetry/instrumentation-http": "0.223.0",
+      "@opentelemetry/exporter-trace-otlp-http": "0.223.0",
+      "@opentelemetry/otlp-exporter-base": "0.223.0",
+      "@opentelemetry/resources": "2.12.0",
+      "@opentelemetry/sdk-trace-base": "2.12.0"
+    },
+    "@grpc/grpc-js": "1.14.7",
+    "@microsoft/teams.apps": {
+      "@azure/msal-node": "7.1.2"
+    },
     "@peculiar/asn1-schema": "2.11.1",
-    "dompurify": "3.4.12",
+    "@runloop/api-client": {
+      "zod": "4.6.7"
+    },
+    "body-parser": "2.4.0",
+    "brace-expansion@^1": "1.1.21",
+    "brace-expansion@^2": "2.1.7",
+    "dompurify": "3.4.17",
+    "e2b": {
+      "glob": "14.0.4"
+    },
     "esbuild": "0.25.0",
+    "fast-uri": "3.1.9",
+    "follow-redirects": "1.16.2",
     "form-data": "4.0.6",
-    "hono": "4.12.30",
-    "ip-address": "10.2.0",
-    "js-yaml": "3.15.0",
-    "mermaid": "11.16.0",
+    "hono": "4.13.17",
+    "ip-address": "10.7.5",
+    "js-yaml": "3.15.2",
+    "katex": "0.18.11",
+    "linkify-it": "5.0.2",
+    "markdown-it": "14.3.3",
+    "mermaid": "11.16.1",
+    "miniflare": {
+      "sharp": "0.35.5",
+      "undici": "7.30.2"
+    },
     "modal": "0.9.0",
+    "node-forge": "1.4.3",
+    "pptxgenjs": {
+      "image-size": "2.1.0"
+    },
     "protobufjs": "7.6.5",
-    "qs": "6.15.3",
+    "proxy-addr": "2.0.8",
+    "qs": "6.16.1",
+    "seroval": "1.7.7",
+    "tinypool": "2.1.2",
     "uuid": "11.1.1",
-    "vite": "8.1.4",
+    "vite": "8.1.6",
     "ws": "8.21.1"
   },
   "packageManager": "bun@1.4.4",
@@ -253,6 +293,8 @@
     "@temporalio/worker@1.22.0": "patches/@temporalio%2Fworker@1.22.0.patch",
     "postgres@3.4.9": "patches/postgres@3.4.9.patch",
     "ts-proto@2.12.0": "patches/ts-proto@2.12.0.patch",
-    "postcss-selector-parser@7.1.0": "patches/postcss-selector-parser@7.1.0.patch"
+    "postcss-selector-parser@7.2.0": "patches/postcss-selector-parser@7.2.0.patch",
+    "happy-dom@21.0.4": "patches/happy-dom@21.0.4.patch",
+    "zod@4.6.7": "patches/zod@4.6.7.patch"
   }
 }

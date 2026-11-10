@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
   ListPersonalGitHubRepositoriesResponse,
   PersonalGitHubRepository,
+  personalGitHubAccessCovers,
+  personalGitHubAllRepositoriesEffectiveAccess,
   personalGitHubConnectionNeedsReconnect,
   ReplacePersonalGitHubRepositorySelectionsRequest,
 } from "../src/personal-github";
@@ -156,6 +158,80 @@ describe("personal GitHub repository contracts", () => {
             },
           ],
         },
+      }).success,
+    ).toBe(false);
+    // All my repositories may carry no attached repository; without it, one is required.
+    const allMode = {
+      ...delegation,
+      personalGitHubRepositorySelection: {
+        ...delegation.personalGitHubRepositorySelection,
+        allRepositoriesAccess: "read" as const,
+        repositories: [],
+      },
+    };
+    expect(McpPersonalConnectionDelegation.parse(allMode)).toEqual(allMode);
+    expect(
+      McpPersonalConnectionDelegation.safeParse({
+        ...delegation,
+        personalGitHubRepositorySelection: {
+          ...delegation.personalGitHubRepositorySelection,
+          repositories: [],
+        },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("All my repositories", () => {
+  const permissions = { pull: true, push: false, admin: false, maintain: false, triage: false };
+  test("access is the chosen access lowered to GitHub's permission", () => {
+    const read = { permissions, archived: false, disabled: false };
+    const write = { permissions: { ...permissions, push: true }, archived: false, disabled: false };
+    expect(personalGitHubAllRepositoriesEffectiveAccess("write", read)).toBe("read");
+    expect(personalGitHubAllRepositoriesEffectiveAccess("write", write)).toBe("write");
+    expect(personalGitHubAllRepositoriesEffectiveAccess("read", write)).toBe("read");
+    expect(
+      personalGitHubAllRepositoriesEffectiveAccess("write", { ...write, archived: true }),
+    ).toBe("read");
+    expect(
+      personalGitHubAllRepositoriesEffectiveAccess("write", { ...write, disabled: true }),
+    ).toBeNull();
+    expect(
+      personalGitHubAllRepositoriesEffectiveAccess("read", {
+        permissions: { ...permissions, pull: false },
+        archived: false,
+        disabled: false,
+      }),
+    ).toBeNull();
+    expect(personalGitHubAccessCovers("write", "read")).toBe(true);
+    expect(personalGitHubAccessCovers("read", "write")).toBe(false);
+    expect(personalGitHubAccessCovers(null, "read")).toBe(false);
+  });
+
+  test("the mode is optional on save and on older selection states", () => {
+    const base = {
+      expectedConnectionAuthorityGeneration: 1,
+      expectedSelectionGeneration: 1,
+      idempotencyKey: "11111111-1111-4111-8111-111111111111",
+      repositories: [],
+    };
+    expect(ReplacePersonalGitHubRepositorySelectionsRequest.parse(base)).toEqual(base);
+    expect(
+      ReplacePersonalGitHubRepositorySelectionsRequest.parse({
+        ...base,
+        allRepositoriesAccess: "write",
+      }).allRepositoriesAccess,
+    ).toBe("write");
+    expect(
+      ReplacePersonalGitHubRepositorySelectionsRequest.parse({
+        ...base,
+        allRepositoriesAccess: null,
+      }).allRepositoriesAccess,
+    ).toBeNull();
+    expect(
+      ReplacePersonalGitHubRepositorySelectionsRequest.safeParse({
+        ...base,
+        allRepositoriesAccess: "admin",
       }).success,
     ).toBe(false);
   });

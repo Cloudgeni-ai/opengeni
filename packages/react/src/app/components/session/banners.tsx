@@ -2,18 +2,12 @@ import { AlertTriangleIcon, ArrowLeftIcon, AudioLinesIcon, TerminalIcon } from "
 import { UserMessageBody as CollapsibleUserMessageBody } from "../../../components/user-message-body";
 import type { UserMessageItem } from "../../../timeline";
 import type { TimelineSearchTarget } from "../../../components/timeline-search";
-import { lazy } from "react";
-
-import { LazyPart } from "../../../components/lazy-part";
-import { LoadFailureNotice } from "../../../components/load-failure-notice";
 import { MarkdownText } from "../markdown";
 import { Button } from "../../../ui/button";
 import { formatTimestamp } from "../../lib/format";
 import type { Session } from "../../types";
-import { MessageFileSkeletons, MessageRepositoryChips } from "./message-resource-placeholders";
+import { MessageRepositoryChips } from "./message-resource-placeholders";
 import { useOpenGeniText } from "../../../messages/runtime";
-
-const MessageResourceAttachments = lazy(() => import("./message-resource-attachments"));
 
 export function TerminalSessionBanner(props: { session: Session; onNewSession: () => void }) {
   return (
@@ -63,25 +57,18 @@ export function TerminalSessionArchive(props: { session: Session; eventCount: nu
   );
 }
 
-/** Attachment previews/chips + repository chips + markdown body inside the user bubble. */
+/**
+ * Repository chips + markdown body inside the user bubble. The timeline shows
+ * the message's attached files above the bubble.
+ */
 export function UserMessageBody({
-  workspaceId,
-  sessionId,
   item,
   searchTarget,
 }: {
-  workspaceId: string;
-  sessionId?: string | undefined;
   item: UserMessageItem;
   searchTarget?: TimelineSearchTarget | null | undefined;
 }) {
   const t = useOpenGeniText();
-  const hasFiles = item.resources.some((resource) => resource.kind === "file");
-  const repositoryChips = item.resources.some((resource) => resource.kind === "repository") ? (
-    <div className="mb-2 flex flex-wrap gap-1.5">
-      <MessageRepositoryChips resources={item.resources} />
-    </div>
-  ) : null;
 
   return (
     <div data-testid="timeline-user">
@@ -93,33 +80,11 @@ export function UserMessageBody({
             : t("messageTimeline.voiceRequest")}
         </div>
       ) : null}
-      {hasFiles ? (
-        // If the attachments' code fails to download, the message, its text
-        // and its repository chips stay; only the files give way to a Reload.
-        <LazyPart
-          fallback={
-            <>
-              <MessageFileSkeletons resources={item.resources} />
-              {repositoryChips}
-            </>
-          }
-          failed={
-            <>
-              {/* Flush with the message text below it. */}
-              <LoadFailureNotice className="mb-1 px-0" />
-              {repositoryChips}
-            </>
-          }
-        >
-          <MessageResourceAttachments
-            sessionId={sessionId}
-            workspaceId={workspaceId}
-            resources={item.resources}
-          />
-        </LazyPart>
-      ) : (
-        repositoryChips
-      )}
+      {item.resources.some((resource) => resource.kind === "repository") ? (
+        <div className="mb-2 flex flex-wrap gap-1.5">
+          <MessageRepositoryChips resources={item.resources} />
+        </div>
+      ) : null}
 
       <CollapsibleUserMessageBody messageId={item.id} text={item.text}>
         <MarkdownText text={item.text} compact softLineBreaks searchTarget={searchTarget} />

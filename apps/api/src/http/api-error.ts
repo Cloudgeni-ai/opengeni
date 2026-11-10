@@ -4,9 +4,11 @@ import {
   AgentConfigError,
   BYOK_PAID_CREDIT_REQUIRED_CODE,
   SUBSCRIPTION_PLAN_REQUIRED_CODE,
+  SUBSCRIPTION_API_UNAVAILABLE_CODE,
   UPGRADE_PLAN_ACTION,
   byokRefusalAction,
   AllowanceExhaustedRefusal,
+  GitHubRepositoryUnavailableError,
   ModelPolicyRefusedError,
   ModelUnavailableError,
   ScheduledTaskTargetAccessChange,
@@ -21,10 +23,12 @@ import {
   WorkspaceContentFlowRefusedError,
 } from "@opengeni/db";
 import {
+  AuthenticationRequiredRefusal,
   ConnectionAccountSelectionError,
   MissingPermissionRefusal,
   SessionUsageLimitHttpError,
   sessionUsageLimitRefusalFromError,
+  TranscriptionServiceError,
 } from "@opengeni/core";
 import { InferenceRegionRestrictedError } from "@opengeni/runtime/model-call";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -60,6 +64,18 @@ export function missingPermissionHttpError(error: unknown): ApiHttpError | null 
   if (!(error instanceof MissingPermissionRefusal)) return null;
   return new ApiHttpError(403, {
     code: "forbidden",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: error.details,
+  });
+}
+
+/** A request that signs no one in says why in `details.code` (missing or lapsed sign-in). */
+export function authenticationRequiredHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof AuthenticationRequiredRefusal)) return null;
+  return new ApiHttpError(401, {
+    code: "unauthenticated",
     message: error.message,
     retryable: false,
     outcomeUnknown: false,
@@ -125,9 +141,28 @@ export function allowanceExhaustedHttpError(error: unknown): ApiHttpError | null
  * callers can tell it from other 402s without matching message text.
  */
 export function insufficientCreditsHttpError(error: unknown): ApiHttpError | null {
-  if (!(error instanceof HTTPException) || error.status !== 402) return null;
+  if (error instanceof TranscriptionServiceError && error.subscriptionCode) {
+    error = new HTTPException(
+      error.subscriptionCode === SUBSCRIPTION_API_UNAVAILABLE_CODE ? 403 : 402,
+      {
+        message: error.message,
+        cause: { allowed: false, code: error.subscriptionCode },
+      },
+    );
+  }
+  if (!(error instanceof HTTPException)) return null;
   const cause = error.cause as { allowed?: unknown; code?: unknown } | null | undefined;
   if (!cause || typeof cause !== "object" || cause.allowed !== false) return null;
+  if (error.status === 403 && cause.code === SUBSCRIPTION_API_UNAVAILABLE_CODE) {
+    return new ApiHttpError(403, {
+      code: "forbidden",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: cause.code },
+    });
+  }
+  if (error.status !== 402) return null;
   if (
     cause.code !== "insufficient_credits" &&
     cause.code !== API_CREDITS_REQUIRED_CODE &&
@@ -393,6 +428,30 @@ export function modelPolicyRefusedHttpError(error: unknown): ApiHttpError | null
     retryable: false,
     outcomeUnknown: false,
     details: { code: cause.code, modelId: cause.modelId, reason: cause.reason },
+  });
+}
+
+/**
+ * GitHub App repositories the workspace can no longer use. The same 422
+ * `validation_failed` with its historical message, plus
+ * `details.code: "github_repository_unavailable"` and the repositories, so
+ * clients can say which repository to remove or restore instead of "check
+ * your input".
+ */
+export function githubRepositoryUnavailableHttpError(error: unknown): ApiHttpError | null {
+  const cause =
+    error instanceof GitHubRepositoryUnavailableError
+      ? error
+      : error instanceof HTTPException && error.cause instanceof GitHubRepositoryUnavailableError
+        ? error.cause
+        : null;
+  if (!cause) return null;
+  return new ApiHttpError(422, {
+    code: "validation_failed",
+    message: cause.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: cause.code, repositories: [...cause.repositories] },
   });
 }
 

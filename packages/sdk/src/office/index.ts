@@ -33,9 +33,19 @@ export {
 export { officeTheme, watchOfficeTheme, watchSelection } from "./watch";
 export { describeWorkbook, workbookContextItem, type OfficeWorkbookInfo } from "./workbook";
 export {
+  readWorkbookFile,
+  workbookCopyFilename,
+  XLSX_CONTENT_TYPE,
+  type OfficeRunFile,
+} from "./workbook-file";
+export {
   WorkbookLink,
   websocketUrl,
   type OfficeWorkbookTicket,
+  type WorkbookFiles,
   type WorkbookLinkOptions,
   type WorkbookLinkState,
+  type WorkbookRunFile,
+  type WorkbookRunRequest,
+  type WorkbookRunResult,
 } from "./workbook-link";

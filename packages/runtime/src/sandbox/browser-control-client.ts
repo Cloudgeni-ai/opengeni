@@ -2482,12 +2482,16 @@ export class BrowserControlSessionClient {
     ) {
       throw new BrowserControlProtocolError("passkey sync targets another controller binding");
     }
+    // The owner rides in the query: controllers that predate it parse the
+    // body strictly and ignore unknown query parameters.
+    const { owner, ...body } = parsed;
+    const query = owner ? `backupFlags=1&owner=${encodeURIComponent(owner)}` : "backupFlags=1";
     return BrowserPasskeySyncResponse.parse(
       await this.parent.requestForSession({
         method: "POST",
-        path: this.path("passkeys/sync?backupFlags=1"),
+        path: this.path(`passkeys/sync?${query}`),
         token: this.controlToken,
-        body: parsed,
+        body,
       }),
     );
   }

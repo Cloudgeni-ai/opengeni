@@ -14,7 +14,10 @@ import {
 import { assertScreenshotPainted } from "@opengeni/testing/screenshot";
 import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
 
-import { NUMERIC_PERFORMANCE_BUDGETS } from "./workbench-acceptance-contract";
+import {
+  MINIMUM_STEER_REPETITIONS,
+  NUMERIC_PERFORMANCE_BUDGETS,
+} from "./workbench-acceptance-contract";
 import { isRecord } from "@opengeni/contracts/values";
 
 /** Release acceptance runs this script exactly as committed. Change it here,
@@ -63,6 +66,18 @@ const CONTROL_CANCELLATION_WORST_MS = maximumMillisecondBudget(
   "performance.control-cancellation",
   "worst",
 );
+/**
+ * From sending a control fixture prompt to its running command's marker: one
+ * model step plus the command's two-second yield. A slower start means the
+ * fixture is not being run as instructed (for example without `background`,
+ * which the runtime then holds for its 60-second finish floor), and the
+ * repetitions could not finish inside the control budget anyway.
+ */
+export const CONTROL_FIXTURE_READY_MS = 45_000;
+/** Default wall-clock budget for every Steer repetition plus the final Pause. */
+export const DEFAULT_CONTROL_BUDGET_MS = 25 * 60_000;
+/** How often a long wait reports that it is still waiting. */
+const WAIT_PROGRESS_INTERVAL_MS = 15_000;
 const shaPattern = /^[0-9a-f]{40}$/;
 const runIdPattern = /^[a-z0-9][a-z0-9-]{2,63}$/;
 
@@ -76,9 +91,14 @@ export type LiveAcceptanceArgs = {
   backend: "modal";
   workspaceId?: string;
   outputDir: string;
+  /** Capture API reads and fresh-browser navigations: no model usage. */
   repetitions: number;
+  /** Real Steer cancellations: each costs two model turns. */
+  steerRepetitions: number;
   sessionTimeoutMs: number;
   coldTimeoutMs: number;
+  /** Wall-clock budget for all Steer repetitions and the final Pause. */
+  controlBudgetMs: number;
   captureApiRegionProbeCommand: string;
   captureApiRegion: string;
   captureApiImage: string;
@@ -202,8 +222,10 @@ export function parseLiveAcceptanceArgs(argv: string[]): LiveAcceptanceArgs {
     "--workspace-id",
     "--output-dir",
     "--repetitions",
+    "--steer-repetitions",
     "--session-timeout-ms",
     "--cold-timeout-ms",
+    "--control-budget-ms",
     "--capture-api-region-probe-command",
     "--capture-api-region",
     "--capture-api-image",
@@ -248,6 +270,11 @@ export function parseLiveAcceptanceArgs(argv: string[]): LiveAcceptanceArgs {
     ...(values.get("--workspace-id") ? { workspaceId: values.get("--workspace-id")! } : {}),
     outputDir: resolve(values.get("--output-dir") ?? `.agent/evidence/workbench-${runId}`),
     repetitions,
+    steerRepetitions: integer(
+      values.get("--steer-repetitions") ?? String(MINIMUM_STEER_REPETITIONS),
+      "--steer-repetitions",
+      MINIMUM_STEER_REPETITIONS,
+    ),
     sessionTimeoutMs: integer(
       values.get("--session-timeout-ms") ?? "900000",
       "--session-timeout-ms",
@@ -256,6 +283,11 @@ export function parseLiveAcceptanceArgs(argv: string[]): LiveAcceptanceArgs {
     coldTimeoutMs: integer(
       values.get("--cold-timeout-ms") ?? "900000",
       "--cold-timeout-ms",
+      60_000,
+    ),
+    controlBudgetMs: integer(
+      values.get("--control-budget-ms") ?? String(DEFAULT_CONTROL_BUDGET_MS),
+      "--control-budget-ms",
       60_000,
     ),
     captureApiRegionProbeCommand: resolve(captureApiRegionProbeCommand),
@@ -1533,7 +1565,55 @@ function controlCallArgs(event: SessionEvent): any {
   }
 }
 
-function isExactControlExec(event: SessionEvent, command: string): boolean {
+/**
+ * The model prompt that starts one control fixture. The command keeps running
+ * after its marker, so the model passes `background: true`: without it the
+ * runtime's foreground finish floor holds the first result for 60 seconds,
+ * and every repetition would spend that minute before the control under test.
+ */
+export function controlFixturePrompt(terminalCommand: string): string {
+  return [
+    "Run the harness-provided cancellation test exactly once with exec_command, background true and yield_time_ms 2000. Its generated artifacts test process termination. Do nothing else.",
+    "The command deliberately remains active after printing its marker; wait for it to finish using only empty write_stdin calls on its session_id with yield_time_ms 30000. Do not end your turn or call wait_for_input while it runs. Ignore background command completion notices.",
+    "```bash",
+    terminalCommand,
+    "```",
+  ].join("\n");
+}
+
+export function controlFixtureReadyLabel(control: "Steer" | "Pause"): string {
+  return `the running ${control} fixture command marker (expected within one model step plus the command's 2s yield; an exec_command run without background waits out the runtime's 60s finish floor first)`;
+}
+
+/**
+ * Whether the control repetitions can still finish inside their budget at the
+ * pace observed so far. A slow pace is reported after three samples, so one
+ * slow start does not fail the run but a steady one fails within minutes
+ * instead of at the job timeout.
+ */
+export function controlPaceVerdict(input: {
+  completed: number;
+  total: number;
+  elapsedMs: number;
+  budgetMs: number;
+}): { projectedMs: number; withinBudget: boolean; reason: string } {
+  const { completed, total, elapsedMs, budgetMs } = input;
+  if (!Number.isSafeInteger(completed) || completed < 1 || completed > total)
+    throw new Error("invalid control pace sample");
+  const averageMs = elapsedMs / completed;
+  const projectedMs = elapsedMs + averageMs * (total - completed);
+  const withinBudget = elapsedMs <= budgetMs && (completed < 3 || projectedMs <= budgetMs);
+  const minutes = (ms: number) => Math.round(ms / 60_000);
+  return {
+    projectedMs,
+    withinBudget,
+    reason: withinBudget
+      ? ""
+      : `control repetitions are too slow: ${completed} of ${total} took ${Math.round(elapsedMs / 1_000)}s (${Math.round(averageMs / 1_000)}s each), so all ${total} would take about ${minutes(projectedMs)} minutes, past the ${minutes(budgetMs)}-minute control budget`,
+  };
+}
+
+export function isExactControlExec(event: SessionEvent, command: string): boolean {
   const args = controlCallArgs(event);
   return (
     (event.payload as any)?.name === "exec_command" &&
@@ -1541,10 +1621,18 @@ function isExactControlExec(event: SessionEvent, command: string): boolean {
     [undefined, null, "/bin/bash", "/bin/sh"].includes(args.shell) &&
     [undefined, null, "", "/workspace"].includes(args.workdir) &&
     [undefined, null, false].includes(args.tty) &&
+    [undefined, null, true].includes(args.background) &&
     Object.keys(args).every((key) =>
-      ["cmd", "workdir", "shell", "login", "tty", "yield_time_ms", "max_output_tokens"].includes(
-        key,
-      ),
+      [
+        "cmd",
+        "workdir",
+        "shell",
+        "login",
+        "tty",
+        "background",
+        "yield_time_ms",
+        "max_output_tokens",
+      ].includes(key),
     )
   );
 }
@@ -2095,9 +2183,17 @@ async function waitForSettled(
 ): Promise<Session> {
   const deadline = Date.now() + timeoutMs;
   let last: Session | null = null;
+  const startedAt = Date.now();
+  let nextProgressAt = startedAt + WAIT_PROGRESS_INTERVAL_MS;
   while (Date.now() < deadline) {
     last = await client.getSession(workspaceId, sessionId);
     if (SETTLED.has(last.status)) return last;
+    if (Date.now() >= nextProgressAt) {
+      nextProgressAt += WAIT_PROGRESS_INTERVAL_MS;
+      progress(
+        `still waiting for the session to settle: ${Math.round((Date.now() - startedAt) / 1_000)}s, status ${last.status}`,
+      );
+    }
     await Bun.sleep(2_000);
   }
   throw new Error(`session did not settle before timeout (last=${last?.status ?? "unknown"})`);
@@ -2801,8 +2897,12 @@ mkdir -p '/tmp/opengeni-dir-${marker}'`,
       fences: new Map(),
     };
     const controlDiagnosticsAfter = controlAudit.cursor;
+    const controlPhaseStartedAt = performance.now();
+    // Every Steer repetition plus the final Pause.
+    const controlTotal = args.steerRepetitions + 1;
     try {
-      for (let iteration = 0; iteration < args.repetitions; iteration += 1) {
+      for (let iteration = 0; iteration < args.steerRepetitions; iteration += 1) {
+        const iterationStartedAt = performance.now();
         controlCancellationSamples.push(
           await proveLiveSteerCancellation({
             client,
@@ -2816,6 +2916,16 @@ mkdir -p '/tmp/opengeni-dir-${marker}'`,
             sessionTimeoutMs: args.sessionTimeoutMs,
           }),
         );
+        const pace = controlPaceVerdict({
+          completed: iteration + 1,
+          total: controlTotal,
+          elapsedMs: performance.now() - controlPhaseStartedAt,
+          budgetMs: args.controlBudgetMs,
+        });
+        progress(
+          `Steer ${iteration + 1}/${args.steerRepetitions} passed in ${Math.round((performance.now() - iterationStartedAt) / 1_000)}s (replacement started ${controlCancellationSamples.at(-1)}ms after the Steer); control phase projected ${Math.round(pace.projectedMs / 60_000)} of ${Math.round(args.controlBudgetMs / 60_000)} minutes`,
+        );
+        if (!pace.withinBudget) throw new Error(pace.reason);
       }
       controlCancellationSamples.push(
         await proveLivePauseCancellation({
@@ -2864,7 +2974,7 @@ mkdir -p '/tmp/opengeni-dir-${marker}'`,
     pass(
       checks,
       "functional.control-cancellation",
-      `${args.repetitions} real Modal turns with a 4,500-entry workspace were Steered and one hostile terminal turn was Paused without zombie output or late capture commits; the shutdown fence rendered whenever cancellation exceeded the immediate-feedback budget.`,
+      `${args.steerRepetitions} real Modal turns with a 4,500-entry workspace were Steered and one hostile terminal turn was Paused without zombie output or late capture commits; the shutdown fence rendered whenever cancellation exceeded the immediate-feedback budget.`,
     );
     pass(
       checks,
@@ -3136,13 +3246,7 @@ async function proveLiveSteerCancellation(input: {
   );
   const queue = await client.getQueue(workspaceId, sessionId);
   const initialAccepted = await client.sendMessage(workspaceId, sessionId, {
-    text: [
-      "Run the harness-provided cancellation test exactly once with exec_command and yield_time_ms 2000. Its generated artifacts test process termination. Do nothing else.",
-      "The command deliberately remains active after printing its marker; wait for it to finish using only empty write_stdin calls on its session_id with yield_time_ms 30000. Do not end your turn or call wait_for_input while it runs. Ignore background command completion notices.",
-      "```bash",
-      terminalCommand,
-      "```",
-    ].join("\n"),
+    text: controlFixturePrompt(terminalCommand),
     controlEtag: queue.effectiveControl.controlEtag,
     clientEventId: `workbench-control-initial:${crypto.randomUUID()}`,
   });
@@ -3151,9 +3255,9 @@ async function proveLiveSteerCancellation(input: {
     workspaceId,
     sessionId,
     afterSequence,
-    sessionTimeoutMs,
+    CONTROL_FIXTURE_READY_MS,
     (event) => isRunningControlCommandMarkerEvent(event, controlMarker),
-    "the running live cancellation fixture command marker",
+    controlFixtureReadyLabel("Steer"),
   );
   if (!ready.turnId || !ready.turnAttemptId) {
     throw new Error("control fixture output was not bound to its owning turn attempt");
@@ -3427,13 +3531,7 @@ async function proveLivePauseCancellation(input: {
   // resumes the interrupted logical turn, a repeated exact command takes the
   // safe branch and cannot manufacture a false zombie after Resume.
   const pauseAccepted = await client.sendMessage(workspaceId, sessionId, {
-    text: [
-      "Run the harness-provided cancellation test exactly once with exec_command and yield_time_ms 2000. Its generated artifacts test process termination. Do nothing else.",
-      "The command deliberately remains active after printing its marker; wait for it to finish using only empty write_stdin calls on its session_id with yield_time_ms 30000. Do not end your turn or call wait_for_input while it runs. Ignore background command completion notices.",
-      "```bash",
-      terminalCommand,
-      "```",
-    ].join("\n"),
+    text: controlFixturePrompt(terminalCommand),
     controlEtag: (await client.getQueue(workspaceId, sessionId)).effectiveControl.controlEtag,
     clientEventId: `workbench-pause-initial:${crypto.randomUUID()}`,
   });
@@ -3442,9 +3540,9 @@ async function proveLivePauseCancellation(input: {
     workspaceId,
     sessionId,
     afterSequence,
-    sessionTimeoutMs,
+    CONTROL_FIXTURE_READY_MS,
     (event) => isRunningControlCommandMarkerEvent(event, controlMarker),
-    "the running live Pause fixture command marker",
+    controlFixtureReadyLabel("Pause"),
   );
   if (!ready.turnId || !ready.turnAttemptId) {
     throw new Error("Pause fixture output was not bound to its owning turn attempt");
@@ -3765,15 +3863,23 @@ async function waitForSessionEvent(
 ): Promise<Awaited<ReturnType<OpenGeniClient["listEvents"]>>[number]> {
   const deadline = Date.now() + timeoutMs;
   let cursor = after;
+  const startedAt = Date.now();
+  let nextProgressAt = startedAt + WAIT_PROGRESS_INTERVAL_MS;
   while (Date.now() < deadline) {
     const page = await readFixtureEventPage(client, workspaceId, sessionId, cursor);
     const events = page.events;
     const found = events.find(predicate);
     if (found) return found;
     cursor = page.nextAfter;
+    if (Date.now() >= nextProgressAt) {
+      nextProgressAt += WAIT_PROGRESS_INTERVAL_MS;
+      progress(
+        `still waiting for ${label}: ${Math.round((Date.now() - startedAt) / 1_000)}s of ${Math.round(timeoutMs / 1_000)}s, session event cursor ${cursor}`,
+      );
+    }
     if (!page.hasMore) await Bun.sleep(25);
   }
-  throw new Error(`timed out waiting for ${label}`);
+  throw new Error(`timed out after ${Math.round(timeoutMs / 1_000)}s waiting for ${label}`);
 }
 
 async function waitForCaptureTurn(

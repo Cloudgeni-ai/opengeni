@@ -29,6 +29,7 @@ import {
   type CoreCodexWakeServices,
 } from "../subscription-core-codex-waits";
 import type { CapacityPhaseDeps, CapacityPhaseOutcome } from "./codex-capacity";
+import { assertCodexDispatchAdmission } from "./codex-credit-policy";
 import type { CodexTurnLease } from "./credential-leases";
 import {
   assertCoreSourceConnected,
@@ -150,6 +151,41 @@ export async function assertCoreCodexSourceConnected(
   core: CodexSubscriptionCoreTurn,
 ): Promise<void> {
   await assertCoreSourceConnected(db, CODEX_CORE_TURN_PROVIDER, core);
+}
+
+/**
+ * The last step before a core Codex request reaches the wire. Without a
+ * request to reserve (the session-title custody reserves its own), it reads
+ * the source and the live lease. With one, the reservation is the dispatch
+ * fence: in a single transaction it rechecks the accepted turn and attempt,
+ * reads the source under the connection lock and holds the live lease KEY
+ * SHARE while it inserts the one-shot permit. Separate source and lease reads
+ * before it would prove nothing more and cost two more sequential
+ * transactions per model request, which under a loaded database is most of a
+ * request's pre-dispatch time. A lease the reservation finds lost marks the
+ * local holder lost, exactly as the separate lease read did.
+ */
+export async function admitCoreCodexDispatch(deps: {
+  lease: Pick<CodexTurnLease, "assertUsable" | "markLost" | "assertCurrentForDispatch">;
+  assertSourceConnected: () => Promise<void>;
+  assertCredits: () => Promise<void>;
+  reserve: (() => Promise<unknown>) | null;
+}): Promise<void> {
+  const { lease, reserve } = deps;
+  if (!reserve) {
+    await deps.assertSourceConnected();
+    await assertCodexDispatchAdmission(deps.assertCredits, () => lease.assertCurrentForDispatch());
+    return;
+  }
+  lease.assertUsable();
+  await deps.assertCredits();
+  lease.assertUsable();
+  try {
+    await reserve();
+  } catch (error) {
+    if (error instanceof SubscriptionCoreCodexLeaseLostError) lease.markLost("not_found");
+    throw error;
+  }
 }
 
 /**

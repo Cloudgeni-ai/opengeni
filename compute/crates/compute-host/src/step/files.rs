@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 use compute_engine::EngineError;
-use compute_engine::SnapshotFiles;
+use compute_engine::{GuestMemory, Region, SnapshotFiles};
+use compute_pager::control::Finished;
 
 #[cfg(target_os = "linux")]
 use super::Reconnected;
@@ -22,9 +23,12 @@ use crate::lazy::Fetcher;
 use crate::paging::Paging;
 use crate::store::Receipt;
 
+/// The directory of a sandbox's memory images, in its own.
+const IMAGES: &str = "images";
+
 /// The sandbox's memory images.
 pub(crate) fn images_of(paths: &Paths) -> Images {
-    Images::new(paths.dir.join("images"))
+    Images::new(paths.dir.join(IMAGES))
 }
 
 /// The learned order the guest touches memory after a wake.
@@ -87,6 +91,48 @@ pub(crate) fn paged(paths: &Paths) -> bool {
     paged_marker(paths).exists()
 }
 
+/// Where the sandbox's running VM holds its guest memory, for naming what
+/// its guest gave back; `None` where nothing can say. A VM restored from a
+/// local image maps the image's file. A VM a pager served holds anonymous
+/// memory, whose regions only the VMM's handshake with the pager named:
+/// known once that pager finished and wrote them down, for the launch the
+/// sandbox's paged marker names, and not before, while missing pages may
+/// still hold image bytes the pager has yet to supply. A VM booted fresh
+/// has neither.
+pub(super) fn guest_memory(paths: &Paths) -> Option<GuestMemory> {
+    let tag = match fs::read_to_string(paged_marker(paths)) {
+        Ok(tag) => tag,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return paths
+                .snapshot
+                .memory
+                .exists()
+                .then(|| GuestMemory::File(paths.snapshot.memory.clone()));
+        }
+        Err(error) => {
+            tracing::warn!(%error, "paged marker unreadable; no memory named as given back");
+            return None;
+        }
+    };
+    // Written by the pager as the VM's user: trusted no more than the VM.
+    let done = pager_control(paths).with_extension("done");
+    let finished = super::learned::read_untrusted(&done)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Finished>(&bytes).ok())
+        .filter(|finished| finished.tag == tag.trim())?;
+    Some(GuestMemory::Unbacked(
+        finished
+            .regions
+            .into_iter()
+            .map(|region| Region {
+                address: region.address,
+                size: region.size,
+                offset: region.offset,
+            })
+            .collect(),
+    ))
+}
+
 /// Reconnects to the pager of a VM found running after an agent restart;
 /// see [`Paging::reconnect`]. What the VM's memory was based on is not
 /// known any more.
@@ -120,6 +166,10 @@ pub(super) struct Taken {
     pub(super) files: SnapshotFiles,
     /// The image a diff was taken against; `None` when the snapshot is whole.
     pub(super) over: Option<Generation>,
+    /// The memory the guest gave back, which reads as zeros, as ranges of
+    /// the image (see [`compute_engine::Engine::freed_memory`]): a diff
+    /// leaves it out. Empty for a whole snapshot, which holds it as zeros.
+    pub(super) freed: Vec<std::ops::Range<u64>>,
     /// The runtime of the VMM that wrote it, which after an upgrade can be
     /// older than the engine's own.
     pub(super) runtime: String,
@@ -162,6 +212,18 @@ pub(crate) fn take_written(files: &SnapshotFiles, scratch: &Path) -> io::Result<
     Ok(taken)
 }
 
+/// The files and directories that hold the sandbox's local copy, which
+/// [`clear_local`] deletes: what giving the copy up frees.
+pub(crate) fn local_copy(paths: &Paths) -> [PathBuf; 5] {
+    [
+        paths.disk.clone(),
+        checkpoint_disk(paths),
+        paths.snapshot.state.clone(),
+        paths.snapshot.memory.clone(),
+        paths.dir.join(IMAGES),
+    ]
+}
+
 /// Deletes the sandbox's local disk, memory images and snapshot files.
 pub(crate) async fn clear_local(paths: &Paths) -> io::Result<()> {
     let paths = paths.clone();
@@ -187,4 +249,63 @@ pub(super) fn drop_snapshot(paths: &Paths) {
     let _ = remove_if_present(&files.state);
     let _ = remove_if_present(&files.memory);
     let _ = images_of(paths).clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::Id;
+    use compute_core::SandboxId;
+    use compute_pager::control;
+
+    fn finished(tag: &str) -> Vec<u8> {
+        serde_json::to_vec(&Finished {
+            tag: tag.into(),
+            regions: vec![control::Region {
+                address: 0x7f00_0000_0000,
+                size: 1 << 30,
+                offset: 0,
+            }],
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn guest_memory_is_named_only_where_something_says_where_it_is() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::new(root.path(), Id(SandboxId(1)));
+        fs::create_dir_all(paths.snapshot.memory.parent().unwrap()).unwrap();
+        fs::create_dir_all(pager_dir(&paths)).unwrap();
+        let done = pager_control(&paths).with_extension("done");
+        assert_eq!(guest_memory(&paths), None, "a VM booted fresh");
+
+        fs::write(&paths.snapshot.memory, b"").unwrap();
+        assert_eq!(
+            guest_memory(&paths),
+            Some(GuestMemory::File(paths.snapshot.memory.clone())),
+            "a VM restored from a local image maps it"
+        );
+
+        // A pager serves this launch; the file left from an earlier one
+        // is not the VM's memory.
+        write_atomic(&paged_marker(&paths), b"7-1f.0").unwrap();
+        assert_eq!(guest_memory(&paths), None, "the pager has not finished");
+        fs::write(&done, b"").unwrap();
+        assert_eq!(guest_memory(&paths), None, "a pager that wrote no layout");
+        fs::write(&done, finished("7-1e.0")).unwrap();
+        assert_eq!(guest_memory(&paths), None, "an earlier launch's pager");
+        fs::write(&done, b"{\"tag\":").unwrap();
+        assert_eq!(guest_memory(&paths), None, "an unreadable layout");
+
+        fs::write(&done, finished("7-1f.0")).unwrap();
+        assert_eq!(
+            guest_memory(&paths),
+            Some(GuestMemory::Unbacked(vec![Region {
+                address: 0x7f00_0000_0000,
+                size: 1 << 30,
+                offset: 0,
+            }])),
+            "this launch's pager finished and said where the memory is"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/artifact-tool",
-  "version": "6.8.0",
+  "version": "6.13.0",
   "description": "Opengeni-owned document, spreadsheet, and presentation engine with skill-compatible authoring APIs.",
   "license": "Apache-2.0",
   "repository": {
@@ -121,7 +121,7 @@
     "exceljs": "^4.4.0",
     "pptxgenjs": "^4.0.1",
     "saxes": "5.0.1",
-    "sharp": "^0.34.5"
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
     "jszip": "^3.10.1",

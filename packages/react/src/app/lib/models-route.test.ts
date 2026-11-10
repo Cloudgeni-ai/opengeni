@@ -52,8 +52,31 @@ describe("Models URLs", () => {
     expect(connectStepOf("connect")).toBeNull();
   });
 
-  test("Azure OpenAI is addressed for the organization only", () => {
-    // A workspace's own Azure key is a direct connection, not a Models account.
+  test("Claude Code (API key) is the Anthropic API-key step, marked", () => {
+    expect(parseModelsView("connect:claude_code_api")).toBe("connect:claude_code_api");
+    expect(parseModelsView("connect-org:claude_code_api")).toBe("connect-org:claude_code_api");
+    expect(connectStepOf("connect-org:claude_code_api")).toEqual({
+      provider: "anthropic",
+      organization: true,
+      claudeCodeApi: true,
+    });
+    expect(connectStepOf("connect:claude_code_api")).toEqual({
+      provider: "anthropic",
+      organization: false,
+      claudeCodeApi: true,
+    });
+    // An organization's page keeps the entry it was opened from.
+    expect(
+      organizationModelsSearch({
+        workspace: undefined,
+        account: undefined,
+        view: "connect:claude_code_api",
+      }).view,
+    ).toBe("connect-org:claude_code_api");
+  });
+
+  test("an Azure OpenAI account page is the organization's; both connect steps exist", () => {
+    // A workspace's own Azure key is a row in its list, not a Models account page.
     expect(parseModelsAccount("org:gateway:azure_openai")).toBe("org:gateway:azure_openai");
     expect(parseModelsAccount("gateway:azure_openai")).toBeUndefined();
     expect(accountKeyOf("org:gateway:azure_openai")).toEqual({
@@ -63,9 +86,34 @@ describe("Models URLs", () => {
     });
     expect(accountKeyOf("gateway:azure_openai")).toBeNull();
     expect(parseModelsView("connect-org:azure_openai")).toBe("connect-org:azure_openai");
-    expect(parseModelsView("connect:azure_openai")).toBeUndefined();
+    // Its connect step is the same page for a workspace's own key.
+    expect(parseModelsView("connect:azure_openai")).toBe("connect:azure_openai");
+    expect(connectStepOf("connect:azure_openai")).toEqual({
+      provider: "azure_openai",
+      organization: false,
+    });
     expect(connectStepOf("connect-org:azure_openai")).toEqual({
       provider: "azure_openai",
+      organization: true,
+    });
+  });
+
+  test("compatible endpoints are organization accounts addressed by endpoint id", () => {
+    const id = "6f1c2a8e-3b4d-4e5f-8a9b-0c1d2e3f4a5b";
+    expect(parseModelsAccount(`org:compatible:${id}`)).toBe(`org:compatible:${id}`);
+    expect(accountKeyOf(`org:compatible:${id}`)).toEqual({
+      provider: "compatible",
+      id,
+      organization: true,
+    });
+    expect(parseModelsAccount(`compatible:${id}`)).toBeUndefined();
+    expect(parseModelsAccount("org:compatible:not-a-uuid")).toBeUndefined();
+    expect(parseModelsView("connect-org:openai_compatible")).toBe("connect-org:openai_compatible");
+    // A workspace's admins connect one for that workspace with the same step.
+    expect(parseModelsView("connect:openai_compatible")).toBe("connect:openai_compatible");
+    expect(parseModelsView("connect:openai")).toBe("connect:openai");
+    expect(connectStepOf("connect-org:openai_compatible")).toEqual({
+      provider: "openai_compatible",
       organization: true,
     });
   });

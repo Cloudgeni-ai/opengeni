@@ -70,7 +70,8 @@ pub(crate) fn os() -> Os {
 /// into shell interpretation of the joined string, mirroring how a terminal
 /// `sh -c "<line>"` behaves.
 pub(crate) fn shell_command(parts: &[String]) -> tokio::process::Command {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+    // `$SHELL`, else `/bin/sh`, else dash or bash when that is gone.
+    let shell = crate::system_shell::environment_shell();
     let mut cmd = tokio::process::Command::new(shell);
     cmd.arg("-c").arg(parts.join(" "));
     cmd

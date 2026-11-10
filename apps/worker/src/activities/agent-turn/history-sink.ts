@@ -2,9 +2,11 @@ import {
   activeSessionHistoryCompactionPressure,
   addActiveSessionHistoryFootprint,
   appendSessionHistoryItems,
+  appendSessionHistoryItemsInTransaction,
   upsertSandboxSessionEnvelope,
   type ActiveSessionHistoryFootprint,
   type ActiveSessionHistoryRecovery,
+  type SessionEventMutation,
 } from "@opengeni/db";
 import {
   sandboxStateEntryFromRunState,
@@ -34,6 +36,14 @@ export type TurnHistorySinkDeps = {
   getStream: () => Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
   getModelRunSettings: () => Settings;
   getExecutionGeneration: () => number;
+};
+
+type HistoryCheckpointOptions = {
+  skipInputOnlyRows?: boolean;
+  requireDurable?: boolean;
+  completedToolCallIds?: string[];
+  /** Commit the prepared history with a structural event's existing write fence. */
+  persist?: (history: SessionEventMutation<"event">) => Promise<boolean>;
 };
 
 /**
@@ -141,13 +151,7 @@ export class TurnHistorySink {
 
   constructor(private readonly deps: TurnHistorySinkDeps) {}
 
-  reconcileConversationTruth = (
-    options: {
-      skipInputOnlyRows?: boolean;
-      requireDurable?: boolean;
-      completedToolCallIds?: string[];
-    } = {},
-  ): Promise<void> => {
+  reconcileConversationTruth = (options: HistoryCheckpointOptions = {}): Promise<void> => {
     // The provider loop and the stream consumer checkpoint independently.
     // Serialize the complete read/write/acknowledgment boundary, not just the
     // database write: each caller must read history against the latest durable
@@ -157,11 +161,7 @@ export class TurnHistorySink {
     return checkpoint;
   };
 
-  private reconcile = async (options: {
-    skipInputOnlyRows?: boolean;
-    requireDurable?: boolean;
-    completedToolCallIds?: string[];
-  }) => {
+  private reconcile = async (options: HistoryCheckpointOptions) => {
     const { media } = this.deps;
     const stream = this.deps.getStream();
     const turnId = this.deps.getTurnId();
@@ -169,6 +169,7 @@ export class TurnHistorySink {
       return;
     }
     const durableTurnId = turnId;
+    let persistenceAttempted = false;
     try {
       const rawHistory = (stream.state as { history?: unknown[] }).history;
       if (Array.isArray(rawHistory)) {
@@ -193,9 +194,10 @@ export class TurnHistorySink {
         );
         const shouldAppendRows =
           rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
-        if (shouldAppendRows || options.completedToolCallIds?.length) {
+        let checkpointAccepted = true;
+        if (shouldAppendRows || options.completedToolCallIds?.length || options.persist) {
           await runMandatoryHistoryPersistenceStep("history_append", async () => {
-            const appended = await appendSessionHistoryItems(this.deps.db, {
+            const input = {
               accountId: this.deps.accountId,
               workspaceId: this.deps.workspaceId,
               sessionId: this.deps.sessionId,
@@ -208,15 +210,52 @@ export class TurnHistorySink {
               ...(options.completedToolCallIds
                 ? { completedToolCallIds: options.completedToolCallIds }
                 : {}),
-              onAppendedFootprint: this.recordAppendedFootprint,
-            });
-            if (!appended) {
+            };
+            let delta: ActiveSessionHistoryFootprint | null = null;
+            let historyFailure: unknown;
+            let appended: boolean;
+            if (options.persist) {
+              persistenceAttempted = true;
+              appended = await options.persist(async (tx, fence) => {
+                delta = null;
+                historyFailure = undefined;
+                if (!fence.allowed)
+                  throw new TurnAttemptFencedError(
+                    "turn execution generation was fenced while saving conversation history",
+                  );
+                try {
+                  // The already-incurred result/usage must survive a history
+                  // SQL failure, exactly as the formerly separate commits did.
+                  delta =
+                    input.items.length || input.completedToolCallIds?.length
+                      ? await tx.transaction((historyTx) =>
+                          appendSessionHistoryItemsInTransaction(historyTx, input, fence),
+                        )
+                      : { jsonBytes: 0, rows: 0, jsonNodes: 0, jsonProperties: 0 };
+                } catch (error) {
+                  historyFailure = error;
+                }
+                return true;
+              });
+            } else {
+              appended = await appendSessionHistoryItems(this.deps.db, {
+                ...input,
+                onAppendedFootprint: this.recordAppendedFootprint,
+              });
+            }
+            if (appended && historyFailure) throw historyFailure;
+            if (options.persist && !appended) checkpointAccepted = false;
+            else if (delta) this.recordAppendedFootprint(delta);
+            if (!appended && !options.persist) {
               throw new TurnAttemptFencedError(
                 "turn execution generation was fenced while saving conversation history",
               );
             }
           });
         }
+        // A duplicate response or lost authority can commit its audit without
+        // applying this history. Never advance the durable watermark for it.
+        if (!checkpointAccepted) return;
         if (shouldAppendRows || !options.skipInputOnlyRows) {
           this.prefix.acknowledge(verifiedKeys, nextWatermark);
           this.persistedHistoryCount = nextWatermark;
@@ -251,6 +290,12 @@ export class TurnHistorySink {
         }
       }
     } catch (persistError) {
+      if (options.persist && !persistenceAttempted) {
+        // Prefix validation or media preparation can fail before there is a
+        // history transaction. Retain the exact result/audit without advancing
+        // this sink, then surface the original history failure.
+        await options.persist(async () => true);
+      }
       console.error("session history persistence failed", safeErrorDiagnostic(persistError));
       if (options.requireDurable) throw persistError;
     }

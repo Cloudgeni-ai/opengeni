@@ -42,6 +42,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { githubAppWebhookPort } from "../github-access";
+import { handleVerifiedGitHubAppDelivery } from "../github-installation-sync";
 import { integrationBaseUrl } from "../integrations/oauth-client";
 import { parseRequestBody, parseRequestJson, readBoundedRawBody } from "../http/request-body";
 
@@ -257,8 +258,10 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   // The deployment's GitHub App sends every webhook here. The App's webhook
-  // secret authenticates GitHub; each delivery goes to the GitHub source of
-  // every workspace bound to its installation and repository.
+  // secret authenticates GitHub. Installation and repository events keep
+  // bound workspaces' repository allowlists in line with GitHub; each
+  // delivery also goes to the GitHub source of every workspace bound to its
+  // installation and repository.
   app.post(GITHUB_WEBHOOK_PATH, async (c) => {
     const body = await readBoundedRawBody(
       c.req.raw,
@@ -270,6 +273,7 @@ export function registerEventSourceRoutes(app: Hono, deps: ApiRouteDeps): void {
       settings: deps.settings,
       headers: c.req.raw.headers,
       body,
+      onVerified: async (delivery) => await handleVerifiedGitHubAppDelivery(deps, delivery),
     });
     switch (result.outcome) {
       case "not_found":

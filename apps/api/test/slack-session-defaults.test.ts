@@ -3,7 +3,7 @@ import type { GitHubRepository, RepositoryResourceRef } from "@opengeni/contract
 import {
   otherDeploymentLinkContext,
   otherDeploymentLinks,
-  selectRecentRepositoryResources,
+  selectFormRepositoryResources,
 } from "../src/integrations/slack-session-defaults";
 
 const workspaceId = "0f9a4c1e-2b3d-4e5f-8a9b-0c1d2e3f4a5b";
@@ -71,7 +71,7 @@ describe("links to another Opengeni deployment", () => {
   });
 });
 
-describe("Slack task repositories from recent use", () => {
+describe("Slack task repositories from the new-chat form", () => {
   const catalogEntry = (
     id: number,
     name: string,
@@ -89,7 +89,7 @@ describe("Slack task repositories from recent use", () => {
     accountType: "User",
     ...extra,
   });
-  const used = (id: number | null, name: string, ref = "feature"): RepositoryResourceRef => ({
+  const selected = (id: number | null, name: string, ref = "feature"): RepositoryResourceRef => ({
     kind: "repository",
     uri: `https://github.com/example-owner/${name}.git`,
     ref,
@@ -98,10 +98,10 @@ describe("Slack task repositories from recent use", () => {
       : {}),
   });
 
-  test("keeps recency order, the catalog's default branch, and marks each one best effort", () => {
+  test("keeps form order, the catalog's default branch, and marks each one best effort", () => {
     expect(
-      selectRecentRepositoryResources(
-        [used(2, "service"), used(1, "project"), used(2, "service")],
+      selectFormRepositoryResources(
+        [selected(2, "service"), selected(1, "project"), selected(2, "service")],
         [catalogEntry(1, "project"), catalogEntry(2, "service")],
       ),
     ).toEqual([
@@ -128,9 +128,9 @@ describe("Slack task repositories from recent use", () => {
     ]);
   });
 
-  test("matches a repository used by URL, case-insensitively, to its catalog entry", () => {
+  test("matches a repository typed by URL, case-insensitively, to its catalog entry", () => {
     expect(
-      selectRecentRepositoryResources(
+      selectFormRepositoryResources(
         [
           {
             kind: "repository",
@@ -145,8 +145,13 @@ describe("Slack task repositories from recent use", () => {
 
   test("drops repositories the catalog no longer offers, archived ones and empty ones", () => {
     expect(
-      selectRecentRepositoryResources(
-        [used(9, "gone"), used(3, "archived"), used(4, "empty"), used(1, "project")],
+      selectFormRepositoryResources(
+        [
+          selected(9, "gone"),
+          selected(3, "archived"),
+          selected(4, "empty"),
+          selected(1, "project"),
+        ],
         [
           catalogEntry(1, "project"),
           catalogEntry(3, "archived", { archived: true, sizeKb: 120 }),
@@ -159,23 +164,46 @@ describe("Slack task repositories from recent use", () => {
   test("stops at five distinct repositories", () => {
     const names = ["a", "b", "c", "d", "e", "f", "g"];
     expect(
-      selectRecentRepositoryResources(
-        names.map((name, index) => used(index + 1, name)),
+      selectFormRepositoryResources(
+        names.map((name, index) => selected(index + 1, name)),
         names.map((name, index) => catalogEntry(index + 1, name)),
       ).map((resource) => resource.githubRepositoryId),
     ).toEqual([1, 2, 3, 4, 5]);
   });
 
-  test("never counts a repository that was itself attached automatically", () => {
+  test("attaches a repository chosen as the person through its App catalog entry", () => {
     expect(
-      selectRecentRepositoryResources(
-        [{ ...used(2, "service"), optional: true }, used(1, "project")],
+      selectFormRepositoryResources(
+        [
+          {
+            kind: "repository",
+            uri: "https://github.com/example-owner/service.git",
+            ref: "feature",
+            provider: "github",
+            connectionType: "github_personal",
+            credentialBindingId: "binding-1",
+            repositoryId: "2",
+            access: "write",
+          },
+          selected(9, "personal-only"),
+        ],
         [catalogEntry(1, "project"), catalogEntry(2, "service")],
-      ).map((resource) => resource.githubRepositoryId),
-    ).toEqual([1]);
+      ),
+    ).toEqual([
+      {
+        kind: "repository",
+        uri: "https://github.com/example-owner/service.git",
+        ref: "trunk",
+        provider: "github",
+        mountPath: "repos/github.com/example-owner/service",
+        githubInstallationId: 71,
+        githubRepositoryId: 2,
+        optional: true,
+      },
+    ]);
   });
 
-  test("attaches nothing without recent use", () => {
-    expect(selectRecentRepositoryResources([], [catalogEntry(1, "project")])).toEqual([]);
+  test("attaches nothing when the form has no repositories", () => {
+    expect(selectFormRepositoryResources([], [catalogEntry(1, "project")])).toEqual([]);
   });
 });

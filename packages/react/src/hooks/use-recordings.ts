@@ -254,6 +254,12 @@ export type UseRecorderResult = RecorderSnapshot & {
   discard: () => Promise<void>;
   /** Rename the recording being made; the title reaches the server with the upload. */
   rename: (title: string) => Promise<void>;
+  /**
+   * Open a stopped track's source again, from a click: the browser asks again
+   * what to share, or for the microphone. Rejects with a RecorderCaptureError
+   * when it can't; a microphone that was unplugged comes back by itself.
+   */
+  reconnectTrack: (trackNumber: number) => Promise<void>;
   /** Input level per track number, 0 to 1. Read it from an animation frame for a meter. */
   levels: () => Record<number, number>;
   /**
@@ -527,6 +533,9 @@ export function useRecorder(options: UseRecorderOptions = {}): UseRecorderResult
       if (!recorder) throw new Error("Nothing is being recorded to rename.");
       await recorder.rename(title);
     }, []),
+    reconnectTrack: useCallback(async (trackNumber: number) => {
+      await recorderRef.current?.reconnect?.(trackNumber);
+    }, []),
     levels: useCallback(() => recorderRef.current?.levels() ?? {}, []),
     importAudio: useCallback(
       async (input: ImportRecordingAudioInput) => {
@@ -586,6 +595,26 @@ function isProcessing(recording: Recording | null | undefined): boolean {
   if (!recording) return false;
   const state = recording.transcript?.state;
   return recording.state === "processing" || state === "queued" || state === "processing";
+}
+
+/** How long after a meeting ends its audio is waited for once the transcript is ready. */
+const AUDIO_KEPT_WAIT_MS = 10 * 60_000;
+
+/**
+ * The transcript is ready but an audio track is still being kept as its
+ * compact playable file, which the worker writes beside the transcript.
+ */
+export function isKeepingRecordingAudio(
+  recording: Recording | null | undefined,
+  now: number = Date.now(),
+): boolean {
+  if (!recording || recording.state !== "ready" || recording.purpose !== "meeting") return false;
+  if (recording.audioDeletedAt) return false;
+  const ended = Date.parse(recording.captureEndedAt ?? recording.updatedAt);
+  if (!Number.isFinite(ended) || now - ended > AUDIO_KEPT_WAIT_MS) return false;
+  return recording.tracks.some(
+    (track) => track.kind === "audio" && track.chunkCount > 0 && !track.playable,
+  );
 }
 
 /**
@@ -726,9 +755,10 @@ export function useRecording(
     isProcessing(recording) ||
     versions.some((version) => version.state === "queued" || version.state === "processing");
   useRefreshWhile(
-    enabled && (nowProcessing || recording?.state === "capturing"),
+    enabled &&
+      (nowProcessing || recording?.state === "capturing" || isKeepingRecordingAudio(recording)),
     state.refresh,
-    nowProcessing ? PROCESSING_POLL_MS : CAPTURING_POLL_MS,
+    nowProcessing || isKeepingRecordingAudio(recording) ? PROCESSING_POLL_MS : CAPTURING_POLL_MS,
   );
   const refresh = state.refresh;
   const require = () => {

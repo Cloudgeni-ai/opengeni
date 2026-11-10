@@ -31,6 +31,11 @@ use object_store::{
 pub const SWEEP_EVERY: Duration = Duration::from_secs(6 * 3600);
 /// How old an artifact is before a read of it is marked.
 const MARK_AFTER: Duration = Duration::from_secs(24 * 3600);
+/// Deletes a sweep has in flight, each of one key. Not in bulk: a store
+/// may work through a bulk delete's keys one after another, as Garage
+/// does with S3's `DeleteObjects`, so a request of a thousand keys can
+/// outlast its timeout on a slow store and delete nothing.
+const DELETES: usize = 16;
 /// Turborepo's headers an artifact keeps.
 const TAG: &str = "x-artifact-tag";
 const DURATION: &str = "x-artifact-duration";
@@ -189,12 +194,17 @@ impl Cache {
                 .filter(|hash| !artifacts.contains_key(*hash))
                 .map(|hash| self.marker(hash)),
         );
-        let mut deleted = self
-            .store
-            .delete_stream(futures::stream::iter(doomed.into_iter().map(Ok)).boxed());
-        while let Some(result) = deleted.next().await {
-            match result {
-                Ok(_) | Err(object_store::Error::NotFound { .. }) => {}
+        let requests = doomed.into_iter().map(|path| {
+            let store = Arc::clone(&self.store);
+            async move { store.delete(&path).await }
+        });
+        let outcomes: Vec<_> = futures::stream::iter(requests)
+            .buffer_unordered(DELETES)
+            .collect()
+            .await;
+        for outcome in outcomes {
+            match outcome {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
                 Err(error) => return Err(error.into()),
             }
         }

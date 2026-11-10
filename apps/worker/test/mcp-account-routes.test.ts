@@ -208,9 +208,39 @@ test("empty accepted bindings remove authenticated defaults while null keeps his
   const empty = expandMcpAccountRoutes({ settings: original, tools, bindings: [] });
   expect(empty.tools.map((tool) => tool.id)).toEqual(["public"]);
   expect(empty.settings.mcpServers.map((server) => server.id)).toEqual(["public"]);
+  // The connector accepted with no account is reported, never silently missing.
+  expect(empty.unavailable).toEqual([{ id: "mail", name: "mail", reason: "no_account" }]);
   const legacy = expandMcpAccountRoutes({ settings: original, tools, bindings: null });
   expect(legacy.tools).toEqual(tools);
   expect(legacy.settings).toBe(original);
+  expect(legacy.unavailable).toEqual([]);
+});
+
+test("a selected connector whose sign-in was not admitted for the turn is reported by name", () => {
+  // The person's personal sign-in was not usable in this workspace when the
+  // message was accepted (for example right after a membership change), so the
+  // turn froze no account for it. Its tools are dropped, and the gap says why.
+  const named = settings();
+  named.mcpServers[0]!.name = "Mail";
+  const result = expandMcpAccountRoutes({
+    settings: named,
+    tools: [{ kind: "mcp", id: "mail", optional: true }],
+    bindings: [],
+  });
+  expect(result.tools).toEqual([]);
+  expect(result.unavailable).toEqual([{ id: "mail", name: "Mail", reason: "no_account" }]);
+
+  const host = settings();
+  host.mcpServers[0]!.connectionRef!.authoritySource = "host";
+  expect(
+    expandMcpAccountRoutes({ settings: host, tools: [{ kind: "mcp", id: "mail" }], bindings: [] })
+      .unavailable,
+  ).toEqual([{ id: "mail", name: "mail", reason: "unsupported_sign_in" }]);
+
+  // A connector that is not selected is not a gap.
+  expect(expandMcpAccountRoutes({ settings: named, tools: [], bindings: [] }).unavailable).toEqual(
+    [],
+  );
 });
 
 test("product credential targets follow account narrowing and never translate onto aliases", () => {
@@ -266,6 +296,9 @@ test("provider changes never rebind an accepted route; the stale route is droppe
   });
   expect(onlyStale.tools).toEqual([]);
   expect(onlyStale.settings.mcpServers).toEqual([]);
+  expect(onlyStale.unavailable).toEqual([
+    { id: "mail", name: "mail", reason: "account_setup_changed" },
+  ]);
 
   const mixed = expandMcpAccountRoutes({
     settings: settings(),
@@ -273,6 +306,7 @@ test("provider changes never rebind an accepted route; the stale route is droppe
     bindings: [moved, workspace],
   });
   expect(mixed.tools.map((tool) => tool.id)).toEqual([workspace.serverId]);
+  expect(mixed.unavailable).toEqual([]);
   expect(mixed.settings.mcpServers.map((server) => server.connectionRef)).toEqual([
     workspace.connectionRef,
   ]);

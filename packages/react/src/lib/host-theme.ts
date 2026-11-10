@@ -55,6 +55,7 @@ export const STOCK_COLOR_TOKENS: Readonly<Record<string, readonly [string, strin
   "--og-color-surface-2": ["#383838", "#eeeeee"],
   "--og-color-surface-3": ["#404040", "#e5e5e5"],
   "--og-color-selection": ["#484848", "#e2e2e2"],
+  "--og-color-text-selection": ["#488ceb70", "#3884ff52"],
   "--og-color-border": ["#454545", "#dedede"],
   "--og-color-border-strong": ["#555555", "#bdbdbd"],
   "--og-color-fg": ["#e6e6e6", "#242424"],

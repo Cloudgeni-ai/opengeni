@@ -19,6 +19,7 @@ import {
   listConnectionsMetadata,
   loadWorkspaceModelCatalogInputs,
   getOrganizationModelProviderCatalogForWorkspace,
+  listOrganizationCompatibleEndpointsForWorkspace,
   listWorkspaceProviderCustomModelsByKind,
   listOrganizationModelProviderCustomModelsForWorkspace,
   listWorkspaceProviderCustomModels,
@@ -324,11 +325,15 @@ test("the public catalog keeps existing readers and filters in one scope with no
       ...input,
       providerKinds: [...providerKinds, "openai", "azure_openai"],
     }),
+    organizationCompatibleEndpoints: await listOrganizationCompatibleEndpointsForWorkspace(
+      client.db,
+      scope,
+    ),
   }));
   const [batched, batchedTransactions] = await transactionsDuring(() =>
     loadWorkspaceModelCatalogInputs(client.db, input),
   );
-  expect(originalTransactions).toBe(3);
+  expect(originalTransactions).toBe(4);
   expect(batchedTransactions).toBe(1);
   expect(batched).toEqual(original);
   expect(JSON.stringify(batched)).not.toContain("fixture-ciphertext-not-a-key");

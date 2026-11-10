@@ -3565,6 +3565,49 @@ describe("BrowserViewer", () => {
     await rendered.unmount();
   });
 
+  test("explains a browser kept on the machine its chat moved away from", async () => {
+    const kept = {
+      ...browserSession(),
+      placement: {
+        kind: "connected_machine" as const,
+        sandboxId: SANDBOX_GROUP_ID,
+      },
+    };
+    const client = fakeClient({
+      listBrowserSessions: async () => ({ revision: 1, sessions: [kept] }),
+      getBrowserSession: async () => kept,
+      listBrowserTargets: async () => {
+        throw new OpenGeniApiError(
+          409,
+          JSON.stringify({
+            error: {
+              status: 409,
+              code: "conflict",
+              message: `This browser runs on Connected Machine ${SANDBOX_GROUP_ID}, and this task now runs on another machine.`,
+              retryable: false,
+              outcomeUnknown: false,
+              details: {
+                interactionResource: "browser_session",
+                interactionFailureCode: "source_placement_elsewhere",
+                connectedSandboxId: SANDBOX_GROUP_ID,
+              },
+            },
+          }),
+        );
+      },
+    });
+
+    const rendered = await renderComponent(
+      <BrowserViewer client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
+    );
+    await flush(120);
+    expect(rendered.container.textContent).toContain(
+      "This chat is working on another computer right now.",
+    );
+    expect(rendered.container.textContent).not.toContain(SANDBOX_GROUP_ID);
+    await rendered.unmount();
+  });
+
   test.each([false, true])(
     "explains the task's lost browser with live peers=%s",
     async (withPeer) => {

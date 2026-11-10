@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, spyOn, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -56,7 +57,7 @@ function Harness({
   organizationId = "org",
   enabled = true,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId?: string;
   enabled?: boolean;
 }) {
@@ -90,7 +91,7 @@ test("organization reads deduplicate across readers and stay fresh for five minu
       models++;
       return { models: [model("first")] };
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const retain = retainSharedQueries(client);
   try {
     await act(async () =>
@@ -131,12 +132,12 @@ test("disabled reads, clients and organization identities do not share data", as
       return connection();
     },
     listOrganizationProviderCustomModels: async (org: string) => ({ models: [model(org)] }),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const pending = deferred<OrganizationModelProviderConnection>();
   const second = {
     getOrganizationModelProviderConnection: () => pending.promise,
     listOrganizationProviderCustomModels: async () => ({ models: [model("second-client")] }),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   await act(async () => root.render(<Harness client={first} enabled={false} />));
   expect(reads).toBe(0);
   await act(async () => root.render(<Harness client={first} />));
@@ -171,7 +172,7 @@ test("connection and custom-model mutations update readers and invalidate retain
     deleteOrganizationProviderCustomModel: async (_org: string, _kind: string, id: string) => {
       models = models.filter((item) => item.id !== id);
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const retain = retainSharedQueries(client);
   try {
     await act(async () => root.render(<Harness client={client} />));
@@ -207,7 +208,7 @@ test("a pre-clear mutation writer cannot restore an old connection or model", as
     listOrganizationProviderCustomModels: async () => (cleared ? noModels.promise : { models: [] }),
     upsertOrganizationModelProviderConnection: () => saved.promise,
     createOrganizationProviderCustomModel: () => added.promise,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   await act(async () => root.render(<Harness client={client} />));
   let saving!: Promise<boolean>, adding!: Promise<void>;
   await act(async () => {
@@ -245,7 +246,7 @@ test("a refused re-read drops cached connection and custom models", async () => 
       read();
       return { models: [model("private")] };
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   await act(async () => root.render(<Harness client={client} />));
   refused = true;
   await act(async () => invalidateSharedQueries(client, ["model-settings"]));

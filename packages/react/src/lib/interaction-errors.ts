@@ -31,3 +31,16 @@ export function isSourcePlacementChangedError(
     error.details?.interactionLifecycle === "lost"
   );
 }
+
+/** The chat now runs on another machine; the browser or Desktop is kept on its own. */
+export function isSourcePlacementElsewhereError(
+  error: unknown,
+  resource: "browser_session" | "computer_session",
+): error is OpenGeniApiError {
+  return (
+    isNonRetryableInteractionError(error) &&
+    error.status === 409 &&
+    error.details?.interactionResource === resource &&
+    error.details?.interactionFailureCode === "source_placement_elsewhere"
+  );
+}

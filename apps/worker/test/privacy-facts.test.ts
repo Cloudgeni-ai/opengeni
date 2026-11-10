@@ -110,21 +110,21 @@ describe("Opengeni's own storage claims in the table", () => {
     );
     expect(codex.store).toBe(false);
     expect(PROVIDER_DATA_POLICIES.codex_subscription.opengeni).toContain(
-      "Opengeni asks OpenAI not to store responses",
+      "Requests ask OpenAI not to store responses",
     );
     // Main chat turns on Azure and the OpenAI platform send store:false
     // (packages/runtime/test/responses-store.test.ts).
     expect(PROVIDER_DATA_POLICIES.openai_api.opengeni).toContain(
-      "Opengeni asks OpenAI not to store Responses API response data for chat turns (store: false)",
+      "Chat turns ask OpenAI not to store Responses API response data (store: false)",
     );
     expect(PROVIDER_DATA_POLICIES.azure_openai.opengeni).toContain(
-      "Opengeni asks Azure not to store Responses API response data for chat turns (store: false)",
+      "Chat turns ask Azure not to store Responses API response data (store: false)",
     );
     expect(PROVIDER_DATA_POLICIES.vercel_ai_gateway.opengeni ?? "").not.toContain("store");
     // Statements about Opengeni's own requests live only in `opengeni`.
     for (const policy of Object.values(PROVIDER_DATA_POLICIES)) {
       expect(`${policy.training} ${policy.retention} ${policy.location}`).not.toMatch(
-        /Opengeni (does not|asks)/,
+        /\b(Chat turns|Requests) ask\b|No inference region is set/u,
       );
     }
   });
@@ -136,7 +136,7 @@ describe("Opengeni's own storage claims in the table", () => {
       deployment: DEPLOYMENT,
     });
     expect(direct).toContain(
-      "- Opengeni's requests: Opengeni asks OpenAI not to store Responses API response data for chat turns (store: false)",
+      "- Request settings: Chat turns ask OpenAI not to store Responses API response data (store: false)",
     );
     const gateway = renderPrivacyFacts({
       route: route({ baseUrl: "https://ai-gateway.vercel.sh/v1", gatewayOnly: ["openai"] }),
@@ -144,39 +144,35 @@ describe("Opengeni's own storage claims in the table", () => {
       deployment: DEPLOYMENT,
     });
     expect(gateway).toContain("Upstream provider behind the gateway");
-    expect(gateway).not.toContain("Opengeni's requests:");
+    expect(gateway).not.toContain("Request settings:");
   });
 });
 
 describe("the store:false line follows the runtime's routes", () => {
   const kept =
-    "- Opengeni's requests: Responses API storage is not turned off for every request on this route.";
+    "- Request settings: Responses API storage is not turned off for every request on this route.";
   const builtin = (baseUrl: string | null, wireProfile = "openai"): PrivacyFactsRoute => {
     const value = route({ baseUrl, wireProfile });
     return { ...value, provider: { ...value.provider!, builtin: true } };
   };
   test.each([
-    [
-      "workspace OpenAI key",
-      route({ kind: "direct-openai-workspace" }),
-      "asks OpenAI not to store",
-    ],
+    ["workspace OpenAI key", route({ kind: "direct-openai-workspace" }), "ask OpenAI not to store"],
     [
       "organization OpenAI key",
       route({ kind: "direct-openai-organization" }),
-      "asks OpenAI not to store",
+      "ask OpenAI not to store",
     ],
-    ["built-in OpenAI, default endpoint", builtin(null), "asks OpenAI not to store"],
+    ["built-in OpenAI, default endpoint", builtin(null), "ask OpenAI not to store"],
     [
       "built-in OpenAI on api.openai.com",
       builtin("https://api.openai.com/v1"),
-      "asks OpenAI not to store",
+      "ask OpenAI not to store",
     ],
-    ["built-in Azure", builtin(AZURE_NEU, "azure-openai"), "asks Azure not to store"],
+    ["built-in Azure", builtin(AZURE_NEU, "azure-openai"), "ask Azure not to store"],
     [
       "workspace Azure key",
       route({ kind: "direct-azure-workspace", wireProfile: "azure-openai", baseUrl: AZURE_NEU }),
-      "asks Azure not to store",
+      "ask Azure not to store",
     ],
     [
       "operator registry provider on api.openai.com",
@@ -201,7 +197,7 @@ describe("the store:false line follows the runtime's routes", () => {
       live: LIVE_OFF,
       deployment: DEPLOYMENT,
     });
-    expect(chatApi).not.toContain("Opengeni's requests:");
+    expect(chatApi).not.toContain("Request settings:");
   });
 });
 
@@ -416,7 +412,7 @@ describe("renderPrivacyFacts", () => {
     const days = COMPUTER_SCREENSHOT_RETENTION_MS / 86_400_000;
     expect(Number.isInteger(days)).toBe(true);
     expect(text).toContain(`are deleted ${days} days after they are stored`);
-    expect(text).toContain("Opengeni does not delete them by age.");
+    expect(text).toContain("they are not deleted by age.");
     // The departing-member rule is admin-only; the tool names where it lives.
     expect(text).toContain("an organization admin's setting in organization settings decides");
     expect(text).not.toMatch(/deleted \d+ days after they leave/u);
@@ -468,7 +464,7 @@ describe("renderPrivacyFacts", () => {
       },
     });
     expect(text).toContain("Trains on the data: Unknown.");
-    expect(text).toContain("Sources: none; this provider is not in Opengeni's reviewed table.");
+    expect(text).toContain("Sources: none; this provider is not in the reviewed provider table.");
     expect(text).toContain("Paid through: Unknown.");
     expect(text).toContain("EU-only: unknown (could not be read).");
     expect(text).toContain("Privacy policy: not configured on this deployment");
@@ -627,5 +623,45 @@ describe("privacy_facts tool", () => {
     const text = (result.content[0] as { text: string }).text;
     expect(text).toContain("Provider: OpenAI API");
     await expect(definition.execute({ x: 1 }, {} as never)).rejects.toThrow("accepts no arguments");
+  });
+});
+
+describe("privacy facts name no product", () => {
+  // A host names its platform through its own identity or instructions; the
+  // facts themselves say "this deployment" so the agent never repeats a
+  // product name it was not given.
+  test("for every route kind, while still stating every fact", () => {
+    const routes: PrivacyFactsRoute[] = [
+      route({ wireProfile: "azure-openai", baseUrl: AZURE_NEU }),
+      route({
+        kind: "direct-openai-workspace",
+        credentialSource: { kind: "workspace_connection" },
+      }),
+      route({ baseUrl: "https://api.openai.com/v1" }),
+      route({
+        kind: "codex-subscription",
+        credentialSource: { kind: "connected_subscription", provider: "codex" },
+      }),
+      route({ kind: "anthropic-api", api: "anthropic-messages" }),
+      route({ kind: "vercel-gateway-default", gatewayOnly: ["openai"] }),
+      route({ kind: "vercel-gateway-default" }),
+      route({ kind: "direct-compatible-workspace", credentialSource: null }),
+    ];
+    for (const value of routes) {
+      const text = renderPrivacyFacts({ route: value, live: LIVE_OFF, deployment: DEPLOYMENT });
+      expect({ kind: value.provider?.kind, named: text.match(/Opengeni/gu) }).toEqual({
+        kind: value.provider?.kind,
+        named: null,
+      });
+      expect(text).toContain("Privacy facts for this chat, from this deployment's configuration.");
+      expect(text).toContain("This deployment and workspace:");
+      expect(text).toContain("- The software running this deployment does not train models");
+    }
+    expect(
+      renderPrivacyFacts({ route: route({}), live: LIVE_OFF, deployment: DEPLOYMENT }),
+    ).toContain("Paid through: This deployment's own account with the provider.");
+    for (const policy of Object.values(PROVIDER_DATA_POLICIES)) {
+      expect(JSON.stringify(policy)).not.toMatch(/Opengeni/u);
+    }
   });
 });

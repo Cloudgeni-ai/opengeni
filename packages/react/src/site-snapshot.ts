@@ -3,6 +3,7 @@ import type {
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 
 export type SiteDisplayContent = Pick<
   WorkspaceArtifactContentResponse,
@@ -11,10 +12,10 @@ export type SiteDisplayContent = Pick<
 
 /** The reads a Site snapshot needs. */
 export type SiteSnapshotReadClient = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   "getWorkspaceArtifact" | "getWorkspaceArtifactHtml"
 > &
-  Partial<Pick<OpenGeniClient, "getWorkspaceArtifactContent">>;
+  Partial<Pick<ChatClient<OpenGeniClient>, "getWorkspaceArtifactContent">>;
 
 // Hermes (React Native) has no structuredClone; snapshots are plain JSON.
 const clone = <T>(value: T): T =>

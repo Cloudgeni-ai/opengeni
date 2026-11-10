@@ -283,7 +283,15 @@ metadata. `install.sh` gets the host its certificate from the service
 instance's identity token, for `control_url`, and the service issues a
 week's certificate for that name; a daily timer renews it when fewer than
 four days are left, with a new token, so a host whose certificate expired
-gets a new one all the same. Terraform sets the group's first size; the service sizes it
+gets a new one all the same. A host reset during or just after its
+install (as a group update may do) can come back with what the install
+wrote in place but empty, so neither script takes a step as done because
+a file is there: at every boot the startup script checks the unpacked
+bundle whole against the `SHA256SUMS` it came with and fetches it again
+when it is not, and `install.sh` compares each installed file and unit
+with the bundle's or its pin and writes again what differs. Both write
+each file to a temporary name, flushed to the disk before its rename, so
+the next boot repairs the host with no hand work. Terraform sets the group's first size; the service sizes it
 from then on. The group has no auto-healing (the service decides when a
 host is lost and fences it), and a new template reaches hosts as they are
 replaced, or, when it changes only their metadata (such as the bundle),
@@ -335,9 +343,10 @@ release under `/opt/compute/releases/<version>` behind
 `/opt/compute/current`, once its `compute-host` has run on this host (a
 binary that cannot, say one built for another C library, is refused
 before anything switches to it); downloads Firecracker, its jailer and the guest
-kernel that `pins.env` names, checking each SHA-256; formats and mounts the
-state volume at `/var/lib/compute` the first time and records its
-filesystem UUID; builds the base image from `COMPUTE_BASE_IMAGE_REF`; and
+kernel that `pins.env` names, checking each SHA-256; mounts the state
+volume at `/var/lib/compute` the first time and records its filesystem
+UUID, in `/etc/compute/state-volume.uuid` and on the volume itself
+(`.compute-state-volume`); builds the base image from `COMPUTE_BASE_IMAGE_REF`; and
 installs three units:
 
 - `compute-host-setup.service` applies the kernel settings at every boot:
@@ -573,9 +582,19 @@ to hosts that offer them; other pools' teams reach none.
   run. Meanwhile their wakes retry and new sandboxes go elsewhere. Then
   the service fences it (on GCP it resets the
   instance, or finds it stopped or gone, or restarted since: see below),
-  then clears its sandboxes'
-  owner with a raised epoch, and each wakes on another host from its
-  latest archived copy on its next request. It boots from that copy's
+  then gives up on it. Its sandboxes stay its own and wait for it
+  (ADR 32): their wakes fail with `unavailable`, saying the host stopped
+  answering, and `GET /v1/sandboxes/<id>` shows `waiting_for`. A host that
+  comes back keeps all of them, newer writes and all. Only once the host
+  is declared gone (its group found its instance deleted, or an operator
+  calls `POST /v1/hosts/<name>/gone`, which answers each sandbox that goes
+  on and when its stored copy was saved) are their owners cleared with a
+  raised epoch, and each wakes on another host from its
+  latest archived copy on its next request. Declare a host gone only once
+  its disks are known lost, or when getting the sandboxes back now matters
+  more than what they wrote since their copies. Each such sandbox then shows
+  `restored`, with a plain `notice` saying what point in time it went back
+  to; its wake's answer carries the same. It boots from that copy's
   files: its programs end and start afresh, and what it wrote since the
   copy is lost, which is why sandboxes archive soon after they go idle
   and are checkpointed while they run. Its memory is not brought back
@@ -583,7 +602,13 @@ to hosts that offer them; other pools' teams reach none.
   drain or move hands the latest state off, memory and all. The adopting
   host raises the `programs_lost` alarm for each sandbox whose memory it
   set aside, as a host does for a VM that died. Nothing has to be done by
-  hand, except replacing the machine where no group does it.
+  hand, except declaring a host gone that will not come back, and
+  replacing the machine where no group does it. A host declared gone
+  that comes back after all sets aside each copy it would otherwise
+  drop: the directory moves, whole, to `vm/aside/<id>-e<epoch>-<ms>`
+  under its state root, and the host logs an error naming it. Copy out
+  what is needed (its disk image holds the files), then delete it;
+  nothing deletes it otherwise.
   A GCP host whose machine restarted (its watchdog reset it, or it
   crashed) is given up on as soon as its lease lapses, with no second
   reset and no wait: its agent writes the machine's boot to the
@@ -816,6 +841,19 @@ before users move to compute from Modal:
 
 ## Storage
 
+- **A state volume is formatted only when it is blank.** With
+  `--state-device`, `install.sh` keeps a file system it finds on the
+  device: a host whose boot disk was rebuilt (a cloud restart that
+  recreates the boot disk from a newer image, losing
+  `/etc/compute/state-volume.uuid` and the mount entry) mounts its state
+  volume again, sandboxes and all, and records it anew. It formats only a
+  device with nothing on it, and refuses one with a file system holding
+  other files, or with anything else (a partition table, swap, an array
+  member), leaving it as it is. To start a host over on such a device,
+  losing what it holds, pass `--reformat-state-device DEV` instead, with
+  `/var/lib/compute` unmounted. The Google Cloud startup script likewise
+  assembles striped local SSDs that already carry an array instead of
+  creating one over them.
 - **Mount the state volume before the agent starts.** The agent creates its
   state root if the parent directory exists, so an unmounted volume looks
   like an empty host and the agent would start keeping new records on the
@@ -985,6 +1023,31 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     `observability.prometheusRule.enabled`), scoping each host to its
     release through the leader's `compute_fleet_host_info`, and the
     **Opengeni · Compute** dashboard shows them.
+- **Distinguish booking headroom from filesystem space.**
+  `compute_fleet_host_disk_booking_headroom_bytes` is what more wakes may book after
+  subtracting worst-case sandbox growth and the host's reserve from available
+  space, not the filesystem's free bytes. Placement also counts
+  `compute_fleet_host_disk_reclaimable_bytes`: saved idle copies and unused
+  caches it can safely release. Both remain useful capacity diagnostics.
+  A small unbooked fraction on one host does not prove a full filesystem or
+  failed fleet placement, so it does not alert by itself.
+  `OpenGeniComputeNoCapacity` still alerts on sustained actual fleet refusals;
+  host alarms and unhealthy-sandbox alerts remain.
+  `compute_fleet_host_disk_available_bytes` measures the state filesystem's
+  available bytes before bookings and reserve. `OpenGeniComputeHostDiskLow`
+  alerts when this falls below 10% of that filesystem for 15 minutes.
+  Monitor any separate backing filesystem independently: this reading covers
+  the state volume only.
+  Total filesystem size is part of the host description sampled at agent
+  startup. Restart the host agent after resizing its state filesystem so
+  the percentage denominator and advertised capacity reflect the new size;
+  an online resize alone does not refresh that description.
+  Upgrade the control service, host bundles, chart and dashboard together.
+  The former `compute_fleet_host_disk_free_bytes` metric is renamed to booking
+  headroom; update custom queries to the explicit new name. Older hosts omit
+  the new filesystem reading, so no physical-space series or disk alert exists
+  for them until upgraded. Missing is unknown; a reported zero is a full disk.
+  The wire field `disk_free_mib` retains its booking meaning for compatibility.
 - **Run a collector next to each host.** Pass `--otlp-endpoint
   http://127.0.0.1:4318` to send events as OTLP log records and metrics
   every ten seconds (`--otlp-metrics-every`); add `--otlp-header
@@ -1048,8 +1111,11 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     sandbox on a later try`); `not recovered` alone is not tried again.
     While its VM may still run, a blocked sandbox holds its full size on
     the host, and a host the service gave up does not register again
-    while anything is blocked. Each round of tries holds the agent up to
-    the two seconds a VMM is given to answer.
+    while anything is blocked, except sandboxes whose VMs are held frozen
+    (`not recovered while its VM is held frozen`): it lists those, and
+    the service's rulings end or keep them before the guard thaws them.
+    Each round of tries holds the agent up to the two seconds a VMM is
+    given to answer.
   - any increase of `compute.export.dropped`: the collector is slow, away
     or refusing; events are still in the journal.
   - `compute.memory.stalled` above zero in its `severe` bucket (40 % and
@@ -1092,6 +1158,20 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   request, or stalling, wants a larger request. A sandbox that only stalls
   itself is never shrunk for it: the severe-stall alert names the host,
   and the sandbox summaries there show which one.
+- **Disk relief** ([ADR 30](adr/0030-disk-relief-for-admission.md)): what
+  a host frees for a create, adopt or wake without losing anything, idle
+  sandboxes' local copies that object storage holds and templates and
+  cached images nothing uses, is in its status (`disk.reclaimable`, bytes)
+  and its lease report (`disk_reclaimable_mib`), which the leader reports
+  as `compute_fleet_host_disk_reclaimable_bytes` and placement counts as
+  free disk. Each thing that goes is a `compute.disk.freed` event with its
+  kind (`copy`, `template` or `image`), the bytes it was measured to free
+  (`compute.disk.bytes`, a lower bound, 0 if never measured) and why
+  (`compute.disk.reason`): `relief` for room something booked, `unused`
+  for the week rule, `sleep` for a sandbox's own sleep policy. Many
+  `relief` events say the host's disk is too small for what it runs, and
+  templates removed that way are built again by the next create of their
+  shape.
 - **Find a slow sandbox** by querying `compute.step` and `compute.request`
   events for its `compute.sandbox.id`. Steps carry time per phase, bytes,
   cause and the host-side pressure the sandbox saw since its previous
@@ -1439,6 +1519,15 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
 - **Busy is busy.** A sandbox that keeps computing stays awake, whether it
   builds code or mines coins. Sleep policy does not decide who pays: usage
   for billing and account budgets belongs to the layer above.
+- **Local disk holds caches, which give way.** Templates (about a
+  sandbox's disk each, more with ready sandboxes), cached images and the
+  local copies of idle archived sandboxes stay on a host's state volume
+  until a create, adopt or wake needs the room, when the least recently
+  used go first ([ADR 30](adr/0030-disk-relief-for-admission.md)), or until
+  a week unused. Size the volume for what runs and wakes at once, with
+  room for the templates of the shapes in use; a volume that only fits
+  with relief keeps rebuilding templates and fetching images and copies
+  back.
 - **Certificates cost nothing.** The hosts' authority is a key the service
   holds; no managed certificate authority is billed.
 - **Sharing between customers.** Identical chunks are shared within a store

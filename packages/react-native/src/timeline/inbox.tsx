@@ -7,6 +7,7 @@ import {
   parseNotificationText,
   type NotificationSpan,
 } from "@opengeni/react/timeline-model";
+import type { ChatClient } from "@opengeni/sdk";
 import type { InboxItem, ListInboxResponse, OpenGeniClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -31,7 +32,7 @@ import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 
 export type NativeInboxClient = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   | "listInbox"
   | "updateInboxItem"
   | "sendApprovalDecision"

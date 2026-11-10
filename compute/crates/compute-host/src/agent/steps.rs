@@ -108,6 +108,8 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             }
             Event::ImageSized { image, length } => self.image_sized(image, length),
             Event::ImageFetched { image, result } => self.fetch_ended(image, &result),
+            Event::ReliefMeasured(measured) => self.relief_measured(*measured),
+            Event::CacheGone { cache, removed } => self.cache_gone(cache, removed),
             Event::Claimed {
                 id,
                 config,
@@ -325,6 +327,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
             }
             Action::Discard { sandbox } => self.discard_spare(Id(sandbox)),
+            Action::RemoveCache { cache } => self.remove_cache(cache),
             Action::Shrink {
                 sandbox,
                 free,
@@ -333,6 +336,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 cause,
             } => self.shrink(Id(sandbox), free, keep, request, cause),
             Action::EndForMemory { sandbox, cause } => self.end_for_memory(Id(sandbox), cause),
+            Action::EndForRestart { sandbox } => self.end_for_restart(Id(sandbox)),
             Action::Bound { sandbox, low, high } => {
                 if let Some(live) = self.slots.get(&sandbox).and_then(|slot| slot.vm.as_ref())
                     && let Err(error) = self.engine.bound_memory(&live.vm, low, high)
@@ -859,7 +863,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             && self.slots.contains_key(&id.0)
             && self.records.get(id).is_some_and(|record| record.handed_off);
         let remove = dropped.then_some(Input::Remove { sandbox: id.0 });
+        let step = finished_step.as_ref().map(|running| running.step);
+        let gave_up = self.gave_up_copy(id.0, step, outcome);
         self.inputs(std::iter::once(finished).chain(activity).chain(remove));
+        if let Some(relieved) = gave_up {
+            self.copy_freed(id.0, relieved);
+        }
         if let Some(running) = finished_step {
             self.step_event(id, &running, outcome, &mut report);
         }

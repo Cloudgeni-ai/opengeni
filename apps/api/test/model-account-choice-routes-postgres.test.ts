@@ -565,8 +565,6 @@ describe.skipIf(!realDb)("model-account choice routes", () => {
         values (${who.accountId}, ${id}, ${admin.json(quota)}, 1, 4, ${observedAt})`;
       return id;
     }
-    await admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${owner.accountId}, 'codex', true) on conflict (account_id, provider) do update set enabled = true`;
     const poolId = await connection(owner, "Shared cached", false);
     const unknownId = await connection(owner, "Shared unknown", false, false);
     const mineId = await connection(owner, "Owner personal cached", true);

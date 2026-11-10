@@ -3,11 +3,7 @@
 // GET .../organization-machines and GET .../organization-rigs, which list
 // every one wherever it works.
 
-import type {
-  OrganizationComputeReach,
-  OrganizationComputeReachResponse,
-  OrganizationComputeSummary,
-} from "@opengeni/contracts";
+import type { OrganizationComputeReachResponse } from "@opengeni/contracts";
 import type { OrganizationComputeReachUpdate } from "@opengeni/db";
 import {
   authorizationHoldsOrganizationAdministration,
@@ -70,34 +66,6 @@ export function requireOrganizationComputeLister(
       message: `only a person, or an agent acting as them, lists every organization ${what}`,
     });
   }
-}
-
-/**
- * The organization ones among a workspace's list, for a server whose
- * organization-wide list is not granted yet (migration 1224): the ones that
- * work in that workspace.
- */
-export function organizationComputeHere(
-  items: readonly {
-    id: string;
-    name: string;
-    scope: string;
-    sandboxId?: string | null | undefined;
-    reach?: OrganizationComputeReach | null | undefined;
-  }[],
-): OrganizationComputeSummary[] {
-  return items.flatMap((item) =>
-    item.scope === "organization" && item.reach
-      ? [
-          {
-            id: item.id,
-            name: item.name,
-            ...(item.sandboxId !== undefined ? { sandboxId: item.sandboxId } : {}),
-            reach: item.reach,
-          },
-        ]
-      : [],
-  );
 }
 
 export function organizationComputeReachResponse(

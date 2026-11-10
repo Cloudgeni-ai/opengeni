@@ -21,7 +21,8 @@ import {
   interactivePreviewKind,
   type InteractivePreviewKind,
 } from "@opengeni/react/native-previews";
-import { prepareMathMarkdown } from "@opengeni/react/markdown-math";
+import { MAX_MARKDOWN_LENGTH, prepareBoundedMarkdown } from "./markdown-limit";
+import { PlainTextMessage } from "./plain-text-message";
 import { Icon } from "./icon";
 import { isStandaloneLinkGroup, soleTextGroupOf } from "./markdown-standalone-links";
 import { DisplayMath, InlineMath } from "./markdown-math";
@@ -772,7 +773,7 @@ function TrimmedMarkdown({
   media: MarkdownMediaOptions & MarkdownLinkOptions;
 }) {
   const theme = useNativeTimelineTheme();
-  const math = useMemo(() => prepareMathMarkdown(text), [text]);
+  const math = useMemo(() => prepareBoundedMarkdown(text), [text]);
   const styles = useMemo(() => {
     const base = webMarkdownStyles(theme, tone);
     return textStyle ? { ...base, body: { ...base.body, ...textStyle } } : base;
@@ -781,12 +782,13 @@ function TrimmedMarkdown({
   // Previews and interactive answers both need to know whether the last fence is still open.
   const openTail = useMemo(
     () =>
-      media.renderInteractiveBlock || text.includes(INTERACTIVE_ANSWER_FENCE)
+      math && (media.renderInteractiveBlock || text.includes(INTERACTIVE_ANSWER_FENCE))
         ? trailingOpenFence(text)
         : null,
-    [media.renderInteractiveBlock, text],
+    [math, media.renderInteractiveBlock, text],
   );
   const fenceState = useMemo(() => ({ openTail, streaming }), [openTail, streaming]);
+  if (!math) return <PlainTextMessage text={text} style={styles.body!} />;
   return (
     <View style={{ marginBottom: -10 }}>
       <FenceStateContext.Provider value={fenceState}>
@@ -827,7 +829,7 @@ export function createWebMarkdownRenderer(
     renderLink: options.renderLink,
   };
   return (text, { tone, streaming, textStyle }): ReactNode =>
-    text.trim() ? (
+    text.length > MAX_MARKDOWN_LENGTH || text.trim() ? (
       <TrimmedMarkdown
         text={text}
         tone={tone}

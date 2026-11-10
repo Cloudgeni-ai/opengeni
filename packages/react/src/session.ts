@@ -82,6 +82,19 @@ export type {
   UseFileAttachmentsOptions,
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
+export {
+  isStoredImage,
+  readStoredFile,
+  readStoredFilePreviewUrl,
+  useStoredFilePreview,
+  useStoredFiles,
+} from "./stored-file-preview";
+export type {
+  StoredFileClientLike,
+  StoredFilePreview,
+  StoredFileSource,
+  StoredFiles,
+} from "./stored-file-preview";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
@@ -107,6 +120,7 @@ export type {
 } from "./hooks/use-session-lineage";
 export { useSessionControl } from "./hooks/use-session-control";
 export type {
+  ApprovalDecisionOptions,
   UseSessionControlOptions,
   UseSessionControlResult,
 } from "./hooks/use-session-control";
@@ -135,6 +149,7 @@ export type {
 } from "./hooks/use-human-input";
 
 export {
+  automationRunOutcomesOnly,
   buildTimeline,
   creditExhaustedFromEvents,
   creditRefusalFromEvents,
@@ -186,6 +201,7 @@ export type {
 export { useSessionStart } from "./hooks/use-session-start";
 export type { UseSessionStartOptions, UseSessionStartResult } from "./hooks/use-session-start";
 export {
+  allowMachineForChat,
   admissionControlNeedsRefresh,
   admissionRecheckControl,
   currentSessionMachineAccess,
@@ -198,11 +214,14 @@ export {
   sessionAdmissionApprovedElsewhere,
   sessionAdmissionApprovedElsewhereCopy,
   sessionAdmissionCopy,
+  sessionAdmissionMachineAccessCopy,
   sessionAdmissionMachineChangedCopy,
   sessionAdmissionNeedsDifferentMachine,
+  sessionAdmissionNeedsMachineAccess,
   sessionAdmissionReason,
 } from "./session-admission-model";
 export type {
+  AllowMachineClient,
   ApprovedElsewhereCopy,
   ApprovedMachineChoice,
   PersonalMachineCopy,

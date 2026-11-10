@@ -483,12 +483,17 @@ expect the documented dependency slice plus an `AccessGrant`.
 `submitComposerDraftForRequest` lives in
 `packages/core/src/application/composer-submit.ts`; it is the composer-shaped
 application boundary used by both the stock HTTP route and an in-process host.
-It validates/accepts the exact durable draft revision, appends the event,
-creates or steers the turn, rotates the draft, and returns the native
-`SubmitComposerDraftResponse`. An in-process host may provide
+It validates and accepts the submitted content, appends the event, creates or
+steers the turn, clears the draft if it still holds what was sent, and returns
+the native `SubmitComposerDraftResponse`. Send is never refused because the
+saved draft changed: `expectedDraftRevision` (and `expectedNewSessionDraftRevision`
+on create) is the revision the sender last saw, the basis for that clear. The
+draft is cleared when it is still at that revision or holds exactly the sent
+content; otherwise another device saved something newer, which stays and is
+returned as `draft`. A sender that saw no saved draft names revision 0. Retries
+stay idempotent through `clientEventId`. An in-process host may provide
 `additionalResources`; they join the accepted command, idempotency hash, turn,
-and durable session resource set atomically while the saved actor draft remains
-the exact fence. This avoids a trusted draft PUT solely to add host-authorized
+and durable session resource set atomically. This avoids a trusted draft PUT solely to add host-authorized
 repositories or files. Terminal control lives in
 `packages/core/src/application/session-commands.ts` and uses an explicit
 authenticated command context. Scheduled-task validation/sync helpers live in
@@ -581,6 +586,10 @@ The repositories are removed from the session and its child sessions, each
 recording a `session.resources.removed` event. Matching ignores letter case
 and a trailing `.git`. Removing a repository that is not attached is a no-op,
 so a retry completes a partial removal.
+
+When a person approves an agent's `github_repository_attach` call, the
+repository is added to the session and a `session.resources.added` event
+records it (see [An agent asking for a repository](github-app.md#an-agent-asking-for-a-repository)).
 
 Access through Opengeni ends on the next call: the personal Git broker, the
 GitHub tools and every new Git credential mint check the session's current
@@ -1007,14 +1016,15 @@ from the clone transport URI.
 
 A repository resource may carry `optional: true` to make its materialization
 best effort: when its clone fails (for example the repository is empty, the
-ref no longer exists, or an anonymous remote is unreachable), the clone hook logs a warning, reports the
-mount path in `skippedOptionalRepositories` on the `repository-clone`
-`sandbox.operation.completed` event, and the session continues without it.
-Without the flag a failed clone fails sandbox setup, as before. Opengeni sets
-it only on repositories it attaches on a person's behalf (a Slack task's
-recently used repositories); it grants no access and changes no credential
-routing. An optional clone is bounded to 60 seconds (90 seconds for all
-optional clones of one setup command) when the sandbox has a `timeout` binary,
+ref no longer exists, or an anonymous remote is unreachable), the clone hook
+logs a warning, reports the mount path in `skippedOptionalRepositories` on the
+`repository-clone` `sandbox.operation.completed` event, and the session
+continues without it. Without the flag a failed clone fails sandbox setup, as
+before. Opengeni sets it only on repositories it attaches on a person's behalf
+(a Slack task's repositories from the person's new-chat form); it grants no
+access and changes no credential routing. An optional clone is bounded to 60
+seconds (90 seconds for all optional clones of one setup command) when the
+sandbox has a `timeout` binary,
 so a hung fetch is skipped the same way. Before each turn's strict GitHub App
 allowlist recheck and installation-token mint, the worker also drops, for that
 turn only, an optional GitHub App repository that the workspace allowlist no
@@ -1024,6 +1034,23 @@ them as `skippedOptionalRepositories` on a `sandbox.operation.completed` event
 named `optional-repository-access`. This only removes repositories from the
 turn. A repository without the flag keeps the strict checks and still fails
 the turn when its access is gone.
+
+The clone hook runs again on every turn and never deletes a repository folder
+that may hold work. A folder that another user owns (Git reports "dubious
+ownership", for example after `chown -R` on the chat's workspace machine) is
+added to that machine's global `safe.directory` and kept as it is. A folder that
+is not a readable work tree (a corrupt `.git`, or an interrupted clone), or that
+was cloned for a different `expectedCommitSha` than the repository now has, is
+renamed to the sibling `<mount path>.opengeni-recovered-<UTC yyyymmddThhmmssZ>`
+(with a numeric suffix if that name exists) and a fresh clone takes its place. A
+pinned clone records its commit as `opengeni.materializedCommit` in the
+repository's Git config, so the agent's own commits and branches stay in place
+while the pin is unchanged. Folders cloned before that record count while `HEAD`
+is the pin or built on it. The model is told where the moved copy is, and the
+`repository-clone` `sandbox.operation.completed` event
+lists each move in `recoveredRepositories` as `{ path, movedTo }`
+(workspace-relative). Only an empty folder, Opengeni's own temporary clone, or an
+untouched empty-remote stub is removed.
 
 When upgrading existing sessions that omitted `mountPath`, the new default
 materializes the repository at the host-aware location. A host that must retain
@@ -1296,9 +1323,11 @@ fetch remains behind `guardedMcpFetch` and must honor the supplied Undici
 `dispatcher`; it is not a bypass for destination policy.
 
 Private integration targets are denied by default. A self-hosted operator may
-explicitly enable `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS` for
-trusted internal MCP/OAuth endpoints; local/test already has the narrow
-loopback escape needed by fixtures. Keep credential resolution outside the
+set `OPENGENI_INTEGRATIONS_PRIVATE_NETWORK_ALLOWED_HOSTS` to exact trusted
+hosts, optionally restricted by port; see [private destinations](workspace-integrations.md#trusted-private-network-destinations).
+The older `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS` opens all
+private targets and is not needed for this list. Local/test retains its existing
+private-network escape. Keep credential resolution outside the
 pinned final transport so headers are attached only to the exact request URL
 that the broker audience-checks.
 

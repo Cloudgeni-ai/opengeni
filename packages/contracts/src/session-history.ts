@@ -195,3 +195,11 @@ export function isPresentedSessionToolCall(call: unknown): boolean {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
   return presentedAppActionId((parsed as { id?: unknown }).id) !== undefined;
 }
+
+/**
+ * The reason recorded on the `session.status.changed` and `turn.cancelled`
+ * events when archiving a chat stops its running work. The status those
+ * events carry is the internal `cancelled`; a history reader shows the chat as
+ * archived instead, so a person never reads an archive as a cancellation.
+ */
+export const SESSION_ARCHIVE_STOP_REASON = "Archived";

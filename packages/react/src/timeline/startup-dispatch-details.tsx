@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Session } from "@opengeni/sdk";
+import type { ChatSession as Session } from "@opengeni/sdk";
 import { useOpenGeniText } from "../messages/runtime";
 
 /** Live dispatch diagnostics belong to the current loading area, never history. */

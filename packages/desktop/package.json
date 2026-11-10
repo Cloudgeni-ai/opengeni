@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/desktop",
-  "version": "6.8.0",
+  "version": "6.13.0",
   "description": "Electron kit for Opengeni desktop apps: several accounts on several servers, the server's own web app in a native window, native notifications, deep links, the menu bar item, updates, and one-click connection of the computer it runs on.",
   "license": "Apache-2.0",
   "repository": {
@@ -77,7 +77,7 @@
     "@opengeni/sdk": "workspace:*"
   },
   "devDependencies": {
-    "electron": "44.7.2",
+    "electron": "44.10.1",
     "electron-updater": "6.8.9",
     "tsup": "^8.5.0",
     "typescript": "7.0.2"

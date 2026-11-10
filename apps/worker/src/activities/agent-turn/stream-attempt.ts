@@ -13,11 +13,15 @@ import {
   sessionTurnFinalReplyFacts,
   sessionTurnHasFinalReplyNudge,
   getSessionEvent,
+  deliverPendingSandboxRestoreNotice,
   getSandboxRecoveryDiscontinuity,
+  readSandboxReducedSave,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
   listTurnCodemodeApprovals,
+  listTurnGitHubGatewayApprovals,
+  isGitHubGatewayApprovalId,
   recordUsageEvent,
   registerPendingSessionToolCallInTransaction,
   registerPendingSessionToolCall,
@@ -36,6 +40,7 @@ import { handOverWaitToSteer } from "./waiting-steer";
 import { withAppActionApprovalTitle } from "./app-action-confirmation";
 import { withApprovalDisplayTitle } from "./approval-display-title";
 import { startSteerWatch, type SteerWatch } from "./steer-watch";
+import { logContextCompactionFailure, logContextCompactionRequest } from "./compaction-diagnostics";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
@@ -65,13 +70,15 @@ import {
   preemptedResponseCutOffText,
   type SandboxFileDownload,
   type OpenGeniRuntime,
-  secretValueModelInputFilter,
   type GeneratedSessionTitle,
   type HistoryProviderApi,
   type GitCredentialTokenWriterSession,
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
+  queueSandboxSetupNotice,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
   withoutAppendedCommandCompletions,
 } from "@opengeni/runtime";
 import {
@@ -86,9 +93,9 @@ import {
   settleContextCompactionInterruption,
 } from "./compaction-interruption";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
-import { type MintedRunGitCredentials } from "../environment";
+import { type MintedRunGitCredentials, type MintedSandboxCodemodeToken } from "../environment";
 import { withFirstPartyTools } from "../goals";
-import { turnInput } from "../run-input";
+import { reducedWorkspaceSaveNote, turnInput } from "../run-input";
 import { createRuntimeBatcher, currentActivityContext, nextStreamEvent } from "../streaming";
 import type {
   TurnActivityServices as ActivityServices,
@@ -101,11 +108,13 @@ import {
   recordBatchFlush,
   recordContextCompaction,
   recordModelInputTokens,
+  recordModelPreparationPhase,
   recordModelStepPhase,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
   StreamTimingMetrics,
   turnLifecycleMetricsFor,
+  type ModelRequestPreDispatchStage,
 } from "../../observability-metrics";
 import {
   compactRetainedScreenshotHistory,
@@ -122,6 +131,7 @@ import {
   isCompletedGeneratedImageSdkEvent,
 } from "../generated-images";
 import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
+import { githubGatewayApproval, githubGatewayContinuationNote } from "../github-gateway-approvals";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { ToolResultSpill } from "./tool-result-spill";
 import type { WorkspaceMutationOptions } from "./sandbox-runtime";
@@ -164,6 +174,7 @@ import {
   compactionFailureReason,
   safeErrorDiagnostic,
   compactionFailureReasonFromError,
+  compactionFailureProviderMessage,
   compactionFailureTurnEventPayload,
   compactionFirstPreparationEventPayload,
   modelPreparationFailureEventPayload,
@@ -239,7 +250,6 @@ import type {
 } from "./turn-context";
 import { sdkResponseHasMeaningfulOutput } from "./meaningful-output";
 import { subscriptionCoreTurnOf } from "./turn-context";
-import { currentAttemptSecretValues } from "./secret-values";
 import { admitIndependentSessionTitle } from "../independent-session-title";
 import {
   requestIdleCompactionAfterCompletedTurn,
@@ -300,14 +310,17 @@ export type TurnStreamAttemptDeps = {
   ) => Promise<void>;
   attachCodemodeTokenRenewal: (
     tokenSession?: CodemodeTokenWriterSession,
-    initialExpiresAt?: Date,
+    seeded?: MintedSandboxCodemodeToken,
     initialSandbox?: ResumedTurnSandbox,
   ) => Promise<void>;
+  /** Stops Codemode renewal and returns the bearer a managed setup writes next. */
+  prepareCodemodeTokenSeed: () => Promise<MintedSandboxCodemodeToken | undefined>;
+  /** Resolves to the soft failure when the box's own disk refused the files. */
   attachRunCredentialRenewal: (
     credentialSession: RunCredentialCommandSession,
     initialMaterial: NormalizedRunCredentialMaterial | null,
     initialSandbox?: ResumedTurnSandbox,
-  ) => Promise<void>;
+  ) => Promise<SoftSetupFailure | null | void>;
   withProviderRequestContext: <T>(fn: () => Promise<T>) => Promise<T>;
   withSessionTitleProviderRequestContext: <T>(fn: () => Promise<T>) => Promise<T>;
   publishCompactionLiveEvents: (events: SessionEvent[]) => Promise<void>;
@@ -654,12 +667,36 @@ export async function runTurnStreamAttempt(
       // A permanent recovery fact is repeated as a NEW turn-scoped notice. The
       // existing history stays byte-for-byte intact, including after retries;
       // the durable receipt restores the warning after compaction as well.
+      // A verified restore's "restored from an older save" notice whose write
+      // failed after the restore is delivered now, once. Never fails a turn.
+      await deliverPendingSandboxRestoreNotice(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      }).catch((error: unknown) => {
+        // Still pending: a later turn or restore delivers it. The warning
+        // itself must never fail the turn either.
+        try {
+          observability.warn?.("pending restore notice delivery failed", {
+            ...safeErrorDiagnostic(error),
+            origin: "worker",
+          });
+        } catch {
+          // Diagnostics only.
+        }
+        return false;
+      });
       const workspaceRecoveryNote = await getSandboxRecoveryDiscontinuity(
         db,
         input.workspaceId,
         input.sessionId,
         "explicit_notice",
       );
+      // Repeated each turn while the latest save is a reduced one; a turn
+      // never fails because this optional notice could not be read.
+      const reducedSave = await (async () =>
+        await readSandboxReducedSave(db, input.workspaceId, input.sessionId))().catch(() => null);
+      const workspaceSaveNote = reducedSave ? reducedWorkspaceSaveNote(reducedSave) : undefined;
       const prepared = await turnInput(db, runtime, agent, trigger, {
         turnId: activeTurnId,
         fileAuthority: {
@@ -668,6 +705,7 @@ export async function runTurnStreamAttempt(
         },
         recovering: turn.executionGeneration > 1,
         ...(workspaceRecoveryNote ? { workspaceRecoveryNote } : {}),
+        ...(workspaceSaveNote ? { workspaceSaveNote } : {}),
         programmaticApprovalAcknowledged,
         ...(codemodeContinuationNote ? { codemodeContinuationNote } : {}),
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
@@ -915,14 +953,28 @@ export async function runTurnStreamAttempt(
     if (usage.status === "rejected") throw usage.reason;
     creditPolicyRevision = usage.value;
     if (pendingSteer.status === "rejected") throw pendingSteer.reason;
-    if (pendingSteer.value) {
+    // The Steer read ran alongside the slower checks, so the watch may have
+    // seen a Steer committed after it. Such a watch is not proof of a
+    // withdrawn Steer: read again before re-arming it, or the request would
+    // go out unpreemptible and the Steer would wait a whole further step.
+    const steerPending =
+      pendingSteer.value ||
+      (checkSteer &&
+        steerWatch?.signal().aborted === true &&
+        (await hasPendingSteerForTurn(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+        })));
+    if (steerPending) {
       // The request has not left the worker. The SDK finishes the run at
       // this boundary after delivering every event of the completed step.
       steerHandover = true;
       throw new ModelStepHandover("steer");
     }
-    // The watch noticed a Steer that no longer waits (withdrawn, or the
-    // automation run that steered was paused) before this boundary. Listen
+    // The watch noticed a Steer that, read again just now, no longer waits
+    // (withdrawn, or the automation run that steered was paused). Listen
     // again, or every later request would be cut short at once.
     if (checkSteer && steerWatch?.signal().aborted) steerWatch.rearm();
   };
@@ -949,12 +1001,15 @@ export async function runTurnStreamAttempt(
     const modelCallAdmission = createModelCallAdmission({
       signal: runtimeCancellationSignal,
       admit: () => revalidateModelCallAdmission({ yieldToSteer: true }),
-      observe: (phase, durationSeconds) =>
+      observe: (phase, durationSeconds) => {
         recordModelStepPhase(observability, {
           provider: resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai",
           phase,
           durationSeconds,
-        }),
+        });
+        // The settlement wait ended; this model entry's admission begins.
+        if (phase === "settlement_wait") enterModelRequestStage("admission");
+      },
     });
     const responseCreditPolicyRevisions = new Set<number | undefined>();
     const responseCountBeforeStream = modelResponseState.responseCount;
@@ -994,48 +1049,104 @@ export async function runTurnStreamAttempt(
     const streamTiming = new StreamTimingMetrics(observability, {
       provider: streamProvider,
     });
+    // A title or other auxiliary request shares the transport but is never the
+    // main request's preparation.
+    const enterModelRequestStage = (stage: ModelRequestPreDispatchStage) => {
+      if (isAuxiliaryProviderDispatch()) return;
+      streamTiming.enterPreDispatchStage(stage);
+    };
+    eventing.enterModelRequestStage = enterModelRequestStage;
     // Wire fingerprint of the latest main request. The next model entry waits
     // for the previous response's settlement, so the response being settled
     // always belongs to the latest dispatched request (as for streamTiming).
     let latestPromptCacheRequest: Promise<PromptCacheRequestFingerprint | null> | null = null;
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
-    const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
-      await checkpointBeforeProviderDispatch();
+    let fallbackProviderRequestIsStartup = true;
+    const publishFallbackProviderEvents = async (events: Parameters<TurnEventPublisher>[0]) => {
+      if (!fallbackProviderRequestIsStartup && eventing.publishInBackground) {
+        // Follow-up lifecycle receipts are observation, not dispatch authority.
+        // The existing ordered lane joins them at the next awaited append and
+        // at finalization; the history/admission checkpoint still gates fetch.
+        eventing.publishInBackground(events);
+      } else {
+        await eventing.publish!(events);
+      }
+    };
+    const fallbackProviderCompletionEvents = (
+      event: Parameters<typeof sdkResponseHasMeaningfulOutput>[0],
+    ): Parameters<TurnEventPublisher>[0] => {
       if (
         providerPublishesNativeRequestEvents ||
-        eventing.firstModelRequestPreparationRecorded ||
-        eventing.firstModelRequestPreparationStartedAt === null
-      ) {
+        fallbackProviderRequestLifecycleStartedAt === null
+      )
+        return [];
+      return [
+        {
+          type: "agent.model.request",
+          occurredAt: new Date(),
+          payload: {
+            phase: "completed",
+            provider: streamProvider,
+            durationMs: Math.round(
+              Math.max(0, performance.now() - fallbackProviderRequestLifecycleStartedAt),
+            ),
+            turnId: activeTurnId,
+            attemptId: input.attemptId,
+            dispatchId,
+            executionGeneration: attempt.executionGeneration,
+            ...eventing.initialModelWireDispatch.payload({ provider: streamProvider, dispatchId }),
+            ...(subscriptionCoreTurnOf(providerTurn)
+              ? { meaningfulOutput: sdkResponseHasMeaningfulOutput(event) }
+              : {}),
+          },
+        },
+      ];
+    };
+    const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
+      enterModelRequestStage("dispatch_checkpoint");
+      await checkpointBeforeProviderDispatch();
+      if (providerPublishesNativeRequestEvents) {
+        enterModelRequestStage("transport");
         return;
       }
+      enterModelRequestStage("request_audit");
       sandboxState.firstProviderRequestStarted = true;
-      eventing.firstModelRequestPreparationRecorded = true;
-      const preparationDurationMs = Math.max(
-        0,
-        performance.now() - eventing.firstModelRequestPreparationStartedAt,
-      );
-      recordTurnStartupPhase(observability, {
-        phase: "model_request_preparation",
-        provider: turnExecutionPolicy.providerId,
-        backend: activeSandboxBackend ?? groupBoxBackend,
-        outcome: "completed",
-        durationSeconds: preparationDurationMs / 1_000,
-        count: turnTools.length,
-      });
+      fallbackProviderRequestIsStartup = !eventing.firstModelRequestPreparationRecorded;
+      const preparationDurationMs =
+        !eventing.firstModelRequestPreparationRecorded &&
+        eventing.firstModelRequestPreparationStartedAt !== null
+          ? Math.max(0, performance.now() - eventing.firstModelRequestPreparationStartedAt)
+          : null;
+      if (preparationDurationMs !== null) {
+        eventing.firstModelRequestPreparationRecorded = true;
+        recordTurnStartupPhase(observability, {
+          phase: "model_request_preparation",
+          provider: turnExecutionPolicy.providerId,
+          backend: activeSandboxBackend ?? groupBoxBackend,
+          outcome: "completed",
+          durationSeconds: preparationDurationMs / 1_000,
+          count: turnTools.length,
+        });
+      }
       const auditStartedAt = performance.now();
       let auditOutcome: "completed" | "failed" = "completed";
       try {
-        await eventing.publish!([
-          {
-            type: "turn.startup.phase.completed",
-            payload: {
-              phase: "model_preparation",
-              durationMs: Math.round(preparationDurationMs),
-            },
-          },
+        await publishFallbackProviderEvents([
+          ...(preparationDurationMs === null
+            ? []
+            : [
+                {
+                  type: "turn.startup.phase.completed" as const,
+                  payload: {
+                    phase: "model_preparation",
+                    durationMs: Math.round(preparationDurationMs),
+                  },
+                },
+              ]),
           {
             type: "agent.model.request",
+            occurredAt: new Date(),
             payload: {
               phase: "started",
               provider: streamProvider,
@@ -1052,27 +1163,29 @@ export async function runTurnStreamAttempt(
         auditOutcome = "failed";
         throw error;
       } finally {
-        recordTurnStartupPhase(observability, {
-          phase: "model_request_audit",
-          provider: turnExecutionPolicy.providerId,
-          backend: activeSandboxBackend ?? groupBoxBackend,
-          outcome: auditOutcome,
-          durationSeconds: (performance.now() - auditStartedAt) / 1_000,
-          count: turnTools.length,
-        });
+        if (preparationDurationMs !== null) {
+          recordTurnStartupPhase(observability, {
+            phase: "model_request_audit",
+            provider: turnExecutionPolicy.providerId,
+            backend: activeSandboxBackend ?? groupBoxBackend,
+            outcome: auditOutcome,
+            durationSeconds: (performance.now() - auditStartedAt) / 1_000,
+            count: turnTools.length,
+          });
+        }
       }
-      // The required audit itself may have consumed the remaining window.
+      // The required startup audit may have consumed the remaining window.
       // This awaited observer still owns the literal pre-fetch boundary.
       assertProviderOverloadRecoveryActive({
         failureCode: attempt.providerRecoveryPolicyCode,
         providerRecoveryCount: attempt.providerRecoveryCount,
         recoveryStartedAt: attempt.providerRecoveryStartedAt,
       });
+      enterModelRequestStage("transport");
     };
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
     const eagerOwnedSandboxSetup =
       deps.eagerOwnedSandboxSetup ?? createEagerOwnedSandboxSetup(deps);
-    const attemptSecretValues = currentAttemptSecretValues();
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
       // Eager owned sessions must settle the exact platform-setup provider
       // promise before the long model stream starts; otherwise one admission
@@ -1126,7 +1239,12 @@ export async function runTurnStreamAttempt(
           },
           beforeModelRequest: (point) => {
             streamTiming.onModelRequestEntry(point);
-            return modelCallAdmission.beforeModelRequest(point);
+            const admitted = modelCallAdmission.beforeModelRequest(point);
+            // A transport recheck joins the call's admission; only the model
+            // entry's own admission ends before the request is built.
+            return point === "transport"
+              ? admitted
+              : admitted.then(() => enterModelRequestStage("request_build"));
           },
           onModelResponse: (event) => {
             responseCreditPolicyRevisions.add(creditPolicyRevision);
@@ -1135,17 +1253,9 @@ export async function runTurnStreamAttempt(
           ...(steerWatch ? { modelPreemption: () => steerWatch?.signal() } : {}),
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
-          // Final guard: no known secret value reaches the provider, whatever
-          // path brought it into the model input (docs/secrets.md, Masking).
-          ...(attemptSecretValues
-            ? { secretMaskingInputFilter: secretValueModelInputFilter(attemptSecretValues) }
-            : {}),
           // Settled by turn input above; the same for every model call of the run.
           searchRecordForm: searchRecords.form,
-          onModelVisibleContext: async (rawSnapshot) => {
-            const snapshot = attemptSecretValues
-              ? attemptSecretValues.mask(rawSnapshot, "model_context_snapshot")
-              : rawSnapshot;
+          onModelVisibleContext: async (snapshot) => {
             await persistModelContextSnapshot(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -1212,10 +1322,15 @@ export async function runTurnStreamAttempt(
                         const pinnedCredentialSession = sandboxState.setupBoxSession
                           ? (sandboxState.setupBoxSession as RunCredentialCommandSession)
                           : credentialSession;
-                        await attachRunCredentialRenewal(
+                        const softFailure = await attachRunCredentialRenewal(
                           pinnedCredentialSession,
                           initialRunCredentialMaterial,
                         );
+                        // No turn input is left to add to; the notice joins
+                        // the next plain-text tool result.
+                        if (softFailure) {
+                          queueSandboxSetupNotice(agent, softSetupFailureNotice([softFailure]));
+                        }
                       },
                     }
                   : {}),
@@ -1243,16 +1358,12 @@ export async function runTurnStreamAttempt(
               eventing.modelRunSettings,
             ),
           },
-          onModelPreparationPhase: (measurement) => {
-            recordTurnStartupPhase(observability, {
-              phase: `model_prepare_${measurement.phase}`,
+          onModelPreparationPhase: (measurement) =>
+            recordModelPreparationPhase(observability, {
               provider: turnExecutionPolicy.providerId,
               backend: activeSandboxBackend ?? groupBoxBackend,
-              outcome: measurement.outcome,
-              durationSeconds: measurement.durationSeconds,
-              ...(measurement.count === undefined ? {} : { count: measurement.count }),
-            });
-          },
+              measurement,
+            }),
           ...(!providerPublishesNativeRequestEvents
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,
@@ -1383,9 +1494,10 @@ export async function runTurnStreamAttempt(
       if (fallbackProviderRequestStartedAt === null) return;
       const durationMs = Math.max(0, performance.now() - fallbackProviderRequestStartedAt);
       fallbackProviderRequestStartedAt = null;
-      await eventing.publish!([
+      await publishFallbackProviderEvents([
         {
           type: "agent.model.request",
+          occurredAt: new Date(),
           payload: {
             phase: "first_byte",
             provider: streamProvider,
@@ -1417,6 +1529,7 @@ export async function runTurnStreamAttempt(
           openingToolLoadInFlight = isOpeningToolLoadResponse(next.value.data);
         if (!openingToolLoadInFlight) await settleFallbackProviderFirstByte();
         let stableToolCallIdsToClear: string[] | null = null;
+        let stableToolHistoryCommitted = false;
         let newlyDurableToolCallId: string | null = null;
         let completedCurrentToolBatch = false;
         let retainedScreenshotMetadata: RetainedArtifactMetadata | null = null;
@@ -1430,6 +1543,17 @@ export async function runTurnStreamAttempt(
         const generatedImageReceipt = generatedImage
           ? await media.retainNativeGeneratedImage(generatedImage)
           : null;
+        let responseLatencyFailure: unknown;
+        try {
+          assertModelResponseLatencyMode({
+            event: next.value,
+            requested: turnExecutionPolicy.latencyMode,
+            model: turnExecutionPolicy.productModelId,
+            ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
+          });
+        } catch (error) {
+          responseLatencyFailure = error;
+        }
         const responseSettlementStartedAt = performance.now();
         const responseResult = await processModelResponseTerminalEvent({
           creditPolicyRevision,
@@ -1462,6 +1586,20 @@ export async function runTurnStreamAttempt(
           leaseLost: leases.servingLost,
           leaseLostMessage: "Provider credential lease expired during the active turn",
           setLastInputTokens: setLastInputTokensFenced,
+          completionEvents: () => fallbackProviderCompletionEvents(next.value),
+          onCompletionCommitted: () => {
+            fallbackProviderRequestLifecycleStartedAt = null;
+            attempt.providerRecoveryCount = 0;
+          },
+          ...(responseLatencyFailure === undefined
+            ? {
+                checkpoint: (persist) =>
+                  historySink.reconcileConversationTruth({
+                    requireDurable: true,
+                    persist,
+                  }),
+              }
+            : {}),
           contextContributions: eventing.companyBrainContextContributions,
           responseTiming: () => streamTiming.completeResponse(),
           promptCacheRequest: () => {
@@ -1471,12 +1609,7 @@ export async function runTurnStreamAttempt(
           },
           processingResidency: turnProcessingResidency,
         });
-        assertModelResponseLatencyMode({
-          event: next.value,
-          requested: turnExecutionPolicy.latencyMode,
-          model: turnExecutionPolicy.productModelId,
-          ...(resolvedModel?.provider.id ? { providerId: resolvedModel.provider.id } : {}),
-        });
+        if (responseLatencyFailure !== undefined) throw responseLatencyFailure;
         if (responseResult.status === "processed") {
           const responseUsageSettledAt = performance.now();
           recordModelStepPhase(observability, {
@@ -1488,35 +1621,11 @@ export async function runTurnStreamAttempt(
             !providerPublishesNativeRequestEvents &&
             fallbackProviderRequestLifecycleStartedAt !== null
           ) {
-            const durationMs = Math.max(
-              0,
-              performance.now() - fallbackProviderRequestLifecycleStartedAt,
-            );
+            // Usage-bearing responses already committed completion with their
+            // response checkpoint. Providers omitting usage retain an audit.
+            if (!responseResult.usageReported)
+              await publishFallbackProviderEvents(fallbackProviderCompletionEvents(next.value));
             fallbackProviderRequestLifecycleStartedAt = null;
-            await eventing.publish!([
-              {
-                type: "agent.model.request",
-                payload: {
-                  phase: "completed",
-                  provider: streamProvider,
-                  durationMs: Math.round(durationMs),
-                  turnId: activeTurnId,
-                  attemptId: input.attemptId,
-                  dispatchId,
-                  executionGeneration: attempt.executionGeneration,
-                  ...eventing.initialModelWireDispatch.payload({
-                    provider: streamProvider,
-                    dispatchId,
-                  }),
-                  // A core-placed turn reports real work for the shared
-                  // capacity breaker (providers with their own request events
-                  // set it there).
-                  ...(subscriptionCoreTurnOf(providerTurn)
-                    ? { meaningfulOutput: sdkResponseHasMeaningfulOutput(next.value) }
-                    : {}),
-                },
-              },
-            ]);
             attempt.providerRecoveryCount = 0;
           }
           if (attempt.providerRecoveryObservation) {
@@ -1834,9 +1943,9 @@ export async function runTurnStreamAttempt(
           const standaloneStableResult =
             !belongsToCurrentBatch && currentToolBatchCallIds.size === 0;
           if (currentBatchIsStable || standaloneStableResult) {
-            // First commit the exact result with its output event below.
-            // Then persist the SDK's stable complete batch and retire its
-            // proven receipts together, covering both crash boundaries.
+            // The final output commits the stable SDK history and retires the
+            // complete batch in its existing result/event transaction. Partial
+            // parallel batches retain their individual recovery receipts.
             stableToolCallIdsToClear = currentBatchIsStable
               ? [...currentToolBatchCallIds]
               : [completedToolCall.callId];
@@ -1931,7 +2040,24 @@ export async function runTurnStreamAttempt(
               }
             }
             await withMcpCallIdentity((event.payload as { id: string }).id, () =>
-              measureMcpPhase("event_persistence", () => batcher.push(event, checkpoint)),
+              measureMcpPhase("event_persistence", async () => {
+                if (checkpoint && stableToolCallIdsToClear) {
+                  await historySink.reconcileConversationTruth({
+                    requireDurable: true,
+                    completedToolCallIds: stableToolCallIdsToClear,
+                    persist: async (history) => {
+                      await batcher.push(event, async (tx, fence) => {
+                        if (!(await checkpoint(tx, fence))) return false;
+                        return history(tx, fence);
+                      });
+                      return true;
+                    },
+                  });
+                  stableToolHistoryCommitted = true;
+                } else {
+                  await batcher.push(event, checkpoint);
+                }
+              }),
             );
           } else {
             await eventing.batcher.push(event, checkpoint);
@@ -1988,10 +2114,11 @@ export async function runTurnStreamAttempt(
         // duplicate live SDK marker before a long turn accumulates it.
         releaseMcpResultCustomDataFromSdkEvent(durableSdkEvent);
         if (stableToolCallIdsToClear) {
-          await historySink.reconcileConversationTruth({
-            requireDurable: true,
-            completedToolCallIds: stableToolCallIdsToClear,
-          });
+          if (!stableToolHistoryCommitted)
+            await historySink.reconcileConversationTruth({
+              requireDurable: true,
+              completedToolCallIds: stableToolCallIdsToClear,
+            });
           if (completedCurrentToolBatch) {
             currentToolBatchCallIds = new Set<string>();
             currentToolBatchCompletedCallIds = new Set<string>();
@@ -2023,9 +2150,10 @@ export async function runTurnStreamAttempt(
         );
         fallbackProviderRequestStartedAt = null;
         fallbackProviderRequestLifecycleStartedAt = null;
-        await eventing.publish!([
+        await publishFallbackProviderEvents([
           {
             type: "agent.model.request",
+            occurredAt: new Date(),
             payload: {
               phase: "failed",
               provider: streamProvider,
@@ -2237,16 +2365,29 @@ export async function runTurnStreamAttempt(
         });
       }
     }
-    const programmaticPending = (
-      await listTurnCodemodeApprovals(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: activeTurnId,
-      })
-    )
-      .filter((operation) => operation.state === "waiting_for_approval")
-      .map(programmaticApproval);
+    const programmaticPending = [
+      ...(
+        await listTurnCodemodeApprovals(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+        })
+      )
+        .filter((operation) => operation.state === "waiting_for_approval")
+        .map(programmaticApproval),
+      // `gh` and Git requests the personal GitHub gateway held for a decision.
+      ...(
+        await listTurnGitHubGatewayApprovals(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+        })
+      )
+        .filter((request) => request.status === "pending")
+        .map(githubGatewayApproval),
+    ];
     if (eventing.stream.interruptions.length > 0 || programmaticPending.length > 0) {
       await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);
       await historySink.reconcileConversationTruth({ requireDurable: true });
@@ -2685,16 +2826,33 @@ export async function runTurnStreamAttempt(
       return eventing.codemodeDispatcher;
     },
   );
-  codemodeContinuationNote = programmaticContinuationNote(codemodeOperations);
+  const gatewayRequests = await listTurnGitHubGatewayApprovals(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    turnId: activeTurnId,
+  });
+  codemodeContinuationNote =
+    [
+      programmaticContinuationNote(codemodeOperations),
+      githubGatewayContinuationNote(gatewayRequests),
+    ]
+      .filter((note): note is string => Boolean(note))
+      .join("\n\n") || undefined;
+  const triggerApprovalId =
+    trigger.type === "user.approvalDecision"
+      ? (trigger.payload as { approvalId?: unknown }).approvalId
+      : undefined;
   programmaticApprovalAcknowledged =
     trigger.type === "user.approvalDecision" &&
-    codemodeOperations.some(
-      (operation) =>
-        operation.operationId === (trigger.payload as { approvalId?: unknown }).approvalId,
-    );
-  const pendingProgrammaticApprovals = codemodeOperations
-    .filter((operation) => operation.state === "waiting_for_approval")
-    .map(programmaticApproval);
+    (codemodeOperations.some((operation) => operation.operationId === triggerApprovalId) ||
+      isGitHubGatewayApprovalId(triggerApprovalId));
+  const pendingProgrammaticApprovals = [
+    ...codemodeOperations
+      .filter((operation) => operation.state === "waiting_for_approval")
+      .map(programmaticApproval),
+    ...gatewayRequests.filter((request) => request.status === "pending").map(githubGatewayApproval),
+  ];
   const openSuffixResume = await settleOpenSuffixResumeIfNeeded({
     additionalApprovals: pendingProgrammaticApprovals,
     programmaticApprovalAcknowledged,
@@ -2898,21 +3056,12 @@ export async function runTurnStreamAttempt(
         }
         await flushRuntimeBatcher();
         await historySink.reconcileConversationTruth({ skipInputOnlyRows: true });
-        observability.warn("context compaction recovery attempted", {
+        logContextCompactionRequest(observability, {
           sessionId: input.sessionId,
           turnId: activeTurnId,
           reason: recoveryKind,
-          ...safeErrorDiagnostic(attemptError),
-          signalTokens: compactionNeeded?.signalTokens,
-          thresholdTokens: compactionNeeded?.thresholdTokens,
-          ...(compactionNeeded?.historyFootprint
-            ? {
-                historyFootprintDimension: compactionNeeded.historyFootprint.dimension,
-                historyFootprintActual: compactionNeeded.historyFootprint.actual,
-                historyFootprintThreshold: compactionNeeded.historyFootprint.threshold,
-              }
-            : {}),
-          ...(requestSizeError ? { ...requestSizeError.requestSize } : {}),
+          compactionNeeded,
+          requestSizeError,
         });
         // When compaction is needed before the turn's first model request,
         // preparation is still open. Settle it as an expected transition and
@@ -2995,6 +3144,7 @@ export async function runTurnStreamAttempt(
               clearRequestedCompaction: recoveryKind === "operator",
               publishLiveEvents: publishCompactionLiveEvents,
               providerRejection: compactionProviderRejection(compactError),
+              providerMessage: compactionFailureProviderMessage(compactError),
             },
           );
           compactionRequestCleared = landmark.requestConsumed;
@@ -3004,10 +3154,10 @@ export async function runTurnStreamAttempt(
           if (deferredSteer) return deferredSteer;
           compactionFailureError = compactError;
           compactionFailureMessage = String(compactionFailureReasonFromError(compactError));
-          observability.warn("context compaction recovery compaction failed", {
+          logContextCompactionFailure(observability, {
             sessionId: input.sessionId,
             turnId: activeTurnId,
-            ...safeErrorDiagnostic(compactError),
+            error: compactError,
           });
         }
         if (!compactionHandled) {

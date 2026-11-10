@@ -55,13 +55,12 @@ const LATE_ANSWER_MS = AGENT_CALL_ANSWER_GRACE_SECONDS * 1000;
 
 const REFUSALS: Record<AgentCallRefusal, (who: string) => string> = {
   no_phone: (who) =>
-    `${who} has no phone that takes calls from agents (they turn it on in their phone app's settings). Notify them instead (notify_user).`,
-  busy: (who) =>
-    `Another call is ringing ${who} right now. Notify them instead (notify_user), or try again in a minute if it truly cannot wait.`,
+    `${who} has no phone that takes calls from agents (they turn it on in their phone app's settings). notify_user still reaches them.`,
+  busy: (who) => `Another call is ringing ${who} right now; it ends within a minute.`,
   rate_limited: (who) =>
-    `This chat already called ${who} ${AGENT_CALL_HOURLY_LIMIT} times in the last hour, the limit. Notify them instead (notify_user).`,
+    `This chat already called ${who} ${AGENT_CALL_HOURLY_LIMIT} times in the last hour, the limit, so it can't call them again yet. notify_user still reaches them.`,
   declined_recently: (who) =>
-    `${who} declined a call from this chat in the last ${AGENT_CALL_DECLINE_COOLDOWN_MINUTES} minutes. Don't call again about it; notify them instead (notify_user).`,
+    `${who} declined a call from this chat in the last ${AGENT_CALL_DECLINE_COOLDOWN_MINUTES} minutes; it can call them again once ${AGENT_CALL_DECLINE_COOLDOWN_MINUTES} minutes have passed since that decline. notify_user still reaches them.`,
 };
 
 function outcomeMessage(call: AgentCallRow, who: string): string {
@@ -69,9 +68,9 @@ function outcomeMessage(call: AgentCallRow, who: string): string {
     case "answered":
       return `${who} answered. You are now on a voice call with them in this chat: the voice side opens by saying why you called, and what they ask for reaches you as new messages here. End this turn now.`;
     case "declined":
-      return `${who} declined the call. Don't call again about this; if it still needs them, notify them (notify_user) and carry on.`;
+      return `${who} declined the call. This chat can't call them again for ${AGENT_CALL_DECLINE_COOLDOWN_MINUTES} minutes.`;
     case "missed":
-      return `${who} didn't answer. They have a missed-call notice with your reason. Don't call again right away; carry on, and notify them (notify_user) if it still needs them.`;
+      return `${who} didn't answer. They have a missed-call notice with your reason.`;
     case "cancelled":
       return "The call was cancelled before anyone answered.";
     default:
@@ -105,7 +104,7 @@ export function registerAgentCallTools(input: RegisterAgentCallToolsInput): void
         "Phone the person who owns this session: their phone rings with the system's incoming-call screen, and if they answer you talk by voice in this chat.",
         "Only for something that cannot wait and needs them live: an outage or emergency, a decision blocking urgent work, or when they asked you to call. Everything else goes through notify_user.",
         "reason: a few words shown on the ring screen and in the chat, saying why you call ('Production is down', 'Need a yes on the refund').",
-        "It rings for up to 40 seconds and returns answered, declined or missed. Answered means they are on the line: end your turn, and the call carries on in this chat. Never call again about something they declined or missed; notify them instead.",
+        "It rings for up to 40 seconds and returns answered, declined or missed. Answered means they are on the line: end your turn, and the call carries on in this chat. A missed call leaves them a missed-call notice with your reason. Every call interrupts them, so before calling again weigh how urgent it is and whether they asked you to call.",
         "It only rings phones where the person turned agent calls on; otherwise you get placed: false with why. recipient (optional): call another member of this workspace instead, by email or name, which works only if they let teammates' agents call them.",
       ].join(" "),
       inputSchema: {

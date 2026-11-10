@@ -1,4 +1,5 @@
 import type { ClaudeSubscriptionAccount } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useState, type ReactNode } from "react";
 import {
@@ -26,6 +27,7 @@ import type { ClaudeSubscriptions } from "./use-claude-subscriptions";
 import { ClaudeUsage, ClaudeUsageReadout, useClaudeUsage } from "./claude-usage";
 import { ClaudeSignInPage } from "./claude-signin";
 import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { subscriptionPlanLabel } from "@opengeni/react/app/lib/subscription-accounts";
 import { invalidateSharedQueries } from "@opengeni/react/app/lib/shared-query";
 import { organizationReachLabel } from "@opengeni/react/app/components/models/models-ui";
 import {
@@ -38,9 +40,7 @@ export type ClaudePlaces = SubscriptionAccountPlaces;
 export type OrganizationClaudePool = OrganizationSubscriptionRows<ClaudeSubscriptionAccount>;
 export const claudeListedCount = subscriptionListedCount<ClaudeSubscriptionAccount>;
 export function claudePlan(account: ClaudeSubscriptionAccount) {
-  if (!account.plan) return "Claude plan";
-  const words = account.plan.replace(/^claude_/, "").replaceAll("_", " ");
-  return "Claude " + words.charAt(0).toUpperCase() + words.slice(1);
+  return subscriptionPlanLabel("claude", account.plan) ?? "Claude plan";
 }
 /** The usage cell of a Claude account row, from the usage its listing carries. */
 export function claudeUsageCell(account: ClaudeSubscriptionAccount): React.ReactNode {
@@ -48,6 +48,7 @@ export function claudeUsageCell(account: ClaudeSubscriptionAccount): React.React
   if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
   return (
     <ClaudeUsageReadout
+      plan={account.plan}
       state={{
         value: account.usage ?? null,
         loading: false,
@@ -77,7 +78,7 @@ export function ClaudeAccountUsageReadout({
   account,
   canManage,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   scope: "workspace" | "organization";
   scopeId: string;
   account: ClaudeSubscriptionAccount;
@@ -97,7 +98,7 @@ export function ClaudeAccountUsageReadout({
   });
   if (account.status !== "active") return null;
   if (!account.allocatorEnabled) return <StatusBadge status="disabled" variant="dot" />;
-  return <ClaudeUsageReadout state={usage} />;
+  return <ClaudeUsageReadout state={usage} plan={account.plan} />;
 }
 export function ClaudeRow({
   claude,
@@ -220,7 +221,7 @@ function AccountUsage({
     onCredentialChanged: () => refreshClaudeAccountMetadata(claude.client),
     accountPool: true,
   });
-  return <ClaudeUsage state={usage} onReconnect={onReconnect} />;
+  return <ClaudeUsage state={usage} plan={account.plan} onReconnect={onReconnect} />;
 }
 export function ClaudeAccountPage({
   claude,

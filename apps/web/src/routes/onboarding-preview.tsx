@@ -1,4 +1,5 @@
 import { t } from "@opengeni/react/app/lib/console-text";
+import type { ChatClient } from "@opengeni/sdk";
 import { Section, SectionStack, SectionVariantProvider } from "@opengeni/react/ui/section";
 import { SettingRow } from "@opengeni/react/ui/setting-row";
 import { ModelPolicyPicker, projectPickerRows } from "@opengeni/react";
@@ -154,7 +155,11 @@ const previewMethods = {
     return connection;
   },
   async getWorkspaceModelCatalog() {
-    return { models: previewModel ? [previewModel] : [] };
+    // A new organization starts on Free, which doesn't include own subscriptions.
+    return {
+      models: previewModel ? [previewModel] : [],
+      ownSubscriptionPlan: { key: "pro", label: "Pro", monthlyPriceMicros: 20_000_000 },
+    };
   },
   async getNewSessionDraft() {
     return {
@@ -197,7 +202,7 @@ const previewMethods = {
     return { id: "preview-setup-session" };
   },
 };
-const previewClient = previewMethods as unknown as OpenGeniBrowserClient;
+const previewClient = previewMethods as unknown as ChatClient<OpenGeniBrowserClient>;
 
 function PreviewResult({ view }: { view: string }) {
   const params = new URLSearchParams(window.location.search);
@@ -560,11 +565,31 @@ export function OnboardingPreviewRoute() {
   const passkeyProps = passkeys
     ? { passkeySignIn: true, passkeySignUp: true, onPasskeySubmit: async () => undefined }
     : {};
+  // `&social=1` adds Google and GitHub with Cloudflare's always-passing test
+  // site key; `&challenge=interactive` uses its key that forces interaction.
+  // A click never leaves the page here.
+  const params = new URLSearchParams(window.location.search);
+  const socialProps =
+    params.get("social") === "1"
+      ? {
+          socialProviders: ["google", "github"] as const,
+          signupChallengeSiteKey:
+            params.get("challenge") === "interactive"
+              ? "3x00000000000000000000FF"
+              : "1x00000000000000000000AA",
+          onSocialSubmit: () => new Promise<void>(() => undefined),
+        }
+      : {};
   if (view === "signin")
-    return <ManagedAuthPanel {...passkeyProps} onSubmit={async () => undefined} />;
+    return <ManagedAuthPanel {...passkeyProps} {...socialProps} onSubmit={async () => undefined} />;
   if (view === "verification-expired")
     return <ManagedAuthPanel verificationLinkError="expired" onSubmit={async () => undefined} />;
   return (
-    <ManagedAuthPanel {...passkeyProps} initialMode="signup" onSubmit={async () => undefined} />
+    <ManagedAuthPanel
+      {...passkeyProps}
+      {...socialProps}
+      initialMode="signup"
+      onSubmit={async () => undefined}
+    />
   );
 }

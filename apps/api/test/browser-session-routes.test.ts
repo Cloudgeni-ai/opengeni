@@ -19,6 +19,7 @@ import {
   browserTabDiagnosisError,
   browserRouteError,
   browserCreateInput,
+  agentBrowserClosingNotice,
   withInitialView,
 } from "../src/routes/browser-sessions";
 
@@ -1260,6 +1261,61 @@ describe("BrowserSession route discipline", () => {
     });
   });
 
+  test("publishes the controller's plain reason a tab produced no capture", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const undrawn =
+      "browser screenshot timed out: Chrome had not drawn this tab yet; retry shortly, or read it with browser_observe.";
+    const stalled =
+      "browser screenshot stalled: Chrome did not draw this tab, which can happen while another tab is in front of it in its window; try again, or read it with browser_observe.";
+    const cases = [
+      ["undrawn", undrawn],
+      ["stalled", stalled],
+    ] as const;
+    const status = 504;
+    for (const [name, message] of cases) {
+      const internal = new BrowserControlRequestError(status, {
+        code: "timeout",
+        message,
+        retryable: true,
+      });
+      const projected = browserScreenshotError(internal);
+      expect(projected).toBeInstanceOf(HTTPException);
+      expect((projected as Error).cause).toBe(internal);
+      app.get(`/v1/test/browser-capture-${name}`, () => {
+        throw projected;
+      });
+    }
+    for (const [name, message] of cases) {
+      const path = `/v1/test/browser-capture-${name}`;
+      const response = await app.request(`http://localhost${path}`, {
+        headers: { "x-opengeni-correlation-id": "capture-request-43" },
+      });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({
+        error: {
+          status,
+          code: "upstream_unavailable",
+          message,
+          retryable: true,
+          requestId: "capture-request-43",
+        },
+      });
+    }
+    // Any other unavailable capture keeps the ordinary envelope.
+    const other = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "PRIVATE /home/user/profile detail",
+      retryable: true,
+    });
+    expect(browserScreenshotError(other)).toBe(other);
+  });
+
   test("does not relabel another screenshot failure as a timeout", () => {
     for (const error of [
       new Error("unexpected"),
@@ -1494,7 +1550,7 @@ describe("BrowserSession route discipline", () => {
     expect(source).toContain('operation === "browser.end" && expectedPlacementInstanceId');
   });
 
-  test("retires a stale Connected Machine placement instead of advertising a retryable 409", async () => {
+  test("keeps a browser its task left on another machine, with a final 409 that says where it is", async () => {
     const source = await readFile(routeUrl, "utf8");
     const placement = source.slice(
       source.indexOf("async function withBrowserPlacement"),
@@ -1502,15 +1558,14 @@ describe("BrowserSession route discipline", () => {
     );
     const active = source.slice(
       source.indexOf("async function withActiveBrowserController"),
-      source.indexOf("async function recoverActiveBrowserController"),
+      source.indexOf("async function browserControllerGone"),
     );
-    expect(placement).toContain("throwBrowserSourcePlacementChanged");
-    expect(active).toContain("terminalizeStaleConnectedInteractionPlacement");
-    expect(active.indexOf("terminalizeStaleConnectedInteractionPlacement")).toBeLessThan(
-      active.indexOf('sourcePlacementChangedApiError("browser_session")'),
-    );
-    expect(source).toContain('interactionFailureCode: "source_placement_changed"');
-    expect(source).toContain('interactionLifecycle: "lost"');
+    // Using it while the task runs elsewhere must not end or retire it: the
+    // task gets it back when it returns to that machine.
+    expect(placement).toContain("sourcePlacementElsewhereApiError(");
+    expect(active).toContain("sourcePlacementElsewhereApiError(");
+    expect(source).not.toContain("terminalizeStaleConnectedInteractionPlacement");
+    expect(source).toContain('interactionFailureCode: "source_placement_elsewhere"');
     expect(source).toContain("retryable: false");
   });
 
@@ -1530,7 +1585,7 @@ describe("BrowserSession route discipline", () => {
     const source = await readFile(routeUrl, "utf8");
     const active = source.slice(
       source.indexOf("async function withActiveBrowserController"),
-      source.indexOf("async function throwBrowserSourcePlacementChanged"),
+      source.indexOf("async function browserControllerGone"),
     );
     // The source-session check and Channel-A's machine-route check prove the
     // same live attempt back to back; the controller call and anything after
@@ -2737,3 +2792,72 @@ async function workingCopyRoutesFixture() {
     await server.stop(true);
   }
 }
+
+describe("an announced agent update that closes a Connected Machine's browsers", () => {
+  const machineId = "33333333-3333-4333-8333-333333333333";
+  const onMachine = { session: { placement: { kind: "connected_machine", sandboxId: machineId } } };
+  const grant = (principalKind: AccessGrant["principalKind"]): AccessGrant => ({
+    accountId: "11111111-1111-4111-8111-111111111111",
+    workspaceId: "22222222-2222-4222-8222-222222222222",
+    subjectId: "subject",
+    permissions: [],
+    principalKind,
+  });
+  const lookups: string[] = [];
+  const lookup = async (_db: unknown, workspaceId: string, sandboxId: string) => {
+    lookups.push(`${workspaceId}:${sandboxId}`);
+    return "Closing.";
+  };
+
+  test("is told to an agent's browser tools, never to a person's viewer", async () => {
+    const notice = (principalKind: AccessGrant["principalKind"], record = onMachine) =>
+      agentBrowserClosingNotice(
+        {} as never,
+        grant(principalKind),
+        "workspace",
+        record as never,
+        lookup as never,
+      );
+    expect(await notice("agent_attempt")).toBe("Closing.");
+    expect(lookups).toEqual([`workspace:${machineId}`]);
+    expect(await notice("human_session")).toBeNull();
+    expect(await notice("api_key")).toBeNull();
+    expect(await notice("service")).toBeNull();
+    expect(
+      await notice("agent_attempt", {
+        session: { placement: { kind: "sandbox_group", sandboxGroupId: machineId } as never },
+      }),
+    ).toBeNull();
+    expect(lookups).toHaveLength(1);
+    // A failed read never fails the browser step.
+    expect(
+      await agentBrowserClosingNotice(
+        {} as never,
+        grant("agent_attempt"),
+        "workspace",
+        onMachine as never,
+        (async () => {
+          throw new Error("database unavailable");
+        }) as never,
+      ),
+    ).toBeNull();
+  });
+
+  test("reaches every observation an agent gets: observe, select and action receipts", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const route = (path: string) => {
+      const start = source.indexOf(path);
+      expect(start).toBeGreaterThanOrEqual(0);
+      return source.slice(start, source.indexOf("\n  app.", start + path.length));
+    };
+    for (const path of [
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/select"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/:targetId/observation"',
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/actions"',
+    ]) {
+      const handler = route(path);
+      expect(handler).toContain("agentBrowserClosingNotice(deps.db, grant, workspaceId, record)");
+      expect(handler).toContain("withBrowserClosingNotice(");
+    }
+  });
+});

@@ -1,5 +1,434 @@
 # Modular prompt changelog
 
+A configured session without a sandbox or Connected Machine no longer gets
+text it cannot act on: editing files in the sandbox, publishing new files,
+workspace file links, sandbox paths, background-command acknowledgement and
+sandbox CLI lists. Site guidance stays, because the Site tools create a Site
+from inline HTML without compute. Without compute, the document rule instead
+says to export a native document when the user asks for a Word, Excel, PDF or
+PowerPoint file and the export tool lists that format. The verification rule
+names a goal and its completion audit only with goals, and an applicable Skill
+only with goals or a readable Skill. It is unchanged whenever goals are on, so
+a session with goals and a sandbox or Connected Machine keeps its bytes; a
+session with compute but without goals gets the goal-free verification rule.
+Measured with the Sonnet 5.5 tokenizer: "none" without compute 2,772 → 2,754
+system tokens; "all" without compute 8,963 → 8,702; "all" with a managed sandbox
+10,405 (unchanged).
+
+```text
+- … Read the documents Skill and create the native document artifact before authoring it; do not write a sandbox Markdown report first or treat publishing a file as native document creation. A Word, Excel, PDF or PowerPoint file the user sends to be changed is edited in the sandbox … unless the artifact export tool lists that format. Then give …
++ … Read the documents Skill and create the native document artifact before authoring it. When the user asks for a Word, Excel, PDF or PowerPoint file, export the native document if the artifact export tool lists that format. Then give …   (no compute)
+- … A sandbox path, a raw file ID, or an assertion that a report exists is not completed report delivery.
++ … A raw file ID or an assertion that a report exists is not completed report delivery.   (no compute)
+- Do not silently fall back to a sandbox link, invent an artifact reference, or claim success. Ordinary in-chat answers, brief progress updates, internal worker findings, source-code navigation, and explicitly requested local-file workflows do not become report deliverables merely because they contain Markdown or a file link.
++ Do not invent an artifact reference or claim success. Ordinary in-chat answers, brief progress updates, and internal worker findings do not become report deliverables merely because they contain Markdown.   (no compute)
+- Publish files you deliberately deliver so they are retained and discoverable in Artifacts; do not publish every temporary file.   (no compute)
+- Source-code navigation may still use workspace file links.   (no compute)
+- Never substitute a storage URL or a sandbox path for a published artifact reference.
++ Never substitute a storage URL for a published artifact reference.   (no compute)
+- For a sandbox image, publish the file first; a sandbox path is not an inline image source.   (no compute; also "A sandbox path is not an inline image source." without sandbox_file_publish)
+- Audit reads do not acknowledge command completion.   (no compute)
+- … rather than looping while holding the inference and sandbox.
++ … rather than looping while holding the inference.   (no compute)
+- `generate_image` is a runtime tool; integration catalogs and sandbox CLI lists do not enumerate it.
++ `generate_image` is a runtime tool; integration catalogs do not enumerate it.   (no compute)
+- Comprehensive audits or reconciliation requested by the goal, user, or applicable Skill … without dropping the full completion audit or required evidence.
++ Comprehensive audits or reconciliation requested by the user or applicable Skill … without dropping required evidence.   (no goals, with or without compute; "by the user" without a readable Skill)
+```
+
+A new first-party tool, `github_repository_attach`, lets the agent ask to
+attach a repository the workspace GitHub App offers to its own chat. It is
+registered only for a chat's own signed attempt with `github:use`, so other
+sessions keep their bytes. Its description is 249 bytes and its two argument
+descriptions are 49 and 65 bytes; no prompt module changes.
+
+```text
++ Ask to attach a repository the workspace GitHub App offers to this chat. A person approves it in the chat; once approved it joins this chat's repositories from the next turn, with this chat's GitHub App access. Find it with github_repositories_list.
++ repository: owner/name, as listed by github_repositories_list
++ ref: Branch to check out; defaults to the repository's default branch.
+```
+
+In a managed sandbox with a repository mounted as the person, the
+repositories module adds one sentence (144 bytes): force-pushing or deleting a
+non-default branch follows the person's GitHub settings, while the default
+branch and tags wait for their approval. The personal GitHub gateway now lets
+those branch rewrites follow the person's policy instead of always asking, so
+the agent can rebase and force-push its own pull request branches. Sessions
+without such a repository, and Connected Machines, keep their prompt bytes.
+
+The agent instructions preamble (`AGENT_INSTRUCTIONS_PREAMBLE`, sent only in
+chats bound to an agent revision) is 56 bytes shorter (259 to 203 bytes). It
+keeps its meaning: precedence over the default behavior, no extra authority,
+and a later developer message may replace it. Plain chats are unchanged; a
+chat bound to an agent gets the new bytes from its next turn. The
+developer-message texts and their legacy parse forms are unchanged.
+
+```text
+- The agent's editors wrote these. Follow them over the default behavior above, such as tone, length and format. They grant no additional authority and do not override the rules above. A later developer message may replace them.
++ These take precedence over the default behavior above; they grant no additional authority and do not override the rules above. A later developer message may replace them.
+```
+
+Agent text is shorter again, with the same rules. A Slack agent's identity
+line drops "keep your answers consistent across chats". The hand-off rule
+keeps a short typo hint and drops "don't mention the suggestion" (the
+`slack_agent_suggest` description and result say it). The
+`slack_agent_handoff`, `slack_agent_suggest`, `slack_agent_chats` and
+`slack_agent_propose` descriptions drop repeated rules, rationale, the name
+example and the 2500-character limit, which the `instructions` schema now
+carries. An open agent's text drops what the Unattended module, the Slack
+instructions and its permissions already cover (nobody approves or answers,
+never reveal credentials, never personal accounts).
+`SESSION_PROFILE_TOOL_GUIDANCE` drops "publish the image first" (the server
+refuses an Only me image with that instruction), what the schema says
+(optional fields, the hue range) and most art direction; `set_session_title`'s
+description changes for every session that has it. `bot_template_save` drops
+the field list and keeps a one-sentence per-person setup rule. Sessions without
+Slack agents change only in the `set_session_title`, other-chat title and
+`bot_template_save` descriptions.
+
+In a managed sandbox, `gh` on repositories mounted as the person now acts as
+the person through the Opengeni GitHub gateway, so the repositories module
+stops telling the agent to avoid it there. Sessions without a repository
+mounted as the person keep their prompt bytes. Outside a managed sandbox
+(Connected Machines) the old sentence stays, because `gh` there is not routed
+through the gateway. The provider-CLI sentence no longer carves out personal
+repositories. `github_connect_link`'s description says the same.
+
+```text
+- On repositories mounted as the person, use plain git and the github_personal__* tools; gh and raw GitHub API calls do not act as the person and must not be used there.
++ On repositories mounted as the person, git and gh (including gh api) act as the person, as on their own computer; the github_personal__* tools act as them too.   (managed sandbox)
+- Provider CLIs such as gh, glab, and az may be pre-authenticated … for repositories that are not mounted as the person; try them there before asking for credentials.
++ Provider CLIs such as gh, glab, and az may be pre-authenticated …; try them before asking for credentials.
+```
+
+A `gh` request that waits for the person's approval fails with a message that
+says so, tells the agent to end its turn, and to run the same command again
+after approval; the approval card is the normal one, and the continuation note
+after the decision says which requests were approved or declined.
+
+The contract no longer names the product. A host names its platform through its
+own identity or instructions; the default identity still introduces the agent
+as an Opengeni workspace agent. Three clauses change wording only; their
+meaning is the same. The "GitHub identity" and "Secrets" sentence lists below
+are updated to the new sentences; before and after:
+
+```text
+- Opengeni's own tools that store or send text (messages to other sessions, …) keep the reference as text, …
++ Built-in workspace tools that store or send text (messages to other sessions, …) keep the reference as text, …
+- `repos/…`: as the Opengeni app. Work appears as the Opengeni bot.   (personal GitHub mounted)
++ `repos/…`: as the workspace's GitHub app. Work appears as its bot.
+- On Opengeni app repositories, use the github_app__* tools.
++ On GitHub app repositories, use the github_app__* tools.
+- … and 'install the GitHub app' means the Opengeni app.
++ … and 'install the GitHub app' means the workspace's GitHub app.
+```
+
+Tool texts the agent reads (the `privacy_facts` result, `wait_for_input`,
+`goal_complete`, the GitHub, secret-profile, Slack-suggestion and Connected
+Machine descriptions, and several tool results) say "this deployment", "the
+runtime" or the passive voice instead of the product name. The Connected Machine
+descriptions name the deployment's configured browser extension
+(`OPENGENI_BROWSER_EXTENSION_NAME`).
+
+Each waiting rule is stated once. How a wait behaves is the `wait_for_input`
+description's job: when not to call it, `reply`, the deadline, the minimum, and
+what starts the next turn. The system prompt keeps only when to end a turn on a
+wait. About 150 tokens of prompt sentences repeated the tool description
+(deadline persistence, the minimum timeout, no preliminary wait, timeout
+cadence, Codemode's live attempt), and the description named goals, child
+sessions, Steer, Codemode and `session_*` tools that many sessions lack. Agents
+also called `wait_for_input` when they were only waiting for the person's
+answer, which a plain reply already handles, so the description now opens with
+that case. The most common refused wait was a missing `reply` (70 of 164
+refusals on staging over 30 days), and the `reply` field itself said to omit it
+"when there is nothing new to tell them", which agents read as permission to
+leave it out after only starting work. That sentence is cut, and the field
+adds no rule of its own: the description already says when `reply` is needed.
+A field reading "Required when this turn answers a person's message" was tried
+and dropped: with it, agents again called `wait_for_input` to deliver answers
+while only waiting for the person. Legacy and modular compositions change the
+same way (the sentence diff is unchanged); their locks are updated.
+
+```text
+- If you were already waiting, reuse that reason and keep its deadline by setting the timeout to the time left rather than a fresh full timeout.   (New messages)
+- If an existing wait's remaining time is below the tool's minimum or its deadline has passed, do not send an invalid timeout or round up and silently extend it. A question-only human/API turn that has not consumed immediate machine input may finish without replacing the retained wait; its deadline machinery remains authoritative. Otherwise, do not assume the old wait remains armed: register a valid wait if still needed and make any unavoidable deadline adjustment explicit.   (Waiting)
+- Do not use `wait_for_input` for work you can still advance or for a blocker that requires a human decision.   (Waiting)
+- Avoid holding execution open with long sleeps or repeated blocking waits when an out-of-turn wait is available. Respect each tool's actual execution-wait limits; those limits do not cap `wait_for_input`, which may span hours or days within its own limits.   (Waiting; legacy: Rules for getting work done)
+- No short execution wait or preliminary status recheck is required before `wait_for_input`. Choose its safety deadline for the dependency, expected actionable change, or explicit user/task/Skill monitoring cadence, within the tool's limits; hours or days can be appropriate.   (Waiting)
+- This does not relax live-attempt requirements such as pending Codemode observation, human-only approvals, or preservation of an existing deadline when answering a question during a wait.   (Waiting)
+- When the turn answers the user, put the whole answer in its `reply` argument, which they see exactly as written, instead of writing it before the call.   (Progress updates)
+```
+
+Each cut rule is in the tool description, or stays elsewhere in the prompt:
+the reply contract in the final-answer rule ("its `reply` carries any
+answer"), Codemode's live attempt in Background commands (with compute), the
+child wake in `subagents`, waiting rather than a goal pause in `goals`, and
+human-only approvals in Autonomy. The remaining Waiting text is unchanged; its
+monitoring sentence ("When monitoring requires timed checks …") now renders
+only with schedules or subagents, as it already did without `wait_for_input`,
+because it names automations and session waits.
+
+```text
+- End this turn and wait out of turn for relevant session input (self-only; no goal needed). On success the Opengeni runtime ends the turn at the tool-batch boundary with no further model step or final message. Use it for long or uncertain waits, such as right after spawning a child that needs minutes, instead of sleeping or polling session_wait, session_get or command_wait; no preliminary short wait or status recheck is required. timeoutSeconds is a relative safety wake, … Wakes on a human/API prompt, agent message or Steer, child terminal result (final answer in payload.finalAnswer), scheduled input, terminal background-command result, or the deadline. Use goal_pause instead when the goal itself should stop pending a human decision. Pending Codemode calls require the same live attempt: …
+```
+
+The new description (`WAIT_FOR_INPUT_DESCRIPTION`) names no tool or feature a
+session may lack, so it stays static and cache-stable. Wake behaviour, the
+reply guard and the arguments are unchanged.
+
+```text
+- reply: … do not also write it before this call. Omit it when there is nothing new to tell them.
++ reply: … do not also write it before this call.
+```
+
+Idempotency keys the model makes up (`wait_for_input`, `goal_update`,
+`goal_progress`, `session_send_message`, `session_pause`, `session_resume`,
+`session_steer`, `session_human_input_respond`) now accept any 8-4-4-4-12 hex
+UUID (`z.guid()`), which is what `format: "uuid"` tells the model; they are
+stored as opaque operation keys. Previously Zod also required RFC version and
+variant digits, so a made-up key such as `12345678-1234-1234-1234-123456789abc`
+was refused (16 of 164 refused waits on staging were invalid UUIDs). The
+pattern Zod emits for such a field only repeats the format, so Opengeni's own
+tools no longer show it (`withoutRedundantUuidPatterns`, first-party servers
+only). A stricter pattern, such as the RFC check on ids and on
+`session_set_model`'s key (validated again by its public contract), is kept.
+
+o200k_base tokens, before → after (main 11550b6c):
+
+| Configuration | System prompt | Waiting section |
+| --- | --- | --- |
+| Legacy, no compute | 6,856 → 6,549 | — |
+| Legacy, sandbox | 7,374 → 7,067 | — |
+| All, no compute | 6,423 → 6,117 | 378 → 133 |
+| All, sandbox | 7,875 → 7,569 | 378 → 133 |
+| All without subagents, sandbox | 6,625 → 6,319 | 378 → 133 |
+| None plus sandbox | 4,580 → 4,248 | 378 → 107 |
+| None plus goals, no compute | 3,404 → 3,072 | 378 → 107 |
+| None, no compute (no wait tool) | 2,398 → 2,398 | — |
+
+`wait_for_input` itself: description 341 → 305, parameters 291 → 183
+(`idempotencyKey` 105 → 9; `reply` −12), whole definition 650 → 506.
+
+Three pieces of text now follow state the session actually has. Compositions
+with the state keep their bytes (`modular-parity-lock.test.ts`; its
+"none-with-features" cases now include workspace connectors, a setup-card
+source, which adds no other text). Nothing was reworded.
+
+- `goal_resume` and the goals sentence that names it are sent to a configured
+  agent once the session has a goal, in any state, as frozen with the turn.
+  Before a goal exists the tool can only fail ("this session has no goal").
+  The tool stays for paused, active and completed goals, so pausing or
+  resuming never changes the tool list or the prompt. Legacy (unconfigured)
+  sessions are unchanged.
+- The "# Images and video" section is left out when the media capability is on
+  but the built agent attaches no image or video tool (no provider adapter,
+  runnable hosted image tool or video boundary). Prompt inspection without a
+  tool surface keeps it.
+- The blocked-tool sentence names a setup card only when the agent has a
+  capability whose tools show one (workspace admin, workspace connectors,
+  browser, or secrets with the question tool). A card a refused tool posts by itself carries its own
+  instructions in that tool's result.
+
+```text
+- Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.   (configured session with no goal)
+- # Images and video …   (media on, no media tool attached)
+- … offer the fix in the same reply: show its setup card, or the exact next step when there is no card, and continue once it is fixed.
++ … offer the fix in the same reply with the exact next step, and continue once it is fixed.   (no setup-card capability)
+```
+
+The `skill_save`, `skill_install` and `skill_publish` tool descriptions and the
+bundled `skill-management` Skill now say that a Skill or change pending
+approval has no effect until someone who can manage it approves it, in
+Knowledge > Review or from its card in the chat where one is shown (an edited
+Skill keeps its current version until then), and that the agent's reply should
+say so.
+Before, they only named where a pending revision waits, so agents reported
+"waiting for your approval" without saying the Skill was inactive until then,
+and people didn't realise approval was needed for it to work. They also named
+the review tab "Needs review"; the app labels it "Review", and `skill_remove`
+now says so too. No system prompt text changes.
+
+`request_human_input` says the same in fewer words, for every session. The
+system prompt is unchanged. In the embedding profile the tool falls from 588
+to 479 o200k tokens (2,562 to 2,048 bytes as sent), and with every feature
+(legacy, top-level) from 1,179 to 1,070.
+
+- Description: the purpose sentence is shorter; "Supports free text,
+  single-select, multi-select, multiple questions, explicit skip policy, and
+  an optional expiry." is cut because the schema states each of these
+  (`kind`, `questions`, `allowSkip`, `expiresInSeconds`); the recommended,
+  preview, confirm and Other rules keep their meaning in fewer words; the
+  "Let the agent decide" sentence is cut because the tool result carries
+  `HUMAN_INPUT_AGENT_DECIDES_NOTE` exactly when it applies.
+- Parent-agent sentences (child sessions): "In a sub-session," is cut when
+  the caller says the session has a parent (`subSession: true`, which the
+  worker always sets from the frozen nested depth). A direct runtime caller
+  that leaves `subSession` out keeps the conditioned wording.
+- The secret sentences are unchanged.
+- Schema: `allowOther` is no longer sent (new choice questions are always
+  normalized to offer Other, and a text question that set it was rejected),
+  nor the `$schema` marker. The zod contract that validates calls is unchanged.
+- A session that started unattended still gets no tool and no question clause
+  (unchanged); the docs now point backends nobody answers at `unattended: true`.
+
+```text
+- Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. The person may instead let you decide: the result then has agentDecides true, so make your own best choice, continue, and say in one short sentence what you chose.
++ Pause the turn to ask a person for a decision or information only they can give. Mark the option you suggest as recommended (shown, never pre-selected), and give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second; their labels become the buttons. Choice questions always offer an Other free-text answer; interpret it normally and ask again only if genuine clarification is still needed.
+- In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. …   (child sessions)
++ Your parent agent also sees this request and may answer it; the first answer wins. …   (child sessions)
+```
+
+A tool result too large to show names only the tools the session has. The
+spilled-result notice names `files__files_get_download_url` and the shell only
+when the turn has compute and the Files server's download tool. Without both
+(and no placed copy), it says the result was saved, which reader is missing,
+and to call the tool again with narrower arguments if it can. Sessions with
+both readers get the same text as before.
+
+```text
++ The result was too large to show (N bytes), so none of it is shown here. Its exact JSON is saved as workspace file <fileId>, but no tool in this session can open it. If the tool can narrow its result, for example with a filter, a smaller page or fewer fields, call it again so the result fits; otherwise continue without it.   (no download tool)
++ … but this session has no shell to read it with. …   (download tool, no shell)
+- If the file is not there, call files__files_get_download_url with fileId <fileId> and download it with the shell.   (placed copy, no download tool)
+```
+
+The search rule no longer assumes `rg` exists. Many user, task and Connected
+Machine images ship without ripgrep, and "`rg` … first" made the agent spend
+its first search on `rg: not found`. Nothing in a turn's prompt inputs says
+which search tools a machine has (the prompt can be composed before a lazy
+sandbox exists, and a machine's PATH can change), so the sentence names both
+paths in fixed text instead of detecting one: it is byte-identical on every
+backend and attachment. Legacy and modular compositions change the same way;
+their locks are updated.
+
+```text
+- Search text and files with `rg` or `rg --files` first; if `rg` is unavailable, use the next best tool.
++ Search text and files with `rg` or `rg --files` when it is installed; otherwise use `grep -rn` and `find` (`Select-String` in PowerShell). Until you know `rg` exists, choose in the same command, for example `if command -v rg >/dev/null; then rg -n PATTERN; else grep -rn PATTERN .; fi`.
+```
+
+A configured agent with nothing to wait for or run code in no longer carries
+that guidance, and two answer rules follow the features they describe. As
+before, only text for an absent feature is omitted: compositions with the
+feature keep their bytes (`modular-parity-lock.test.ts`; its "none-with-features"
+cases now include artifacts, recorded from the composer just before this
+change). Nothing was reworded.
+
+- `wait_for_input` no longer follows human input. An answer to
+  `request_human_input` resumes the paused turn, and a new message starts one,
+  so a person needs no wait; compute, subagents, goals, schedules, browser,
+  media or workspaceAdmin (a `run_on` command finishes later) still bring it.
+  A configured agent's prefix is therefore the same
+  whether the API or a person started the turn. The Waiting section, the
+  monitoring sentences and every `wait_for_input` clause already follow the
+  tool.
+- The Codemode directive is sent to a configured session only when the turn
+  has a sandbox or Connected Machine to run `ogtool` from, or `run_on` to open
+  a Codemode-enabled shell elsewhere (otherwise the worker sets no
+  `codemodeAvailable` and seeds no token). Legacy sessions are unchanged.
+- Final answer: the web-sources sentence needs `webSearch` or `browser`.
+- Formatting rules: "Answer in chat by default …" needs `artifacts`; without
+  them there is nowhere else to answer.
+- The three `all-without-artifacts` locked cases are dropped (58 → 55): with
+  artifacts now gating a sentence, they no longer compose the pre-change bytes,
+  and the artifacts removal variant covers that omission instead.
+
+```text
+- An answer built from web or published sources (research, evidence summaries, product or price comparisons) may be short but not partial: summarize what the sources establish, including the best-supported finding, not only the practical takeaway; give figures in the user's terms, such as a monthly total at their stated size rather than only a starting price or unit rate; and link the source next to each study or figure you cite.   (without webSearch or browser)
+- - Answer in chat by default, including summaries, reports, briefs, letters and plans the user asks you to write.   (without artifacts)
+- Every tool in the Codemode catalog (what `ogtool list` shows) is also callable programmatically from the sandbox … inspect actual state before any separately authorized retry.   (configured session with no sandbox, Connected Machine or `run_on`)
+```
+
+Slack agent text is shorter. A chat started from Slack in an installation
+with agents keeps the same rules in fewer words: answer yourself by default,
+hand off only to an agent the person names (then exactly `NO_REPLY`), suggest
+a fitting agent without mentioning it, and use Memory and `slack_agent_chats`
+when context is missing. Cut: examples, rationale, "do not hand it back"
+(the server refuses a hand-back), and the propose line's card and icon details
+(the `slack_agent_propose` description has them). The agent roster describes
+the first 20 agents and names up to 30 more. The `slack_agent_handoff`,
+`slack_agent_suggest`, `slack_agent_chats` and `slack_agent_propose`
+descriptions drop what the server enforces or reports (one hop, never back,
+usable agents only, name character rules, the text to tell the person).
+
+A configured agent pays only for what it can use. Every section below is
+omitted only when its feature is absent; sessions that have the feature render
+byte for byte as before (`modular-parity-lock.test.ts` pins 58 such
+compositions recorded before this change). Nothing was reworded. For the
+embedding profile (`capabilities: "none"`, no sandbox, one eager product MCP
+server, an API-started turn) the fixed prefix falls from about 3,580 to 1,920
+o200k tokens of instructions and from about 2,530 to 580 of built-in tools.
+
+- Identity: an agent that shares no workspace (no compute, Knowledge, files,
+  connectors, artifacts, automations, sessions, browser, secrets or Skill
+  management) gets `NEUTRAL_AGENT_IDENTITY` instead of the Opengeni workspace
+  agent introduction. A configured `identity` still replaces either.
+- Tool discovery renders only when a tool can be deferred and the attempt can
+  install the search router. The worker decides the first from frozen
+  per-turn facts (`turnToolRouterExpected`) and passes `toolSearchAbsent`; any
+  doubt keeps the section and the router. The runtime adds the second: with no
+  lazy transport, or with tool search off for the deployment and no router in
+  history, there is no `tool_search` to name. The Images and video module's
+  "If it is deferred, use … `tool_search`" sentence follows the same rule.
+- Waiting renders only with `wait_for_input`, schedules or subagents. The
+  Progress updates monitoring sentences and the Autonomy "Monitor or wait"
+  bullet need `wait_for_input` or schedules.
+- Progress updates: the web-search sentence needs `webSearch`; "Do not narrate
+  Skill reads or waits." needs readable Skills or a sandbox when
+  `wait_for_input` is absent.
+- Autonomy: the learning-policy sentence needs Knowledge or Skill management;
+  "Decide the design before building it" needs a sandbox, artifacts, browser,
+  connectors or workspace admin.
+- Rules for getting work done: the `privacy_facts` rule needs the new
+  `privacyFacts` capability.
+- Compaction: "Always retain the full completion audit and required completion
+  evidence." needs `goals`; audits a user or Skill asked for stay for every
+  session.
+- Using skills and the Skill index need a readable Skill: a configured session
+  with an empty index gets neither (the history item is not written either).
+- Workspace governance omits the learning-policy block for an agent that
+  cannot learn.
+
+These are variants, not changes to the `"all"` composition, so they are
+listed as text rather than as the legacy diff:
+
+```text
+- Web searches take several seconds each, so before searching the web, write the opening update in a few words.   (without webSearch)
+- Monitoring checks and user notifications have separate cadences: choose checks for actionable changes or deadlines, not merely to produce reassurance.   (without wait_for_input or schedules)
+- Do not wake a suspended turn only to repeat an unchanged status unless an explicit update cadence requires it.   (same)
+- - Monitor or wait: use the recurring-monitoring or wait mechanism provided by the product. Unchanged external state is expected and is not by itself a blocker.   (same)
+-  Useful learning follows its accepted policy; it grants no external-action or settings permission.   (without Knowledge or Skill management)
+- Decide the design before building it. …   (without sandbox, artifacts, browser, connectors or workspace admin)
+- - Answer questions about privacy, retention, training, the model or provider, or where data is processed only from `privacy_facts`: …   (without privacyFacts)
+-  Always retain the full completion audit and required completion evidence.   (without goals)
+- ## Tool discovery …   (nothing deferred)
+- ## Waiting …   (nothing can resume the agent)
+- # Using skills …   (no readable Skill)
+- You are an Opengeni workspace agent: … You and the user share one workspace, …
++ You are a general assistant for questions, writing, research, analysis, and technical work. Your job is to collaborate with the user until their goal is genuinely handled. You are a curious, thoughtful collaborator and a clear communicator.   (no shared workspace)
+```
+
+Built-in tools follow the same rule. `request_human_input` builds its schema
+from the enabled features: the `secret` kind and spec only with secrets,
+`skillReview` only with Skill management; with both on it is the unchanged
+`RequestHumanInputToolInput`. A reduced schema is sent as the full schema in
+the form the Agents SDK converts it, with only those fields removed
+(`human-input-wire-schema.test.ts`), so it is never larger than the full one. Its parent-agent
+sentences render only in a child session, for every session including legacy
+ones. `wait_for_input` is attached only when something can resume the agent
+(compute, subagents, goals, schedules, browser, media, or human input with a
+turn a person started, including the local-mode person); legacy sessions keep
+it. When the router could be installed but nothing else is deferred,
+`set_session_title` is not attached (Opengeni titles the session itself); an
+eager server prepared best effort (optional, connection-backed or Codex Apps)
+counts as deferred.
+`privacy_facts` and the notification tools moved behind the new `privacyFacts`
+and `notifications` capabilities, on under `"all"`. Saved requests (workspace
+defaults and schedules) keep their earlier meaning: under `"none"` they still
+include both (`savedRequestBaseCapabilities`).
+
+```text
+-  In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.   (top-level sessions)
+```
+
 Finished background commands report themselves. When a command the agent
 left running finishes during the turn, its exit status and the start and end
 of its output follow the next plain-text tool result, and the durable
@@ -118,6 +547,19 @@ the lines are shown as text, not as a sentence diff:
 - Verify changes when practical, especially after editing code, tests, build scripts, generated artifacts, or configuration. For a change to something already running, such as a service, worker or scheduled job, restart or reload the process that actually serves it, exercise the real entry point and check what the user asked about; unit tests alone do not show it works. Ask first only if a restart could disrupt others or lose work in progress.
 ```
 
+Connect cards despite unrelated strong matches. No prompt or tool description
+text changes. `tool_search` used to skip its integration catalog lookup
+whenever any installed tool matched strongly, so "posts on Slack" (matching a
+Slack bot tool) or "Linear issues" (matching meeting search) got no Connect
+card. It now skips the lookup only when a strong match is the named
+integration's own tool (beside strong matches reading the catalog only for a
+capitalised or unfamiliar word, waiting at most 1.5 seconds, and naming only
+distinctive mentions), and also recognises an
+integration's name with different spacing or case, a near spelling, or its
+vendor domain word. Catalog search ranks entries a query names first. The
+`notConnected` text is unchanged, and it appears on more searches than
+before.
+
 The agent knows both GitHub identities. When personal GitHub sign-in is
 enabled on the deployment (new `personalGitHub` resource fact) and
 `github_connect_link` is available, the admin module adds one sentence (about
@@ -136,7 +578,7 @@ that mount only Opengeni app repositories render byte-for-byte as before. The
 (see docs/github-app.md).
 
 ```diff
-+ For GitHub, `github_connect_link` reports both identities: 'connect my GitHub' or 'do it as me' means the person's own account (Your GitHub), and 'install the GitHub app' means the Opengeni app.
++ For GitHub, `github_connect_link` reports both identities: 'connect my GitHub' or 'do it as me' means the person's own account (Your GitHub), and 'install the GitHub app' means the workspace's GitHub app.
 ```
 
 Automatic chat titles are written in the language the person writes in, and
@@ -837,7 +1279,7 @@ so "never request credentials in chat" comes with the supported alternative.
 ```diff
 + Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`).
 + A reference is replaced by its value where something runs: shell commands, files, browser typing and connector tool calls.
-+ Opengeni's own tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something.
++ Built-in workspace tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something.
 + In a shell command or script, including `ogtool call`, write `\{{secret:Item}}` to pass one on.
 + Find saved items and their ready references with `secret_search`.
 + Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.
@@ -866,6 +1308,11 @@ unchanged.
   Integration setup drops "(see Session coordination)".
 - `workspaceAdmin` off: the rig `rig_propose_change`/`rig_get` sentences are
   omitted.
+- No sandbox or Connected Machine: the documents, file-publishing,
+  sandbox-path, command-acknowledgement and CLI-list clauses listed at the top
+  of this file are omitted or use their no-compute wording.
+- `goals` off: the verification rule names "the user or applicable Skill"
+  ("the user" without a readable Skill) and drops "the full completion audit".
 - Managed sandbox only: "Use the active workspace path exactly as exposed to
   you. Managed sandboxes normally use `/workspace`."
 - Connected Machine only: "… A Connected Machine uses its host-native workspace

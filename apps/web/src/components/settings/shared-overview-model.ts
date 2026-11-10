@@ -5,6 +5,7 @@ import {
   type VaultAvailability,
   type VaultSummary,
 } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { isPermissionDenied, userErrorText } from "@opengeni/react/ui/api-error";
 
@@ -34,7 +35,7 @@ import {
    -------------------------------------------------------------------------- */
 
 export type SharedOverviewClient = AvailableHereClient &
-  Pick<OpenGeniBrowserClient, "listOrganizationMachines" | "listOrganizationRigs">;
+  Pick<ChatClient<OpenGeniBrowserClient>, "listOrganizationMachines" | "listOrganizationRigs">;
 
 /** What the page lists, in the order "Couldn't load" names them. */
 export const SHARED_KINDS = ["machine", "rig", "vault", "skills", "knowledge"] as const;
@@ -71,12 +72,11 @@ export type SharedCompute = {
 export type SharedSkills = { count: number; notHere: number };
 
 /**
- * Which of the organization's things a list holds: all of them; only the
+ * Which of the organization's things a list holds: all of them, or only the
  * ones that work here because only organization owners and admins may list
- * them all; or only the ones that work here because the server can't list the
- * rest yet.
+ * them all.
  */
-export type SharedCoverage = "all" | "here-admins-see-all" | "here";
+export type SharedCoverage = "all" | "here-admins-see-all";
 
 export type SharedOverviewResult = {
   /** Machines, then sandbox environments, each by name. */
@@ -114,7 +114,7 @@ async function organizationVaults(
     const listed = await api.listOrganizationVaults();
     return {
       vaults: listed.vaults.filter((vault) => vault.ownerKind === "organization").map(sharedVault),
-      coverage: listed.complete ? "all" : "here",
+      coverage: "all",
     };
   } catch (error) {
     if (!isPermissionDenied(error)) throw error;
@@ -143,7 +143,7 @@ async function organizationMachines(
     const listed = await client.listOrganizationMachines(workspaceId);
     return {
       items: listed.machines.flatMap((machine) => sharedCompute("machine", machine)),
-      coverage: listed.complete ? "all" : "here",
+      coverage: "all",
     };
   } catch (error) {
     if (!isPermissionDenied(error)) throw error;
@@ -167,7 +167,7 @@ async function organizationRigs(
     const listed = await client.listOrganizationRigs(workspaceId);
     return {
       items: listed.rigs.flatMap((rig) => sharedCompute("rig", rig)),
-      coverage: listed.complete ? "all" : "here",
+      coverage: "all",
     };
   } catch (error) {
     if (!isPermissionDenied(error)) throw error;
@@ -204,9 +204,7 @@ async function organizationKnowledgeHere(
 
 /** The narrower of two lists' coverage, for one group holding both. */
 function narrower(a: SharedCoverage, b: SharedCoverage): SharedCoverage {
-  if (a === "here-admins-see-all" || b === "here-admins-see-all") return "here-admins-see-all";
-  if (a === "here" || b === "here") return "here";
-  return "all";
+  return a === "here-admins-see-all" || b === "here-admins-see-all" ? "here-admins-see-all" : "all";
 }
 
 export async function loadSharedOverview(
@@ -391,8 +389,6 @@ export function coverageDescription(coverage: SharedCoverage, place: SharedPlace
   switch (coverage) {
     case "all":
       return `${reach} Organization owners and admins manage them.`;
-    case "here":
-      return `${reach} Organization owners and admins manage them. Here are the ones that work in ${hereName(place)}.`;
     case "here-admins-see-all":
       return `${reach} Organization owners and admins manage them and see every one; here are the ones that work in ${hereName(place)}.`;
   }

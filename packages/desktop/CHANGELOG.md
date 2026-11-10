@@ -1,5 +1,114 @@
 # @opengeni/desktop
 
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [1c7aa2a]
+  - @opengeni/sdk@6.13.0
+  - @opengeni/agent-host@6.13.0
+
+## 6.12.0
+
+### Patch Changes
+
+- Updated dependencies [64fd53f]
+- Updated dependencies [2e7c01e]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [98938f0]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [65e1fb9]
+- Updated dependencies [c0b9f88]
+  - @opengeni/sdk@6.12.0
+  - @opengeni/agent-host@6.12.0
+
+## 6.11.0
+
+### Patch Changes
+
+- 635cc6b: A "connect this computer" link to a server the app has not used before now asks the person to approve that server, named in the dialog and defaulting to Cancel, before any sign-in starts. Links to the app's own or installed-from server, or to a server that already has an account in the app, work as before.
+- 83399c2: The macOS install script no longer refuses to update when an iOS simulator is running an app with the same name: it only waits for the desktop app itself to close.
+- 840a780: The desktop app now opens a link to any page of the web app, not only workspaces and sessions. Before, a connector sign-in started in the desktop app finished in the browser, and the browser's "Back to Opengeni" page handed the app the page it started on (for example a workspace's plugins page with the connection result in its address), but the app only read workspace and session links, so it just came forward on whatever page it was showing and never showed the result. Now the app opens that page, with its query kept, on the account for that server and workspace; a page on a server without an account here opens in the browser. `parseAppLink` takes a new `anyPage` option for apps that show the whole web app, and `AppWebPaths` gets an optional `workspaceOf` that reads the workspace any page belongs to (`OPENGENI_WEB_PATHS` reads `/workspaces/:id/…`). Without `anyPage` nothing changes, so phone apps still open those pages in the browser.
+- Updated dependencies [9bb1b56]
+- Updated dependencies [cd52481]
+- Updated dependencies [7e92bda]
+- Updated dependencies [71395d6]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [a505ce8]
+- Updated dependencies [840a780]
+- Updated dependencies [9d52126]
+- Updated dependencies [2a02889]
+- Updated dependencies [888aaf5]
+- Updated dependencies [d677983]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [486e0bf]
+- Updated dependencies [cd349e6]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [6d81049]
+- Updated dependencies [57748cf]
+- Updated dependencies [3b81d9b]
+- Updated dependencies [d355388]
+- Updated dependencies [42cd370]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [b9523c1]
+- Updated dependencies [cf9358a]
+  - @opengeni/sdk@6.11.0
+  - @opengeni/agent-host@6.11.0
+
+## 6.10.0
+
+### Patch Changes
+
+- c19768e: Not now on the desktop app's meeting card now ends the question for the whole call. An app that drops the microphone for a while, for example when muted or switching devices, is no longer asked about again. Inside a calendar meeting the question doesn't come back until the meeting ends. Outside one, it comes back only after the app has been off the microphone for five minutes. Not now on a call that started shortly before a calendar meeting also covers that meeting, so its "Join and start recording" reminder no longer appears for a meeting the person is already in. The card no longer holds itself up after Not now. Chromium replays the pointer onto a window shown again, which made the next card never time out. The pointer's position now comes from the main process, so a card holds only once the pointer moves onto it. Escape closes the question like Not now does, and a card window closed from outside counts as Not now. `MeetingPromptCard` takes an optional `pointerMs`.
+- b5201d5: Dependency security updates: sharp 0.35.5 (bundled libvips fixes), Electron 44.10.1, @azure/msal-node 7.1.2, undici 6.29.1, @grpc/grpc-js 1.14.7, and patched transitive versions of dompurify, ip-address, js-yaml, proxy-addr, fast-uri, seroval, follow-redirects and body-parser. This clears the critical and most high advisories reported by `bun audit` for server and desktop code.
+- 15763a2: Stop recording on the desktop meeting card now stops the recording in the account where it started, even while the window shows another account. Before, the stop could go to the account on screen, which ignored it, and the meeting kept recording. If a recording hasn't stopped a few seconds after Stop, the app shows its account, asks it again and logs this. Meeting detection, system audio and dictation now forget a page only when it really leaves its document (a committed navigation, an error page or a lost renderer), not when a navigation starts and is cancelled, such as a link opened in the browser. With several accounts, the stop card names the account that records and the account menu marks it.
+
+  API: `MeetingDetection` and `createMeetingDetection` take optional `revealPage`, `describePage`, `recordingChanged` and `stopConfirmMs`. `MeetingDetection` adds `isRecording()`. The stop prompt has an optional `where`, `MeetingWords` an optional `callEndedIn` and `DesktopAccount` an optional `recording`. Code that declares a `Required<MeetingWords>` object must now include `callEndedIn`.
+
+- f2b5205: Picking the wrong account no longer forces a sign-in. In the phone app, picking a signed-out account opens its sign-in over the account in use, so Cancel goes back. The account menus mark signed-out accounts. When the account in use is signed out, the sign-in screen lists the other accounts, so one tap returns to a signed-in one. In the desktop app, Cancel on the sign-in page returns to the account you came from, not the first signed-in one.
+- Updated dependencies [b72f388]
+- Updated dependencies [c9e5547]
+- Updated dependencies [1fd358c]
+- Updated dependencies [fb37d99]
+- Updated dependencies [f619179]
+- Updated dependencies [6900fce]
+- Updated dependencies [15763a2]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/agent-host@6.10.0
+  - @opengeni/sdk@6.10.0
+
+## 6.9.0
+
+### Minor Changes
+
+- 8572155: The desktop app can remind you about a minute before a calendar meeting with a Google Meet, Zoom, Teams or Webex link: a card in the corner says "<title> · Starts in 1 min" with Join and start recording, which opens the meeting and records it, named after the calendar event. While another meeting is being recorded it offers Join and record this one. Only the active account reminds, each meeting once, and Settings → Computer use → Voice has a switch for it, with a link to connect a calendar when none is.
+
+  New `GET /v1/workspaces/:workspaceId/upcoming-meetings` lists the caller's own meetings about to start with their join links (`listUpcomingMeetings` in the SDK). Creating a recording accepts `calendarEvent` (`{ provider, id }`), which names it after that event and is kept in `metadata.calendarEvent`. `createMeetingDetection` takes a `calendar` option and has `accountChanged()`, `refreshCalendar()` and `shutdown()`.
+
+### Patch Changes
+
+- Updated dependencies [f1c6437]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/sdk@6.9.0
+  - @opengeni/agent-host@6.9.0
+
 ## 6.8.0
 
 ### Patch Changes

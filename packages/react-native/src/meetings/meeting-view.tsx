@@ -9,13 +9,17 @@ import {
   formatClock,
   formatDuration,
   groupTranscriptTurns,
+  interleaveUnrecordedMarks,
   meetingHereStatus,
   meetingPhase,
   meetingTitle,
   speakerDisplayName,
   speakerIsNamed,
+  trackSpeakerName,
   transcribingText,
   transcriptErrorText,
+  transcriptUnrecordedMarks,
+  unrecordedMarkText,
   useRecording,
   useRecordingModels,
   useRecordingPeople,
@@ -23,6 +27,7 @@ import {
   versionSummary,
   type RecordingsClientOverride,
   type TranscriptTurn,
+  type TranscriptUnrecordedMark,
 } from "@opengeni/react/recordings";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -169,7 +174,24 @@ export function useMeetingView({
   const [sheet, setSheet] = useState<Sheet>(null);
   const [pulling, setPulling] = useState(false);
   const tracks = recording?.tracks ?? [];
-  const turns = useMemo(() => groupTranscriptTurns(transcript.segments), [transcript.segments]);
+  const length =
+    recording?.durationMilliseconds ??
+    Math.max(0, ...tracks.map((track) => track.durationMilliseconds));
+  const recordingTracks = recording?.tracks;
+  const marks = useMemo(
+    () => transcriptUnrecordedMarks(recordingTracks ?? [], length),
+    [recordingTracks, length],
+  );
+  // No turn runs across a stretch without audio, so its line sits between them.
+  const turns = useMemo(
+    () =>
+      groupTranscriptTurns(
+        transcript.segments,
+        undefined,
+        marks.map((mark) => mark.startMilliseconds),
+      ),
+    [transcript.segments, marks],
+  );
   const tryAgain = msg("native.meetings.meetingView.tryAgainInAMoment");
   const viewerSubjectId = viewer?.subjectId ?? null;
   const people = useRecordingPeople({ ...scope, enabled: sheet?.kind === "speaker" });
@@ -487,15 +509,31 @@ export function useMeetingView({
                   </Text>
                 ) : (
                   <View style={{ marginTop: 8 }}>
-                    {turns.map((turn) => (
-                      <Turn
-                        key={turn.key}
-                        turn={turn}
-                        speakers={transcript.speakers}
-                        tracks={tracks}
-                        onSpeaker={(label) => setSheet({ kind: "speaker", label })}
-                      />
-                    ))}
+                    {interleaveUnrecordedMarks(turns, marks).map((item) =>
+                      item.kind === "unrecorded" ? (
+                        <UnrecordedLine
+                          key={`unrecorded-${item.mark.key}`}
+                          mark={item.mark}
+                          speakerName={
+                            item.mark.trackNumber === null
+                              ? null
+                              : trackSpeakerName(
+                                  item.mark.trackNumber,
+                                  transcript.segments,
+                                  transcript.speakers,
+                                )
+                          }
+                        />
+                      ) : (
+                        <Turn
+                          key={item.turn.key}
+                          turn={item.turn}
+                          speakers={transcript.speakers}
+                          tracks={tracks}
+                          onSpeaker={(label) => setSheet({ kind: "speaker", label })}
+                        />
+                      ),
+                    )}
                   </View>
                 )}
               </>
@@ -671,6 +709,50 @@ function TranscriptFacts(props: {
           })}
         </View>
       ) : null}
+    </View>
+  );
+}
+
+/**
+ * A quiet line where a track recorded nothing, as on the web:
+ * lined up with the speaker names, wrapping evenly when it is long.
+ */
+function UnrecordedLine({
+  mark,
+  speakerName,
+}: {
+  mark: TranscriptUnrecordedMark;
+  speakerName: string | null;
+}) {
+  const msg = useOpenGeniText();
+  const theme = useNativeTimelineTheme();
+  const c = theme.colors;
+  return (
+    <View
+      accessible
+      accessibilityRole="text"
+      style={{ marginTop: 18, flexDirection: "row", alignItems: "flex-start", gap: 6 }}
+    >
+      <View style={{ marginTop: 1.5 }}>
+        <Icon
+          name={mark.source === "microphone" ? "mic-off" : "volume-x"}
+          size={13}
+          color={c["fg-muted"]}
+        />
+      </View>
+      <Text
+        textBreakStrategy="balanced"
+        style={{
+          ...fontStyle(theme),
+          flexShrink: 1,
+          fontSize: 12,
+          lineHeight: 16,
+          color: c["fg-muted"],
+          fontVariant: ["tabular-nums"],
+        }}
+      >
+        {unrecordedMarkText(mark, msg, speakerName)}
+      </Text>
     </View>
   );
 }

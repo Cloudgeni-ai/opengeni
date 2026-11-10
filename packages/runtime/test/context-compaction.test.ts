@@ -48,7 +48,6 @@ import {
   jsonSerializedLength,
   jsonSerializedUtf8ByteLength,
   omitOpaqueArtifactsFromPortableCompactionHistory,
-  portableSwitchTranscriptStart,
   prepareCompactionPromptInput,
   projectRemoteCompactionOverflowRetryInput,
   renderCompactionPromptInputForChat,
@@ -65,6 +64,7 @@ import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
 import {
   MODEL_ATTACHMENT_CATALOG_MARKER,
   MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD,
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
 } from "@opengeni/contracts";
@@ -849,12 +849,14 @@ describe("codex-parity rebuild", () => {
         ...user("first photo"),
         [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: olderId }],
         [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+        [MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD]: ["heif"],
       },
       assistant("looked at it"),
       {
         ...user("second photo"),
         [MODEL_ATTACHMENT_REFS_FIELD]: [{ kind: "file", fileId: newerId }],
         [MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]: 2000,
+        [MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD]: ["heif"],
       },
       user("what changed between them?"),
     ];
@@ -873,6 +875,7 @@ describe("codex-parity rebuild", () => {
         expect(first).toEqual(user("first photo"));
         expect(second[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: newerId }]);
         expect(second[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD]).toBe(2000);
+        expect(second[MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD]).toEqual(["heif"]);
         const catalog = rebuilt.find((item) => item[MODEL_ATTACHMENT_CATALOG_MARKER] === true)!;
         expect(catalog[MODEL_ATTACHMENT_REFS_FIELD]).toEqual([{ kind: "file", fileId: olderId }]);
         expect(rebuilt.indexOf(catalog)).toBeLessThan(rebuilt.indexOf(first));
@@ -894,9 +897,10 @@ describe("codex-parity rebuild", () => {
       expect(rebuilt.some((item) => item.content === "first photo")).toBe(true);
     });
 
-    test("the image bound never reaches the provider", () => {
+    test("the image bound and converted formats never reach the provider", () => {
       const wire = sanitizeHistoryItemsForModel(history()) as CompactionItem[];
       expect(JSON.stringify(wire)).not.toContain(MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD);
+      expect(JSON.stringify(wire)).not.toContain(MODEL_ATTACHMENT_CONVERTED_IMAGE_FORMATS_FIELD);
     });
   });
 
@@ -1911,36 +1915,4 @@ test("remote compaction preserves explicitly selected reasoning instructions on 
     });
     expect(body.reasoning).toEqual({ effort, summary: "detailed" });
   }
-});
-
-describe("portableSwitchTranscriptStart", () => {
-  const reply = (text: string): CompactionItem => ({
-    type: "message",
-    role: "assistant",
-    content: text,
-  });
-  // Three work units; the oldest reply is large.
-  const items = [
-    user("first"),
-    reply("x".repeat(40_000)),
-    user("second"),
-    reply("short"),
-    user("third"),
-    reply("short"),
-  ];
-  const tokens = (from: number) => estimateTokens(items.slice(from));
-
-  test("keeps the whole transcript when it fits", () => {
-    expect(portableSwitchTranscriptStart(items, tokens(0))).toBe(0);
-  });
-
-  test("drops the oldest work units that do not fit, at a user message", () => {
-    expect(portableSwitchTranscriptStart(items, tokens(2))).toBe(2);
-    expect(portableSwitchTranscriptStart(items, tokens(4))).toBe(4);
-  });
-
-  test("keeps at least the newest work unit", () => {
-    expect(portableSwitchTranscriptStart(items, 0)).toBe(4);
-    expect(portableSwitchTranscriptStart([reply("only a reply")], 0)).toBe(0);
-  });
 });

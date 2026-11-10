@@ -14,6 +14,7 @@ export type ComputeControlErrorKind =
   | "invalid"
   | "unauthorized"
   | "busy"
+  | "exists"
   | "request_mismatch"
   | "request_gone"
   | "host"
@@ -98,7 +99,11 @@ export type ComputeAgentInit = {
 
 export type ComputeCreateRequest = {
   request_id: string;
+  /** The image to boot. A create names an image or a template, never both. */
   image?: string;
+  /** A team template (by id or name) to boot afresh from instead of an image:
+   * the disk a sandbox had when it was captured (ADR 22). */
+  template?: string;
   vcpus: number;
   memory_mib: number;
   memory_request_mib?: number;
@@ -126,6 +131,30 @@ export type ComputeRequestLookup =
   | { state: "none" }
   | { state: "gone" };
 
+/** A team template: a sandbox's disk captured as a stored image that creates
+ * naming the template start from (ADR 22). */
+export type ComputeTemplateView = {
+  id: string;
+  name?: string;
+  /** The stored image (its content digest) sandboxes from it boot. */
+  image: string;
+  /** The sandbox it was captured from. */
+  source: string;
+  vcpus: number;
+  memory_mib: number;
+  disk_mib: number;
+  created_ms: number;
+};
+
+/** A create that named a template the team no longer has. */
+export function isComputeTemplateGone(error: unknown): boolean {
+  return (
+    error instanceof ComputeControlError &&
+    (error.kind === "invalid" || error.kind === "not_found") &&
+    /no such template/u.test(error.message)
+  );
+}
+
 export type ComputeControlClientOptions = {
   baseUrl: string;
   apiKey: string;
@@ -150,6 +179,7 @@ const KNOWN_CODES: ReadonlySet<string> = new Set([
   "not_found",
   "invalid",
   "busy",
+  "exists",
   "request_mismatch",
   "request_gone",
   "host",
@@ -240,6 +270,17 @@ export class ComputeControlClient {
     );
   }
 
+  /** Boot the sandbox afresh from its disk, keeping its files and shape. Its
+   * running programs end; the next request wakes it on a new agent
+   * connection. */
+  async restart(sandboxId: string): Promise<ComputeSandboxView> {
+    return await this.request<ComputeSandboxView>(
+      "POST",
+      `/v1/sandboxes/${encodeURIComponent(sandboxId)}/restart`,
+      {},
+    );
+  }
+
   /** The team's sandboxes whose metadata holds every given pair. */
   async list(metadata: Record<string, string> = {}): Promise<ComputeSandboxView[]> {
     const query = new URLSearchParams(metadata).toString();
@@ -285,13 +326,63 @@ export class ComputeControlClient {
     return await this.request<ComputeLinkKeys>("GET", "/v1/link/keys");
   }
 
-  private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  /** Capture a sandbox's disk as a new team template named `name`. The
+   * control service saves the sandbox, copies its disk and stores it before
+   * answering, so this can take as long as the upload; `timeoutMs` bounds it.
+   * A name the team already has answers `exists`. Asked once: a repeated
+   * request would start another capture, so a lost answer is for the caller
+   * to look up by name. */
+  async captureTemplate(
+    sandboxId: string,
+    name: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<ComputeTemplateView> {
+    return await this.request<ComputeTemplateView>(
+      "POST",
+      `/v1/sandboxes/${encodeURIComponent(sandboxId)}/templates`,
+      { name },
+      options.timeoutMs,
+      1,
+    );
+  }
+
+  /** The team's template with this id or name, or null when it has none. */
+  async getTemplate(key: string): Promise<ComputeTemplateView | null> {
+    try {
+      return await this.request<ComputeTemplateView>(
+        "GET",
+        `/v1/templates/${encodeURIComponent(key)}`,
+      );
+    } catch (error) {
+      if (error instanceof ComputeControlError && error.kind === "not_found") return null;
+      throw error;
+    }
+  }
+
+  /** Delete a team template by id or name. An already-gone one is success.
+   * Sandboxes already created from it keep running. */
+  async deleteTemplate(key: string): Promise<void> {
+    try {
+      await this.request<unknown>("DELETE", `/v1/templates/${encodeURIComponent(key)}`);
+    } catch (error) {
+      if (error instanceof ComputeControlError && error.kind === "not_found") return;
+      throw error;
+    }
+  }
+
+  private async request<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    timeoutMs?: number,
+    maxAttempts: number = this.maxAttempts,
+  ): Promise<T> {
     let lastError: ComputeControlError | undefined;
-    for (let attempt = 0; attempt < this.maxAttempts; attempt += 1) {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       if (attempt > 0) await this.backoff(Math.min(8_000, 250 * 2 ** attempt));
       if (this.signal?.aborted) break;
       try {
-        return await this.attempt<T>(method, path, body);
+        return await this.attempt<T>(method, path, body, timeoutMs);
       } catch (error) {
         if (!(error instanceof ComputeControlError) || !error.retryable) throw error;
         lastError = error;
@@ -324,10 +415,15 @@ export class ComputeControlClient {
     }
   }
 
-  private async attempt<T>(method: string, path: string, body?: unknown): Promise<T> {
+  private async attempt<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    timeoutMs: number = this.requestTimeoutMs,
+  ): Promise<T> {
     const route = path.split("?")[0];
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const abandon = (): void => controller.abort();
     this.signal?.addEventListener("abort", abandon, { once: true });
     if (this.signal?.aborted) controller.abort();

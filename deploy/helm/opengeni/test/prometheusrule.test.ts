@@ -38,18 +38,21 @@ describe("turn-capacity Prometheus alerts", () => {
         release: {{ .Release.Name | quote }}`);
   });
 
-  test("alerts on cumulative queue, provider-dispatch, and first-byte p95 SLOs", async () => {
+  test("alerts on provider-dispatch and first-byte p95 measured from the attempt start", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",
     );
     for (const [name, milestone] of [
-      ["OpenGeniTurnStartupQueueP95High", "queue"],
       ["OpenGeniTurnStartupProviderDispatchP95High", "provider_dispatch"],
+      ["OpenGeniTurnStartupProviderDispatchP95Critical", "provider_dispatch"],
       ["OpenGeniTurnStartupFirstByteP95High", "first_byte"],
     ] as const) {
       const expression = alertExpression(template, name);
-      expect(expression).toContain("opengeni_turn_startup_milestone_duration_seconds_bucket");
+      // Time queued behind an earlier turn in the same chat is serialization,
+      // not latency we can act on, so the cumulative clock never alerts.
+      expect(expression).toContain("opengeni_turn_startup_since_attempt_start_seconds_bucket");
+      expect(expression).not.toContain("opengeni_turn_startup_milestone_duration_seconds");
       expect(expression).toContain(`milestone="${milestone}"`);
       expect(expression).toContain("histogram_quantile(");
       expect(expression).toContain("turnStartupMinSamples");
@@ -59,6 +62,41 @@ describe("turn-capacity Prometheus alerts", () => {
       expect(expression).not.toContain("sessionId");
       expect(expression).not.toContain("turnId");
     }
+    expect(template).not.toContain("OpenGeniTurnStartupQueueP95High");
+    expect(template).not.toContain("turnStartupQueueP95Seconds");
+  });
+
+  test("alerts on runnable prompts waiting, not prompts held behind an active turn", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    const warning = ruleBlock(template, "alert", "OpenGeniTurnReadyPromptWaiting");
+    const critical = ruleBlock(template, "alert", "OpenGeniTurnReadyPromptWaitingCritical");
+    for (const name of [
+      "OpenGeniTurnReadyPromptWaiting",
+      "OpenGeniTurnReadyPromptWaitingCritical",
+    ]) {
+      const expression = alertExpression(template, name);
+      expect(expression).toContain("opengeni_turns_queued_oldest_age_seconds");
+      expect(expression).toContain('hold="ready"');
+      expect(expression).not.toContain("behind_active_turn");
+      for (const selector of metricSelectors(expression)) {
+        expect(selector).toContain(DEPLOYMENT_SCOPE);
+      }
+    }
+    expect(warning).toContain("> {{ $turnReadyPromptAgeSeconds }}");
+    expect(warning).toContain("unless on()");
+    expect(warning).toContain("> {{ $turnReadyPromptAgeCriticalSeconds }}");
+    expect(warning).toContain("notification_policy: investigate");
+    expect(critical).toContain("severity: critical");
+    expect(critical).toContain("notification_policy: page");
+    expect(critical).toContain("opengeni_turn_eligible_backlog");
+    expect(template).toContain("{{- $turnReadyPromptAgeSeconds := int (default 60 ");
+    expect(template).toContain("{{- $turnReadyPromptAgeCriticalSeconds := int (default 300 ");
+    expect(template).toContain(
+      "(le $turnReadyPromptAgeCriticalSeconds $turnReadyPromptAgeSeconds)",
+    );
   });
 
   test("renders disjoint startup alert scopes for separate releases and environments", async () => {
@@ -225,7 +263,7 @@ describe("turn-capacity Prometheus alerts", () => {
     );
     const expected = new Map([
       ["OpenGeniTurnFailureRatioHigh", ["opengeni_turns_total", 'outcome="failed"']],
-      ["OpenGeniTurnRecoveryRatioHigh", ["opengeni_turns_total", 'outcome="recovering"']],
+      ["OpenGeniTurnRecoveryRatioHigh", ["opengeni_turn_recoveries_total", 'cause!="provider"']],
       [
         "OpenGeniTurnWorkerDeathRecovered",
         ["opengeni_turn_worker_death_recoveries_total", 'outcome="recovering"'],
@@ -262,15 +300,6 @@ describe("turn-capacity Prometheus alerts", () => {
         "OpenGeniNatsSubscriptionTerminated",
         ["opengeni_nats_subscription_terminations_total", "sum by (kind, recovery)"],
       ],
-      [
-        "OpenGeniMcpToolLatencyHigh",
-        [
-          "opengeni_mcp_tool_call_duration_seconds_bucket",
-          "sum by (le, tool)",
-          "and on(tool)",
-          "sum by (tool) (increase(opengeni_mcp_tool_call_duration_seconds_count",
-        ],
-      ],
       ["OpenGeniHttp5xxRatioHigh", ["opengeni_http_requests_total", 'status=~"5.."']],
       [
         "OpenGeniCoreReadLatencyHigh",
@@ -305,6 +334,8 @@ describe("turn-capacity Prometheus alerts", () => {
         "OpenGeniApiRouteRejectionsAbnormal",
         [
           "opengeni_http_requests_total",
+          "opengeni_http_request_rejections_total",
+          'reason!="agent_attempt_caller_stale"',
           'status=~"401|403|409|422"',
           "sum by (method, route, status)",
           "[1d] offset 30m",
@@ -451,7 +482,7 @@ describe("turn-capacity Prometheus alerts", () => {
     );
   });
 
-  test("tiers Opengeni-owned dispatch latency tightly and without duplicate incidents", async () => {
+  test("tiers attempt preparation latency tightly and without duplicate incidents", async () => {
     const template = await readFile(
       new URL("../templates/prometheusrule.yaml", import.meta.url),
       "utf8",
@@ -471,6 +502,8 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(preDispatch).toContain("opengeni_model_request_pre_dispatch_seconds_bucket");
     expect(preDispatch).toContain("> {{ $modelRequestPreDispatchP95Seconds }}");
     expect(preDispatch).toContain(">= {{ $modelRequestMinSamples }}");
+    // The first action names the per-stage split, not a guess at the cause.
+    expect(preDispatch).toContain("opengeni_model_request_pre_dispatch_stage_seconds");
     for (const block of [warning, critical, preDispatch]) {
       expect(block).toContain("action:");
       expect(block).toContain(
@@ -484,6 +517,25 @@ describe("turn-capacity Prometheus alerts", () => {
     expect(template).toContain(
       "(le $turnStartupProviderDispatchCriticalP95Seconds $turnStartupProviderDispatchP95Seconds)",
     );
+  });
+
+  test("describes dispatch latency as attempt preparation, excluding queue and capacity waits", async () => {
+    const template = await readFile(
+      new URL("../templates/prometheusrule.yaml", import.meta.url),
+      "utf8",
+    );
+    for (const name of [
+      "OpenGeniTurnStartupProviderDispatchP95High",
+      "OpenGeniTurnStartupProviderDispatchP95Critical",
+    ]) {
+      const dispatch = ruleBlock(template, "alert", name);
+      expect(dispatch).toContain("start of the turn attempt");
+      expect(dispatch).toContain("time behind an earlier turn");
+      expect(dispatch).toContain("capacity waits");
+      expect(dispatch).toContain("opengeni_turn_startup_phase_duration_seconds");
+      expect(dispatch).toContain("opengeni_model_request_pre_dispatch_stage_seconds");
+      expect(dispatch).toContain("Do not subtract histogram quantiles");
+    }
   });
 
   test("alerts from durable model-aware compaction lifecycle instead of a static token guess", async () => {
@@ -755,12 +807,18 @@ describe("Codex pool Prometheus alerts", () => {
     const expression = alertExpression(template, "OpenGeniCodexPromptCacheTelemetryMissing");
     // HTTP-200 headers can arrive before streamed usage, or the stream can fail
     // without usage. These counters are not a matched numerator/denominator.
-    // Explicit missing fields must still alert even while other calls report;
-    // absent usage must alert on active traffic but never on an idle provider.
+    // Explicit missing fields alert even while other calls report, but only
+    // from 3 calls and over 5% of calls that reported usage: one call never
+    // pages. A call with no usage at all (status="no_usage") is neither a
+    // missing field nor a usage observation. Absent usage must alert on
+    // active traffic but never on an idle provider.
+    const usage = `opengeni_model_cache_read_telemetry_total{${DEPLOYMENT_SCOPE},provider="codex-subscription"`;
     expect(expression.replace(/\s+/g, " ").trim()).toBe(
-      `(sum(rate(opengeni_model_cache_read_telemetry_total{${DEPLOYMENT_SCOPE},provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0 ` +
+      `( sum(increase(${usage},status="missing"}[30m])) >= 3 ` +
+        `and on() sum(increase(${usage},status="missing"}[30m])) ` +
+        `/ clamp_min(sum(increase(${usage},status=~"reported|missing"}[30m])), 1) > 0.05 ) ` +
         `or ( sum(increase(opengeni_model_calls_total{${DEPLOYMENT_SCOPE},provider="codex-subscription",outcome="completed"}[30m])) >= 20 ` +
-        `and on() (sum(rate(opengeni_model_cache_read_telemetry_total{${DEPLOYMENT_SCOPE},provider="codex-subscription"}[30m])) or vector(0)) == 0 )`,
+        `and on() (sum(rate(${usage},status=~"reported|missing"}[30m])) or vector(0)) == 0 )`,
     );
   });
 
@@ -840,3 +898,24 @@ function renderDeploymentScope(
     .replaceAll("{{ .Release.Name | quote }}", JSON.stringify(scope.release))
     .replaceAll("{{ $environment | quote }}", JSON.stringify(scope.environment));
 }
+
+test("platform reliability ratios exclude customer-provider failures consistently", async () => {
+  const template = await readFile(
+    new URL("../templates/prometheusrule.yaml", import.meta.url),
+    "utf8",
+  );
+  for (const name of [
+    "OpenGeniTurnFailureRatioHigh",
+    "OpenGeniModelCallFailureRatioHigh",
+    "OpenGeniTurnStartupFirstByteAvailabilityLow",
+  ]) {
+    const selectors = metricSelectors(alertExpression(template, name));
+    expect(selectors.length).toBeGreaterThan(2);
+    for (const selector of selectors)
+      expect(selector).toContain('failure_origin!="customer_provider"');
+  }
+  // Recovery/exhaustion and other system signals are not suppressed by provider choice.
+  expect(alertExpression(template, "OpenGeniTurnRecoveryRatioHigh")).not.toContain(
+    "failure_origin",
+  );
+});

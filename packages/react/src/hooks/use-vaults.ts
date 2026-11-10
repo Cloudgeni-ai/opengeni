@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { useCallback, useMemo } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import type {
@@ -11,7 +12,7 @@ import type {
 import { asVaultClient, vaultsApi, type VaultsApi } from "@opengeni/sdk";
 import { usePolledValue } from "./internal";
 
-export type UseVaultQueryOptions = ClientOverride & {
+export type UseVaultQueryOptions = ClientOverride<ChatClient> & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
 };
@@ -27,7 +28,7 @@ type QueryResult<T> = {
  * plain promises: callers refresh the affected query afterwards. Plaintext
  * (`revealField`) is returned to the caller only and never stored here.
  */
-export function useVaultsApi(options: ClientOverride = {}): VaultsApi {
+export function useVaultsApi(options: ClientOverride<ChatClient> = {}): VaultsApi {
   const { client, workspaceId } = useOpenGeni(options);
   return useMemo(() => vaultsApi(asVaultClient(client), workspaceId), [client, workspaceId]);
 }

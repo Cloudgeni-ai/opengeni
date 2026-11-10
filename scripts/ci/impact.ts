@@ -113,6 +113,19 @@ const TEMPORAL_WORKFLOW_DEPENDENCIES = [
 ];
 
 const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
+  "test/integration/sdk-compatibility.integration.ts": [
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/sdk",
+    "@opengeni/react",
+    "@opengeni/core",
+    "@opengeni/db",
+    "@opengeni/events",
+    "@opengeni/runtime",
+    "@opengeni/worker-bundle",
+    "@opengeni/storage",
+    "@opengeni/testing",
+  ],
   "test/integration/background-command-wake.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/worker-bundle",
@@ -345,6 +358,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/react-compiled-css.browser.e2e.ts": ["@opengeni/react"],
+  "test/e2e/session-relay-headers.browser.e2e.ts": ["@opengeni/sdk", "@opengeni/contracts"],
   "test/e2e/secrets-fake-login-suite.browser.e2e.ts": ["@opengeni/testing"],
   "test/e2e/external-vaults.e2e.ts": [
     "@opengeni/api-router",
@@ -375,6 +389,15 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/api-router",
     "@opengeni/contracts",
+    "@opengeni/db",
+    "@opengeni/testing",
+  ],
+  "test/e2e/archived-chat-status.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/api-router",
+    "@opengeni/contracts",
+    "@opengeni/core",
     "@opengeni/db",
     "@opengeni/testing",
   ],
@@ -448,6 +471,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/session-sidebar.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/desktop-rail.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/desktop-corner.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/agents.browser.e2e.ts": ["opengeni-web", "@opengeni/react", "@opengeni/testing"],
   "test/e2e/error-branding.browser.e2e.ts": [
     "@opengeni/react",
     "@opengeni/sdk",
@@ -568,6 +592,12 @@ for (const path of TEMPORAL_WORKFLOW_INTEGRATION_TESTS) {
 }
 
 const ROOT_TEST_HELPER_DEPENDENTS: Record<string, readonly string[]> = {
+  "test/integration/sdk-compatibility/consumer.ts": [
+    "test/integration/sdk-compatibility.integration.ts",
+  ],
+  "test/integration/sdk-compatibility/versions.json": [
+    "test/integration/sdk-compatibility.integration.ts",
+  ],
   "test/e2e/browser-account-read-diagnostics.ts": [
     "test/e2e/browser-accounts-acceptance.e2e.ts",
     "test/e2e/browser-account-read-diagnostics.test.ts",
@@ -1010,7 +1040,10 @@ export function createImpactPlan(
       "migration-immutability",
     );
   }
-  if ([...affected].some((name) => PUBLIC_API_WORKSPACES.has(name))) {
+  if (
+    [...affected].some((name) => PUBLIC_API_WORKSPACES.has(name)) ||
+    changedFiles.includes("test/integration/sdk-compatibility/versions.json")
+  ) {
     guards.push("public-api");
   }
   if (buildPackages.length > 0) guards.push("publish-closure");

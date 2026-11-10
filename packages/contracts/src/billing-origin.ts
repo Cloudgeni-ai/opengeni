@@ -5,7 +5,8 @@ import { z } from "zod";
  * Who a turn's usage is billed as. Frozen on every accepted turn
  * (`session_turns.billing_origin`) and on every debit it causes
  * (`credit_ledger_entries.usage_origin`). Unlike the analytics-only turn
- * surface, this is a funding fact; it never grants or narrows access.
+ * surface, this is a funding fact; it also restricts connected subscriptions
+ * to app work, never granting access to a workspace or credential.
  *
  * - `app`: a signed-in person in Opengeni's own web, desktop or mobile apps,
  *   and work set up there (Slack and Teams bots, published Sites, schedules
@@ -65,6 +66,11 @@ export function byokRefusalAction(message: string) {
 export const SUBSCRIPTION_PLAN_REQUIRED_CODE = "subscription_plan_required";
 export const SUBSCRIPTION_PLAN_REQUIRED_MESSAGE = "Upgrade to Pro to use your own subscription.";
 
+/** Buying a plan cannot enable connected subscriptions for API-origin work. */
+export const SUBSCRIPTION_API_UNAVAILABLE_CODE = "subscription_api_unavailable";
+export const SUBSCRIPTION_API_UNAVAILABLE_MESSAGE =
+  "Connected subscriptions are only available in the Opengeni apps. Choose a credit-billed model for API use.";
+
 /** The cheapest monthly plan price that includes the person's own subscriptions. */
 export const OWN_SUBSCRIPTION_MIN_PLAN_PRICE_MICROS = 20_000_000;
 
@@ -81,5 +87,33 @@ export function planIncludesOwnSubscriptions(plan: {
     plan.key !== "free" &&
     (plan.monthlyPriceMicros === null ||
       plan.monthlyPriceMicros >= OWN_SUBSCRIPTION_MIN_PLAN_PRICE_MICROS)
+  );
+}
+
+/** The catalog fields the own-subscription upgrade choice reads. */
+export type OwnSubscriptionUpgradeCandidate = {
+  key: string;
+  label: string;
+  monthlyPriceMicros: number | null;
+  selfService: boolean;
+};
+
+/**
+ * The plan to name when an organization's own subscriptions need a paid plan:
+ * the cheapest self-service catalog plan that includes them (Pro in the
+ * launch catalog). Null when the catalog sells none, so nothing is invented.
+ */
+export function ownSubscriptionUpgradePlan<T extends OwnSubscriptionUpgradeCandidate>(
+  plans: readonly T[],
+): T | null {
+  return (
+    plans
+      .filter(
+        (plan) =>
+          plan.selfService &&
+          plan.monthlyPriceMicros !== null &&
+          planIncludesOwnSubscriptions(plan),
+      )
+      .sort((a, b) => (a.monthlyPriceMicros ?? 0) - (b.monthlyPriceMicros ?? 0))[0] ?? null
   );
 }

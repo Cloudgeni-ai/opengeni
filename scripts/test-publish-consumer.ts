@@ -403,6 +403,7 @@ try {
       "packages/contracts",
       "packages/decisions",
       "packages/interaction",
+      "packages/jev",
       "packages/network",
       "packages/observability",
       "packages/tool-gateway",
@@ -472,6 +473,8 @@ try {
     "package/dist/connection-account-label.d.ts",
     "package/dist/personal-integration-setup.js",
     "package/dist/personal-integration-setup.d.ts",
+    "package/dist/machine-access.js",
+    "package/dist/machine-access.d.ts",
   ]) {
     if (!contractsTarballContents.split("\n").includes(artifact)) {
       throw new Error(`contracts tarball is missing ${artifact}`);

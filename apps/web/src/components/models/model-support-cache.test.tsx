@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type {
   OrganizationModelDefaults,
@@ -55,7 +56,7 @@ function makeClient() {
 }
 let client = makeClient();
 const context = {
-  client: client as unknown as OpenGeniBrowserClient,
+  client: client as unknown as ChatClient<OpenGeniBrowserClient>,
   clientConfig: { billingMode: "stripe", models: [{ cost: "credits" }] },
   accessContext: {
     accountGrants: [{ accountId: "organization-a", permissions: ["billing:read"] }],
@@ -73,7 +74,7 @@ registerDom();
 let release: () => void;
 beforeEach(() => {
   client = makeClient();
-  context.client = client as unknown as OpenGeniBrowserClient;
+  context.client = client as unknown as ChatClient<OpenGeniBrowserClient>;
   context.accessContext.accountGrants = [
     { accountId: "organization-a", permissions: ["billing:read"] },
   ];
@@ -247,7 +248,7 @@ test("a completed defaults mutation cannot overwrite a newer client's rows", asy
   await actRun(() => {
     saved = hook.result.current.update({ sessionDefaults: null });
   });
-  context.client = makeClient() as unknown as OpenGeniBrowserClient;
+  context.client = makeClient() as unknown as ChatClient<OpenGeniBrowserClient>;
   await hook.rerender();
   const changed = { ...defaults, allowedModels: ["new-model"] };
   await actRun(async () => {

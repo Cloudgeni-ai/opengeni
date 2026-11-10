@@ -54,6 +54,9 @@ export const ToolReviewContext = /* @__PURE__ */ defineSchema(() =>
        * What an app action changes, as facts the server read from its own
        * records when the approval was prepared ("Connection: Gmail",
        * "Account: anna@example.com"); never text from the call's arguments.
+       * Other first-party calls the worker reviews state their target the
+       * same way ("Repository", "Branch"), under fixed labels. When present,
+       * the card lists these facts and the raw arguments stay in Details.
        */
       targetFacts: z
         .array(

@@ -3,7 +3,10 @@ import {
   applySkillFileChanges,
   assertSkillRelativePath,
   readSkillFiles,
+  readSkillFilesReportingMissing,
   skillScriptIndex,
+  SKILL_READ_AVAILABLE_PATHS_MAX_BYTES,
+  SKILL_READ_AVAILABLE_PATHS_MAX_ENTRIES,
   SKILL_READ_MAX_OUTPUT_BYTES,
   SKILL_SCRIPT_INDEX_MAX_BYTES,
   SKILL_SCRIPT_INDEX_MAX_ENTRIES,
@@ -67,6 +70,74 @@ describe("sandbox-independent Skill reads", () => {
     ]) {
       expect(() => assertSkillRelativePath(path)).not.toThrow();
     }
+  });
+});
+
+describe("Skill reads that name missing paths", () => {
+  test("return the files that exist, name each missing path and list the Skill's paths", () => {
+    const result = readSkillFilesReportingMissing(folder, [
+      "SKILL.md",
+      "references/x.md",
+      "scripts/deploy",
+      "notes.md",
+    ]);
+    expect(result).toEqual({
+      files: [folder[0], folder[2]],
+      missing: ["references/x.md", "notes.md"],
+      availablePaths: ["SKILL.md", "references/deploy.md", "scripts/deploy"],
+      note: expect.stringContaining("availablePaths lists every file of this Skill."),
+    });
+    expect(result.note).toContain("reading it again will not help");
+    expect(result.note).toContain("a file that another Skill names is read from that Skill");
+    expect(result.note).not.toContain("try again");
+  });
+
+  test("a read where no path exists still returns names and paths", () => {
+    const result = readSkillFilesReportingMissing(folder, ["references/x.md", "../sibling/x.md"]);
+    expect(result.files).toEqual([]);
+    expect(result.missing).toEqual(["references/x.md", "../sibling/x.md"]);
+    expect(result.availablePaths).toEqual(["SKILL.md", "references/deploy.md", "scripts/deploy"]);
+  });
+
+  test("a complete read is unchanged, and the default read stays strict", () => {
+    expect(readSkillFilesReportingMissing(folder, ["scripts/deploy"])).toEqual({
+      files: [folder[2]],
+    });
+    expect(readSkillFilesReportingMissing(folder)).toEqual({ files: [folder[0]] });
+    expect(() => readSkillFilesReportingMissing(folder.slice(1))).toThrow("SKILL.md");
+    expect(() => readSkillFilesReportingMissing(folder, [])).toThrow("between 1 and");
+    expect(() => readSkillFilesReportingMissing(folder, ["x.md", "x.md"])).toThrow(
+      "Duplicate requested",
+    );
+  });
+
+  test("bounds the path list, keeps likely matches and points to listFiles", () => {
+    const many = [
+      { path: "SKILL.md", content: "" },
+      ...Array.from({ length: 200 }, (_, i) => ({
+        path: `a/${String(i).padStart(3, "0")}.md`,
+        content: "",
+      })),
+      { path: "z/guide.md", content: "" },
+    ];
+    const result = readSkillFilesReportingMissing(many, ["references/guide.md"]);
+    expect(result.availablePaths).toHaveLength(SKILL_READ_AVAILABLE_PATHS_MAX_ENTRIES);
+    expect(result.availablePaths).toContain("z/guide.md");
+    expect(result.availablePaths).toEqual([...result.availablePaths!].sort());
+    expect(result.availablePathsOmitted).toBe(many.length - SKILL_READ_AVAILABLE_PATHS_MAX_ENTRIES);
+    expect(result.note).toContain(
+      `availablePaths lists ${SKILL_READ_AVAILABLE_PATHS_MAX_ENTRIES} of this Skill's ${many.length} files; call skill_read with listFiles:true for all of them.`,
+    );
+
+    const long = Array.from({ length: 20 }, (_, i) => ({
+      path: `${String(i).padStart(2, "0")}-${"n".repeat(500)}.md`,
+      content: "",
+    }));
+    const bounded = readSkillFilesReportingMissing(long, ["x.md"]);
+    expect(
+      new TextEncoder().encode(JSON.stringify(bounded.availablePaths)).byteLength,
+    ).toBeLessThanOrEqual(SKILL_READ_AVAILABLE_PATHS_MAX_BYTES);
+    expect(bounded.availablePathsOmitted).toBe(long.length - bounded.availablePaths!.length);
   });
 });
 

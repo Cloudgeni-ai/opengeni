@@ -21,11 +21,27 @@ if (mode === "writers") {
     waitForQuiescence: () => pending,
   };
 }
+if (mode.startsWith("secret-cleanup")) {
+  context.eventing.toolCancellationFenceRef.current = {
+    cancel() {},
+    waitForQuiescence: async () => {},
+    clearSecretFiles: () => {
+      console.log("secret_cleanup_started");
+      if (mode === "secret-cleanup-rejects") {
+        return Bun.sleep(10).then(() => { throw new Error("cleanup failed"); });
+      }
+      if (mode === "secret-cleanup-throws") throw new Error("cleanup failed");
+      return pending;
+    },
+  };
+}
 if (mode === "snapshot") context.sandboxState.snapshotInFlight = pending;
+if (mode === "run-credentials") context.renewals.runCredentialSession = {};
 let held = true;
 const keepAlive = setInterval(() => {}, 1_000);
 const observability = {
   incrementCounter() {}, incrementGauge() {}, observeHistogram() {},
+  warn(message: string) { console.log(message); },
   error(message: string, attributes: unknown) { console.log(message, JSON.stringify(attributes)); },
   recordWorkerActivity(activity: unknown) { console.log("worker_activity", JSON.stringify(activity)); },
 } as unknown as Observability;
@@ -99,6 +115,8 @@ const deps = {
   stopLeaseHeartbeat() {},
   turnCompletionMemoryCollector: { schedule() {} },
   noteCancellationRequested() {},
+  requireResolvedSandboxForMutation: () => ({}),
+  runWorkspaceMutationForSandbox: () => pending,
 } as unknown as TurnFinalizationDeps;
 await finalizeTurnAttempt(deps);
 containment.finished();

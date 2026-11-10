@@ -1,4 +1,5 @@
 import { useAppApi } from "../lib/app-api";
+import { REPOSITORY_OPEN_REFRESH_COOLDOWN_MS } from "../lib/github-access-return";
 import { useAppHost } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { initialWorkspaceMachineCompute } from "../lib/workspace-default-machine";
@@ -109,6 +110,11 @@ import { Button } from "../../ui/button";
 import { sessionDisplayTitle } from "../lib/session-rename";
 import { Notice } from "../../ui/notice";
 import { CreditRefusalNotice } from "../components/credits/credit-refusal-notice";
+import {
+  OwnSubscriptionPlanNotice,
+  ownSubscriptionPlanNotice,
+} from "../components/credits/own-subscription-plan-notice";
+import { useDismissedNotice } from "../components/agents/agent-notices";
 import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
 import {
   pickerPolicyRunnable,
@@ -137,6 +143,7 @@ import { useAppContext, useLatestCallback } from "../app-context";
 import { useBrowserAccountBridgeBlocker } from "../lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
+  composerLaunchAgentId,
   composerLaunchSearchKey,
   continueArchivedChatMessage,
   modelProvidedAfterLaunch,
@@ -218,6 +225,7 @@ import {
   repositorySelectionFromResources,
 } from "../lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "../lib/use-new-session-draft";
+import { newSessionDraftConflictRevision } from "../../hooks/use-new-session-draft";
 import { userErrorText } from "../../ui/api-error";
 import {
   newSessionCreateSnapshot,
@@ -235,9 +243,10 @@ import {
 } from "./sessions-index-hydration";
 import type { SandboxBackend, Session } from "../types";
 import { useUiEventTarget } from "../lib/ui-events";
-import { BotLaunchStrip, type BotLaunchState } from "../components/bots/bot-launch-strip";
-import { BotTemplateShortcuts } from "../components/bots/bot-template-shortcuts";
-import { useBotTemplates } from "../lib/bot-templates";
+import { ComposerAgentChip } from "../components/agents/composer-agent-chip";
+import { agentAvatar } from "../lib/agent-avatar";
+import { useAgents } from "../lib/agents";
+import { AGENT_ONLY_ME_CHAT, useComposerAgent } from "../lib/composer-agent";
 import { useWindowBarTitle } from "../../ui/window-bar-title";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
@@ -354,50 +363,11 @@ function SessionsIndexRouteContent({
   const [projectAudienceDraft, setProjectAudienceDraft] = useState<ProjectAudience>("workspace");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
-  // ?botTemplateId= starts this chat as a bot: the template's setup
-  // instructions fill the composer (to read and change before sending), and
-  // the chat is created with its name, description and avatar, kept live.
-  const launchBotTemplateId = launch.botTemplateId;
-  const workspaceBotTemplates = useBotTemplates(workspaceId);
-  const [botLaunch, setBotLaunch] = useState<{
-    id: string;
-    state: BotLaunchState;
-  } | null>(null);
-  useEffect(() => {
-    if (!launchBotTemplateId) {
-      setBotLaunch(null);
-      return;
-    }
-    let live = true;
-    setBotLaunch({ id: launchBotTemplateId, state: { kind: "loading" } });
-    context.client.getBotTemplate(workspaceId, launchBotTemplateId).then(
-      (template) => {
-        if (live)
-          setBotLaunch({
-            id: launchBotTemplateId,
-            state: { kind: "ready", template },
-          });
-      },
-      (error: unknown) => {
-        if (live)
-          setBotLaunch({
-            id: launchBotTemplateId,
-            state: { kind: "error", message: userErrorText(error) },
-          });
-      },
-    );
-    return () => {
-      live = false;
-    };
-  }, [context.client, launchBotTemplateId, workspaceId]);
-  const botTemplate = botLaunch?.state.kind === "ready" ? botLaunch.state.template : null;
-  const newSessionBot = botTemplate
-    ? {
-        name: botTemplate.name,
-        description: botTemplate.description,
-        avatar: botTemplate.avatar,
-      }
-    : undefined;
+  // ?agent= (or an older ?botTemplateId= link) starts this chat with an
+  // agent (useComposerAgent, after the draft below): the composer stays as it
+  // is, and the chat follows its Instructions and shows its icon.
+  const launchAgentId = composerLaunchAgentId(launch);
+  const workspaceAgents = useAgents(workspaceId);
   const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() =>
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
@@ -818,6 +788,25 @@ function SessionsIndexRouteContent({
     );
   }, [canCreatePrivateChat, selectProject, selectedProjectOnlyMe, tenancyCapabilities]);
 
+  const setDraftVisibility = useCallback(
+    (visibility: "private" | "workspace") =>
+      setDraft((current) =>
+        current.visibility === visibility ? current : { ...current, visibility },
+      ),
+    [],
+  );
+  const composerAgent = useComposerAgent({
+    workspaceId,
+    agentId: launchAgentId,
+    canCreatePrivateChat: tenancyCapabilities === null ? null : canCreatePrivateChat,
+    visibility: draft.visibility,
+    setVisibility: setDraftVisibility,
+    keepOnlyMe: selectedProjectOnlyMe,
+  });
+  const newSessionAgent = composerAgent.agent
+    ? { id: composerAgent.agent.id, avatar: agentAvatar(composerAgent.agent) }
+    : undefined;
+
   useEffect(() => {
     const onRequest = (event: Event) => {
       const requestedChannelId = (event as CustomEvent<CreateComposerFocusIntent>).detail
@@ -1065,6 +1054,32 @@ function SessionsIndexRouteContent({
       draft.visibility === "private" &&
       tenancyCapabilities?.canCreatePrivate !== true);
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
+  // Own subscriptions the organization's plan doesn't include: the chosen
+  // model says so before Send, and anyone with one connected hears it once.
+  const ownSubscriptionHeadsUp = useDismissedNotice(
+    `ownSubscriptionPlan.${workspace?.accountId ?? "unknown"}`,
+  );
+  const ownSubscriptionNotice = ownSubscriptionPlanNotice({
+    selected: selectedPolicyRow?.catalog,
+    models: modelCatalog.models,
+    headsUpDismissed: ownSubscriptionHeadsUp.dismissed || !workspace?.accountId,
+  });
+  const ownSubscriptionNoticeView = ownSubscriptionNotice ? (
+    <div className="mt-6">
+      <OwnSubscriptionPlanNotice
+        plan={ownSubscriptionNotice.plan}
+        workspaceId={workspaceId}
+        canUpgrade={hasAccountPermission(
+          context.accessContext,
+          workspace?.accountId ?? "",
+          "billing:manage",
+        )}
+        {...(ownSubscriptionNotice.dismissible
+          ? { onDismiss: ownSubscriptionHeadsUp.dismiss }
+          : {})}
+      />
+    </div>
+  ) : null;
   // The signup answer picks the starters, and with them the heading and placeholder.
   const starterSet = signupStarterSet(
     context.authSession?.user.email,
@@ -1223,6 +1238,10 @@ function SessionsIndexRouteContent({
     uploadPending: attachments.hasUnresolved,
     computeLoading: draft.compute.kind === "machine" && fleet.loading,
     computeReady,
+    // A chosen agent that hasn't loaded, or can't start a chat here, never
+    // becomes an ordinary chat.
+    agentLoading: composerAgent.loading,
+    agentBlocked: composerAgent.blocker !== null,
   };
   const sendBlocker = getNewSessionSendBlocker(sendState);
   // Voice skips the connected-tool accounts; its control and URL launch read
@@ -1352,92 +1371,10 @@ function SessionsIndexRouteContent({
             // an initial message. Persist the draft so a pending autosave is not
             // lost on navigate, but do not consume it — text stays for later.
             if (realtimeModel) {
-              for (let attempt = 0; attempt < 3; attempt += 1) {
-                // Voice launch does not consume the draft. Save local edits if
-                // possible, but never rebase an old voice draft over a sibling's
-                // newer unsent message merely to start a realtime session.
-                const flushed = await newSessionDraft.flush();
-                if (!flushed) {
-                  reportDraftSaveFailure(newSessionDraft);
-                  return null;
-                }
-                const submission = submissionFromSessionDraft(
-                  draft,
-                  defaultFirstPartyMcpTools,
-                  personalResourceAttachment.intent,
-                );
-                let draftConflict = false;
-                let outcomeUnknown = false;
-                const created = await context.startSession(
-                  workspaceId,
-                  {
-                    text: "",
-                    resources: [],
-                    tools: submittedSnapshot.tools,
-                    model,
-                    reasoningEffort,
-                    latencyMode,
-                    ...submission.extras,
-                  },
-                  {
-                    targetSandboxId: submission.options.targetSandboxId,
-                    workingDir: submission.options.workingDir,
-                    channelId: selectedChannelId,
-                    omitWorkspaceResources: submission.omitWorkspaceResources,
-                    installedSkillIds: launch.skillCapabilityId
-                      ? [launch.skillCapabilityId]
-                      : undefined,
-                    bot: newSessionBot,
-                    startMode: "realtime",
-                    expectedNewSessionDraftRevision: flushed.revision,
-                    newSessionDraftToolPolicy: persistedToolPolicy,
-                    agentLearning: draft.agentLearning,
-                    usageLimitMicros,
-                    visibility: newSessionCreateVisibility(
-                      personalWorkspace,
-                      submission.options.visibility ?? "workspace",
-                      tenancyCapabilities?.canCreatePrivate === true,
-                    ),
-                    onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
-                      draftConflict = newSessionDraft.captureConflict(error);
-                      outcomeUnknown = uncertain;
-                      recoverPersonalResourceAttachment(error, request);
-                      connectionAccounts.onSelectionError(error);
-                      // A brief outage shows the updating notice, not a toast.
-                      return (
-                        draftConflict ||
-                        newSessionDraft.reportUnavailable(error) ||
-                        noteCreditRefusal(error, request) ||
-                        noteCreateFailure(error, sentSignature)
-                      );
-                    },
-                  },
-                );
-                if (!created) {
-                  if (draftConflict) continue;
-                  if (!outcomeUnknown) await preserveNewerLocalDraft();
-                  return null;
-                }
-                setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
-                setCreateCreditRefusal(null);
-                setCreateFailure(null);
-                setUsageLimitSendBlocked(false);
-                return {
-                  sessionId: created.id,
-                  settleDraft: async () => true,
-                };
-              }
-              await preserveNewerLocalDraft();
-              newSessionDraft.clearError();
-              toast.error("Couldn't start voice", {
-                description: DRAFT_CHANGED_DURING_SEND_TEXT,
-              });
-              return null;
-            }
-
-            const submittedResources = submittedSnapshot.resources;
-            for (let attempt = 0; attempt < 3; attempt += 1) {
-              const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
+              // Voice launch does not consume the draft. Unsaved local edits
+              // are saved as autosave would save them; an unchanged form
+              // saves nothing, so it never writes over another device's draft.
+              const flushed = await newSessionDraft.flush();
               if (!flushed) {
                 reportDraftSaveFailure(newSessionDraft);
                 return null;
@@ -1448,18 +1385,18 @@ function SessionsIndexRouteContent({
                 personalResourceAttachment.intent,
               );
               let draftConflict = false;
+              let draftChangedElsewhere = false;
               let outcomeUnknown = false;
               const created = await context.startSession(
                 workspaceId,
                 {
-                  text,
-                  resources: submittedResources,
+                  text: "",
+                  resources: [],
                   tools: submittedSnapshot.tools,
                   model,
                   reasoningEffort,
                   latencyMode,
                   ...submission.extras,
-                  connectionAccounts: connectionAccounts.selections,
                 },
                 {
                   targetSandboxId: submission.options.targetSandboxId,
@@ -1469,7 +1406,8 @@ function SessionsIndexRouteContent({
                   installedSkillIds: launch.skillCapabilityId
                     ? [launch.skillCapabilityId]
                     : undefined,
-                  bot: newSessionBot,
+                  agent: newSessionAgent,
+                  startMode: "realtime",
                   expectedNewSessionDraftRevision: flushed.revision,
                   newSessionDraftToolPolicy: persistedToolPolicy,
                   agentLearning: draft.agentLearning,
@@ -1480,13 +1418,16 @@ function SessionsIndexRouteContent({
                     tenancyCapabilities?.canCreatePrivate === true,
                   ),
                   onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
+                    // Only an older server still refuses a Send over its draft.
                     draftConflict = newSessionDraft.captureConflict(error);
+                    if (draftConflict) {
+                      draftChangedElsewhere =
+                        newSessionDraftConflictRevision(error) !== flushed.revision;
+                    }
                     outcomeUnknown = uncertain;
                     recoverPersonalResourceAttachment(error, request);
                     connectionAccounts.onSelectionError(error);
                     // A brief outage shows the updating notice, not a toast.
-                    // An unconfirmed create keeps its idempotency key, so the
-                    // person's next Send cannot start a second session.
                     return (
                       draftConflict ||
                       newSessionDraft.reportUnavailable(error) ||
@@ -1497,67 +1438,160 @@ function SessionsIndexRouteContent({
                 },
               );
               if (!created) {
-                if (draftConflict) continue;
+                if (draftConflict) {
+                  await preserveNewerLocalDraft();
+                  newSessionDraft.clearError();
+                  toast.error("Couldn't start voice", {
+                    description: draftConflictDuringSendText(draftChangedElsewhere),
+                  });
+                  return null;
+                }
                 if (!outcomeUnknown) await preserveNewerLocalDraft();
                 return null;
               }
-              // The limit belongs to the chat just created; the next starts with none.
               setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
               setCreateCreditRefusal(null);
               setCreateFailure(null);
               setUsageLimitSendBlocked(false);
               return {
                 sessionId: created.id,
-                settleDraft: async () => {
-                  const acknowledged = await newSessionDraft.acknowledgeConsumed(
-                    flushed,
-                    visibleSignature,
-                  );
-                  if (
-                    acknowledged?.kind === "consumed" &&
-                    newSessionDraft.isCurrentSignature(visibleSignature)
-                  ) {
-                    setMessage("");
-                    visibilityChosenRef.current = false;
-                    setDraft({
-                      ...emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
-                      visibility:
-                        tenancyCapabilities?.canCreatePrivate === true &&
-                        tenancyCapabilities.defaultVisibility === "private"
-                          ? "private"
-                          : "workspace",
-                    });
-                    attachments.removeReadyFiles(
-                      submittedResources.flatMap((resource) =>
-                        resource.kind === "file" ? [resource.fileId] : [],
-                      ),
-                    );
-                  } else if (
-                    acknowledged?.kind !== "preserved" ||
-                    !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
-                  ) {
-                    // The message was already accepted. If there is no newer
-                    // local edit, leave a sibling's later draft untouched.
-                    if (!acknowledged && newSessionDraft.isCurrentSignature(visibleSignature)) {
-                      return true;
-                    }
-                    const preserved = await newSessionDraft.flushForSend();
-                    if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
-                      return false;
-                    }
-                  }
-                  return true;
-                },
+                settleDraft: async () => true,
               };
             }
-            await preserveNewerLocalDraft();
-            // Each attempt saved the draft before the create refused it, so the
-            // draft is not unsaved: clear that notice and resume autosave.
-            newSessionDraft.clearError();
-            toast.error("Couldn't send", {
-              description: DRAFT_CHANGED_DURING_SEND_TEXT,
-            });
-            return null;
+
+            const submittedResources = submittedSnapshot.resources;
+            // Send carries the clicked snapshot. Saving it first only keeps
+            // the draft in step; the server clears the draft afterwards only
+            // if nothing newer replaced it on another device.
+            const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
+            if (!flushed) {
+              reportDraftSaveFailure(newSessionDraft);
+              return null;
+            }
+            const submission = submissionFromSessionDraft(
+              draft,
+              defaultFirstPartyMcpTools,
+              personalResourceAttachment.intent,
+            );
+            let draftConflict = false;
+            let draftChangedElsewhere = false;
+            let outcomeUnknown = false;
+            const created = await context.startSession(
+              workspaceId,
+              {
+                text,
+                resources: submittedResources,
+                tools: submittedSnapshot.tools,
+                model,
+                reasoningEffort,
+                latencyMode,
+                ...submission.extras,
+                connectionAccounts: connectionAccounts.selections,
+              },
+              {
+                targetSandboxId: submission.options.targetSandboxId,
+                workingDir: submission.options.workingDir,
+                channelId: selectedChannelId,
+                omitWorkspaceResources: submission.omitWorkspaceResources,
+                installedSkillIds: launch.skillCapabilityId
+                  ? [launch.skillCapabilityId]
+                  : undefined,
+                agent: newSessionAgent,
+                expectedNewSessionDraftRevision: flushed.revision,
+                newSessionDraftToolPolicy: persistedToolPolicy,
+                agentLearning: draft.agentLearning,
+                usageLimitMicros,
+                visibility: newSessionCreateVisibility(
+                  personalWorkspace,
+                  submission.options.visibility ?? "workspace",
+                  tenancyCapabilities?.canCreatePrivate === true,
+                ),
+                onFailure: ({ error, request, outcomeUnknown: uncertain }) => {
+                  // Only an older server still refuses a Send over its draft.
+                  draftConflict = newSessionDraft.captureConflict(error);
+                  if (draftConflict) {
+                    draftChangedElsewhere =
+                      newSessionDraftConflictRevision(error) !== flushed.revision;
+                  }
+                  outcomeUnknown = uncertain;
+                  recoverPersonalResourceAttachment(error, request);
+                  connectionAccounts.onSelectionError(error);
+                  // A brief outage shows the updating notice, not a toast.
+                  // An unconfirmed create keeps its idempotency key, so the
+                  // person's next Send cannot start a second session.
+                  return (
+                    draftConflict ||
+                    newSessionDraft.reportUnavailable(error) ||
+                    noteCreditRefusal(error, request) ||
+                    noteCreateFailure(error, sentSignature)
+                  );
+                },
+              },
+            );
+            if (!created) {
+              if (draftConflict) {
+                await preserveNewerLocalDraft();
+                // The draft is saved, so it is not unsaved: clear that notice
+                // and resume autosave.
+                newSessionDraft.clearError();
+                toast.error("Couldn't send", {
+                  description: draftConflictDuringSendText(draftChangedElsewhere),
+                });
+                return null;
+              }
+              if (!outcomeUnknown) await preserveNewerLocalDraft();
+              return null;
+            }
+            // The limit belongs to the chat just created; the next starts with none.
+            setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
+            setCreateCreditRefusal(null);
+            setCreateFailure(null);
+            setUsageLimitSendBlocked(false);
+            return {
+              sessionId: created.id,
+              settleDraft: async () => {
+                const acknowledged = await newSessionDraft.acknowledgeConsumed(
+                  flushed,
+                  visibleSignature,
+                );
+                // A newer draft from another device stayed; the form shows it.
+                if (acknowledged?.kind === "followed") return true;
+                if (
+                  acknowledged?.kind === "consumed" &&
+                  newSessionDraft.isCurrentSignature(visibleSignature)
+                ) {
+                  setMessage("");
+                  visibilityChosenRef.current = false;
+                  setDraft({
+                    ...emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
+                    visibility:
+                      tenancyCapabilities?.canCreatePrivate === true &&
+                      tenancyCapabilities.defaultVisibility === "private"
+                        ? "private"
+                        : "workspace",
+                  });
+                  attachments.removeReadyFiles(
+                    submittedResources.flatMap((resource) =>
+                      resource.kind === "file" ? [resource.fileId] : [],
+                    ),
+                  );
+                } else if (
+                  acknowledged?.kind !== "preserved" ||
+                  !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
+                ) {
+                  // The message was already accepted. If there is no newer
+                  // local edit, leave a sibling's later draft untouched.
+                  if (!acknowledged && newSessionDraft.isCurrentSignature(visibleSignature)) {
+                    return true;
+                  }
+                  const preserved = await newSessionDraft.flushForSend();
+                  if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
+                    return false;
+                  }
+                }
+                return true;
+              },
+            };
           },
           navigate: async (sessionId) => {
             // Voice connects while the session page loads; the page adopts
@@ -1594,54 +1628,6 @@ function SessionsIndexRouteContent({
     },
   );
 
-  // A bot template's setup instructions fill an empty composer once its saved
-  // draft has loaded, so the remote draft cannot overwrite them. Text the
-  // person already typed stays; they can still start the bot with it.
-  const prefilledBotTemplateRef = useRef<string | null>(null);
-  // The instructions this page put in the composer, so leaving the bot launch
-  // (dismissing it, or a link without the template) takes them out again
-  // instead of leaving them behind as an ordinary chat's first message.
-  const prefilledBotInstructionsRef = useRef<string | null>(null);
-  const fillBotInstructions = useCallback((instructions: string) => {
-    prefilledBotInstructionsRef.current = instructions;
-    setMessage(instructions);
-  }, []);
-  useEffect(() => {
-    if (!botTemplate || newSessionDraft.loading) return;
-    if (prefilledBotTemplateRef.current === botTemplate.id) return;
-    prefilledBotTemplateRef.current = botTemplate.id;
-    if (message.trim().length === 0 || message === botTemplate.setupInstructions) {
-      fillBotInstructions(botTemplate.setupInstructions);
-    } else {
-      toast.info("Kept your unsent message", {
-        description: "Clear it to use the template's setup instructions instead.",
-        action: {
-          label: "Use setup instructions",
-          onClick: () => fillBotInstructions(botTemplate.setupInstructions),
-        },
-      });
-    }
-  }, [botTemplate, fillBotInstructions, message, newSessionDraft.loading]);
-  useEffect(() => {
-    if (launchBotTemplateId) return;
-    prefilledBotTemplateRef.current = null;
-    const prefilled = prefilledBotInstructionsRef.current;
-    prefilledBotInstructionsRef.current = null;
-    if (prefilled !== null) setMessage((current) => (current === prefilled ? "" : current));
-  }, [launchBotTemplateId]);
-  // After a reload the page no longer knows it filled the composer, but the
-  // saved draft still holds the instructions. Untouched instructions of a
-  // template, without that template's launch, are taken out the same way.
-  const leftoverBotInstructionsCheckedRef = useRef(false);
-  useEffect(() => {
-    if (leftoverBotInstructionsCheckedRef.current) return;
-    if (newSessionDraft.loading || workspaceBotTemplates.templates === undefined) return;
-    leftoverBotInstructionsCheckedRef.current = true;
-    if (launchBotTemplateId || message.length === 0) return;
-    if (workspaceBotTemplates.templates.some((entry) => entry.setupInstructions === message)) {
-      setMessage("");
-    }
-  }, [launchBotTemplateId, message, newSessionDraft.loading, workspaceBotTemplates.templates]);
   // ?continueSessionId= (an archived chat's "Continue in a new chat") starts
   // the composer with a link to that chat once the saved draft has loaded,
   // ahead of anything the person already typed, then leaves the URL.
@@ -1669,17 +1655,21 @@ function SessionsIndexRouteContent({
       replace: true,
     });
   }, [launchContinueSessionId, navigate, newSessionDraft.loading, page, workspaceId]);
-  const dismissBotLaunch = useCallback(() => {
-    void navigate({
-      to: "/workspaces/$workspaceId/sessions",
-      params: { workspaceId },
-      search: (previous: Record<string, unknown>) => {
-        const { botTemplateId: _dropped, ...rest } = previous;
-        return rest;
-      },
-      replace: true,
-    });
-  }, [navigate, workspaceId]);
+  // The agent chip: `?agent=<id>` for an agent, nothing for Opengeni itself.
+  const selectComposerAgent = useCallback(
+    (agentId: string | null) => {
+      void navigate({
+        to: "/workspaces/$workspaceId/sessions",
+        params: { workspaceId },
+        search: (previous: Record<string, unknown>) => {
+          const { botTemplateId: _legacy, agent: _current, ...rest } = previous;
+          return agentId ? { ...rest, agent: agentId } : rest;
+        },
+        replace: true,
+      });
+    },
+    [navigate, workspaceId],
+  );
 
   // URL launch: ?model=&effort=&latency= prefill the composer; +?realtime= also
   // creates a realtime-first session and autostarts voice on the session page.
@@ -1720,6 +1710,7 @@ function SessionsIndexRouteContent({
         search: {
           ...(launch.channelId ? { channelId: launch.channelId } : {}),
           ...(launchSkillCapabilityId ? { skillCapabilityId: launchSkillCapabilityId } : {}),
+          ...(launch.agent ? { agent: launch.agent } : {}),
           ...(launch.botTemplateId ? { botTemplateId: launch.botTemplateId } : {}),
         },
         replace: true,
@@ -1744,6 +1735,7 @@ function SessionsIndexRouteContent({
     launchRealtime,
     launchSkillCapabilityId,
     launchKey,
+    launch.agent,
     launch.botTemplateId,
     launch.channelId,
     navigate,
@@ -1901,8 +1893,10 @@ function SessionsIndexRouteContent({
           <VisibilityMenuBody
             value={draft.visibility}
             disabled={setupDisabled}
+            workspaceUnavailable={composerAgent.onlyMe ? AGENT_ONLY_ME_CHAT : null}
             onChange={(visibility) => {
               visibilityChosenRef.current = true;
+              composerAgent.visibilityChosen();
               // A shared chat can't go in an Only me project.
               if (visibility === "workspace" && selectedProjectOnlyMe) selectProject(null);
               setDraft((current) => ({ ...current, visibility }));
@@ -1912,6 +1906,24 @@ function SessionsIndexRouteContent({
         ),
       }
     : null;
+
+  // Who answers: Opengeni or one of the workspace's agents. Shown once there
+  // is an agent to pick (or one is already in the URL).
+  const agentChip =
+    composerAgent.selection !== null ||
+    (workspaceAgents.supported && (workspaceAgents.agents?.length ?? 0) > 0) ? (
+      <ComposerAgentChip
+        workspaceId={workspaceId}
+        agents={workspaceAgents.agents}
+        selection={composerAgent.selection}
+        disabled={setupDisabled}
+        onlyMeUnavailable={tenancyCapabilities !== null && !canCreatePrivateChat}
+        onSelect={selectComposerAgent}
+        onBrowse={() =>
+          void navigate({ to: "/workspaces/$workspaceId/agents", params: { workspaceId } })
+        }
+      />
+    ) : null;
 
   return createElement(
     LightboxProvider,
@@ -2003,6 +2015,9 @@ function SessionsIndexRouteContent({
               {...(refusedCreate ? { onDismiss: () => setCreateCreditRefusal(null) } : {})}
             />
           </div>
+        ) : ownSubscriptionNotice && !ownSubscriptionNotice.dismissible ? (
+          // The chosen model waits for a plan: said before Send.
+          ownSubscriptionNoticeView
         ) : modelUsesCredits(selectedPolicyRow?.catalog) &&
           hasAccountPermission(
             context.accessContext,
@@ -2026,6 +2041,8 @@ function SessionsIndexRouteContent({
             </Suspense>
           </div>
         ) : null}
+        {/* The one-time heads-up is a reminder: below anything about the chosen model. */}
+        {!creditGap && ownSubscriptionNotice?.dismissible ? ownSubscriptionNoticeView : null}
 
         <div ref={composerRegionRef} className="mt-8 [&_textarea]:min-h-[calc(2lh+1rem)]">
           <ConsoleComposer
@@ -2212,51 +2229,44 @@ function SessionsIndexRouteContent({
                         ? "Choose supported model settings before starting voice."
                         : voiceSendBlocker === "compute"
                           ? "Choose where this session should run first."
-                          : voiceSendBlocker !== null &&
-                              composerSendBlockerIsLoading(voiceSendBlocker)
-                            ? "Wait for the chat to finish loading."
-                            : voiceSendBlocker !== null
-                              ? (composerSendBlockerNotice(voiceSendBlocker)?.message ?? null)
-                              : personalMachineSelected
-                                ? "Start with a message so personal machine access can attach to an accepted turn."
-                                : null
+                          : voiceSendBlocker === "agent"
+                            ? composerAgent.blocker
+                            : voiceSendBlocker !== null &&
+                                composerSendBlockerIsLoading(voiceSendBlocker)
+                              ? "Wait for the chat to finish loading."
+                              : voiceSendBlocker !== null
+                                ? (composerSendBlockerNotice(voiceSendBlocker)?.message ?? null)
+                                : personalMachineSelected
+                                  ? "Start with a message so personal machine access can attach to an accepted turn."
+                                  : null
                   }
                   onStart={async (model) => await submitNewSession(model)}
                 />
               </>
             }
             header={
-              chatList || botLaunch || runsOnSetup || visibilitySetup ? (
-                <>
-                  {botLaunch ? (
-                    <BotLaunchStrip
-                      state={botLaunch.state}
-                      workspaceId={workspaceId}
-                      onDismiss={dismissBotLaunch}
-                    />
-                  ) : null}
-                  {chatList || runsOnSetup || visibilitySetup ? (
-                    <SessionSetupStrip
-                      disabled={busy || newSessionDraft.loading}
-                      project={
-                        chatList
-                          ? {
-                              channels: canCreatePrivateChat
-                                ? channelsQuery.channels
-                                : channelsQuery.channels.filter(
-                                    (channel) => channel.visibility !== "private",
-                                  ),
-                              selectedChannelId,
-                              onChange: selectProject,
-                              onCreate: () => setProjectDialogOpen(true),
-                            }
-                          : null
-                      }
-                      runsOn={runsOnSetup}
-                      visibility={visibilitySetup}
-                    />
-                  ) : null}
-                </>
+              chatList || agentChip || runsOnSetup || visibilitySetup ? (
+                <SessionSetupStrip
+                  disabled={busy || newSessionDraft.loading}
+                  agent={agentChip}
+                  agentError={composerAgent.blocker}
+                  project={
+                    chatList
+                      ? {
+                          channels: canCreatePrivateChat
+                            ? channelsQuery.channels
+                            : channelsQuery.channels.filter(
+                                (channel) => channel.visibility !== "private",
+                              ),
+                          selectedChannelId,
+                          onChange: selectProject,
+                          onCreate: () => setProjectDialogOpen(true),
+                        }
+                      : null
+                  }
+                  runsOn={runsOnSetup}
+                  visibility={visibilitySetup}
+                />
               ) : undefined
             }
           />
@@ -2349,13 +2359,6 @@ function SessionsIndexRouteContent({
           />
         </div>
 
-        {!botLaunch ? (
-          <BotTemplateShortcuts
-            workspaceId={workspaceId}
-            templates={workspaceBotTemplates.templates}
-            disabled={busy}
-          />
-        ) : null}
         {chatList ? <RecentSessions workspaceId={workspaceId} /> : null}
         {starters ? (
           <NewSessionStarters
@@ -2394,9 +2397,16 @@ function SessionsIndexRouteContent({
   );
 }
 
-/** Send kept losing to a newer draft saved elsewhere (another tab or window). */
-const DRAFT_CHANGED_DURING_SEND_TEXT =
-  "Your message is saved, but this draft kept changing in another tab or window. Check it and send again.";
+/**
+ * Send was refused as a draft conflict. Only a draft that really moved on
+ * since this Send saved it was changed somewhere else (another tab, window or
+ * device); otherwise nothing is known to have changed it.
+ */
+function draftConflictDuringSendText(changedElsewhere: boolean): string {
+  return changedElsewhere
+    ? "Your message is saved, but this draft kept changing in another tab or window. Check it and send again."
+    : "Your message is saved, but it couldn't be sent. Check the draft and send again.";
+}
 
 /** A draft that didn't save: the message is kept, then what to do. */
 function draftSaveFailureText(draft: { conflict: Error | null; error: Error | null }): string {
@@ -2610,6 +2620,9 @@ function SessionModelControl({
   );
 }
 
+/** When the new-chat repository menu last re-read each workspace's repositories. */
+const repositoryMenuOpenReads = new Map<string, number>();
+
 function workspaceRepositoryPickerProps(
   context: ReturnType<typeof useAppContext>,
   workspaceId: string,
@@ -2651,9 +2664,30 @@ function workspaceRepositoryPickerProps(
         context.refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true }),
       ]);
     },
+    // Opening the menu re-reads the workspace's App repositories, which the
+    // server keeps in line with GitHub (a repository just added there shows up).
+    onOpenRefresh: async () => {
+      if (context.repoBusy || context.githubStatus?.status !== "bound") return;
+      const now = Date.now();
+      if (
+        now - (repositoryMenuOpenReads.get(workspaceId) ?? 0) <
+        REPOSITORY_OPEN_REFRESH_COOLDOWN_MS
+      )
+        return;
+      repositoryMenuOpenReads.set(workspaceId, now);
+      await context.refreshGitHub(workspaceId);
+    },
     onConnectPersonalGitHub: () => void context.connectPersonalGitHub(workspaceId),
     onTogglePersonalGitHubRepo: (repository) =>
       void context.togglePersonalGitHubRepository(workspaceId, repository),
+    // Only All my repositories can use a repository found past the listed ones.
+    ...(context.personalGitHubSelection?.allRepositoriesAccess &&
+    context.personalGitHubStatus?.allRepositoriesAvailable !== false
+      ? {
+          onSearchPersonalGitHubRepositories: (query: string) =>
+            context.searchPersonalGitHubRepositories(workspaceId, query),
+        }
+      : {}),
     onPersonalGitHubRefChange: (repositoryId: string, ref: string) =>
       context.setSelectedPersonalGitHubRepoRefs((current) => ({
         ...current,

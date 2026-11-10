@@ -1,4 +1,4 @@
-import type { Session, SessionEvent, SessionEventType } from "@opengeni/sdk";
+import type { ChatSession as Session, SessionEvent, SessionEventType } from "@opengeni/sdk";
 
 import { isCodexProductModel } from "./session-model";
 

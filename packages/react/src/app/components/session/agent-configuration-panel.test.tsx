@@ -18,7 +18,12 @@ const getAgentLearningSettings = mock(
 );
 const navigate = mock(async (_options: unknown) => undefined);
 const context = {
-  client: { getAgentLearningSettings, saveAgentLearningSettings: mock(async () => ({})) },
+  client: {
+    getAgentLearningSettings,
+    saveAgentLearningSettings: mock(async () => ({})),
+    getSessionConfiguration: mock(async () => session()),
+    getSessionTenancyCreateCapabilities: mock(async () => ({ canCreatePrivate: true })),
+  },
   workspaces: [
     {
       id: workspaceId,
@@ -46,12 +51,16 @@ const context = {
   captureWorkspaceInvocation: () => ({}),
   ownsWorkspaceInvocation: () => true,
 };
-mock.module("../../app-context", () => ({ useAppContext: () => context }));
+mock.module("../../app-context", () => ({
+  useAppContext: () => context,
+  useOptionalAppContext: () => context,
+}));
 mock.module("../../lib/navigation", () => ({ useNavigate: () => navigate }));
 mock.module("sonner", () => ({
   toast: Object.assign(() => 0, { error: () => 0, success: () => 0 }),
 }));
 const { AgentConfigurationPanel } = await import("./agent-configuration-panel");
+const { NewAgentPage } = await import("../agents/agent-form-page");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -131,6 +140,55 @@ test("the Agent tab is one page: Identity, then Capabilities with Agent learning
     expect(capabilities.querySelector('[data-capability="webSearch"]')?.textContent).not.toContain(
       "Read and write",
     );
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("read-only chat viewers do not fetch operator configuration", async () => {
+  const read = context.client.getSessionConfiguration;
+  read.mockClear();
+  const grant = context.accessContext.workspaceGrants[0]!;
+  const permissions = grant.permissions;
+  grant.permissions = ["sessions:read"];
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<AgentConfigurationPanel session={session()} onReloadSession={async () => {}} />),
+    );
+    await settle();
+    expect(read).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain("Loading tool details");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    grant.permissions = permissions;
+  }
+});
+
+test("configuration errors can be retried without blocking the settings", async () => {
+  const read = context.client.getSessionConfiguration;
+  read.mockClear();
+  read.mockRejectedValueOnce(new Error("offline"));
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<AgentConfigurationPanel session={session()} onReloadSession={async () => {}} />),
+    );
+    await settle();
+    expect(container.textContent).toContain("Could not load tool details.");
+    const retry = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Try again",
+    )!;
+    await act(async () => retry.click());
+    await settle();
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain("Could not load tool details.");
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -257,6 +315,33 @@ test("Storage keeps a chat active only where the deployment archives idle chats"
     expect(storageSection()).toBeNull();
   } finally {
     context.clientConfig = clientConfig;
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("create agent from chat prefills instructions from the explicit configuration read", async () => {
+  const read = context.client.getSessionConfiguration;
+  read.mockClear();
+  read.mockImplementationOnce(async () =>
+    session({ title: "Support", instructions: "Use the approved guide." }),
+  );
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<NewAgentPage workspaceId={workspaceId} sourceSessionId={sessionId} />),
+    );
+    await settle();
+    expect(read).toHaveBeenCalledWith(workspaceId, sessionId);
+    expect([...container.querySelectorAll("textarea")].map((element) => element.value)).toContain(
+      "Use the approved guide.",
+    );
+    expect([...container.querySelectorAll("input")].map((element) => element.value)).toContain(
+      "Support",
+    );
+  } finally {
     await act(async () => root.unmount());
     container.remove();
   }

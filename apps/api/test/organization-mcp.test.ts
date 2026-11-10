@@ -134,6 +134,15 @@ async function connect(
 }
 
 describe("organization MCP action catalog", () => {
+  test("compact UI configuration reads do not add a redundant agent action", () => {
+    const path = "/v1/workspaces/:workspaceId/sessions/:sessionId";
+    expect(isActionCatalogExempt(`${path}/configuration`)).toBe(true);
+    expect(isActionCatalogExempt(path)).toBe(false);
+    expect(isActionCatalogExempt(`${path}/skills`)).toBe(false);
+    expect(ACTION_CATALOG.find((entry) => entry.id === "getSession")?.path).toBe(path);
+    expect(ACTION_CATALOG.some((entry) => entry.path === `${path}/configuration`)).toBe(false);
+  });
+
   test("covers every registered route except the listed exemptions, and is current", () => {
     const registered = registeredApiRoutes();
     // Regenerate with `bun scripts/public-api/action-catalog.ts --write`.
@@ -152,7 +161,6 @@ describe("organization MCP action catalog", () => {
     for (const key of [
       "PATCH /v1/organizations/:organizationId/codex/settings",
       "POST /v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/redeem",
-      "POST /v1/workspaces/:workspaceId/integrations/slack/user-links",
     ])
       expect(listed.has(key)).toBe(true);
     // An agent with the person's full access approves sign-ins and manages
@@ -266,6 +274,7 @@ describe("organization MCP action catalog", () => {
         "POST /v1/workspaces/:workspaceId/identity-links/:linkId/:operation",
         // Teams setup and account linking require the person's verified browser.
         "PUT /v1/workspaces/:workspaceId/integrations/teams/bot",
+        "POST /v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/bot",
         "POST /v1/workspaces/:workspaceId/integrations/teams/link",
         "DELETE /v1/workspaces/:workspaceId/integrations/teams/link",
@@ -716,7 +725,7 @@ describe("organization MCP browser-only actions", () => {
           for (const tool of ["opengeni_action_describe", "opengeni_action_call"]) {
             expect(await call(tool, { id })).toEqual({
               isError: true,
-              value: `listOrganizationMemberships isn't available to connected agents or API keys: ${hidden.browserOnly}. The person has to do it in the Opengeni app in a browser.`,
+              value: `listOrganizationMemberships isn't available to connected agents or API keys: ${hidden.browserOnly}. The person has to do it in the web app in a browser.`,
             });
           }
         }

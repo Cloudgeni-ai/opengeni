@@ -274,8 +274,7 @@ admins only). For each it says where it works (a machine or sandbox environment
 always works in the workspace it came from) and where it opens: in this
 workspace when it works here, else in the first workspace by name that it
 works in and the viewer can open, else nowhere. A caller those lists refuse
-(anyone but an organization owner or admin, or an agent acting as itself), or
-a server that has not granted a list yet (`complete: false`), gets the
+(anyone but an organization owner or admin, or an agent acting as itself) gets the
 organization ones that work in the current workspace, and the page says so.
 The Skills row counts the organization's Skills and says how many don't work
 here (the Skills list already holds those for the people who manage them).
@@ -864,18 +863,29 @@ setup. A reused link only redirects and never mints another session. `dual` and
 `broker` modes leave it off: there, sign-in belongs to the isolated browser
 transaction (see `docs/browser-login-session-sets.md`).
 
-This is a deliberate trade-off with two known edges. While an unused link is
-live (one hour), whoever holds it gets a session for a brand-new, empty
-account; anyone who can read that mailbox could already reset the password.
-The reverse case is pre-account takeover: someone signs up with another
-person's email and a password they know, and that person clicks the
-unsolicited link. Before auto sign-in the victim met a sign-in wall and had to
-reset the password, which revokes sessions and locks the other party out; now
-the victim is signed in and may start using an account whose password someone
-else holds. Every verification email therefore says to ignore it if the
-recipient did not create an Opengeni account. Signing in only when the link is
-opened in the browser that signed up would close that edge and remains a
-possible follow-up.
+While an unused link is live (one hour), whoever holds it gets a session for a
+brand-new, empty account; anyone who can read that mailbox could already
+reset the password. Every verification email also says to ignore it if the
+recipient did not create an Opengeni account.
+
+Verification proves who controls the address, not who chose the stored
+password, so only the newest sign-up's link verifies an address
+(`apps/api/src/auth/managed-sign-up-verification.ts`). While the address is
+unverified, every email sign-up for it replaces the account's password with
+its own, under the auth user's row lock, and the response is the same as for
+a new address. Every verification link (sign-up, repeated sign-up or a
+requested new email) carries a keyed digest of the password stored when it
+was sent, in its signed token. Following a link checks that digest against the
+stored password under the same lock: the current link verifies the address
+with that sign-up's password, from any browser or device (or a mail scanner
+that follows it first), and revokes existing sessions; a link from an earlier
+sign-up gets the ordinary invalid-link answer (`error=INVALID_TOKEN`) and the
+person can request a new email. A repeated sign-up's link keeps the callback
+URL that sign-up asked for. This closes pre-account takeover, where someone
+signs up with another person's address and a password they know and the owner
+later signs up and verifies the address: the owner's sign-up replaced that
+password and invalidated the earlier link. A sign-up never adds a password to
+an account created without one (for example through Google or GitHub).
 
 ### Post-sign-in organization setup and one-time invited-user setup (0348)
 

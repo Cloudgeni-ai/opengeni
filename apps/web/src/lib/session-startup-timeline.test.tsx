@@ -1,7 +1,12 @@
 import { t } from "@opengeni/react/app/lib/console-text";
 import { expect, test } from "bun:test";
 import { act } from "react";
-import type { Session, SessionEvent, SessionQueueSnapshot, SessionTurn } from "@opengeni/sdk";
+import type {
+  ChatSession as Session,
+  SessionEvent,
+  SessionQueueSnapshot,
+  SessionTurn,
+} from "@opengeni/sdk";
 import { buildTimeline, type ComposerState, type TimelineItem } from "@opengeni/react/session";
 import { MessageTimeline } from "@opengeni/react/session-ui";
 import { registerDom, renderComponent, flush } from "../../../../packages/react/test/render-hook";

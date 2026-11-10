@@ -30,9 +30,11 @@ use object_store::{ClientOptions, ObjectStore, PutMode, PutOptions, path::Path};
 
 use crate::{
     Error, Result,
-    chunk::{ChunkRef, EncodedChunk, decode},
+    chunk::{ChunkRef, EncodedChunk, MAX_PACK, decode},
     fresh::{Clock, period_of},
     manifest::{DiskManifest, MAX_MANIFEST_BYTES},
+    pace::{self, Pace},
+    pack::Packer,
     pointer_store::{ObjectPointers, PointerStore},
     upload::{Created, Gcs, md5_hex, tag_is_md5},
 };
@@ -94,6 +96,11 @@ pub trait QuarantineWatch: Send + Sync + std::fmt::Debug {
 #[derive(Clone, Debug)]
 pub struct ChunkStore {
     backend: Arc<dyn ObjectStore>,
+    /// The same store, for uploads: its requests may take longer
+    /// ([`UPLOAD_TIMEOUT`]).
+    uploads: Arc<dyn ObjectStore>,
+    /// The slots uploads take, shared by every clone ([`crate::pace`]).
+    pace: Arc<Pace>,
     prefix: Path,
     uploader: Uploader,
     pointers: Arc<dyn PointerStore>,
@@ -108,6 +115,9 @@ pub struct ChunkStore {
     /// The archive this store stores chunks for, if any, which holds every
     /// chunk it stores until it publishes ([`Self::holding`]).
     held: Option<Arc<Held>>,
+    /// Whether archives through it may write packs at all
+    /// ([`Self::with_packs`]).
+    packs: bool,
 }
 
 /// How long a read of a chunk or manifest keeps trying while the store
@@ -119,6 +129,14 @@ pub struct ChunkStore {
 /// after it is back.
 pub const SETTLE: Duration = Duration::from_secs(5 * 60);
 
+/// How long one upload request may take, sending its bytes included. The
+/// client's usual 30 s covers the whole request, and a store busy with
+/// other writers has been seen taking three minutes to read one pack
+/// ([`crate::pack::PACK_BYTES`]) that it then stored; a create that ran
+/// out of time is not sent again by the client. Other requests keep the
+/// client's usual deadline.
+pub const UPLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
 /// The longest wait between two reads while one settles.
 const SETTLE_DELAY_MAX: Duration = Duration::from_secs(10);
 
@@ -128,13 +146,28 @@ const SETTLE_DELAY_MAX: Duration = Duration::from_secs(10);
 pub enum Area {
     Manifests,
     Chunks,
+    /// Chunks stored together, an archive's file at a time (ADR 31).
+    Packs,
 }
 
 impl Area {
+    /// Every area, in the order a sweep lists them.
+    pub const ALL: [Self; 3] = [Self::Manifests, Self::Chunks, Self::Packs];
+
     fn prefix(self) -> &'static str {
         match self {
             Self::Manifests => "manifests",
             Self::Chunks => "chunks",
+            Self::Packs => "packs",
+        }
+    }
+
+    /// The prefix of its layout whose keys name their period.
+    pub(crate) fn periodic(self) -> &'static str {
+        match self {
+            Self::Manifests => "manifests/v2",
+            Self::Chunks => "chunks/v2",
+            Self::Packs => "packs/v1",
         }
     }
 }
@@ -163,6 +196,20 @@ pub struct Put {
     pub copied: bool,
 }
 
+/// A pack as [`ChunkStore::put_pack`] stored it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PutPack {
+    /// What names each chunk in it, in the order they were packed.
+    pub references: Vec<ChunkRef>,
+    /// Whether this call wrote it, as [`Put::new`].
+    pub new: bool,
+    /// Whether this call wrote it by a copy within the store, as
+    /// [`Put::copied`].
+    pub copied: bool,
+    /// Its length.
+    pub len: u64,
+}
+
 /// A record of up to `most` chunks a store stored.
 fn remembering(most: usize) -> Arc<Mutex<carried::Stored>> {
     Arc::new(Mutex::new(carried::Stored::new(most)))
@@ -184,6 +231,8 @@ impl ChunkStore {
     pub fn new(backend: Arc<dyn ObjectStore>, prefix: Path) -> Self {
         Self {
             pointers: Arc::new(ObjectPointers::new(backend.clone(), prefix.clone())),
+            uploads: backend.clone(),
+            pace: Arc::new(Pace::new()),
             backend,
             prefix,
             uploader: Uploader::ReadBack,
@@ -192,6 +241,7 @@ impl ChunkStore {
             settle: Duration::ZERO,
             stored: remembering(carried::REMEMBERED),
             held: None,
+            packs: true,
         }
     }
 
@@ -284,6 +334,8 @@ impl ChunkStore {
         let backend: Arc<dyn ObjectStore> = Arc::new(crate::fake::Bucket(fake.clone()));
         Self {
             pointers: Arc::new(ObjectPointers::new(backend.clone(), Path::from(prefix))),
+            uploads: backend.clone(),
+            pace: Arc::new(Pace::new()),
             backend,
             prefix: Path::from(prefix),
             uploader: Uploader::Gcs(crate::fake::gcs(fake)),
@@ -292,6 +344,7 @@ impl ChunkStore {
             settle: Duration::ZERO,
             stored: remembering(carried::REMEMBERED),
             held: None,
+            packs: true,
         }
     }
 
@@ -330,8 +383,9 @@ impl ChunkStore {
     }
 
     fn open(url: &str, settings: Option<&[(String, String)]>) -> Result<Option<Self>> {
-        use object_store::aws::{AmazonS3Builder, Checksum};
-        use object_store::azure::MicrosoftAzureBuilder;
+        use object_store::ClientConfigKey;
+        use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey, Checksum};
+        use object_store::azure::{AzureConfigKey, MicrosoftAzureBuilder};
         use object_store::client::{HttpConnector as _, ReqwestConnector};
         use object_store::gcp::GoogleCloudStorageBuilder;
 
@@ -340,30 +394,37 @@ impl ChunkStore {
         };
         let (bucket, prefix) = rest.split_once('/').unwrap_or((rest, ""));
         let prefix = Path::from(prefix.trim_end_matches('/'));
-        let (backend, uploader): (Arc<dyn ObjectStore>, _) = match scheme {
-            "gs" => {
-                let builder = match settings {
-                    None => GoogleCloudStorageBuilder::from_env(),
-                    Some(settings) => configured(
-                        GoogleCloudStorageBuilder::new(),
-                        settings,
-                        "GOOGLE_",
-                        GoogleCloudStorageBuilder::with_config,
-                    )?,
-                };
-                let store = builder.with_bucket_name(bucket).build()?;
-                let client = ReqwestConnector::default().connect(&ClientOptions::new())?;
-                let gcs = Gcs::new(
-                    client,
-                    store.credentials().clone(),
-                    "https://storage.googleapis.com",
-                    bucket,
-                );
-                (Arc::new(store), Uploader::Gcs(gcs))
-            }
-            "s3" => (
-                Arc::new(
-                    match settings {
+        // Uploads go through a client of their own with a longer deadline:
+        // a request's deadline covers sending its body, which for a pack is
+        // megabytes.
+        let upload_timeout = format!("{}s", UPLOAD_TIMEOUT.as_secs());
+        let (backend, uploads, uploader): (Arc<dyn ObjectStore>, Arc<dyn ObjectStore>, _) =
+            match scheme {
+                "gs" => {
+                    let builder = match settings {
+                        None => GoogleCloudStorageBuilder::from_env(),
+                        Some(settings) => configured(
+                            GoogleCloudStorageBuilder::new(),
+                            settings,
+                            "GOOGLE_",
+                            GoogleCloudStorageBuilder::with_config,
+                        )?,
+                    };
+                    let store = builder.with_bucket_name(bucket).build()?;
+                    let client = ReqwestConnector::default()
+                        .connect(&ClientOptions::new().with_timeout(UPLOAD_TIMEOUT))?;
+                    let gcs = Gcs::new(
+                        client,
+                        store.credentials().clone(),
+                        "https://storage.googleapis.com",
+                        bucket,
+                    );
+                    // Cloud Storage uploads go through `gcs`, not the store.
+                    let store: Arc<dyn ObjectStore> = Arc::new(store);
+                    (store.clone(), store, Uploader::Gcs(gcs))
+                }
+                "s3" => {
+                    let builder = match settings {
                         None => AmazonS3Builder::from_env(),
                         Some(settings) => configured(
                             AmazonS3Builder::new(),
@@ -373,14 +434,22 @@ impl ChunkStore {
                         )?,
                     }
                     .with_bucket_name(bucket)
-                    .with_checksum_algorithm(Checksum::SHA256)
-                    .build()?,
-                ),
-                Uploader::StoreVerified,
-            ),
-            "az" => (
-                Arc::new(
-                    match settings {
+                    .with_checksum_algorithm(Checksum::SHA256);
+                    let uploads = builder
+                        .clone()
+                        .with_config(
+                            AmazonS3ConfigKey::Client(ClientConfigKey::Timeout),
+                            &upload_timeout,
+                        )
+                        .build()?;
+                    (
+                        Arc::new(builder.build()?),
+                        Arc::new(uploads),
+                        Uploader::StoreVerified,
+                    )
+                }
+                "az" => {
+                    let builder = match settings {
                         None => MicrosoftAzureBuilder::from_env(),
                         Some(settings) => configured(
                             MicrosoftAzureBuilder::new(),
@@ -389,16 +458,27 @@ impl ChunkStore {
                             MicrosoftAzureBuilder::with_config,
                         )?,
                     }
-                    .with_container_name(bucket)
-                    .build()?,
-                ),
-                Uploader::ReadBack,
-            ),
-            _ => return Err(Error::Invalid("unknown store; use gs://, az:// or s3://")),
-        };
+                    .with_container_name(bucket);
+                    let uploads = builder
+                        .clone()
+                        .with_config(
+                            AzureConfigKey::Client(ClientConfigKey::Timeout),
+                            &upload_timeout,
+                        )
+                        .build()?;
+                    (
+                        Arc::new(builder.build()?),
+                        Arc::new(uploads),
+                        Uploader::ReadBack,
+                    )
+                }
+                _ => return Err(Error::Invalid("unknown store; use gs://, az:// or s3://")),
+            };
         Ok(Some(Self {
             pointers: Arc::new(ObjectPointers::new(backend.clone(), prefix.clone())),
             backend,
+            uploads,
+            pace: Arc::new(Pace::new()),
             prefix,
             uploader,
             clock: Clock::system(),
@@ -406,6 +486,7 @@ impl ChunkStore {
             settle: SETTLE,
             stored: remembering(carried::REMEMBERED),
             held: None,
+            packs: true,
         }))
     }
 
@@ -482,6 +563,77 @@ impl ChunkStore {
         Ok(put)
     }
 
+    /// Stores the chunks `packer` holds as one pack under this period's
+    /// name (ADR 31), unless another write stored the same bytes under it
+    /// already, and returns what names each chunk there. As
+    /// [`Self::put_chunk`] does a chunk, a pack this store stored itself in
+    /// an earlier period is copied within the store, and one it stored this
+    /// period is checked rather than sent again: an archive started again
+    /// whose packs come out the same sends nothing.
+    pub async fn put_pack(&self, packer: Packer) -> Result<PutPack> {
+        let (bytes, chunks) = packer.finish();
+        if chunks.is_empty() || bytes.len() as u64 > MAX_PACK {
+            return Err(Error::Invalid(
+                "a pack holds one chunk or more, within its limit",
+            ));
+        }
+        let digest = blake3::hash(&bytes).to_hex().to_string();
+        let checksums = crate::upload::checksums(&bytes);
+        let len = bytes.len() as u64;
+        let period = period_of(self.clock.now());
+        let references = crate::pack::named(chunks, period, &digest, len, &checksums);
+        for reference in &references {
+            reference.validate()?;
+        }
+        let probe = &references[0];
+        let stored = self.stored().pack_period(&digest);
+        let mut put = None;
+        if stored == Some(period) && self.has_chunk(probe).await? {
+            put = Some((false, false));
+        } else if let Some(earlier) = stored.filter(|stored| *stored < period) {
+            let from = probe.on_day(earlier).key();
+            if let Some(copied) = self.carry(&from, probe).await? {
+                put = Some((copied, copied));
+            }
+        }
+        let (new, copied) = match put {
+            Some(put) => put,
+            None => (
+                self.put_immutable(&probe.key(), Bytes::from(bytes)).await?,
+                false,
+            ),
+        };
+        if new {
+            self.stored().remember_pack(&digest, period);
+        }
+        if let Some(held) = &self.held {
+            for reference in &references {
+                held.hold(reference);
+            }
+        }
+        Ok(PutPack {
+            references,
+            new,
+            copied,
+            len,
+        })
+    }
+
+    /// Whether an archive through this store may write packs, and so copies
+    /// of [`crate::copy::VERSION_PACKS`]: in a fleet, once every live host
+    /// reads them (ADR 31).
+    #[must_use]
+    pub fn writes_packs(&self) -> bool {
+        self.packs && self.pointers.writes_packs()
+    }
+
+    /// The same store writing packs only if `packs`, and otherwise each
+    /// chunk as an object of its own, as a release before packs did.
+    #[must_use]
+    pub fn with_packs(self, packs: bool) -> Self {
+        Self { packs, ..self }
+    }
+
     fn stored(&self) -> std::sync::MutexGuard<'_, carried::Stored> {
         self.stored.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -519,7 +671,36 @@ impl ChunkStore {
 
     /// Writes `bytes` under `key`, a name that allows no other bytes,
     /// unless they are stored there already; whether this call wrote them.
+    ///
+    /// It waits for a slot among the store's uploads, and an upload that
+    /// fails as a busy store's do is sent again after a pause, up to
+    /// [`pace::TRIES`] times ([`crate::pace`]).
     async fn put_immutable(&self, key: &str, bytes: Bytes) -> Result<bool> {
+        let mut tries = 0;
+        loop {
+            tries += 1;
+            let slot = self.pace.slot().await;
+            match self.put_immutable_once(key, &bytes).await {
+                Ok(new) => {
+                    slot.stored();
+                    return Ok(new);
+                }
+                Err(error) if pace::crowded(&error) => {
+                    slot.crowded();
+                    if tries >= pace::TRIES {
+                        return Err(error);
+                    }
+                    tracing::debug!(key, tries, %error, "upload failed: sending it again");
+                    tokio::time::sleep(pace::pause(tries)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// One try of [`Self::put_immutable`].
+    async fn put_immutable_once(&self, key: &str, bytes: &Bytes) -> Result<bool> {
+        let bytes = bytes.clone();
         let path = self.path(key);
         if self.create(&path, &bytes).await? == Created::New {
             return Ok(true);
@@ -554,7 +735,7 @@ impl ChunkStore {
             mode: PutMode::Overwrite,
             ..Default::default()
         };
-        self.backend
+        self.uploads
             .put_opts(path, bytes.clone().into(), options)
             .await?;
         Ok(())
@@ -571,7 +752,7 @@ impl ChunkStore {
             ..Default::default()
         };
         match self
-            .backend
+            .uploads
             .put_opts(path, bytes.clone().into(), options)
             .await
         {
@@ -653,7 +834,10 @@ impl ChunkStore {
 
     /// Whether the chunk `reference` names is stored with exactly the bytes
     /// it names. A local copy may be deleted on this answer, so a stored
-    /// length is not enough: same-length damage must be found too.
+    /// length is not enough: same-length damage must be found too. For a
+    /// chunk in a pack, whether the whole pack is: the checksums a
+    /// reference to it records are the pack's, so one answer proves every
+    /// chunk in it.
     ///
     /// GCS keeps the CRC32C and MD5 it computed when the object was stored;
     /// matching them against the checksums recorded in `reference` proves
@@ -682,7 +866,7 @@ impl ChunkStore {
                 Err(object_store::Error::NotFound { .. }) => return Ok(false),
                 Err(error) => return Err(error.into()),
             };
-            if meta.size != u64::from(reference.stored_len) {
+            if meta.size != reference.object_len() {
                 return Ok(false);
             }
             let tagged = meta.e_tag.as_deref().and_then(|tag| tag_is_md5(tag, &md5));
@@ -690,8 +874,14 @@ impl ChunkStore {
                 return Ok(true);
             }
         }
-        match self.read_chunk(&path, reference).await {
-            Ok(_) => Ok(true),
+        let read = if reference.pack.is_some() {
+            // The whole pack, which every chunk it holds is then proven by.
+            self.read_pack(&path, reference).await.map(drop)
+        } else {
+            self.read_chunk(&path, reference).await.map(drop)
+        };
+        match read {
+            Ok(()) => Ok(true),
             Err(
                 Error::Integrity
                 | Error::Truncated { .. }
@@ -740,6 +930,19 @@ impl ChunkStore {
 
     async fn read_chunk(&self, path: &Path, reference: &ChunkRef) -> Result<Vec<u8>> {
         let expected = u64::from(reference.stored_len);
+        if reference.pack.is_some() {
+            let bytes = self
+                .backend
+                .get_range(path, reference.stored_range())
+                .await?;
+            if bytes.len() as u64 != expected {
+                return Err(Error::Truncated {
+                    expected,
+                    actual: bytes.len() as u64,
+                });
+            }
+            return decode(reference, &bytes);
+        }
         let result = self.backend.get(path).await?;
         if result.meta.size != expected {
             return Err(Error::Truncated {
@@ -755,6 +958,88 @@ impl ChunkStore {
             });
         }
         decode(reference, &bytes)
+    }
+
+    /// Reads and decodes `references`, in order, as [`Self::get_chunk`]
+    /// does each. Chunks that follow one another in one pack
+    /// ([`crate::pack::follows`]) are read with one ranged read and each
+    /// checked against its own hashes; when that read fails its checks,
+    /// each is read on its own, which finds the bad one.
+    pub async fn get_chunks(&self, references: &[ChunkRef]) -> Result<Vec<Vec<u8>>> {
+        let run = references
+            .windows(2)
+            .all(|pair| crate::pack::follows(&pair[0], &pair[1]));
+        let (Some(first), Some(last), true) = (references.first(), references.last(), run) else {
+            let mut chunks = Vec::with_capacity(references.len());
+            for reference in references {
+                chunks.push(self.get_chunk(reference).await?);
+            }
+            return Ok(chunks);
+        };
+        if references.len() == 1 {
+            return Ok(vec![self.get_chunk(first).await?]);
+        }
+        for reference in references {
+            reference.validate()?;
+        }
+        let path = self.path(&first.key());
+        let range = first.stored_range().start..last.stored_range().end;
+        let read = || async {
+            let bytes = self.backend.get_range(&path, range.clone()).await?;
+            let expected = range.end - range.start;
+            if bytes.len() as u64 != expected {
+                return Err(Error::Truncated {
+                    expected,
+                    actual: bytes.len() as u64,
+                });
+            }
+            references
+                .iter()
+                .map(|reference| {
+                    let at = reference.stored_range();
+                    let within = usize::try_from(at.start - range.start)
+                        .map_err(|_| Error::Invalid("pack offset"))?;
+                    let stored = &bytes[within..within + reference.stored_len as usize];
+                    decode(reference, stored)
+                })
+                .collect()
+        };
+        match self.settled(&path, self.settle, read).await {
+            Err(Error::Integrity | Error::Truncated { .. }) => {
+                let mut chunks = Vec::with_capacity(references.len());
+                for reference in references {
+                    chunks.push(self.get_chunk(reference).await?);
+                }
+                Ok(chunks)
+            }
+            result => result,
+        }
+    }
+
+    /// Reads the whole pack holding the chunk `reference` names, checked
+    /// against the length and digest the reference records.
+    async fn read_pack(&self, path: &Path, reference: &ChunkRef) -> Result<Bytes> {
+        let Some(pack) = &reference.pack else {
+            return Err(Error::Invalid("not a chunk in a pack"));
+        };
+        let result = self.backend.get(path).await?;
+        if result.meta.size != pack.len {
+            return Err(Error::Truncated {
+                expected: pack.len,
+                actual: result.meta.size,
+            });
+        }
+        let bytes = result.bytes().await?;
+        if bytes.len() as u64 != pack.len {
+            return Err(Error::Truncated {
+                expected: pack.len,
+                actual: bytes.len() as u64,
+            });
+        }
+        if blake3::hash(&bytes).to_hex().as_str() != pack.digest {
+            return Err(Error::Integrity);
+        }
+        Ok(bytes)
     }
 
     /// Publish only after every referenced chunk has completed uploading.
@@ -829,7 +1114,8 @@ impl ChunkStore {
 
     /// The bytes stored for the chunk `reference` names, as they are
     /// stored (compressed), checked against its stored length and hash,
-    /// for copying it to another store. A read that fails the check is
+    /// for copying it to another store: for a chunk in a pack, the whole
+    /// pack, checked against its length and digest. A read that fails the check is
     /// tried once more; nothing is quarantined, so a copy never writes to
     /// the store it copies from.
     pub async fn get_stored_chunk(&self, reference: &ChunkRef) -> Result<Bytes> {
@@ -845,6 +1131,9 @@ impl ChunkStore {
     }
 
     async fn read_stored_chunk(&self, path: &Path, reference: &ChunkRef) -> Result<Bytes> {
+        if reference.pack.is_some() {
+            return self.read_pack(path, reference).await;
+        }
         let bytes = self.backend.get(path).await?.bytes().await?;
         if bytes.len() != reference.stored_len as usize {
             return Err(Error::Truncated {
@@ -892,7 +1181,9 @@ impl ChunkStore {
     /// when it was first stored.
     pub async fn put_stored(&self, key: &str, bytes: Bytes) -> Result<()> {
         if written(key).is_none() {
-            return Err(Error::Invalid("only chunks and manifests are copied"));
+            return Err(Error::Invalid(
+                "only chunks, packs and manifests are copied",
+            ));
         }
         self.put_immutable(key, bytes).await.map(|_| ())
     }
@@ -938,7 +1229,9 @@ impl ChunkStore {
     /// (see [`crate::fresh`]). Whether it was there.
     pub async fn delete(&self, key: &str) -> Result<bool> {
         if written(key).is_none() {
-            return Err(Error::Invalid("only chunks and manifests are deleted"));
+            return Err(Error::Invalid(
+                "only chunks, packs and manifests are deleted",
+            ));
         }
         match self.backend.delete(&self.path(key)).await {
             Ok(()) => Ok(true),
@@ -1030,6 +1323,9 @@ pub fn written(key: &str) -> Option<Written> {
             let digest = file.strip_suffix(".json")?;
             is_digest(digest).then_some(())?;
             canonical_day(day).map(Written::On)
+        }
+        ["packs", "v1", period, digest] if is_digest(digest) => {
+            canonical_day(period).map(Written::On)
         }
         ["manifests", "v1", file] => {
             let digest = file.strip_suffix(".json")?;

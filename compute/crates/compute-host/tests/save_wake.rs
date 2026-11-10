@@ -155,6 +155,7 @@ async fn restart_with<S: Store>(
         first_wake_within: HostConfig::FIRST_WAKE_WITHIN,
         disk_reading: None,
         stream_idle: HostConfig::STREAM_IDLE,
+        hand_off_unwakeable: HostConfig::HAND_OFF_UNWAKEABLE,
         guest_ports: Vec::new(),
         restore_notice_port: None,
         guest_checks: compute_host::GuestChecks::DEFAULT,

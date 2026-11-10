@@ -856,7 +856,7 @@ impl Sim {
                     "an agent's reply on {subject} reached its gateway marked as the host's"
                 );
             }
-            HostFrame::State { s, state } => {
+            HostFrame::State { s, state, .. } => {
                 self.opened_scope(link, s, "state");
                 self.sessions.get_mut(&(link, s)).unwrap().told = Some(state);
             }

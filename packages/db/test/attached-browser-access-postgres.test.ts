@@ -17,6 +17,7 @@ import {
   getAttachedBrowserDevice,
   getBrowserSession,
   getComputerSessionControlRecord,
+  getLiveEnrollmentConnection,
   interactionControllerGone,
   listAttachedBrowserDevices,
   prepareBrowserSessionCreate,
@@ -916,5 +917,301 @@ describe("attached browsers on a machine enrolled in another workspace", () => {
     expect(
       await getBrowserSession(client.db, { ...scope, browserSessionId: browser.session.id }),
     ).toMatchObject({ lifecycle: "lost", failureCode: "controller_transition_expired" });
+  });
+});
+
+/** A live machine enrolled by `subjectId` with `pubkey` (the machine's key),
+ *  announcing `deviceId`. */
+async function enrolledAs(
+  org: Org,
+  input: {
+    subjectId: string;
+    scope: "workspace" | "organization" | "user";
+    workspaceId: string;
+    pubkey?: string;
+    deviceId: string;
+    connectionGeneration: string;
+  },
+) {
+  const pubkey = input.pubkey ?? `ed25519:browser-${crypto.randomUUID()}`;
+  const row = (await app.begin(async (tx) => {
+    await tx`select
+      set_config('opengeni.account_id', ${org.accountId}, true),
+      set_config('opengeni.workspace_id', ${input.workspaceId}, true),
+      set_config('opengeni.subject_id', ${input.subjectId}, true)`;
+    const [created] = await tx<Array<{ enrollmentId: string }>>`
+      select enrollment_id as "enrollmentId"
+      from finalize_scoped_enrollment(
+        ${org.accountId}::uuid, ${input.workspaceId}::uuid,
+        ${input.scope === "organization" ? "workspace" : input.scope}, ${pubkey},
+        true, false, 'macos', 'arm64', 'Laptop', false
+      )`;
+    return created!;
+  })) as { enrollmentId: string };
+  if (input.scope === "organization") {
+    await shared.admin`
+      update enrollments set authority_scope = 'organization' where id = ${row.enrollmentId}`;
+  }
+  await shared.admin`
+    update enrollments set connection_instance_id = 'connection-1',
+      connection_lease_expires_at = now() + interval '1 hour', workspace_root = '/srv/workspace'
+    where id = ${row.enrollmentId}`;
+  await reconcileAttachedBrowserInventory(client.db, {
+    accountId: org.accountId,
+    workspaceId: input.workspaceId,
+    enrollmentId: row.enrollmentId,
+    snapshot: {
+      bridgeGeneration: "bridge-1",
+      revision: 1,
+      devices: [profile(input.deviceId, input.connectionGeneration, 1)],
+    },
+  });
+  return { enrollmentId: row.enrollmentId, pubkey };
+}
+
+/** The member may connect machines to the shared workspace. */
+async function memberManagesMachines(org: Org) {
+  await shared.admin`
+    update workspace_memberships
+    set permissions = permissions || '["enrollments:read","enrollments:manage"]'::jsonb
+    where workspace_id = ${org.workspaceId} and subject_id = ${org.member}`;
+}
+
+describe("a profile id announced by more than one machine", () => {
+  test("another member's machine never shadows the viewer's own profile", async () => {
+    const org = await organization();
+    await memberManagesMachines(org);
+    const personalWorkspaceId = await personalWorkspaceOf(org, org.owner);
+    const deviceId = crypto.randomUUID();
+    const own = await enrolledAs(org, {
+      subjectId: org.owner,
+      scope: "user",
+      workspaceId: personalWorkspaceId,
+      deviceId,
+      connectionGeneration: "owner-extension",
+    });
+    // The member's shared machine announces the same profile id here, once
+    // with its own key and once claiming the owner's (enrolling proves no key).
+    const other = await enrolledAs(org, {
+      subjectId: org.member,
+      scope: "workspace",
+      workspaceId: org.workspaceId,
+      deviceId,
+      connectionGeneration: "member-extension",
+    });
+    const asOwner = viewer(org, org.owner);
+
+    const resolved = await getAttachedBrowserDevice(client.db, { ...asOwner, deviceId });
+    expect(resolved).toMatchObject({
+      enrollmentId: own.enrollmentId,
+      workspaceId: personalWorkspaceId,
+    });
+    expect((await getLiveEnrollmentConnection(client.db, asOwner, resolved.enrollmentId))?.id).toBe(
+      own.enrollmentId,
+    );
+    const listed = await listAttachedBrowserDevices(client.db, asOwner);
+    expect(
+      listed.devices
+        .filter((device) => device.id === deviceId)
+        .map((device) => device.enrollmentId)
+        .sort(),
+    ).toEqual([own.enrollmentId, other.enrollmentId].sort());
+    // An existing session pinned to the member's copy keeps it.
+    expect(
+      await getAttachedBrowserDevice(client.db, {
+        ...asOwner,
+        deviceId,
+        deviceWorkspaceId: org.workspaceId,
+      }),
+    ).toMatchObject({ enrollmentId: other.enrollmentId });
+
+    // The member sees only their own machine's copy.
+    expect(
+      await getAttachedBrowserDevice(client.db, { ...viewer(org, org.member), deviceId }),
+    ).toMatchObject({ enrollmentId: other.enrollmentId });
+  });
+
+  test("a workspace machine enrolled with another machine's key never stands in for it", async () => {
+    const org = await organization();
+    await memberManagesMachines(org);
+    const personalWorkspaceId = await personalWorkspaceOf(org, org.owner);
+    const deviceId = crypto.randomUUID();
+    const own = await enrolledAs(org, {
+      subjectId: org.owner,
+      scope: "user",
+      workspaceId: personalWorkspaceId,
+      deviceId,
+      connectionGeneration: "owner-extension",
+    });
+    // Enrolling proves no key, so a member can claim the owner's.
+    await enrolledAs(org, {
+      subjectId: org.member,
+      scope: "workspace",
+      workspaceId: org.workspaceId,
+      pubkey: own.pubkey,
+      deviceId,
+      connectionGeneration: "forged-extension",
+    });
+    const asOwner = viewer(org, org.owner);
+    expect(await getAttachedBrowserDevice(client.db, { ...asOwner, deviceId })).toMatchObject({
+      enrollmentId: own.enrollmentId,
+      workspaceId: personalWorkspaceId,
+    });
+    expect(
+      (await listAttachedBrowserDevices(client.db, asOwner)).devices.filter(
+        (device) => device.id === deviceId,
+      ),
+    ).toEqual([expect.objectContaining({ enrollmentId: own.enrollmentId })]);
+
+    // The same against an organization machine, whose key members can see.
+    const organizationDevice = crypto.randomUUID();
+    const everyone = await enrolledAs(org, {
+      subjectId: org.owner,
+      scope: "organization",
+      workspaceId: personalWorkspaceId,
+      deviceId: organizationDevice,
+      connectionGeneration: "organization-extension",
+    });
+    const claimed = await enrolledAs(org, {
+      subjectId: org.member,
+      scope: "workspace",
+      workspaceId: org.workspaceId,
+      pubkey: everyone.pubkey,
+      deviceId: organizationDevice,
+      connectionGeneration: "claimed-extension",
+    });
+    // Even while the organization machine's profile is disconnected.
+    await reconcileAttachedBrowserInventory(client.db, {
+      accountId: org.accountId,
+      workspaceId: personalWorkspaceId,
+      enrollmentId: everyone.enrollmentId,
+      snapshot: { bridgeGeneration: "bridge-1", revision: 2, devices: [] },
+    });
+    const resolved = await getAttachedBrowserDevice(client.db, {
+      ...asOwner,
+      deviceId: organizationDevice,
+    });
+    expect(resolved).toMatchObject({
+      enrollmentId: everyone.enrollmentId,
+      state: "disconnected",
+    });
+    expect(resolved.enrollmentId).not.toBe(claimed.enrollmentId);
+  });
+
+  test("copies from two shared machines are ambiguous unless pinned", async () => {
+    const org = await organization();
+    await memberManagesMachines(org);
+    const personalWorkspaceId = await personalWorkspaceOf(org, org.owner);
+    const deviceId = crypto.randomUUID();
+    const everyone = await enrolledAs(org, {
+      subjectId: org.owner,
+      scope: "organization",
+      workspaceId: personalWorkspaceId,
+      deviceId,
+      connectionGeneration: "organization-extension",
+    });
+    const other = await enrolledAs(org, {
+      subjectId: org.member,
+      scope: "workspace",
+      workspaceId: org.workspaceId,
+      deviceId,
+      connectionGeneration: "member-extension",
+    });
+    const asOwner = viewer(org, org.owner);
+
+    await expect(
+      getAttachedBrowserDevice(client.db, { ...asOwner, deviceId }),
+    ).rejects.toBeInstanceOf(AttachedBrowserDeviceNotFoundError);
+    expect(
+      await interactionControllerGone(client.db, asOwner, { kind: "attached_device", deviceId }),
+    ).toBe(true);
+    expect(
+      (await listAttachedBrowserDevices(client.db, asOwner)).devices
+        .filter((device) => device.id === deviceId)
+        .map((device) => device.enrollmentId)
+        .sort(),
+    ).toEqual([everyone.enrollmentId, other.enrollmentId].sort());
+    expect(
+      await getAttachedBrowserDevice(client.db, {
+        ...asOwner,
+        deviceId,
+        deviceWorkspaceId: personalWorkspaceId,
+      }),
+    ).toMatchObject({ enrollmentId: everyone.enrollmentId });
+    expect(
+      await getAttachedBrowserDevice(client.db, {
+        ...asOwner,
+        deviceId,
+        deviceWorkspaceId: org.workspaceId,
+      }),
+    ).toMatchObject({ enrollmentId: other.enrollmentId });
+  });
+
+  test("the same computer enrolled in two workspaces is one profile", async () => {
+    const org = await organization();
+    const personalWorkspaceId = await personalWorkspaceOf(org, org.owner);
+
+    // Only me in the owner's personal workspace, and shared here.
+    const personalDevice = crypto.randomUUID();
+    const personal = await enrolledAs(org, {
+      subjectId: org.owner,
+      scope: "user",
+      workspaceId: personalWorkspaceId,
+      deviceId: personalDevice,
+      connectionGeneration: "extension-1",
+    });
+    const sharedCopy = await enrolledAs(org, {
+      subjectId: org.owner,
+      scope: "workspace",
+      workspaceId: org.workspaceId,
+      pubkey: personal.pubkey,
+      deviceId: personalDevice,
+      connectionGeneration: "extension-1",
+    });
+    const asOwner = viewer(org, org.owner);
+    expect(
+      (await listAttachedBrowserDevices(client.db, asOwner)).devices.filter(
+        (device) => device.id === personalDevice,
+      ),
+    ).toEqual([expect.objectContaining({ enrollmentId: personal.enrollmentId })]);
+    expect(
+      await getAttachedBrowserDevice(client.db, { ...asOwner, deviceId: personalDevice }),
+    ).toMatchObject({ enrollmentId: personal.enrollmentId, state: "connected" });
+    // A member sees only the shared enrollment's copy.
+    expect(
+      await getAttachedBrowserDevice(client.db, {
+        ...viewer(org, org.member),
+        deviceId: personalDevice,
+      }),
+    ).toMatchObject({ enrollmentId: sharedCopy.enrollmentId });
+
+    // Shared with the whole organization from the personal workspace, and
+    // shared here: every member sees one profile, addressed through the
+    // organization enrollment.
+    const organizationDevice = crypto.randomUUID();
+    const everyone = await enrolledAs(org, {
+      subjectId: org.owner,
+      scope: "organization",
+      workspaceId: personalWorkspaceId,
+      deviceId: organizationDevice,
+      connectionGeneration: "extension-1",
+    });
+    await enrolledAs(org, {
+      subjectId: org.owner,
+      scope: "workspace",
+      workspaceId: org.workspaceId,
+      pubkey: everyone.pubkey,
+      deviceId: organizationDevice,
+      connectionGeneration: "extension-1",
+    });
+    const asMember = viewer(org, org.member);
+    expect(
+      (await listAttachedBrowserDevices(client.db, asMember)).devices.filter(
+        (device) => device.id === organizationDevice,
+      ),
+    ).toEqual([expect.objectContaining({ enrollmentId: everyone.enrollmentId })]);
+    expect(
+      await getAttachedBrowserDevice(client.db, { ...asMember, deviceId: organizationDevice }),
+    ).toMatchObject({ enrollmentId: everyone.enrollmentId, workspaceId: personalWorkspaceId });
   });
 });

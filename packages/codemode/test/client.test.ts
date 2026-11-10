@@ -10,6 +10,7 @@ import {
   createCodemodeTools,
   createAttemptToolEnvironment,
   environmentCodemodeClient,
+  isCodemodeCallerStaleError,
   type AttemptToolDefinition,
 } from "../src";
 
@@ -728,6 +729,62 @@ describe("CodemodeClient", () => {
       retryable: true,
       outcomeUnknown: false,
     });
+  });
+
+  test("a bearer refused as a stale caller is never sent again; a renewed bearer is", async () => {
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition],
+    }).catalog;
+    let bearer = "ended-attempt-bearer";
+    const requests: string[] = [];
+    const fetchStub = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get("authorization") ?? "";
+      requests.push(`${new URL(String(input)).pathname} ${authorization}`);
+      if (authorization === "Bearer ended-attempt-bearer")
+        return Response.json(
+          {
+            error: {
+              status: 403,
+              code: "forbidden",
+              message: "The agent attempt credential is no longer valid",
+              retryable: false,
+              details: { code: "agent_attempt_caller_stale" },
+            },
+          },
+          { status: 403 },
+        );
+      return Response.json(catalog);
+    }) as typeof fetch;
+    const client = new CodemodeClient({
+      baseUrl: "https://api.example.test/codemode",
+      token: () => bearer,
+      fetch: fetchStub,
+    });
+    // A program that keeps calling (a loop, a Site preview polling its
+    // catalog) gets the same permanent refusal without reaching the API.
+    const tools = createCodemodeTools(() => client);
+    for (let index = 0; index < 20; index += 1) {
+      const caught = await (index % 2 ? client.catalog() : tools.docs!.search!({ query: "x" }))
+        .then(() => null)
+        .catch((error: unknown) => error);
+      expect(isCodemodeCallerStaleError(caught)).toBe(true);
+      expect(caught).toMatchObject({ status: 403, retryable: false });
+    }
+    expect(requests).toEqual(["/codemode/catalog Bearer ended-attempt-bearer"]);
+    // A program that builds a fresh client per retry is refused locally too.
+    const fresh = new CodemodeClient({
+      baseUrl: "https://api.example.test/codemode",
+      token: "ended-attempt-bearer",
+      fetch: fetchStub,
+    });
+    expect(isCodemodeCallerStaleError(await fresh.catalog().catch((error) => error))).toBe(true);
+    expect(requests).toHaveLength(1);
+
+    bearer = "renewed-attempt-bearer";
+    expect((await client.catalog()).digest).toBe(catalog.digest);
+    expect(requests).toHaveLength(2);
   });
 
   test("calls the exact catalog identity through a lazy namespace without parsing wire names", async () => {

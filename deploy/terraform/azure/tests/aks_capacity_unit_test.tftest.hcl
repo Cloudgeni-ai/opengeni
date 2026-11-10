@@ -218,6 +218,33 @@ variables {
   resource_group_name             = "rg-opengeni-test"
 }
 
+run "automatic_outbound_allocation_unchanged_by_default" {
+  command = plan
+  assert {
+    condition     = azurerm_kubernetes_cluster.this.network_profile[0].load_balancer_profile[0].outbound_ports_allocated == 0
+    error_message = "Default composition must retain automatic allocation."
+  }
+}
+
+run "explicit_outbound_allocation" {
+  command = plan
+  variables {
+    aks_outbound_ports_allocated = 4000
+  }
+  assert {
+    condition     = azurerm_kubernetes_cluster.this.network_profile[0].load_balancer_profile[0].outbound_ports_allocated == 4000
+    error_message = "Explicit per-node ports must reach the AKS profile."
+  }
+}
+
+run "invalid_outbound_port_granularity" {
+  command = plan
+  variables {
+    aks_outbound_ports_allocated = 4001
+  }
+  expect_failures = [var.aks_outbound_ports_allocated]
+}
+
 run "fixed_pool_retains_explicit_node_count" {
   command = plan
 

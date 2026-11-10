@@ -996,6 +996,7 @@ describe("deployment contract", () => {
         OPENGENI_TEAMS_BOT_CLIENT_ID: "teams-pilot-client",
         OPENGENI_TEAMS_BOT_CLIENT_SECRET: "teams-pilot-secret",
         OPENGENI_TEAMS_BOT_TENANT_ID: "teams-home-tenant",
+        OPENGENI_TEAMS_APP_NAME: "Opengeni Assistant",
 
         OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "github-personal-staging",
@@ -1059,6 +1060,7 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_BOT_DISPLAY_NAME=Opengeni Staging");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS=00000000-0000-4000-8000-000000000001:19:pilot@thread.tacv2",
     );
@@ -1069,6 +1071,7 @@ describe("deployment contract", () => {
       "OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS=00000000-0000-4000-8000-000000000001",
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_CLIENT_SECRET=teams-pilot-secret");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_APP_NAME=Opengeni Assistant");
 
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_COMMAND=/opengeni-staging");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true");

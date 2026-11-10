@@ -107,6 +107,8 @@ export type CodexRealtimeV3BridgeOptions = {
   listen?: boolean | undefined;
   onSnapshot?: ((snapshot: CodexRealtimeV3BridgeSnapshot) => void) | undefined;
   onFatal?: ((fatal: CodexRealtimeV3BridgeFatal) => void) | undefined;
+  /** A user or assistant turn's transcript became final. */
+  onFinalTranscript?: ((role: "user" | "assistant") => void) | undefined;
 };
 
 export type CodexRealtimeV3Bridge = {
@@ -560,6 +562,7 @@ export function createCodexRealtimeV3Bridge(
         );
         if (durable) {
           finalizedTurnIds.add(event.turnId);
+          options.onFinalTranscript?.(event.role);
           if (coveredByDelegationItemId) {
             pendingDelegationUserTranscript = null;
           } else {

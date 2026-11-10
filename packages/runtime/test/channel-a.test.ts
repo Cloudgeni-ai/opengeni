@@ -38,6 +38,7 @@ import {
   ChannelANotFoundError,
   ChannelAConflictError,
   ChannelAValidationError,
+  ChannelASymlinkPathError,
   ChannelAUnavailableError,
   createMockSelfhostedOpStream,
   MockAgentResponder,
@@ -1410,6 +1411,10 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     await expect(
       svc.fsList({ path: "external-dir", depth: 1, maxEntries: 10, includeHidden: true }),
     ).rejects.toThrow(/symbolic link/);
+    // Typed, so repository skill discovery can skip a symlinked search path.
+    await expect(
+      svc.fsList({ path: "external-dir", depth: 1, maxEntries: 10, includeHidden: true }),
+    ).rejects.toBeInstanceOf(ChannelASymlinkPathError);
     await expect(svc.gitStatus({ path: "external-dir" })).rejects.toThrow(/symbolic link/);
 
     const outsideAfter = await svc.terminalExec({

@@ -257,11 +257,10 @@ export type SessionDraftSubmission = {
   omitWorkspaceResources: boolean;
 };
 
-/** A new chat started as a bot (from a bot template): who it is. */
-export type NewSessionBotProfile = {
-  name: string;
-  description?: string | undefined;
-  avatar?: import("@opengeni/sdk").SessionAvatar | null | undefined;
+/** The agent a new chat starts with, and the icon the chat shows for it. */
+export type NewSessionAgent = {
+  id: string;
+  avatar: import("@opengeni/sdk").SessionAvatar;
 };
 
 export type BuildCreateSessionRequestInput = {
@@ -271,8 +270,8 @@ export type BuildCreateSessionRequestInput = {
   instructions?: string | undefined;
   /** Installed session-selected Skills to freeze onto the new session. */
   installedSkillIds?: string[] | undefined;
-  /** Start the chat as a bot: its name, description and avatar, kept live. */
-  bot?: NewSessionBotProfile | undefined;
+  /** Start the chat with an agent: it follows the agent's Instructions and shows its icon. */
+  agent?: NewSessionAgent | undefined;
   startMode?: "realtime" | undefined;
   visibility?: "private" | "workspace" | undefined;
   omitWorkspaceResources?: boolean | undefined;
@@ -389,16 +388,7 @@ export function buildCreateSessionRequest(
     visibility: input.visibility ?? "workspace",
     instructions: input.instructions || undefined,
     ...(input.installedSkillIds?.length ? { installedSkillIds: input.installedSkillIds } : {}),
-    ...(input.bot
-      ? {
-          keepLive: true,
-          profile: {
-            title: input.bot.name,
-            ...(input.bot.description ? { description: input.bot.description } : {}),
-            ...(input.bot.avatar ? { avatar: input.bot.avatar } : {}),
-          },
-        }
-      : {}),
+    ...(input.agent ? { agentId: input.agent.id, profile: { avatar: input.agent.avatar } } : {}),
     resources,
     ...(tools === undefined ? {} : { tools }),
     ...(input.newSessionDraftToolPolicy?.excludedMcpServerIds !== undefined

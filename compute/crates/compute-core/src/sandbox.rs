@@ -26,6 +26,13 @@ pub(crate) struct Retry {
     pub not_before: At,
 }
 
+/// A restart under way (see [`crate::Input::Restart`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Restart {
+    /// Whether its VM was asked to end since the restart was last asked.
+    pub ending: bool,
+}
+
 /// An outstanding request to be awake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Wake {
@@ -120,6 +127,9 @@ pub(crate) struct Sandbox {
     /// The VM process died while a step was in flight.
     pub process_lost: bool,
     pub retry: Option<Retry>,
+    /// A restart under way: its programs end and its memory image is
+    /// forgotten before it runs again.
+    pub restart: Option<Restart>,
     pub queued: Option<(Step, QueueKey)>,
     pub timer: Option<At>,
     pub dirty: bool,
@@ -130,7 +140,7 @@ pub(crate) struct Sandbox {
 pub(crate) struct LocalDisk {
     /// Bytes its disk may still grow by while its VM runs: its size's
     /// `disk` until [`crate::Input::DiskGrowth`] measures it, and again
-    /// from the end of each pause whose guest trimmed its disk.
+    /// from the end of each pause that trimmed it or fetch that replaced it.
     pub growth: u64,
     /// Whether a wake from object storage may still be writing its local
     /// copy: from that wake's start until [`crate::Input::Hydrating`]
@@ -139,6 +149,10 @@ pub(crate) struct LocalDisk {
     /// What it booked on local disk as of its last reconcile, so what it
     /// stops booking is counted until a reading shows it.
     pub booked: DiskSpace,
+    /// What giving up its local copy frees at least, as last measured
+    /// while it slept with no VM (see [`crate::Input::LocalCopy`]);
+    /// nothing until then, and again once it wakes or its copy goes.
+    pub copy: DiskSpace,
 }
 
 /// What can still be done with a sandbox.
@@ -184,6 +198,7 @@ impl Sandbox {
                 growth: size.disk,
                 hydrating: false,
                 booked: DiskSpace::default(),
+                copy: DiskSpace::default(),
             },
             in_flight: None,
             // A copy found in object storage counts as taken at its last
@@ -193,6 +208,7 @@ impl Sandbox {
             running_since: last_activity,
             process_lost: false,
             retry: None,
+            restart: None,
             queued: None,
             timer: None,
             dirty: false,
@@ -418,6 +434,16 @@ impl Sandbox {
         }
         if self.backing_off(now) {
             return None;
+        }
+        if self.restart.is_some() {
+            // Its VM ends first, then its memory image goes, before any
+            // wake: the wake then boots it from its files.
+            if self.state.level.has_process() {
+                return None;
+            }
+            if self.state.memory_saved {
+                return Some(Step::Forget);
+            }
         }
         if self.wants_awake() {
             if self.room == WakeRoom::Refused {

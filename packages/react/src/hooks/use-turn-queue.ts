@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   ComposerDraft,
   EffectiveSessionControl,
@@ -68,7 +69,7 @@ export type QueueRecallResult =
   /** Anything else (offline, draft changed, a mutation in flight); the queue shows why. */
   | { status: "failed" };
 
-export type UseTurnQueueOptions = EmbeddedSessionClientOverride &
+export type UseTurnQueueOptions = EmbeddedSessionClientOverride<ChatClient> &
   SessionEventFeedOptions & {
     pollIntervalMs?: number | undefined;
   };

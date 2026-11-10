@@ -169,11 +169,19 @@ describe("system audio", () => {
     await expect(start({ trusted: false, sender: page })).rejects.toThrow("Not allowed");
     const started = (await start({ trusted: true, sender: page })) as { ok: boolean };
     expect(started.ok).toBe(true);
-    // A same-document navigation keeps it; leaving the page ends it.
-    listeners.get("did-start-navigation")!({ isMainFrame: true, isSameDocument: true });
+    // A navigation that only starts, such as a link opened in the browser,
+    // keeps it; so does a cancelled one. Leaving the document ends it.
+    expect(listeners.has("did-start-navigation")).toBe(false);
+    (listeners.get("did-fail-provisional-load") as (...args: unknown[]) => void)(
+      {},
+      -3,
+      "ERR_ABORTED",
+      "https://example.com/",
+      true,
+    );
     await Bun.sleep(100);
     expect(page.ended).toBeNull();
-    listeners.get("did-start-navigation")!({ isMainFrame: true, isSameDocument: false });
+    listeners.get("did-navigate")!();
     await page.whenEnded();
     expect(page.ended?.error).toBeNull();
   });

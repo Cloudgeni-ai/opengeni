@@ -295,6 +295,68 @@ async fn unused_images_retire_unless_kept_or_in_use() {
     assert_eq!(cache.retire(&keep, SystemTime::now()).await, vec![held]);
 }
 
+/// Disk relief removes an image however lately it was used, but never
+/// one a copy holds; [`Cache::images`] lists what is left, and
+/// [`Cache::last_used`] says when each was last used.
+#[tokio::test]
+async fn relief_removes_an_image_now_unless_in_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    let (store, used) = stored(dir.path(), b"used").await;
+    drop(cache.get(used, &store).await.unwrap());
+    let (store, held) = stored(dir.path(), b"held").await;
+    let holding = cache.get(held, &store).await.unwrap();
+    let mut both = vec![used, held];
+    both.sort_unstable();
+    assert_eq!(cache.images(), both);
+    let since = SystemTime::now()
+        .duration_since(cache.last_used(used).unwrap())
+        .unwrap_or_default();
+    assert!(since < Duration::from_secs(60), "just used: {since:?}");
+
+    assert!(cache.remove(used).await, "unused, if lately");
+    assert!(!cache.has(used) && !cache.path(used).exists() && !cache.mark(used).exists());
+    assert!(!cache.remove(held).await, "a copy holds it");
+    assert!(cache.has(held) && cache.path(held).exists());
+    assert_eq!(cache.images(), vec![held]);
+    drop(holding);
+    assert!(cache.remove(held).await);
+    assert_eq!(cache.images(), Vec::new());
+    assert!(!cache.remove(held).await, "already gone");
+}
+
+/// An image the host built is kept without any store: moved into place,
+/// used like a fetched one, and kept by the next agent. One built again
+/// while the host has it leaves the kept file as it was.
+#[tokio::test]
+async fn a_built_image_is_kept_without_a_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    let built = dir.path().join("image.ext4");
+    fs::write(&built, b"built here").unwrap();
+    let image = ImageId(*blake3::hash(b"built here").as_bytes());
+    cache.adopt(image, &built).await.unwrap();
+    assert!(!built.exists(), "moved into place");
+    assert!(cache.has(image));
+    let held = cache.get(image, &NoStore).await.unwrap();
+    assert_eq!(fs::read(&held.path).unwrap(), b"built here");
+    let before = identity(&held.path);
+    drop(held);
+
+    fs::write(&built, b"built here").unwrap();
+    cache.adopt(image, &built).await.unwrap();
+    assert!(!built.exists(), "the second build is dropped");
+    assert_eq!(
+        identity(&cache.path(image)),
+        before,
+        "the kept file untouched"
+    );
+    assert_eq!(images_in(&dir.path().join("rootfs")), 1);
+
+    let reopened = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    assert!(reopened.get(image, &NoStore).await.is_ok());
+}
+
 /// Fetching a sandbox's disk over its image hashes the image once per
 /// version of its file's metadata: using the image must not touch it, or
 /// every create made the next fetch download the whole disk.

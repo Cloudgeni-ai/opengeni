@@ -190,7 +190,7 @@ describe("Teams actor and transport boundary", () => {
     const token = mintTeamsProof("secret", input, now);
     expect(verifyTeamsProof("secret", token, now).actorId).toBe(actor);
     expect(() => verifyTeamsProof("wrong", token, now)).toThrow();
-    expect(() => verifyTeamsProof("secret", token, now + 600001)).toThrow();
+    expect(() => verifyTeamsProof("secret", token, now + 3_600_001)).toThrow();
     expect(() => verifyTeamsProof("secret", `${token}x`, now)).toThrow();
   });
   test("no session/provider/database access occurs with rollout disabled", async () => {

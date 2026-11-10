@@ -61,13 +61,13 @@ const COPIED = [
   "max_nested_agent_depth_override",
   "effective_max_nested_agent_depth",
   "nested_agent_depth_policy_source",
-  // The source's creator holds no manual pin here; a manual pin carries over
-  // only to that same person's fork, a policy pin never does.
-  "codex_pinned_credential_id",
-  "codex_pin_source",
   // The fork's first request repeats the source's history, so it keeps the
   // source's search-record form (docs/web-search.md).
   "search_records_as_input",
+  // The agent a chat was started for and the revision in its prompt
+  // (migration 1244, docs/agents.md): a fork is a chat with the same agent.
+  "agent_id",
+  "agent_prompt_revision",
 ] as const;
 
 const fresh = (value: unknown) => () => value;
@@ -172,7 +172,6 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   active_sandbox_id: { why: "route to its own group sandbox", expected: fresh(null) },
   active_epoch: { why: "its own route fence", expected: fresh(0) },
   working_dir: { why: "follows the route", expected: fresh(null) },
-  codex_last_credential_id: { why: "its own measurements", expected: fresh(null) },
   last_input_tokens: { why: "its own measurements", expected: fresh(null) },
   compact_requested: { why: "its own measurements", expected: fresh(false) },
   // The fork routines start from the source row and clear only the request;
@@ -204,6 +203,7 @@ const OWN: Record<string, { why: string; expected: (context: Context) => unknown
   content_archived_at: { why: "its own archive", expected: fresh(null) },
   content_archive: { why: "its own archive", expected: fresh(null) },
   content_archive_purged_at: { why: "its own archive", expected: fresh(null) },
+  content_restore_requested_at: { why: "its own archive", expected: fresh(null) },
   archived_at: { why: "its own archive", expected: fresh(null) },
   archive_requested_by: { why: "its own archive", expected: fresh(null) },
   tool_policy_version: { why: "edit counter of this row's policy", expected: fresh(1) },
@@ -391,6 +391,7 @@ async function configuredSource(org: Org) {
   await shared.admin`update sessions set keep_live = true, title = 'Release plan',
     title_source = 'user', description = 'Owns the release checklist',
     search_records_as_input = true,
+    agent_id = ${crypto.randomUUID()}, agent_prompt_revision = 1,
     avatar = ${shared.admin.json({ kind: "emoji", emoji: "🚀", hue: 210 })}
     where id = ${session.id}`;
   return session.id;
@@ -510,6 +511,8 @@ describe("a fork is the same agent as its source", () => {
       "instructions",
       "max_nested_agent_depth_override",
       "search_records_as_input",
+      "agent_id",
+      "agent_prompt_revision",
     ]) {
       expect({ column, value: source[column] }).not.toEqual({ column, value: blank[column] });
     }

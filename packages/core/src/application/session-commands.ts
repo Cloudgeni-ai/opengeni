@@ -17,6 +17,7 @@ import type {
   WorkspaceInferenceControlResponse,
 } from "@opengeni/contracts";
 import { DraftTimelineAnnotations } from "@opengeni/contracts";
+import { SESSION_ARCHIVE_STOP_REASON } from "@opengeni/contracts/session-history";
 import type { Settings } from "@opengeni/config";
 import { prepareDraftModel } from "./draft-model-preparation";
 import { HTTPException } from "hono/http-exception";
@@ -24,12 +25,17 @@ import {
   checkWorkspaceAllowance,
   deleteSessionQueueItemInTransaction,
   editQueuedTurnInTransaction,
+  effectiveSessionPolicyQuery,
   getComposerDraftInTransaction,
   getSession,
   requireSessionArchiveMemberAuthority,
   retireArchivedChatWaits,
   requestSessionArchive,
-  undoSessionArchive,
+  unarchiveSession,
+  listArchivePausedSessions,
+  reopenArchiveStoppedSessions,
+  SessionControlConflictError,
+  type SessionCommandActor,
   getSessionGoal,
   setSessionGoalStatusWithEvent,
   sessionWorkstreamHasActiveWork,
@@ -53,7 +59,6 @@ import {
   steerQueuedTurnInTransaction,
   workspaceControlRequestLockTimeoutMs,
   withEffectiveComposerDraftPolicy,
-  withWorkspaceRls,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectRls,
   withWorkspaceSubjectSessionActivityRls,
@@ -411,6 +416,19 @@ async function publishWorkspaceControlEvent(
     throw new Error(`Committed workspace control event disappeared: ${eventId}`);
   }
   await publishDurableWorkspaceControlEvent(deps.bus, workspaceId, event);
+}
+
+/** Live fanout of the session events a control mutation appended. */
+function sessionEventFanout(
+  deps: { db: Database; bus: EventBus },
+  workspaceId: string,
+  affectedSessionEvents: Array<{ sessionId: string; eventIds: string[] }>,
+) {
+  return affectedSessionEvents.map((affected) => ({
+    kind: "session_event_fanout" as const,
+    run: async () =>
+      await publishSessionEventIds(deps, workspaceId, affected.sessionId, affected.eventIds),
+  }));
 }
 
 export async function sendAgentSessionMessage(
@@ -988,11 +1006,7 @@ function scheduleHumanControlPostCommit(
   action: "pause" | "resume" | "cancel",
 ): void {
   scheduleSessionCommandPostCommit(deps, "human_control", [
-    ...result.affectedSessionEvents.map((affected) => ({
-      kind: "session_event_fanout" as const,
-      run: async () =>
-        await publishSessionEventIds(deps, workspaceId, affected.sessionId, affected.eventIds),
-    })),
+    ...sessionEventFanout(deps, workspaceId, result.affectedSessionEvents),
     ...(result.workspaceControlEventId
       ? [
           {
@@ -1034,23 +1048,35 @@ function scheduleHumanControlPostCommit(
 }
 
 /**
- * Archive a chat for everyone, or undo that within its window. Archiving marks
- * the chat and its sub-chats archived at once and schedules
- * {@link stopArchivedSessionWork} for when the undo window ends; the archiver
- * then stores them. Undo returns the chat exactly as it was, since nothing
- * else changes before the window ends. Both need session control.
+ * Archive a chat for everyone, or bring it back. Archiving marks the chat and
+ * its sub-chats archived at once and schedules {@link stopArchivedSessionWork}
+ * for when the undo window ends; the archiver then stores them. It refuses
+ * while a sub-chat is still in use unless the caller confirmed that sub-chat
+ * (`confirmActiveSubChats`). Unarchiving within the window returns the chat
+ * exactly as it was; after it, the chat is live again and anything already in
+ * long-term storage is restored in the background. Both need session control.
  */
 export async function archiveHumanSessionWorkstream(
   deps: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[0] & {
-    workflowClient: Pick<SessionWorkflowClient, "scheduleSessionArchive">;
+    workflowClient: Pick<
+      SessionWorkflowClient,
+      "scheduleSessionArchive" | "scheduleSessionArchiveRestore"
+    >;
   },
   context: HumanSessionCommandContext,
   input: {
     archived: boolean;
+    /** Sub-chats in use the caller saw and chose to archive too. */
+    confirmActiveSubChats?: readonly string[];
     /** Verified owning-user proof, for a Personal workspace (see requireSessionArchiveMemberAuthority). */
     personalWorkspaceOwnerException?: boolean;
   },
-): Promise<{ changed: boolean; undoUntil: string | null } | null> {
+): Promise<{
+  changed: boolean;
+  undoUntil: string | null;
+  /** Chats whose stored content is being restored. */
+  restoringSessionIds?: string[];
+} | null> {
   await authorizeHumanSessionCommand(deps, context, "session.control");
   await requireSessionArchiveMemberAuthority(deps.db, {
     workspaceId: context.workspaceId,
@@ -1063,10 +1089,36 @@ export async function archiveHumanSessionWorkstream(
     sessionId: context.sessionId,
   };
   if (!input.archived) {
-    const undone = await undoSessionArchive(deps.db, scope);
-    return undone === null ? null : { changed: undone, undoUntil: null };
+    const requestedAt = new Date();
+    const result = await unarchiveSession(deps.db, scope, requestedAt);
+    if (result === null) return null;
+    // Chats that are live again take new messages at once; stored ones do
+    // when their content is back (the restore workflow does the same). Also
+    // run when nothing was archived, so restoring again repairs a chat an
+    // interrupted earlier restore left stopped.
+    await reviveRestoredArchivedSessions(deps, {
+      ...scope,
+      actor: { type: "human", subjectId: context.subjectId },
+    });
+    if (result.restoringSessionIds.length > 0) {
+      // Durable: putting the content back must not depend on this process.
+      await deps.workflowClient.scheduleSessionArchiveRestore?.({
+        ...scope,
+        subjectId: context.subjectId,
+        requestedAt: requestedAt.toISOString(),
+      });
+    }
+    return {
+      changed: result.outcome !== "not_archived",
+      undoUntil: null,
+      restoringSessionIds: result.restoringSessionIds,
+    };
   }
-  const request = await requestSessionArchive(deps.db, { ...scope, subjectId: context.subjectId });
+  const request = await requestSessionArchive(deps.db, {
+    ...scope,
+    subjectId: context.subjectId,
+    ...(input.confirmActiveSubChats ? { confirmActiveSubChats: input.confirmActiveSubChats } : {}),
+  });
   if (!request) return null;
   if (!request.alreadyArchived) {
     // Durable: stopping work and storing must not depend on this process.
@@ -1156,13 +1208,78 @@ export async function stopArchivedSessionWork(
             actor: { type: "human", subjectId: input.subjectId },
             operationKey: `archive-stop:${input.sessionId}:${input.archivedAt}`,
             action: "cancel",
-            reason: "Archived",
+            // Clients read this cancellation as the archive, never as "cancelled".
+            reason: SESSION_ARCHIVE_STOP_REASON,
           }),
       },
     );
     scheduleHumanControlPostCommit(deps, input.workspaceId, result, "cancel");
   }
   return { pending: true };
+}
+
+/**
+ * Make a restored chat (and its restored sub-chats) take new messages again.
+ * Its Archive stopped any running work the way Cancel does, which leaves the
+ * tree cancelled and paused: put the chats it cancelled back to idle, then
+ * Resume the topmost chat it paused (as `actor`), which lifts the pause below
+ * it too. A turn the Archive cut off stays as it ended and reads as
+ * interrupted; goals it paused stay paused. Chats still archived or in
+ * storage, or cancelled for another reason, are left alone. Safe to repeat:
+ * a later call finishes what an earlier one could not.
+ */
+export async function reviveRestoredArchivedSessions(
+  deps: Parameters<typeof stopArchivedSessionWork>[0],
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    actor: Exclude<SessionCommandActor, { type: "agent_attempt" }>;
+  },
+): Promise<{ reopened: number; resumed: number; settling: number }> {
+  const scope = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+  };
+  const { reopened, settling } = await reopenArchiveStoppedSessions(deps.db, scope);
+  for (const session of reopened) {
+    await publishSessionEventIds(
+      deps,
+      input.workspaceId,
+      session.sessionId,
+      session.eventIds,
+    ).catch(() => undefined);
+  }
+  let resumed = 0;
+  for (const paused of await listArchivePausedSessions(deps.db, scope)) {
+    try {
+      const result = await runSessionCommandPersistenceTransaction(
+        deps,
+        { workspaceId: input.workspaceId },
+        {
+          stage: "session_commands.archive_restore_resume",
+          eventTypes: ["session.control.resumed"],
+          transaction: async (tx) =>
+            await mutateSessionControlInTransaction(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: paused.sessionId,
+              actor: input.actor,
+              operationKey: `archive-restore:${paused.sessionId}:${paused.pauseRevision}`,
+              action: "resume",
+              reason: null,
+            }),
+        },
+      );
+      scheduleHumanControlPostCommit(deps, input.workspaceId, result, "resume");
+      resumed += 1;
+    } catch (error) {
+      // A chat above it was cancelled for another reason: it stays as it is.
+      if (!(error instanceof SessionControlConflictError)) throw error;
+    }
+  }
+  return { reopened: reopened.length, resumed, settling };
 }
 
 /** Backward-compatible response path used by the REST control route. */
@@ -1183,9 +1300,9 @@ export async function controlHumanWorkspace(
   context: Omit<HumanSessionCommandContext, "sessionId">,
   input: WorkspaceInferenceControlRequest,
 ): Promise<WorkspaceInferenceControlResponse> {
-  const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
+  const result = await withWorkspaceSessionActivityRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
-      mutateWorkspaceControlInTransaction(tx as unknown as Database, {
+      mutateWorkspaceControlInTransaction(tx as unknown as typeof scoped, {
         accountId: context.accountId,
         workspaceId: context.workspaceId,
         actor: { type: "human", subjectId: context.subjectId },
@@ -1205,6 +1322,7 @@ export async function controlHumanWorkspace(
     wakeCount: result.wakeCount,
   };
   scheduleSessionCommandPostCommit(deps, "human_workspace_control", [
+    ...sessionEventFanout(deps, context.workspaceId, result.affectedSessionEvents),
     ...(result.workspaceControlEventId
       ? [
           {
@@ -1235,37 +1353,42 @@ export async function getHumanComposerDraft(
   context: HumanSessionCommandContext,
 ): Promise<ComposerDraft> {
   await authorizeHumanSessionCommand(deps, context, "session.composer.read");
-  const row = await withWorkspaceSubjectRls(
+  return await withWorkspaceSubjectRls(
     deps.db,
     context.workspaceId,
     context.subjectId,
-    async (scoped) =>
-      withEffectiveComposerDraftPolicy(
+    async (scoped) => {
+      const row = await withEffectiveComposerDraftPolicy(
         scoped,
         await getComposerDraftInTransaction(scoped, {
           workspaceId: context.workspaceId,
           sessionId: context.sessionId,
           subjectId: context.subjectId,
         }),
-      ),
+      );
+      const mapped = composerDraft(row);
+      if (mapped) return mapped;
+      // No stored draft: only the effective composer policy is needed, not
+      // the full session, MCP metadata, cursor and control-tree projection.
+      const [policy] = await effectiveSessionPolicyQuery(scoped, context.workspaceId, [
+        context.sessionId,
+      ]);
+      if (!policy) throw new Error(`Session not found: ${context.sessionId}`);
+      return {
+        revision: 0,
+        text: "",
+        annotations: [],
+        resources: [],
+        model: policy.model,
+        reasoningEffort: policy.reasoningEffort as ComposerDraft["reasoningEffort"],
+        latencyMode: policy.latencyMode as ComposerDraft["latencyMode"],
+        policyFollowsSession: true,
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: null,
+      };
+    },
   );
-  const mapped = composerDraft(row);
-  if (mapped) return mapped;
-  const session = await getSession(deps.db, context.workspaceId, context.sessionId);
-  if (!session) throw new Error(`Session not found: ${context.sessionId}`);
-  return {
-    revision: 0,
-    text: "",
-    annotations: [],
-    resources: [],
-    model: session.model,
-    reasoningEffort: session.reasoningEffort,
-    latencyMode: session.latencyMode,
-    policyFollowsSession: true,
-    sourceTurnId: null,
-    sourceTurnVersion: null,
-    updatedAt: null,
-  };
 }
 
 export async function saveHumanComposerDraft(
@@ -1306,15 +1429,16 @@ export async function controlHumanWorkspaceTimer(
   context: Parameters<typeof controlHumanWorkspace>[1],
   input: import("@opengeni/contracts").WorkspacePauseTimerRequest,
 ): Promise<void> {
-  const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
+  const result = await withWorkspaceSessionActivityRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
-      setWorkspacePauseTimerInTransaction(tx as unknown as Database, {
+      setWorkspacePauseTimerInTransaction(tx as unknown as typeof scoped, {
         ...input,
         ...context,
       }),
     ),
   );
   scheduleSessionCommandPostCommit(deps, "human_workspace_timer", [
+    ...sessionEventFanout(deps, context.workspaceId, result.affectedSessionEvents),
     ...(result.workspaceControlEventId
       ? [
           {

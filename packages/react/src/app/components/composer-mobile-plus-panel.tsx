@@ -105,7 +105,7 @@ export type ComposerPlusProps = {
       }
     | undefined;
   /**
-   * An existing chat: "Chat settings" opens the chat's Agent tab, the one
+   * An existing chat: "Chat settings" opens the chat's Settings tab, the one
    * place for its identity, capabilities and Agent learning.
    */
   chatSettings?:
@@ -184,7 +184,7 @@ export function ComposerMobilePlusPanel(
     return () => cancelAnimationFrame(frame);
   }, [panel]);
   // Chat settings opens without a load: fetch the editor (and, for an existing
-  // chat, its settings for the Agent tab) while the menu is open. A composer
+  // chat, its settings for the Settings tab) while the menu is open. A composer
   // rendered outside the app (a preview harness) has no client.
   const client = useOptionalAppContext()?.client ?? null;
   const chatSettings = props.chatSettings;
@@ -374,7 +374,7 @@ export function ComposerMobilePlusPanel(
             </DropdownMenuItem>
           ) : null}
           {props.chatSettings ? (
-            // One place per chat: its Agent tab, not a second copy here.
+            // One place per chat: its Settings tab, not a second copy here.
             <DropdownMenuItem
               data-composer-panel="settings"
               className="cursor-pointer"
@@ -385,7 +385,7 @@ export function ComposerMobilePlusPanel(
             >
               <SettingsIcon className="size-4" />
               Chat settings
-              <DropdownMenuMeta>Agent tab</DropdownMenuMeta>
+              <DropdownMenuMeta>Settings tab</DropdownMenuMeta>
             </DropdownMenuItem>
           ) : props.draftChatSettings ? (
             <DropdownMenuItem

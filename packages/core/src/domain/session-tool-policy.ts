@@ -9,6 +9,7 @@ import {
   type Settings,
 } from "@opengeni/config";
 import {
+  HARNESS_CONTROL_FIRST_PARTY_TOOLS,
   AGENT_SKILL_MANAGE_TOOL_NAMES,
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   bundledSkillSelectionForAgentConfig,
@@ -40,6 +41,7 @@ import {
   isWorkspaceEuOnly,
   hasWorkspaceManagedSkill,
   requireWorkspace,
+  sessionsWithGoal,
   sessionsWithToolRouterHistory,
   type Database,
 } from "@opengeni/db";
@@ -288,14 +290,30 @@ export async function workspaceSessionToolPolicyDefaultServerIds(
   settings: Settings,
   subjectId?: string,
 ): Promise<string[]> {
+  return (await workspaceSessionToolPolicyDefaultServers(db, workspaceId, settings, subjectId)).map(
+    (server) => server.id,
+  );
+}
+
+/**
+ * The same defaults with each connector's display name, so a turn can name a
+ * default connector that is missing from its own registry.
+ */
+export async function workspaceSessionToolPolicyDefaultServers(
+  db: Database,
+  workspaceId: string,
+  settings: Settings,
+  subjectId?: string,
+): Promise<{ id: string; name: string | undefined }[]> {
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(db, workspaceId, settings, {
     ...(subjectId ? { subjectId } : {}),
   });
   const workspace = await requireWorkspace(db, workspaceId);
+  const names = new Map(runtimeSettings.mcpServers.map((server) => [server.id, server.name]));
   return workspaceSessionToolPolicyDefaultServerIdsFor(
     runtimeSettings.mcpServers,
     workspace.settings,
-  );
+  ).map((id) => ({ id, name: names.get(id) ?? undefined }));
 }
 
 /**
@@ -332,6 +350,12 @@ export type SessionEffectiveToolsContext = {
   mediaAttachments?: ReadonlyMap<string, AgentMediaAttachment>;
   routerInHistory?: boolean;
   routerHistorySessionIds?: ReadonlySet<string>;
+  /**
+   * The sessions in this response page that have a goal, in any state. When
+   * present, a configured session missing from it projects no `goal_resume`,
+   * as the worker omits it for a turn whose frozen goal is none.
+   */
+  goalSessionIds?: ReadonlySet<string>;
   /** Resolved once per distinct model in this response page, using its catalog settings. */
   modelProviders?: ReadonlyMap<string, ReturnType<typeof resolveModelProviderForTurn>>;
 };
@@ -356,7 +380,7 @@ export async function workspaceSessionEffectiveToolsContext(
     objectStorageAvailable: Boolean(deps.objectStorage),
   };
   if (configured.length === 0) return baseline;
-  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory, euOnly] =
+  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory, euOnly, goalSessions] =
     await Promise.all([
       workspaceRead ?? requireWorkspace(deps.db, workspaceId),
       resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
@@ -393,6 +417,7 @@ export async function workspaceSessionEffectiveToolsContext(
       }),
       // EU-only: the projection lists only tools the worker would attach.
       isWorkspaceEuOnly(deps.db, { accountId: configured[0]!.accountId, workspaceId }),
+      sessionsWithGoal(deps.db, workspaceId, [...new Set(configured.map((session) => session.id))]),
     ]);
   return {
     ...baseline,
@@ -406,6 +431,7 @@ export async function workspaceSessionEffectiveToolsContext(
       ),
     ),
     routerHistorySessionIds: routerHistory,
+    goalSessionIds: goalSessions,
     modelProviders: new Map(
       [...new Set(configured.map((session) => session.model))].map((modelId) => [
         modelId,
@@ -446,6 +472,8 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
     return true;
   });
 }
+
+const HARNESS_CONTROL_TOOLS: ReadonlySet<string> = new Set(HARNESS_CONTROL_FIRST_PARTY_TOOLS);
 
 /** The server can prove attachment policy, not successful future provider calls. */
 export function sessionEffectiveToolProjectionInput(
@@ -541,7 +569,12 @@ export function sessionEffectiveToolProjectionInput(
     : [];
   const firstPartyMcpTools =
     context && toolRefs.some((ref) => ref.id === "opengeni")
-      ? resolveAgentToolFamilies(session.agent, { sandboxAttached: sandboxAvailable })
+      ? resolveAgentToolFamilies(session.agent, {
+          sandboxAttached: sandboxAvailable,
+          ...(context.goalSessionIds
+            ? { sessionGoal: context.goalSessionIds.has(session.id) }
+            : {}),
+        })
           .firstPartyTools(selectedFirstPartyMcpTools)
           .filter((name) => name !== "set_session_title" || !needsTitle)
       : [];
@@ -619,6 +652,8 @@ export function sessionEffectiveToolProjectionInput(
     // Interaction entry tools stay visible even with progressive disclosure;
     // the remaining authorized family tools are disclosed after opening.
     ...firstPartyMcpTools.filter((name) => name === "browser_open" || name === "computer_open"),
+    // The harness control tools are in the first request on every path.
+    ...firstPartyMcpTools.filter((name) => HARNESS_CONTROL_TOOLS.has(name)),
     ...(toolRefs.some((ref) => ref.id === "opengeni" && ref.eager === true) ||
     !progressiveDisclosure
       ? firstPartyMcpTools.filter((name) => !interactionNames.has(name) || !progressiveDisclosure)
@@ -645,16 +680,48 @@ export function sessionEffectiveToolProjectionInput(
     ...(context ? { sandboxAttached: sandboxAvailable } : {}),
   };
   const families = resolveAgentToolFamilies(session.agent, environment);
-  environment.hasDeferredTools =
+  // Same rule as the worker's `turnToolRouterExpected`: an eager server the
+  // runtime prepares best effort may list its tools after the first request.
+  const registry = [...session.mcpServers, ...(context?.settings.mcpServers ?? [])];
+  const eagerPreparesLate = (ref: ToolRef): boolean => {
+    const eager = ref.eager === true || (Array.isArray(ref.eager) && ref.eager.length > 0);
+    if (!eager || !families.allowsMcpServer(ref.id)) return false;
+    if (ref.optional === true || ref.id === "codex_apps") return true;
+    const server = registry.find((candidate) => candidate.id === ref.id);
+    return Boolean(server?.connectionRef);
+  };
+  // The worker predicts the router from the media capability, before any media
+  // provider is attached, so the projection does too.
+  const mediaCapability = resolveAgentToolFamilies(session.agent, {
+    ...environment,
+    media: undefined,
+  }).media;
+  const deferredBesidesTitle =
     (nativeComputerTools && progressiveDisclosure) ||
+    mediaCapability ||
+    toolRefs.some(eagerPreparesLate) ||
     toolRefs.some(
       (ref) => ref.id !== "opengeni" && ref.eager !== true && families.allowsMcpServer(ref.id),
     ) ||
     firstPartyMcpTools.some(
-      (name) => families.allowsFirstPartyTool(name) && !upfrontToolNames.has(name),
+      (name) =>
+        name !== "set_session_title" &&
+        families.allowsFirstPartyTool(name) &&
+        !upfrontToolNames.has(name),
     ) ||
     runtimeToolNames.some(
       (name) => families.allowsFunctionTool(name) && !upfrontToolNames.has(name),
+    );
+  // The worker leaves the title tool out when it alone would bring the router
+  // back; Opengeni titles the session itself.
+  if (progressiveDisclosure && !retainedRouter && !deferredBesidesTitle) {
+    const index = firstPartyMcpTools.indexOf("set_session_title");
+    if (index >= 0) firstPartyMcpTools.splice(index, 1);
+  }
+  environment.hasDeferredTools =
+    deferredBesidesTitle ||
+    firstPartyMcpTools.some(
+      (name) => families.allowsFirstPartyTool(name) && !upfrontToolNames.has(name),
     );
   const provider = model?.provider;
   const native =

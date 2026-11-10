@@ -332,7 +332,7 @@ test("All isolates archives in the last collapsed folder and uses archive filing
   expect(archiveCall?.options.sortBy).toBeUndefined();
 }, 30_000);
 
-test("Archived filter opens only the archive folder; an archived chat can't be restored", async () => {
+test("Archived filter opens only the archive folder; an archived chat's menu offers no Restore (that is in the chat)", async () => {
   await openActive();
   await selectView("Status", "Archived");
   await waitForRows("Archived", 4);
@@ -875,6 +875,43 @@ test("a chat's unread reply shows over its working sub-sessions, which still say
     }
   }
 }, 60_000);
+
+test("an idle parent of paused workers is not shown paused; its workers are", async () => {
+  const row = (number: number) =>
+    page.locator(
+      `a[data-session-row="00000000-0000-4000-9000-${String(number).padStart(12, "0")}"]`,
+    );
+  const paused = (number: number) => row(number).locator("[data-og-rail-paused]");
+  await page.goto(`${url}?scenario=paused&theme=light`);
+  await row(5007).waitFor();
+  await page.mouse.move(1150, 10);
+
+  // Pinned, finished and never paused itself; all three of its workers are paused.
+  expect(await paused(5007).count()).toBe(0);
+  expect(await row(5007).locator("[data-session-row-metadata] [title]").count()).toBe(0);
+  expect(await row(5007).getAttribute("aria-label")).not.toContain("paused");
+  // A paused manager holding its workers' parked work, and a chat's own parked turn, still show it.
+  expect(await paused(5003).count()).toBe(1);
+  expect(await paused(5002).count()).toBe(1);
+  await capture("paused-parent-collapsed");
+
+  // The workers' pause is still one hover away, and on each worker's own row.
+  await row(5007).hover();
+  const card = page.locator("[data-session-row-hover-details]");
+  await card.waitFor();
+  expect(await card.innerText()).toContain("3 sub-agents · 3 paused");
+  await page.mouse.move(1150, 10);
+  await card.waitFor({ state: "detached" });
+  await row(5007)
+    .locator("xpath=..")
+    .getByRole("button", { name: "Expand spawned sessions" })
+    .click();
+  await row(5008).waitFor();
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  for (const worker of [5008, 5009, 5010]) expect(await paused(worker).count()).toBe(1);
+  expect(await paused(5007).count()).toBe(0);
+  await capture("paused-parent-expanded");
+}, 30_000);
 
 test("the row hover explains status, model and activity from the compact list row", async () => {
   await page.goto(`${url}?scenario=hover&theme=light`);

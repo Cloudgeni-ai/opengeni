@@ -62,6 +62,15 @@ import {
   type SecretFilesWriter,
 } from "./secret-delivery";
 
+/**
+ * The shell a wrapper re-executes for a new session. The Opengeni agent sets
+ * `OPENGENI_SYSTEM_SHELL` to the dash or bash it falls back to while the
+ * machine's `/bin/sh` cannot be started, so the command still runs there.
+ */
+const SYSTEM_SHELL_EXPANSION = '"${OPENGENI_SYSTEM_SHELL:-/bin/sh}"';
+/** The macOS fallback for a missing setsid executable, with the same shell. */
+const PYTHON_SESSION_EXEC =
+  'import os,sys; os.setsid(); s=os.environ.get("OPENGENI_SYSTEM_SHELL") or "/bin/sh"; os.execv(s, [s, "-c", sys.argv[1]])';
 const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
 const TURN_MAX_MODEL_WAIT_MS = 30_000;
@@ -711,13 +720,13 @@ export function cancellableShellCommand(command: string, markerPath: string): st
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
     '  if [ -n "$__opengeni_setsid" ]; then',
-    `    exec "$__opengeni_setsid" /bin/sh -c "$${capture.variable}"`,
+    `    exec "$__opengeni_setsid" ${SYSTEM_SHELL_EXPANSION} -c "$${capture.variable}"`,
     "  fi",
     // macOS has setsid(2), but no setsid executable. The parent is proven
     // not to be a group leader, so the same process can safely start a session.
     '  __opengeni_python="$(command -v python3 2>/dev/null)"',
     '  [ -n "$__opengeni_python" ] || exit 125',
-    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} "$${capture.variable}"`,
+    `  exec "$__opengeni_python" -c ${singleQuote(PYTHON_SESSION_EXEC)} "$${capture.variable}"`,
     "fi",
     `eval "$${capture.variable}"`,
   ].join("\n");
@@ -842,11 +851,11 @@ export function cancellableSynchronousShellCommand(command: string, markerPath: 
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
     '  if [ -n "$__opengeni_setsid" ]; then',
-    `    exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    `    exec "$__opengeni_setsid" ${SYSTEM_SHELL_EXPANSION} -c ${singleQuote(groupLeaderCommand)}`,
     "  fi",
     '  __opengeni_python="$(command -v python3 2>/dev/null)"',
     '  [ -n "$__opengeni_python" ] || exit 125',
-    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} ${singleQuote(groupLeaderCommand)}`,
+    `  exec "$__opengeni_python" -c ${singleQuote(PYTHON_SESSION_EXEC)} ${singleQuote(groupLeaderCommand)}`,
     "fi",
     groupLeaderCommand,
   ].join("\n");
@@ -1234,15 +1243,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   async clearSecretFiles(): Promise<void> {
-    let failure: unknown = null;
-    for (const session of this.secretFileSessions) {
-      try {
-        await session.clearSecretFilesForAttempt!();
-      } catch (error) {
-        failure ??= error;
-      }
-    }
-    if (failure !== null) throw failure;
+    const sessions = [...this.secretFileSessions];
+    this.secretFileSessions.clear();
+    // One unavailable backend must not prevent cleanup on the others. Observe
+    // every rejection even when another provider never answers.
+    await Promise.all(sessions.map(async (session) => await session.clearSecretFilesForAttempt!()));
   }
 
   runSandboxCommand(
@@ -1329,7 +1334,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       };
       const invokeExec: FunctionToolInvoke = async (_runContext, input) =>
         nativeCommandBanner(await invokeExecNative(input));
-      const invokeWrite: FunctionToolInvoke | null =
+      // `signal` stops only this runner's own eager reads when the turn is
+      // cancelled. The registered shell's control reads (the writer drain's
+      // exit proof) must never carry it: after a cancellation it is always
+      // aborted, and a command that exited on its own, whose wrapper already
+      // removed its identity marker, could then never be proven settled.
+      const lifecycleWrite = (signal?: AbortSignal): FunctionToolInvoke | null =>
         session.writeStdin || session.writeStdinForProcessControl
           ? async (_runContext, input) => {
               const parsed = parsedObject(input);
@@ -1338,7 +1348,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               }
               const directArgs = {
                 sessionId: parsed.session_id,
-                signal: this.observationCancellation.signal,
+                ...(signal ? { signal } : {}),
                 ...(typeof parsed.chars === "string" ? { chars: parsed.chars } : {}),
                 ...(typeof parsed.yield_time_ms === "number"
                   ? { yieldTimeMs: parsed.yield_time_ms }
@@ -1361,6 +1371,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               return await session.writeStdin!(directArgs);
             }
           : null;
+      const invokeWrite = lifecycleWrite(this.observationCancellation.signal);
+      const controlWrite = lifecycleWrite();
       const correlationId = `turn_lifecycle_${crypto.randomUUID()}`;
       const useRemoteOpCancellation = await usesRemoteOperationCancellation(session);
       if (this.cancelled) throw cancellationError(this.reason);
@@ -1445,7 +1457,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             interactive,
             runContext: lifecycleRunContext,
             execInvoke: invokeExec,
-            writeInvoke: invokeWrite,
+            writeInvoke: controlWrite,
             processSession,
             typedHandleLoss: hasTypedExecHandleLoss(session, retainedProcess.providerSessionId),
             identity: null,
@@ -1581,7 +1593,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         interactive,
         runContext: lifecycleRunContext,
         execInvoke: invokeExec,
-        writeInvoke: invokeWrite,
+        writeInvoke: controlWrite,
         processSession: retainedProcessSession(session, sessionId),
         typedHandleLoss: hasTypedExecHandleLoss(session, sessionId),
         identity: null,
@@ -2854,6 +2866,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     });
     let cancellation: Promise<void> | null = null;
     let cancellationRequest: Promise<void> | null = null;
+    let abandonmentRequest: Promise<void> | null = null;
     let observation: Promise<RemoteOperationObservation | null> | null = null;
     let ownershipTransferPending = false;
     let transport: RemoteOperationControl | null =
@@ -2934,9 +2947,23 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                     cancellationRequest = null;
                   });
               }
+              if (!abandonmentRequest && exactTransport.abandonExecCommand) {
+                abandonmentRequest = exactTransport
+                  .abandonExecCommand(opId)
+                  .then((committed) => {
+                    if (committed) entry.releaseCancellationAuthority(opId);
+                  })
+                  .catch(() => undefined)
+                  .finally(() => {
+                    abandonmentRequest = null;
+                  });
+              }
               // Reconcile only the original operation. readExisting is
               // observation-only and never OpStarts or final-ACKs its output.
-              await entry.observe();
+              // A stuck transport read cannot prevent independent durable
+              // custody from committing. observe() already coalesces reads;
+              // keep the registration until exit proof or committed handoff.
+              void entry.observe().catch(() => undefined);
             }
             await Promise.race([entry.settledPromise, delay(SHELL_POLL_MS)]);
           }

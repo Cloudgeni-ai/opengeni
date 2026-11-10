@@ -14,7 +14,7 @@ mod reach;
 mod requests;
 mod templates;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -28,7 +28,7 @@ use compute_storage::store::ChunkStore;
 use crate::hosts::{Answered, Hosts};
 use crate::link::Links;
 use crate::store::{SandboxRow, Spec, Store, StoreError, Write, replace};
-use crate::view::{Target, Unplaced, View, shape_key};
+use crate::view::{Refused, Target, Unplaced, View, shape_key};
 
 pub use holds::Depth;
 pub use moves::{Drained, Resize};
@@ -241,6 +241,13 @@ pub struct Service<S> {
     hosts: Hosts,
     archive: Option<ChunkStore>,
     settings: Settings,
+    /// Whose turn it is to place each sandbox nobody owns, on this
+    /// replica ([`Service::turn`]).
+    turns: std::sync::Mutex<HashMap<Id, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+    /// The last adopt of each sandbox this replica saw a host refuse as
+    /// full: that host holds nothing of it under that owner epoch, for
+    /// good ([`Service::held_nothing`]).
+    refused_adopts: std::sync::Mutex<HashMap<Id, (HostId, OwnerEpoch)>>,
 }
 
 /// The wall-clock time in milliseconds since the Unix epoch.
@@ -289,6 +296,8 @@ impl<S: Store> Service<S> {
             hosts,
             archive,
             settings,
+            turns: std::sync::Mutex::new(HashMap::new()),
+            refused_adopts: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -418,6 +427,18 @@ impl<S: Store> Service<S> {
                     row.sends.send(change.set.epoch, stamp);
                 }
                 Next::Clear(change) => row.ownership = change.set,
+                // It exists nowhere: its row goes, unless written meanwhile.
+                Next::Forget => {
+                    if self.store.delete(id, row.version).await? {
+                        tracing::info!(
+                            sandbox = %id,
+                            host = asked.host.0,
+                            "forgot a sandbox its host never held and nothing archived"
+                        );
+                        return Ok((next, None));
+                    }
+                    continue;
+                }
                 Next::Nothing | Next::PlaceElsewhere => {}
             }
             if (row.ownership, row.sends) == before {
@@ -425,10 +446,14 @@ impl<S: Store> Service<S> {
             }
             match replace(&*self.store, &mut row).await? {
                 Write::Done => return Ok((next, Some(row))),
-                // Written meanwhile, or about to be given to a host given
-                // up on meanwhile: the rules run again on the row as it is.
-                // (Only an insert finds its template gone.)
-                Write::Conflict | Write::OwnerLost | Write::TemplateGone => {}
+                // Its owner, which answered, was given up on since: the
+                // sandbox waits for it, and the answer changes nothing.
+                Write::OwnerLost => {
+                    return Ok((Next::Nothing, self.store.sandbox(id).await?));
+                }
+                // Written meanwhile: the rules run again on the row as it
+                // is. (Only an insert finds its template gone.)
+                Write::Conflict | Write::TemplateGone => {}
             }
         }
     }
@@ -548,6 +573,11 @@ impl<S: Store> Service<S> {
             match next {
                 _ if answered.outcome() == Outcome::Done => return Ok(row),
                 Next::PlaceElsewhere => {
+                    // Not asked again for a create like it until what it
+                    // reports could have changed.
+                    if answered.code() == Some(ErrorCode::HostFull) {
+                        self.view.refused(target.host, Refused::Place(demand));
+                    }
                     exclude.insert(target.host);
                     refused = Some(answered);
                 }
@@ -604,6 +634,7 @@ impl<S: Store> Service<S> {
             sends: compute_fleet::Sends::default(),
             class: None,
             created_ms: now_ms(),
+            lost: None,
             version: 0,
         };
         Ok((row, demand))
@@ -673,8 +704,19 @@ impl<S: Store> Service<S> {
             if row.team != team {
                 return Err(Failure::NotFound);
             }
-            let Some(host) = row.ownership.owner else {
-                let change = row.ownership.clear();
+            // A host given up on keeps what it owned, waiting for it to
+            // come back; deleting the sandbox need not wait. Should it come
+            // back, it finds the sandbox gone and drops its copy.
+            let owner = match row.ownership.owner {
+                Some(host) if self.view.lost(host) && !self.renews(host).await? => None,
+                owner => owner,
+            };
+            let Some(host) = owner else {
+                let change = if row.ownership.owner.is_some() {
+                    row.ownership.lose()
+                } else {
+                    row.ownership.clear()
+                };
                 row.ownership = change.set;
                 if !replace(&*self.store, &mut row).await?.done() {
                     continue;
@@ -703,6 +745,33 @@ impl<S: Store> Service<S> {
                 return Ok(());
             }
         }
+    }
+
+    /// Why a sandbox owned by `host`, which the view has no target for,
+    /// cannot be reached now, in words for whoever waits on it.
+    pub(super) fn unreachable(&self, host: HostId) -> String {
+        let Some(name) = self.view.name(host).filter(|_| self.view.lost(host)) else {
+            return "its host is not reachable".into();
+        };
+        format!(
+            "its host {name} stopped answering, and the sandbox waits for that host to come \
+             back rather than going back to its older stored copy and losing what was written \
+             since; if the host is gone for good, an operator can declare it gone, and the \
+             sandbox then goes on from that stored copy"
+        )
+    }
+
+    /// Whether the store counts `host` as not given up on, as it is now:
+    /// the view may lag a registration. A registration after this read
+    /// raises the version of every sandbox it keeps, so a write read
+    /// before it is refused.
+    async fn renews(&self, host: HostId) -> Result<bool, Failure> {
+        Ok(self
+            .store
+            .renewals()
+            .await?
+            .iter()
+            .any(|counted| counted.host == host))
     }
 
     /// Has `host`, the owner, remove `row`'s sandbox, then deletes the row.

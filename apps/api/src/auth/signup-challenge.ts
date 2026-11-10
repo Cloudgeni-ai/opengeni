@@ -112,3 +112,36 @@ export async function verifySignupChallenge(
     );
   }
 }
+
+/**
+ * A Google or GitHub start may turn out to be a sign-in, which needs no
+ * challenge, so a token that can't be verified must not refuse it. The start
+ * then carries no proof, and the user-create hook still refuses a new account.
+ * `onUnverified` receives the refusal's code (`SIGNUP_CHALLENGE_FAILED`,
+ * `SIGNUP_CHALLENGE_UNAVAILABLE` or `SIGNUP_CHALLENGE_REQUIRED`) so a broken
+ * configuration or provider outage stays visible to operators.
+ */
+export async function verifySocialSignupChallenge(
+  settings: Settings,
+  token: unknown,
+  options: { fetcher?: typeof fetch; onUnverified?: (code: string) => void } = {},
+): Promise<boolean> {
+  if (!settings.signupChallengeEnabled || token === undefined || token === null || token === "") {
+    return false;
+  }
+  try {
+    await verifySignupChallenge(settings, token, options.fetcher);
+    return true;
+  } catch (error) {
+    const code =
+      error instanceof ApiHttpError && typeof error.details?.managedAuthCode === "string"
+        ? error.details.managedAuthCode
+        : "SIGNUP_CHALLENGE_UNAVAILABLE";
+    try {
+      options.onUnverified?.(code);
+    } catch {
+      // Reporting never changes the start.
+    }
+    return false;
+  }
+}

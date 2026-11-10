@@ -15,6 +15,7 @@ import {
   type BillingBalance,
   type ConnectionMetadata,
   type OrganizationModelDefaults,
+  type BillingOrigin,
 } from "@opengeni/contracts";
 import {
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
@@ -29,6 +30,8 @@ import {
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   getBillingBalance,
   getOrganizationModelDefaults,
+  chargeBillingOrigin,
+  readScheduledTaskBillingOrigin,
   spendableCreditMicros,
   type ConnectionModelRestrictions,
   type Database,
@@ -43,10 +46,12 @@ import {
 
 import { loadWorkspaceCodexCatalogReadiness } from "./codex-model-availability";
 import {
+  connectedSubscriptionsRefusedForOrigin,
   ownModelFunding,
   ownSubscriptionPlanAllows,
   ownSubscriptionPlanRequired,
 } from "./billing/byok-platform-fee";
+import { fundedBillingOrigin } from "./billing-origin";
 
 const REASONING_EFFORT_ORDER: readonly ReasoningEffort[] = [
   "none",
@@ -289,6 +294,8 @@ export async function resolveDefaultSessionModelForSelections(
     organizationDefaults?: Pick<OrganizationModelDefaults, "sessionDefaults"> | null;
     /** Request-local ledger snapshot, shared with the catalog's funding projection. */
     creditBalance?: BillingBalance;
+    /** API work cannot choose a connected subscription, including saved defaults. */
+    billingOrigin?: BillingOrigin | null;
   },
 ): Promise<DefaultModelSelection> {
   const workspaceDefaults = resolveWorkspaceSessionDefaults(input.workspaceSettings);
@@ -332,10 +339,16 @@ async function withoutUnusableOwnSubscriptions(
     settings: Settings;
     accountId: string;
     selections: readonly WorkspaceModelSelection[];
+    billingOrigin?: BillingOrigin | null;
   },
 ): Promise<readonly WorkspaceModelSelection[]> {
   const isOwnSubscription = (selection: WorkspaceModelSelection) =>
     ownModelFunding(selection.model) === "subscription";
+  if (
+    connectedSubscriptionsRefusedForOrigin(input.settings, chargeBillingOrigin(input.billingOrigin))
+  ) {
+    return input.selections.filter((selection) => !isOwnSubscription(selection));
+  }
   if (
     !ownSubscriptionPlanRequired(input.settings, input.accountId) ||
     !input.selections.some(
@@ -354,6 +367,7 @@ async function withoutUnusableOwnSubscriptions(
 export type WorkspaceModelSelectionContext = {
   accountId: string;
   workspaceId: string;
+  billingOrigin?: BillingOrigin | null;
   /**
    * The subject whose connected-subscription authority applies: the
    * authenticated caller for direct creates, or a scheduled task's immutable
@@ -479,7 +493,10 @@ export async function loadWorkspaceModelSelectionInput(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
-  options: { observeAvailability?: boolean } = {},
+  options: {
+    observeAvailability?: boolean;
+    catalogInputs?: Awaited<ReturnType<typeof loadWorkspaceModelCatalogInputs>>;
+  } = {},
 ): Promise<WorkspaceModelSelectionInput> {
   const { accountId, workspaceId } = context;
   // The exact provider set the catalog route reads. A disabled Claude
@@ -502,9 +519,10 @@ export async function loadWorkspaceModelSelectionInput(
       providerKinds,
       organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
     });
-  const sharedCatalogRead =
-    typeof db.transaction === "function" &&
-    typeof (db as Database & { rollback?: unknown }).rollback !== "function"
+  const sharedCatalogRead = options.catalogInputs
+    ? Promise.resolve(options.catalogInputs)
+    : typeof db.transaction === "function" &&
+        typeof (db as Database & { rollback?: unknown }).rollback !== "function"
       ? readCatalog()
       : undefined;
   // The catalog batch still owns this failure. An unavailable shared read
@@ -617,11 +635,15 @@ export async function resolveCallerWorkspaceModelSelections(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
-  options: { observeAvailability?: boolean } = {},
+  options: {
+    observeAvailability?: boolean;
+    catalogInputs?: Awaited<ReturnType<typeof loadWorkspaceModelCatalogInputs>>;
+  } = {},
 ): Promise<WorkspaceModelSelection[]> {
   return resolveWorkspaceModelSelection(
     await loadWorkspaceModelSelectionInput(db, settings, context, {
       observeAvailability: options.observeAvailability === true,
+      ...(options.catalogInputs ? { catalogInputs: options.catalogInputs } : {}),
     }),
   );
 }
@@ -677,6 +699,7 @@ export async function resolveDefaultSessionModel(
     accountId: context.accountId,
     workspaceSettings,
     selections: resolveWorkspaceModelSelection(selectionInput),
+    ...(context.billingOrigin ? { billingOrigin: context.billingOrigin } : {}),
   });
 }
 
@@ -698,6 +721,14 @@ export async function resolveScheduledTaskDefaultModel(
     accountId: task.accountId,
     workspaceId: task.workspaceId,
     subjectId: task.ownerSubjectId ?? task.createdBy.subjectId,
+    billingOrigin: fundedBillingOrigin(
+      task.accountId,
+      await readScheduledTaskBillingOrigin(db, {
+        accountId: task.accountId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+      }),
+    ),
     claudeAuthoritySnapshot: await getScheduledTaskClaudeProviderAccountAuthoritySnapshot(
       db,
       task.workspaceId,

@@ -3015,7 +3015,7 @@ describe("worker activities integration", () => {
     }
   });
 
-  test("caps model usage debits at the prepaid balance", async () => {
+  test("charges model usage in full after use, below the prepaid balance", async () => {
     const grant = await testGrant(dbClient.db);
     await applyCreditLedgerEntry(dbClient.db, {
       accountId: grant.accountId,
@@ -3072,7 +3072,8 @@ describe("worker activities integration", () => {
     });
 
     // An admitted final answer stays complete even when it spends the last
-    // credit. A later request must pass a fresh credit check.
+    // credit. It is charged in full, so the balance goes below zero, and a
+    // later request must pass a fresh credit check.
     expect(result.status).toBe("idle");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
@@ -3080,8 +3081,6 @@ describe("worker activities integration", () => {
     expect(completed?.payload).toMatchObject({ output: "expensive response" });
     expect(completed?.payload).not.toHaveProperty("segmentLimit");
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
-    const balance = await getBillingBalance(dbClient.db, grant.accountId);
-    expect(balance.balanceMicros).toBe(0);
     const usage = await listUsageEvents(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -3092,6 +3091,8 @@ describe("worker activities integration", () => {
         event.eventType === "model.cost" && event.sourceResourceId?.endsWith("expensive-response"),
     );
     expect(cost?.quantity).toBeGreaterThan(1);
+    const balance = await getBillingBalance(dbClient.db, grant.accountId);
+    expect(balance.balanceMicros).toBe(1 - Number(cost?.quantity));
   });
 
   test("exhausted promotional credits stop before a second model request", async () => {
@@ -3168,11 +3169,6 @@ describe("worker activities integration", () => {
       expect(events.find((event) => event.type === "turn.completed")?.payload).toMatchObject({
         segmentLimit: "budget_exhausted",
       });
-      expect(await getBillingBalance(dbClient.db, grant.accountId)).toMatchObject({
-        balanceMicros: 0,
-        generalBalanceMicros: 0,
-        promotionalCredits: [],
-      });
       const usage = await listUsageEvents(dbClient.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -3182,6 +3178,13 @@ describe("worker activities integration", () => {
       expect(costs).toHaveLength(1);
       expect(costs[0]?.quantity).toBeGreaterThan(1);
       expect(costs[0]?.sourceResourceId).toEndWith(":promotional-tool-response");
+      // The promotional micro pays first; the rest of the full cost takes
+      // general credit below zero.
+      expect(await getBillingBalance(dbClient.db, grant.accountId)).toMatchObject({
+        balanceMicros: 1 - Number(costs[0]?.quantity),
+        generalBalanceMicros: 1 - Number(costs[0]?.quantity),
+        promotionalCredits: [],
+      });
     } finally {
       mcp.close();
     }
@@ -3994,9 +3997,9 @@ describe("worker activities integration", () => {
 
   test("scheduled dispatch and its retry skip without a chat while the workspace is paused", async () => {
     const grant = await testGrant(dbClient.db);
-    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+    await withWorkspaceSessionActivityRls(dbClient.db, grant.workspaceId, (db) =>
       db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as typeof db, {
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           actor: { type: "human", subjectId: grant.subjectId },
@@ -4765,9 +4768,9 @@ describe("worker activities integration", () => {
     });
     expect(turn.status).toBe("idle");
 
-    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+    await withWorkspaceSessionActivityRls(dbClient.db, grant.workspaceId, (db) =>
       db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as typeof db, {
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           actor: { type: "human", subjectId: grant.subjectId },
@@ -4792,9 +4795,9 @@ describe("worker activities integration", () => {
       status: "idle",
       effectiveControl: { state: "paused" },
     });
-    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+    await withWorkspaceSessionActivityRls(dbClient.db, grant.workspaceId, (db) =>
       db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as typeof db, {
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           actor: { type: "human", subjectId: grant.subjectId },

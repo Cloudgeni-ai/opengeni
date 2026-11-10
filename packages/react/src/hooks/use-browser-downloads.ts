@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { BrowserDownload, BrowserDownloadSaveResponse } from "@opengeni/sdk/interaction";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EmbeddedBrowserInteractionClientLike } from "../client";
@@ -7,7 +8,7 @@ import {
 } from "../session-context";
 import { usePageLiveActivity } from "./internal";
 
-export type UseBrowserDownloadsOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseBrowserDownloadsOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   browserSessionId: string | null;
   enabled?: boolean | undefined;
   pollIntervalMs?: number | undefined;
@@ -215,4 +216,4 @@ function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
-export type BrowserDownloadsClient = EmbeddedBrowserInteractionClientLike;
+export type BrowserDownloadsClient = EmbeddedBrowserInteractionClientLike<ChatClient>;

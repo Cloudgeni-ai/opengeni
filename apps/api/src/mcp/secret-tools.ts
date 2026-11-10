@@ -134,7 +134,7 @@ export function registerSecretTools(
     "secret_save",
     {
       description:
-        'Save or update a secret item (login, API key, note) and get its references back. For a new password use a field with `generate` (for example {name: "password", generate: {length: 24}}) and save it before typing it anywhere; copy an existing secret with `fromReference`. Put a username in `username`; keys, tokens and passwords belong in concealed fields (a new plain field whose value looks like one is saved as concealed, reported in `fieldNotes`). saveTo picks the vault: user (Only me), task (this task) or workspace; it defaults to Only me when a person started this work, otherwise the workspace. Values are never echoed; avoid putting a literal `value` here unless the task gave you that exact value.',
+        'Save or update a secret item (login, API key, note) and get its references back. For a new password use a field with `generate` (for example {name: "password", generate: {length: 24}}) and save it before typing it anywhere; copy an existing secret with `fromReference`. Put a username in `username`. saveTo picks the vault: user (Only me), task (this task) or workspace; it defaults to Only me when a person started this work, otherwise the workspace. Values are never echoed; avoid putting a literal `value` here unless the task gave you that exact value.',
       inputSchema: SecretSaveInput.shape,
     },
     (input) =>
@@ -208,7 +208,7 @@ export function registerSecretTools(
     "secret_profile_get",
     {
       description:
-        "Show the credential profile: environment variables (such as GH_TOKEN or AZURE_CLIENT_SECRET) that Opengeni fills from saved secrets in every command you run, without putting them in the command. scope session (default) lists this conversation's own additions and every variable your commands receive, including inherited ones; scope workspace lists the shared profile. Names and references only, never values.",
+        "Show the credential profile: environment variables (such as GH_TOKEN or AZURE_CLIENT_SECRET) that are filled from saved secrets in every command you run, without putting them in the command. scope session (default) lists this conversation's own additions and every variable your commands receive, including inherited ones; scope workspace lists the shared profile. Names and references only, never values.",
       inputSchema: SecretProfileGetInput.shape,
     },
     (input) =>

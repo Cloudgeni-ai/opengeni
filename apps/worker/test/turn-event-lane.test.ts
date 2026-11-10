@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing/settings";
-import { createTurnEventLane } from "../src/activities/agent-turn/turn-event-lane";
+import {
+  createTurnEventLane,
+  createTurnEventPublisher,
+} from "../src/activities/agent-turn/turn-event-lane";
 import {
   publishStartupProgress,
   type TurnBackgroundEventPublisher,
@@ -20,6 +23,125 @@ function gate() {
 const flush = async () => {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 };
+
+describe("checkpoint event transactions", () => {
+  const event = (phase: string) => ({ type: "agent.model.request", payload: { phase } });
+  test("absorbed observations retain their barrier against concurrent later appends", async () => {
+    const held = gate();
+    const committed: string[][] = [];
+    const publisher = createTurnEventPublisher(async (events) => {
+      const phases = events.map((entry) => (entry.payload as { phase: string }).phase);
+      if (phases.includes("first_checkpoint")) await held.promise;
+      committed.push(phases);
+      return { accepted: true, events: [], canonicalStartupMilestones: [] };
+    });
+    publisher.publishInBackground([event("observation")]);
+    const first = publisher.publish([event("first_checkpoint")]);
+    const second = publisher.publish([event("later_checkpoint")]);
+    let drained = false;
+    const drain = publisher.backgroundSettled().then(() => {
+      drained = true;
+    });
+    await flush();
+    expect(committed).toEqual([]);
+    expect(drained).toBe(false);
+    held.release();
+    await Promise.all([first, second, drain]);
+    expect(committed).toEqual([["observation", "first_checkpoint"], ["later_checkpoint"]]);
+    expect(drained).toBe(true);
+  });
+  test("queued observations share the next awaited checkpoint without reordering", async () => {
+    const held = gate();
+    const batches: string[][] = [];
+    const publisher = createTurnEventPublisher(async (events) => {
+      batches.push(events.map((entry) => (entry.payload as { phase: string }).phase));
+      if (batches.length === 1) await held.promise;
+      return { accepted: true, events: [], canonicalStartupMilestones: [] };
+    });
+    publisher.publishInBackground([event("started")]);
+    await flush();
+    publisher.publishInBackground([event("first_byte")]);
+    publisher.publishInBackground([event("completed")]);
+    const checkpoint = publisher.publish([event("usage")]);
+    publisher.publishInBackground([event("next_started")]);
+    await flush();
+    expect(batches).toEqual([["started"]]);
+    held.release();
+    await checkpoint;
+    await publisher.backgroundSettled();
+    expect(batches).toEqual([["started"], ["first_byte", "completed", "usage"], ["next_started"]]);
+  });
+  test("an idle observation starts without waiting for a later checkpoint", async () => {
+    const batches: string[][] = [];
+    const publisher = createTurnEventPublisher(async (events) => {
+      batches.push(events.map((entry) => (entry.payload as { phase: string }).phase));
+      return { accepted: true, events: [], canonicalStartupMilestones: [] };
+    });
+    publisher.publishInBackground([event("started")]);
+    await publisher.backgroundSettled();
+    expect(batches).toEqual([["started"]]);
+  });
+  test("the background drain waits for an absorbed observation's commit", async () => {
+    const held = gate();
+    let committed = false;
+    const publisher = createTurnEventPublisher(async () => {
+      await held.promise;
+      committed = true;
+      return { accepted: true, events: [], canonicalStartupMilestones: [] };
+    });
+    publisher.publishInBackground([event("observation")]);
+    const checkpoint = publisher.publish([event("checkpoint")]);
+    let drained = false;
+    const drain = publisher.backgroundSettled().then(() => {
+      drained = true;
+    });
+    await flush();
+    expect(drained).toBe(false);
+    expect(committed).toBe(false);
+    held.release();
+    await Promise.all([checkpoint, drain]);
+    expect(committed).toBe(true);
+    expect(drained).toBe(true);
+  });
+  test("a failed absorbing checkpoint releases the observation barrier without hiding its error", async () => {
+    const failed = new Error("checkpoint failed");
+    const batches: string[][] = [];
+    const publisher = createTurnEventPublisher(async (events) => {
+      const phases = events.map((entry) => (entry.payload as { phase: string }).phase);
+      batches.push(phases);
+      if (phases.includes("checkpoint")) throw failed;
+      return { accepted: true, events: [], canonicalStartupMilestones: [] };
+    });
+    publisher.publishInBackground([event("observation")]);
+    const checkpoint = publisher.publish([event("checkpoint")]);
+    const later = publisher.publish([event("later")]);
+    await expect(checkpoint).rejects.toBe(failed);
+    await later;
+    await expect(publisher.backgroundSettled()).resolves.toBeUndefined();
+    expect(batches).toEqual([["observation", "checkpoint"], ["later"]]);
+  });
+  test("timed receipts retain their boundary and cannot be stolen by a later checkpoint", async () => {
+    const batches: string[][] = [];
+    const timed: string[] = [];
+    const publisher = createTurnEventPublisher(async (events) => {
+      batches.push(events.map((entry) => (entry.payload as { phase: string }).phase));
+      return { accepted: true, events: [], canonicalStartupMilestones: [] };
+    });
+    publisher.publishInBackground([event("before")]);
+    publisher.publishInBackground([event("timed")], {
+      measureDelivery: async (work) => {
+        timed.push("start");
+        const result = await work();
+        timed.push("end");
+        return result;
+      },
+    });
+    publisher.publishInBackground([event("after")]);
+    await publisher.publish([event("checkpoint")]);
+    expect(batches).toEqual([["before"], ["timed"], ["after", "checkpoint"]]);
+    expect(timed).toEqual(["start", "end"]);
+  });
+});
 
 describe("turn event lane", () => {
   test("a background receipt does not hold up the caller, and the next awaited append follows it", async () => {

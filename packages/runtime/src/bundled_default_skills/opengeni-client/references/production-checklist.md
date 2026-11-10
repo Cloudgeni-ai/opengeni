@@ -8,9 +8,9 @@
 - Set `OPENGENI_TOOL_SERVER_URL` to the production tool endpoint. The proxy and
   `verifyToolRequest` must see the same URL and the same `OPENGENI_API_KEY`.
 - Self-hosted: set `OPENGENI_API_BASE_URL` and pass it as `baseUrl`.
-- Pin every `@opengeni/*` package to one version. If the repository enforces a
-  minimum release age, pin an older shared version or ask the user; do not
-  bypass the policy.
+- Pin every `@opengeni/*` package to one exact stable version; see
+  [Versions and upgrades](versions-and-upgrades.md) for choosing and
+  upgrading it.
 - Private chats need the organization's private-session setting. Organizations
   created at signup have it on, so don't ask the user to check it. Without it
   the SDK throws `OpenGeniSetupError`, whose message says who can enable it.

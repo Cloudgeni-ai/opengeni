@@ -18,7 +18,11 @@ import { t } from "../../lib/console-text";
 import { formatRelativeTime } from "../../../lib/format";
 import { sessionDisplayStatus, type SessionDisplayStatus } from "../../../timeline-model";
 import { sessionAgentAttention } from "../../../session-agents-model";
-import type { LineageNode, SessionStatus, SessionSummary } from "@opengeni/sdk";
+import type {
+  ChatLineageNode as LineageNode,
+  SessionStatus,
+  ChatSession as SessionSummary,
+} from "@opengeni/sdk";
 import { Link } from "../../lib/navigation";
 import { BotIcon, ChevronLeftIcon, ChevronRightIcon, EllipsisIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -69,6 +73,7 @@ export function sessionStatusTone(status: SessionDisplayStatus): StatusTone {
     case "failed":
       return "failed";
     case "cancelled":
+    case "archived":
       return "cancelled";
     default:
       return "idle";
@@ -124,8 +129,10 @@ function SubagentRow({
 }) {
   const [open, setOpen] = useState(false);
   const title = sessionDisplayTitle(node.session);
-  const paused = sessionControlPaused(node.session);
-  const tone = paused ? "waiting" : sessionStatusTone(sessionDisplayStatus(node.session));
+  const displayStatus = sessionDisplayStatus(node.session);
+  // Archiving stops (and so pauses) a chat's work; it reads as archived, not paused.
+  const paused = displayStatus !== "archived" && sessionControlPaused(node.session);
+  const tone = paused ? "waiting" : sessionStatusTone(displayStatus);
   const live = !paused && isLiveStatus(node.session.status);
   const canExpand = depth < MAX_DEPTH && node.children.length > 0;
 

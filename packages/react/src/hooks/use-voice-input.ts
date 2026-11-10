@@ -1,4 +1,5 @@
 import type { ClientVoiceInputConfig, RecordingTranscriptVersion } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import {
   OpenGeniRecordingsClient,
@@ -106,8 +107,8 @@ export type UseVoiceInputOptions = {
   automaticRetryDelayMilliseconds?: number | undefined;
 };
 
-type VoiceInputClient = Pick<OpenGeniClient, "transcribeAudio"> &
-  Partial<Pick<OpenGeniClient, "requestJson">>;
+type VoiceInputClient = Pick<ChatClient<OpenGeniClient>, "transcribeAudio"> &
+  Partial<Pick<ChatClient<OpenGeniClient>, "requestJson">>;
 
 /** A dictation's speech, as recorded. */
 export type VoiceInputAudio = {
@@ -178,7 +179,8 @@ export type UseVoiceInputResult = {
   transcribe: (audio: Blob, options?: { durationMilliseconds?: number }) => Promise<boolean>;
 };
 
-export const VOICE_RECORDING_TIMESLICE_MILLISECONDS = 1_000;
+/** A dictation is uploaded in pieces this long, like a meeting. */
+export const VOICE_RECORDING_TIMESLICE_MILLISECONDS = 5_000;
 /** @deprecated Dictations no longer use owner heartbeats. */
 export const VOICE_RECORDING_OWNER_HEARTBEAT_MILLISECONDS = 5_000;
 /** @deprecated Dictations no longer use owner heartbeats. */
@@ -191,6 +193,8 @@ export const VOICE_RECORDING_RESUMABLE_CLIENT_MAX_DURATION_SECONDS = 8 * 60 * 60
 const ACCIDENTAL_START_MAX_MILLISECONDS = 3_000;
 const DEFAULT_POLL_MILLISECONDS = 1_000;
 const MAX_POLL_MILLISECONDS = 15_000;
+/** How long one check holds on the server for the text to be ready. */
+const TRANSCRIPT_WAIT_SECONDS = 20;
 const TAKEN_STORAGE_KEY = "opengeni.voice-input.taken.v1";
 const MIME_PREFERENCES = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus"];
 const currentDate = () => new Date();
@@ -415,7 +419,7 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
   }, []);
 
   /** Look for a dictation an earlier page, tab or device left with this workspace. */
-  const loadSaved = useCallback(
+  const offerSaved = useCallback(
     async (generation: number): Promise<void> => {
       const client = latest.current.recordings;
       const workspace = latest.current.workspaceId;
@@ -434,10 +438,17 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       } catch {
         return;
       }
+      // A host's own recordings client, or a proxy answering this route with
+      // something else, may resolve without a list: there is nothing to offer.
+      const saved: unknown = listed?.recordings;
+      if (!Array.isArray(saved)) return;
       if (generation !== generationRef.current || dictationRef.current) return;
       const taken = readTaken();
-      const listedIds = new Set(listed.recordings.map((recording) => recording.id));
-      for (const recording of listed.recordings) {
+      const offered = (saved as typeof listed.recordings).filter(
+        (recording) => recording !== null && typeof recording?.id === "string",
+      );
+      const listedIds = new Set(offered.map((recording) => recording.id));
+      for (const recording of offered) {
         if (taken.has(recording.id)) {
           // Its text went into a draft while the delete couldn't reach the server.
           void client.deleteRecording(workspace, recording.id).then(
@@ -500,6 +511,15 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
     },
     [hold, settleIdle, uploader],
   );
+  /**
+   * `offerSaved`, quietly: recovery runs in the background, so whatever goes
+   * wrong leaves the composer as it is, and any saved dictation stays on the
+   * server for the next composer to offer.
+   */
+  const loadSaved = useCallback(
+    (generation: number): Promise<void> => offerSaved(generation).catch(() => undefined),
+    [offerSaved],
+  );
   loadSavedRef.current = loadSaved;
 
   /** Take the text: delete the dictation, then insert it once. */
@@ -542,10 +562,13 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
       for (;;) {
         if (generation !== generationRef.current) return;
         let version: RecordingTranscriptVersion | undefined;
+        const asked = Date.now();
         try {
+          // The server answers the moment the text is ready.
           const versions = await client.listRecordingTranscriptVersions(
             workspace,
             dictation.recordingId,
+            { waitSeconds: TRANSCRIPT_WAIT_SECONDS, ...(versionId ? { waitFor: versionId } : {}) },
           );
           version = versionId
             ? versions.find((item) => item.id === versionId)
@@ -586,7 +609,9 @@ export function useVoiceInput(options: UseVoiceInputOptions): UseVoiceInputResul
             return;
           }
         }
-        await sleep(delay);
+        // A server that answered at once (one that doesn't wait, or a hiccup)
+        // is asked again after the usual pause; one that waited, right away.
+        await sleep(Math.max(0, delay - (Date.now() - asked)));
       }
     },
     [hold, settleIdle, take],
@@ -1302,6 +1327,8 @@ function chooseMimeType(accepted: string[]): string | undefined {
 function voiceInputCode(code: string | null): string {
   if (!code) return "unknown";
   if (code.startsWith("voice_")) return voiceInputCode(code.slice("voice_".length));
+  // An account out of credit needs someone to top it up, not a retry.
+  if (code === "provider_quota_exceeded") return code;
   if (code.startsWith("provider_")) return "provider";
   switch (code) {
     case "insufficient_credits":

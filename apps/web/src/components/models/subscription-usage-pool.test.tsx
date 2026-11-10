@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -46,7 +47,7 @@ test("shows weekly utilization and one weighted total bar without an account bre
     "At this pace you'll use about 50% of this week's included usage.",
   );
   expect(container.textContent).toContain("Last 7 days, adjusted to this week's pace.");
-  expect(container.textContent).toContain("Team Plus is at its 5-hour limit until");
+  expect(container.textContent).toContain("Team Plus is at its 5h limit until");
   expect(container.textContent).not.toContain("Team Pro 1");
   expect(container.textContent).not.toContain("Team Pro 2");
   expect(container.querySelectorAll('[role="meter"]')).toHaveLength(1);
@@ -264,7 +265,7 @@ test("all providers share one client-scoped request and refresh invalidation", a
       reads++;
       return { pools: [pooledLimitsFixture("workspace")], checkedAt: new Date().toISOString() };
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const release = retainSharedQueries(client);
   await act(async () =>
     root.render(
@@ -294,7 +295,7 @@ test("workspace loading and failure show no pool until available accounts are es
   });
   const client = {
     getWorkspaceSubscriptionUsagePools: () => pending,
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   await act(async () =>
     root.render(
       <ul>

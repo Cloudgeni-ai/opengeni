@@ -27,6 +27,15 @@ import type { ActionCatalogEntry } from "../../packages/contracts/src/app-action
  * in the browser.
  */
 export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
+  {
+    pattern: /^\/v1\/workspaces\/:workspaceId\/sessions\/:sessionId\/configuration$/,
+    reason:
+      "configuration read for compact UI clients; the existing getSession agent action already returns the full configuration",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/:workspaceId\/decisions$/,
+    reason: "stateless product inference API; agents use the internal configured decision model",
+  },
   { pattern: /^\/v1\/auth\//, reason: "Opengeni sign-in itself" },
   {
     pattern: /^\/v1\/site-auth\//,
@@ -42,6 +51,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   },
   { pattern: /^\/v1\/identity(\/|$)/, reason: "sign-in methods and account recovery" },
   {
+    pattern: /^\/v1\/organizations\/:organizationId\/identity\//,
+    reason: "an organization's public auto-connect issuer documents, read by outside apps",
+  },
+  {
     pattern:
       /\/callback$|^\/v1\/integrations\/connect\/finished$|^\/v1\/(pr-review\/)?github\/setup$|\/client-metadata\.json$/,
     reason: "a provider's browser redirect back to Opengeni, and the page it ends on",
@@ -52,6 +65,10 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
     reason: "calls from other services, signed by them",
   },
   { pattern: /^\/v1\/git\//, reason: "git protocol for sandboxes" },
+  {
+    pattern: /^\/v1\/github\/personal\/gateway\//,
+    reason: "the GitHub gateway gh uses as the person from a sandbox",
+  },
   { pattern: /^\/v1\/enrollments\//, reason: "a machine enrolling itself" },
   {
     pattern: /^\/v1\/office\/workbook-tickets$/,
@@ -88,7 +105,7 @@ export function isActionCatalogExempt(path: string): boolean {
 export const ACTION_CATALOG_BROWSER_ONLY: ReadonlyArray<{ pattern: RegExp; reason: string }> = [
   {
     pattern:
-      /^(PUT|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot$|^(POST|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/link$/,
+      /^(PUT|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot$|^POST \/v1\/workspaces\/:workspaceId\/integrations\/teams\/bot\/microsoft-sign-in$|^(POST|DELETE) \/v1\/workspaces\/:workspaceId\/integrations\/teams\/link$/,
     reason:
       "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
   },

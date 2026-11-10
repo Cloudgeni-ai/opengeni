@@ -1,5 +1,130 @@
 # @opengeni/capabilities
 
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [1c7aa2a]
+  - @opengeni/contracts@6.13.0
+  - @opengeni/network@6.13.0
+
+## 6.12.0
+
+### Patch Changes
+
+- Updated dependencies [64fd53f]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [913e2b4]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+  - @opengeni/network@6.12.0
+
+## 6.11.0
+
+### Minor Changes
+
+- 6abf872: Integration Knowledge sync is fully removed. A migration deletes the leftover Knowledge source sync tasks with their runs, sync state and wakes, and any saved `knowledge_source` facets; Automations no longer show "Sync retired" and the integration facets panel no longer shows "Retired" sources. Native Google Drive and Atlassian source connections left from the old sync stay hidden and inert; the generic connection DELETE still revokes them. Schedules only run agent turns. The native Google Drive and Atlassian source OAuth, callbacks, lifecycle and source routes are gone; Google Drive, OneDrive and Atlassian keep working through their agent-tool connections.
+
+  - Removed internal entry points: `@opengeni/documents/google-drive`, `@opengeni/documents/atlassian` and `@opengeni/contracts/google-drive-native-retirement`. `@opengeni/contracts/knowledge-source-sync-retirement` now exports only `KNOWLEDGE_SOURCE_SYNC_RETIRED_MESSAGE`, and `@opengeni/contracts/atlassian-native-retirement` only the historical tool names.
+  - Removed internal `@opengeni/contracts` root exports: `KnowledgeSourceSyncScheduleControl`, `scheduledTaskKnowledgeSource`, `requireScheduledTaskKnowledgeSource` and `knowledgeSourceAgentConfig`.
+  - The `OPENGENI_GOOGLE_DRIVE_CLIENT_ID`, `OPENGENI_GOOGLE_DRIVE_CLIENT_SECRET`, `OPENGENI_GOOGLE_DRIVE_SYNC_*`, `OPENGENI_GOOGLE_DRIVE_PROVIDER_*`, `OPENGENI_ATLASSIAN_CLIENT_ID` and `OPENGENI_ATLASSIAN_CLIENT_SECRET` settings are no longer read.
+  - Public SDK surface is unchanged until the next major: `browseAtlassianSources`, `saveAtlassianSources`, `setAtlassianLifecycle`, `transitionGoogleDriveLifecycle`, `browseGoogleDriveFacetSource`, `saveGoogleDriveFacetSource`, `disconnectGoogleDriveConnection`, `CreateKnowledgeSourceSyncScheduledTaskRequest`, `agentConfig.knowledgeSource` and `KnowledgeSourceSyncRunSummary` are deprecated. Their routes answer 410, except `disconnectGoogleDriveConnection`, which now revokes through the generic connection DELETE.
+
+### Patch Changes
+
+- 547c03e: Shorter model-facing text for reserved path parameters and the reviewed Outlook and SharePoint search descriptions.
+- Updated dependencies [9bb1b56]
+- Updated dependencies [7e92bda]
+- Updated dependencies [88de211]
+- Updated dependencies [5dabaa2]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [276001c]
+- Updated dependencies [0e8b3b2]
+- Updated dependencies [90b961f]
+- Updated dependencies [f12070a]
+- Updated dependencies [56801f4]
+- Updated dependencies [a505ce8]
+- Updated dependencies [06606ef]
+- Updated dependencies [b05587f]
+- Updated dependencies [3345899]
+- Updated dependencies [11550b6]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [650e54a]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [57748cf]
+- Updated dependencies [04d36ce]
+  - @opengeni/contracts@6.11.0
+  - @opengeni/network@6.11.0
+
+## 6.10.0
+
+### Minor Changes
+
+- 3cb57d8: `tool_search` now offers the Connect card for an integration the query names even when an unrelated installed tool matches strongly, such as a Slack bot tool for "posts on Slack" or meeting search for "Linear issues". The integration catalog lookup is skipped only when a strong match is that integration's own tool; ownership by a shared vendor domain also needs agreeing names, so a Microsoft Teams tool does not hide Microsoft Excel. Beside strong matches the catalog is read only when the query has a capitalised word mid-sentence or a word no installed tool uses, the search waits for it at most 1.5 seconds, and only a distinctive mention names an integration, so "close the ticket" or "linear regression" add no card.
+
+  Integration names are also recognised with different spacing or case ("hub spot", "wisprflow"), as near spellings ("whisperflow" for Wispr Flow, "hubsopt" for HubSpot), and by the vendor's word in its registrable domain ("jira" for Atlassian at jira.com) when that domain is one product's ("microsoft" names none of Teams, Excel and OneDrive). Common words close to a name ("email" for Gmail, "conference" for Confluence), plurals ("snowflakes") and compound phrases ("linked in", "the last pass") do not name one. `@opengeni/capabilities` exports the shared matching (`integrationMentionsIn`, `integrationMentionMatcher`, `isDistinctiveIntegrationMention`, `isIntegrationNearSpelling`, `integrationVendorWord`, `integrationQueryWords`, `integrationNamesAgree`, `sharedVendorDomains`, `registrableHostDomain`), and capability catalog search ranks entries a query names distinctively above entries that only share its ordinary words ("send a message" does not promote Send). Entries whose names agree with a named entry share its rank, so naming "GitHub" keeps GitHub App above the GitHub plugin.
+
+### Patch Changes
+
+- 168d812: Generated OpenAPI integrations now read files whose download redirects. A safe read (GET or HEAD) follows at most three https redirects, such as Microsoft Graph `/content` to its pre-signed download URL, through the same pinned transport and one shared deadline, without the Authorization header, credential cookies or credential query parameters. A redirect target's own 401 or 403 (an expired link) is returned as the provider's result rather than as a lost authorization. A mutation's redirect is still rejected and its outcome stays unknown. Response bytes that are not UTF-8 (PDFs, images, Word, Excel and PowerPoint files) come back as base64 instead of replacement characters, up to 2 MiB; larger binary reports its size. A body over the response limit is a recoverable `response_too_large` error.
+
+  A generated integration call that fails with a known outcome (a rejected redirect, a missing path parameter, an authorization the provider refused) now reaches the model as an ordinary tool error, `{"ok":false,"error":{"code","message","status","retryable"}}`, on every server. It is no longer reported as a tool that is unavailable for the rest of the turn. A missing path parameter's error names the parameter.
+
+- c672cf7: Reviewed OpenAPI definitions can now correct a provider's document declaratively, without new prompt text.
+
+  - `requestPath` sends a reviewed operation to a different path while it keeps its tool identity. `{+name}` in it expands a path parameter as a path (RFC 6570 reserved expansion, marked as `allowReserved` on the binding): each segment is encoded once (an already percent-encoded segment is decoded first), `/` is kept, extra slashes are dropped, a `.` or `..` segment is refused as a recoverable error, and the parameter gets generic path guidance. A request path that lands on a path another operation uses is merged with it.
+  - `omitQueryParameters` drops query parameters the provider documents but rejects, including ones declared for the whole path.
+  - Any path parameter whose value is `.`, `..` or invalid Unicode is now a recoverable `parameter_invalid` error.
+  - `operationText` replaces a prefix-selected operation's summary and description when the provider's text describes a different operation.
+
+  These Microsoft definitions use the new fields:
+
+  - SharePoint's site lookup by path now uses Graph's colon form, `/sites/{hostname}:/{path}`, which Graph accepts. Previously it sent an encoded `getByPath(path='%2Fsites%2Fhr')`, which Graph rejected with "Error in query syntax".
+  - Teams channel messages offer only `$top`, `$select`, `$expand` and paging, not `$orderby`, `$skip`, `$search`, `$filter` or `$count`, which Graph doesn't support there.
+  - Outlook's list, create-draft, get, update and delete message operations, and the MIME content operations, get correct names and descriptions instead of Graph's open-extension and eventMessage text.
+  - The SharePoint and Teams search descriptions now say to send one entry in `requests` per call, because Graph v1.0 rejects several.
+
+  Installed integrations adopt these changes when their definition is refreshed.
+
+- f0d27b2: One connector's bad tool no longer stops a turn. When a connector lists the same tool more than once (as the ElevenLabs hosted MCP did while its tool list changed), Opengeni keeps one copy. Two different tools that would share a Codemode path now get distinct paths, and a tool that still cannot be added, or whose definition is invalid, is left out for that turn. Each case is logged as a structured warning. A call always runs the tool the model was shown: when two different tools claim one model name, the catalog keeps one, and a call meant for the other is refused rather than sent to the wrong tool. OpenAPI connectors whose operation names differ only by a number suffix keep a separate tool for each operation.
+- Updated dependencies [c9e5547]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [b5201d5]
+- Updated dependencies [b089060]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/contracts@6.10.0
+  - @opengeni/network@6.10.0
+
+## 6.9.0
+
+### Patch Changes
+
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/contracts@6.9.0
+  - @opengeni/network@6.9.0
+
 ## 6.8.0
 
 ### Patch Changes

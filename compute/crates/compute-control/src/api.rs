@@ -18,6 +18,12 @@
 //!   or `memory_mib` ends its running programs, as it boots afresh from
 //!   its disk; new requests or a longer disk keep them. Its disk may only
 //!   grow.
+//! - `POST /v1/sandboxes/{id}/restart` boots it afresh from its disk,
+//!   keeping its files and shape: its host ends its VM unsaved and forgets
+//!   its memory image, storing nothing first, so its next wake boots it
+//!   from its disk there, ending its running programs. A host from before
+//!   that hands it off as a resize does, even awake. A host busy with it,
+//!   as one handing it off, is answered `409 busy` with why.
 //! - `GET /v1/sandboxes/{id}/connect/{port}` with `Upgrade: compute-stream`
 //!   turns the connection into a byte stream to the guest port.
 //! - `POST /v1/sandboxes/{id}/templates`, `GET /v1/templates` and `GET` and
@@ -26,7 +32,9 @@
 //! - `GET /v1/link/keys` lists the keys agent-link tokens are signed with
 //!   ([`docs/agent-link.md`](../../../docs/agent-link.md)).
 //! - `GET /v1/hosts`, `POST /v1/hosts/{name}/drain` and `/undrain`, for the
-//!   operator team.
+//!   operator team, and `POST /v1/hosts/{name}/gone`, which declares a host
+//!   given up on gone for good: the sandboxes that wait for it go on from
+//!   their stored copies, each noting what it went back to (`restored`).
 //!
 //! Every request names its key in `X-API-Key`; the store holds only the
 //! key's digest. Errors are `{"code": "...", "message": "..."}`.
@@ -51,7 +59,7 @@ pub use crate::keys::key_digest;
 use crate::link::LinkKeys;
 use crate::metrics::{Metrics, Outcome, track};
 use crate::service::{Drained, Failure, Resize, Service, TEMPLATE_PREFIX, request_digest};
-use crate::store::{AgentRef, SandboxRow, Spec, Store};
+use crate::store::{AgentRef, Forsaken, LostCopy, SandboxRow, Spec, Store, notice};
 
 pub mod templates;
 
@@ -188,8 +196,34 @@ pub struct SandboxView {
     pub agent: Option<AgentRef>,
     /// The host that owns it, if one does.
     pub host: Option<String>,
+    /// The host it waits for, which stopped answering and may hold changes
+    /// newer than its stored copy, if it does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<String>,
+    /// The older stored copy it went back to when its host was given up
+    /// for gone, if it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored: Option<Restored>,
     pub owner_epoch: u64,
     pub created_ms: u64,
+}
+
+/// What a sandbox went back to when its host was given up for gone.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Restored {
+    #[serde(flatten)]
+    pub lost: LostCopy,
+    /// The same in plain words, for the people using it.
+    pub notice: String,
+}
+
+impl Restored {
+    fn of(lost: Option<LostCopy>) -> Option<Self> {
+        lost.map(|lost| Self {
+            notice: notice(&lost),
+            lost,
+        })
+    }
 }
 
 impl SandboxView {
@@ -199,6 +233,11 @@ impl SandboxView {
             .owner
             .and_then(|host| service.view().target(host))
             .map(|target| target.name);
+        let waiting_for = row
+            .ownership
+            .owner
+            .filter(|host| service.view().lost(*host))
+            .and_then(|host| service.view().name(host));
         Self {
             id: row.id,
             image: row.spec.image,
@@ -206,6 +245,8 @@ impl SandboxView {
             metadata: row.metadata,
             agent: row.spec.agent,
             host,
+            waiting_for,
+            restored: Restored::of(row.lost),
             owner_epoch: row.ownership.epoch.0,
             created_ms: row.created_ms,
         }
@@ -308,6 +349,9 @@ pub struct WokenView {
     /// Its execution on its owner, as in [`StateView::generation`].
     pub generation: u64,
     pub host: Option<String>,
+    /// As in [`SandboxView::restored`]: whoever woke it is told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored: Option<Restored>,
 }
 
 /// How a sandbox is now, as its host says.
@@ -406,6 +450,9 @@ pub struct HostView {
     /// Processor time in millicores a wake can still reserve on it.
     pub cpu_free_millis: u64,
     pub disk_free_mib: u64,
+    /// Disk in MiB it frees for a sandbox without losing anything, by
+    /// disk relief (ADR 30); placement counts it as free.
+    pub disk_reclaimable_mib: u64,
     pub sandboxes: u32,
     pub awake: u32,
 }
@@ -589,11 +636,12 @@ async fn wake<S: Store>(
         } => (waited_us, generation),
         _ => (0, 0),
     };
-    let host = SandboxView::of(service, reached.row).host;
+    let view = SandboxView::of(service, reached.row);
     Ok(Json(WokenView {
         waited_us,
         generation,
-        host,
+        host: view.host,
+        restored: view.restored,
     }))
 }
 
@@ -644,6 +692,17 @@ async fn resize<S: Store>(
     let row = service
         .resize(&team, parse_id(&id)?, shape, body.awake)
         .await?;
+    Ok(Json(SandboxView::of(service, row)))
+}
+
+async fn restart<S: Store>(
+    State(api): State<Api<S>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<SandboxView>, ApiError> {
+    let team = api.team(&headers).await?;
+    let service = &api.0.service;
+    let row = service.restart(&team, parse_id(&id)?).await?;
     Ok(Json(SandboxView::of(service, row)))
 }
 
@@ -726,6 +785,7 @@ async fn hosts<S: Store>(
             cpu_millis: known.capacity.cpu_millis,
             cpu_free_millis: known.capacity.cpu_free_millis,
             disk_free_mib: known.capacity.disk_free_mib,
+            disk_reclaimable_mib: known.capacity.disk_reclaimable_mib,
             sandboxes: known.capacity.sandboxes,
             awake: known.capacity.awake,
         })
@@ -742,6 +802,23 @@ async fn drain<S: Store>(
     api.operator(&headers).await?;
     let awake = body.is_some_and(|Json(body)| body.awake);
     Ok(Json(api.0.service.drain(&name, awake).await?))
+}
+
+/// The sandboxes a declaration that a host is gone sent back to their
+/// stored copies.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeclaredGone {
+    pub sandboxes: Vec<Forsaken>,
+}
+
+async fn gone<S: Store>(
+    State(api): State<Api<S>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<DeclaredGone>, ApiError> {
+    api.operator(&headers).await?;
+    let sandboxes = api.0.service.declare_gone(&name).await?;
+    Ok(Json(DeclaredGone { sandboxes }))
 }
 
 async fn undrain<S: Store>(
@@ -776,6 +853,7 @@ pub fn router<S: Store>(
         .route("/v1/sandboxes/{id}/sleep", post(sleep::<S>))
         .route("/v1/sandboxes/{id}/move", post(move_to::<S>))
         .route("/v1/sandboxes/{id}/resize", post(resize::<S>))
+        .route("/v1/sandboxes/{id}/restart", post(restart::<S>))
         .route("/v1/sandboxes/{id}/connect/{port}", get(connect::<S>))
         .route(
             "/v1/sandboxes/{id}/templates",
@@ -789,6 +867,7 @@ pub fn router<S: Store>(
         .route("/v1/hosts", get(hosts::<S>))
         .route("/v1/hosts/{name}/drain", post(drain::<S>))
         .route("/v1/hosts/{name}/undrain", post(undrain::<S>))
+        .route("/v1/hosts/{name}/gone", post(gone::<S>))
         .route_layer(axum::middleware::from_fn_with_state(metrics, track))
         .with_state(api)
 }

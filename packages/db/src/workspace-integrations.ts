@@ -834,6 +834,43 @@ export async function deleteWorkspaceWebhook(
   });
 }
 
+/**
+ * How many webhooks, of the workspace and of its organization, were queued to
+ * receive one session event. Delivery rows are written by the event's own
+ * insert, so this is exact right after the event commits: 0 means no
+ * integration is subscribed to it.
+ */
+export async function countWebhookDeliveriesForEvent(
+  db: Database,
+  input: WorkspaceIntegrationScope & { eventId: string },
+): Promise<number> {
+  const workspace = await withRlsContext(db, input, async (scopedDb) =>
+    scopedDb
+      .select({ id: workspaceWebhookDeliveries.id })
+      .from(workspaceWebhookDeliveries)
+      .where(
+        and(
+          eq(workspaceWebhookDeliveries.accountId, input.accountId),
+          eq(workspaceWebhookDeliveries.workspaceId, input.workspaceId),
+          eq(workspaceWebhookDeliveries.eventId, input.eventId),
+        ),
+      ),
+  );
+  const organization = await withAccountRls(db, input.accountId, async (scopedDb) =>
+    scopedDb
+      .select({ id: organizationWebhookDeliveries.id })
+      .from(organizationWebhookDeliveries)
+      .where(
+        and(
+          eq(organizationWebhookDeliveries.accountId, input.accountId),
+          eq(organizationWebhookDeliveries.workspaceId, input.workspaceId),
+          eq(organizationWebhookDeliveries.eventId, input.eventId),
+        ),
+      ),
+  );
+  return workspace.length + organization.length;
+}
+
 export async function listWorkspaceWebhookDeliveries(
   db: Database,
   input: WorkspaceIntegrationScope & { webhookId: string; limit?: number },

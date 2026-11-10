@@ -46,6 +46,8 @@ const CONSTRAINTS = new Set([
 const ERROR_NAMES = new Set([
   "Error",
   "TypeError",
+  "CompactionProviderResponseError",
+  "EmptyCompactionSummaryError",
   "RangeError",
   "AggregateError",
   "PostgresError",
@@ -65,6 +67,8 @@ export const DIAGNOSTIC_SOURCE_FILES = [
   "apps/api/src/mcp/orchestration-failure-diagnostic.ts",
   "apps/api/dist/process/index.js",
   "apps/worker/src/activities/agent-turn/run.ts",
+  "apps/worker/src/activities/agent-turn/stream-attempt.ts",
+  "packages/runtime/src/context-compaction.ts",
   "apps/worker/src/activities/agent-turn/claim.ts",
   "apps/worker/src/activities/agent-turn/failure-settlement.ts",
   "apps/worker/src/activities/parent-wake.ts",

@@ -23,6 +23,7 @@ import type { EventBus } from "@opengeni/events";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   reconcilePendingSessionWorkflowWakes,
+  repairMissedSessionWorkflowWakes,
   type NotifyServices,
 } from "../src/activities/parent-wake";
 
@@ -267,6 +268,7 @@ test("reaper discovers an authentic no-goal child result behind a fully ACKed en
   const before = await wakeRow(ctx.parent.id);
   const signals: Array<{ sessionId: string; wakeRevision: number }> = [];
   const svc = services(signals);
+  await repairMissedSessionWorkflowWakes(svc);
   await reconcilePendingSessionWorkflowWakes(svc, 1000);
   expect(signals.filter((wake) => wake.sessionId === ctx.parent.id)).toHaveLength(1);
   expect(await wakeRow(ctx.parent.id)).toEqual({
@@ -286,6 +288,7 @@ test("reaper discovers an authentic no-goal child result behind a fully ACKed en
       wakeRevision: before.wake_revision + 1,
     }),
   ).toEqual({ action: "pending_admission", blocker: "pending_machine_input" });
+  await repairMissedSessionWorkflowWakes(svc);
   await reconcilePendingSessionWorkflowWakes(svc, 1000);
   expect((await wakeRow(ctx.parent.id)).wake_revision).toBe(before.wake_revision + 1);
   const attemptId = crypto.randomUUID();
@@ -313,6 +316,7 @@ test("coalesces multiple already-pending child results into one repair revision"
   await pendingResult(ctx, "two");
   const before = await wakeRow(ctx.parent.id);
   const signals: Array<{ sessionId: string; wakeRevision: number }> = [];
+  await repairMissedSessionWorkflowWakes(services(signals));
   await reconcilePendingSessionWorkflowWakes(services(signals), 1000);
   expect(signals.filter((wake) => wake.sessionId === ctx.parent.id)).toHaveLength(1);
   expect((await wakeRow(ctx.parent.id)).wake_revision).toBe(before.wake_revision + 1);
@@ -386,6 +390,7 @@ for (const scenario of [
     }
     const before = await wakeRow(ctx.parent.id);
     const signals: Array<{ sessionId: string; wakeRevision: number }> = [];
+    await repairMissedSessionWorkflowWakes(services(signals));
     await reconcilePendingSessionWorkflowWakes(services(signals), 1000);
     expect(signals.some((wake) => wake.sessionId === ctx.parent.id)).toBe(false);
     expect(await wakeRow(ctx.parent.id)).toEqual(before);
@@ -399,6 +404,7 @@ test("a child result newer than a compaction failure still repairs the parent wa
   const updateId = await pendingResult(ctx);
   const before = await wakeRow(ctx.parent.id);
   const signals: Array<{ sessionId: string; wakeRevision: number }> = [];
+  await repairMissedSessionWorkflowWakes(services(signals));
   await reconcilePendingSessionWorkflowWakes(services(signals), 1000);
   expect(signals.filter((wake) => wake.sessionId === ctx.parent.id)).toHaveLength(1);
   expect((await wakeRow(ctx.parent.id)).wake_revision).toBe(before.wake_revision + 1);

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, jest, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
@@ -31,8 +32,11 @@ const noReadGrant: AccessContext = {
   ...readGrant,
   workspaceGrants: [{ ...readGrant.workspaceGrants[0]!, permissions: ["sessions:create"] }],
 };
-const context: { client: OpenGeniBrowserClient; accessContext: AccessContext | null } = {
-  client: {} as OpenGeniBrowserClient,
+const context: {
+  client: ChatClient<OpenGeniBrowserClient>;
+  accessContext: AccessContext | null;
+} = {
+  client: {} as ChatClient<OpenGeniBrowserClient>,
   accessContext: readGrant,
 };
 
@@ -90,7 +94,7 @@ function fakeClient(definitions: Promise<{ definitions: IntegrationDefinitionSum
     listIntegrationDefinitions: async () => await definitions,
     listApiIntegrations: async () => ({ integrations: [] }),
     connectTransport: () => ({ catalog: async () => [] }),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
 }
 
 describe("useCapabilitiesCatalog", () => {
@@ -111,7 +115,7 @@ describe("useCapabilitiesCatalog", () => {
               ? oldRead.promise
               : restoredRead.promise;
         },
-      } as unknown as OpenGeniBrowserClient;
+      } as unknown as ChatClient<OpenGeniBrowserClient>;
       context.client = client;
       context.accessContext = readGrant;
       let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
@@ -185,7 +189,7 @@ describe("useCapabilitiesCatalog", () => {
         reads++;
         return [cached];
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     context.accessContext = {
       ...noReadGrant,
       workspaceGrants: [{ ...noReadGrant.workspaceGrants[0]!, permissions: ["workspace:admin"] }],
@@ -230,7 +234,7 @@ describe("useCapabilitiesCatalog", () => {
         listSocialConnections: async () => [{ id: "social-a" }],
         listSlackInstallationBindings: async () => [{ id: "slack-a" }],
         listApiIntegrations: async () => ({ integrations: [{ id: "instance-a" }] }),
-      } as unknown as OpenGeniBrowserClient;
+      } as unknown as ChatClient<OpenGeniBrowserClient>;
       let readsB = 0;
       const clientB = {
         ...fakeClient(Promise.resolve({ definitions: [] })),
@@ -242,7 +246,7 @@ describe("useCapabilitiesCatalog", () => {
           if (outcome === "no read") return pending.promise;
           throw { status: outcome === "denied" ? 403 : 503 };
         },
-      } as unknown as OpenGeniBrowserClient;
+      } as unknown as ChatClient<OpenGeniBrowserClient>;
 
       let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
       function Harness() {
@@ -312,7 +316,7 @@ describe("useCapabilitiesCatalog", () => {
         if (workspaceId === "workspace-a") return [personal];
         return pending.promise;
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     context.client = client;
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     const reads: string[] = [];
@@ -350,14 +354,14 @@ describe("useCapabilitiesCatalog", () => {
     const clientA = {
       ...fakeClient(Promise.resolve({ definitions: [] })),
       listConnections: async () => [personal],
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const clientB = {
       ...fakeClient(Promise.resolve({ definitions: [] })),
       listConnections: async () => {
         bReads++;
         throw { status: 503 };
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
       const currentClient = context.client;
@@ -394,7 +398,7 @@ describe("useCapabilitiesCatalog", () => {
         if (aReads === 2) return stale.promise;
         throw { status: 503 };
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const clientB = fakeClient(Promise.resolve({ definitions: [] }));
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
@@ -440,7 +444,7 @@ describe("useCapabilitiesCatalog", () => {
         if (denied) throw { status: 403 };
         return [connection];
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
@@ -480,7 +484,7 @@ describe("useCapabilitiesCatalog", () => {
         if (denied) throw { status: 403 };
         return [recovered];
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
@@ -544,7 +548,7 @@ describe("useCapabilitiesCatalog", () => {
         if (fail) throw { status: 503 };
         return [cached];
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
       latest = useCapabilitiesCatalog("workspace-a");
@@ -578,7 +582,7 @@ describe("useCapabilitiesCatalog", () => {
         if (++calls === 1) return oldLoad.promise;
         throw { status: 403 };
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
@@ -626,7 +630,7 @@ describe("useCapabilitiesCatalog", () => {
               ? newer.promise
               : [restored];
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
@@ -669,7 +673,7 @@ describe("useCapabilitiesCatalog", () => {
     context.client = {
       ...fakeClient(Promise.resolve({ definitions: [] })),
       listConnections: async () => (++calls === 1 ? older.promise : newer.promise),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
       latest = useCapabilitiesCatalog("workspace-a");
@@ -705,11 +709,11 @@ describe("useCapabilitiesCatalog", () => {
     const clientA = {
       ...fakeClient(Promise.resolve({ definitions: [] })),
       listConnections: async () => stale.promise,
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const clientB = {
       ...fakeClient(Promise.resolve({ definitions: [] })),
       listConnections: async () => [current],
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
       latest = useCapabilitiesCatalog("workspace-a");
@@ -745,7 +749,7 @@ describe("useCapabilitiesCatalog", () => {
       ...fakeClient(Promise.resolve({ definitions: [] })),
       listCapabilities: async () => (fail ? catalogFailure.promise : { items: [] }),
       listConnections: async () => (fail ? connectionFailure.promise : [cached]),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
@@ -793,7 +797,7 @@ describe("useCapabilitiesCatalog", () => {
         if (denied) throw { status: 403 };
         return [cached];
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
@@ -828,7 +832,7 @@ describe("useCapabilitiesCatalog", () => {
         if (failed) throw new Error("Temporary failure");
         return [connection];
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
@@ -864,7 +868,7 @@ describe("useCapabilitiesCatalog", () => {
       listConnections: async () => {
         throw { status: 403 };
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
 
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
     function Harness() {
@@ -948,7 +952,7 @@ describe("useCapabilitiesCatalog", () => {
       listSlackInstallationBindings: async () => [],
       listIntegrationDefinitions: async () => ({ definitions: [] }),
       listApiIntegrations: async () => ({ integrations: [] }),
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const healthy = fakeClient(Promise.resolve({ definitions: [] }));
 
     let latest: ReturnType<typeof useCapabilitiesCatalog> | null = null;
@@ -988,7 +992,7 @@ test("native setup readiness fences same-client actor changes and late responses
   context.client = {
     ...fakeClient(Promise.resolve({ definitions: [] })),
     connectTransport: () => ({ catalog: () => (++reads === 1 ? first.promise : second.promise) }),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   context.accessContext = readGrant;
   let latest!: ReturnType<typeof useCapabilitiesCatalog>;
   function Harness() {
@@ -1050,7 +1054,7 @@ test("setup readiness failure is distinct from an empty catalog and retries inde
         return [];
       },
     }),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   context.accessContext = readGrant;
   let latest!: ReturnType<typeof useCapabilitiesCatalog>;
   function Harness() {
@@ -1105,7 +1109,7 @@ describe("catalog reads while Opengeni is updating", () => {
         }
         return { items: [item] };
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const view = await mounted();
     try {
       const progress = { done: false };
@@ -1141,7 +1145,7 @@ describe("catalog reads while Opengeni is updating", () => {
       listCapabilities: async () => {
         throw new OpenGeniApiError(503, "", { mutation: false, correlationId: "edge-1" });
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const view = await mounted();
     try {
       const progress = { done: false };
@@ -1174,7 +1178,7 @@ describe("catalog reads while Opengeni is updating", () => {
       listCapabilities: async () => {
         throw new OpenGeniApiError(403, "", { mutation: false });
       },
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const view = await mounted();
     try {
       await act(async () => await view.latest().refresh());

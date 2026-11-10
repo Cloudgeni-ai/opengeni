@@ -125,7 +125,11 @@ and members of the running batch are never regenerated.
    (3 minutes, `MERGE_BATCHER_WINDOW_SECONDS`), the batcher takes up to 12 ready
    PRs (`MERGE_BATCHER_MAX_BATCH`) in queue order. PRs that change `.github/`,
    `scripts/ci/` or `scripts/batcher/`, and Version PRs, are batched alone
-   (a Version PR first; see above).
+   (a Version PR first; see above). While a failed batch is being split and no
+   priority PR is waiting, the oldest of those CI and batcher changes outside
+   its halves takes turns with them, as a priority batch does, so it is not
+   held back until the whole bisection ends. It carries what the bisection
+   blamed, and what it fails in is not added to that.
 2. **Build.** It merges the PRs one by one onto the current `main` with
    GitHub's merge API on a scratch branch, and pushes the result with a
    manifest commit as `batch/<id>`. A PR that conflicts with an earlier one in
@@ -139,7 +143,11 @@ and members of the running batch are never regenerated.
    lanes instead of waiting for the release-approval gate. A batch passes only
    when `Typecheck and unit tests`, `Deployment artifacts` and
    `Workload image builds` all passed, the same jobs canary admission requires
-   on a `main` SHA. Failed jobs are retried once to absorb flaky tests.
+   on a `main` SHA. Failed jobs are retried once to absorb flaky tests. A run
+   that failed before any job started (GitHub could not start the workflow)
+   has no failed job, so GitHub refuses that retry; it runs again in full
+   instead. A run GitHub will not run again at all fails the batch as a failed
+   retry would.
 4. **Land.** When every run on the batch tip passed and `main` has not moved,
    each PR lands as **one squash commit**, `<PR title> (#<n>)`, through GitHub's
    merge API, so the PR shows as merged. A Version PR lands as a true merge
@@ -149,7 +157,10 @@ and members of the running batch are never regenerated.
 5. **Failures.** A failed batch is split in half and each half is tested in
    turn until the failing PR is found and removed from the queue. A failed
    batch with both priority and other PRs is split into its priority PRs, tested
-   first, and the rest, so a broken fill delays them one round. Priority PRs in
+   first, and the rest, so a broken fill delays them one round. When the rest
+   has at least two PRs and at least as many as the priority PRs, it is halved
+   at once: it is then at least as likely to hold what broke the batch, and
+   testing it whole again would usually only fail once more first. Priority PRs in
    those halves keep their place in them, so a failed batch of only priority PRs
    is split in half too; a priority PR queued since goes first. A half of
    several PRs that fails only in jobs (by name, ignoring jobs cancelled
@@ -159,6 +170,9 @@ and members of the running batch are never regenerated.
    `blame` lists those jobs; a priority or Version PR built in between drops
    it. A single PR always gets its retry before it is ejected, so a flaky job
    in a half costs at most one more split, never an innocent PR's place.
+   A half with more PRs than fit in one batch tests the first `BATCHER_MAX_BATCH`
+   and keeps the others next in line as their own group, so none of them
+   drops out of the bisection.
 
 A batch is rebuilt from scratch whenever `main` moves under it, a member leaves
 the queue, or a member gets a new head that changes what the batch tests. The

@@ -20,6 +20,11 @@ export interface MeetingWords {
   stopQuestion: string;
   /** Why it asks. `{app}` is the call's app. */
   callEnded: string;
+  /**
+   * Why it asks, when the app has several accounts: `{where}` names the one
+   * that records. Added later; without it the card says `callEnded`.
+   */
+  callEndedIn?: string;
   /** Stops the recording. */
   stop: string;
   /** Closes the question and keeps recording. */
@@ -60,6 +65,7 @@ export const ENGLISH_MEETING_WORDS: Required<MeetingWords> = {
   notNow: "Not now",
   stopQuestion: "Meeting over?",
   callEnded: "{app} stopped using your microphone. Still recording.",
+  callEndedIn: "{app} stopped using your microphone. Still recording in {where}.",
   stop: "Stop recording",
   keepRecording: "Keep recording",
   recordingStarted: "Recording this call",

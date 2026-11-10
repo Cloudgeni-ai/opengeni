@@ -5,6 +5,7 @@
 //   state = idle | running | paused | waiting | all   (all = waiting + command + goal + attachment)
 //   theme = dark | light
 //   desktop = macos | windows   (the desktop shell's platform attribute)
+//   skill = new | update | remove   (a pending Skill review after the last message)
 // Screenshots and measurements for the composer-stack design review use this page.
 import {
   MessageTimeline,
@@ -27,10 +28,12 @@ import {
   previewState,
   usePreviewTheme,
 } from "./preview-fixtures";
+import { PreviewSkillReview, previewSkillReview } from "./skill-review-fixture";
 
 export function ComposerStackPreviewRoute() {
   usePreviewTheme();
   const state = previewState();
+  const skillReview = previewSkillReview();
   const session = useMemo(() => previewSession(state), [state]);
   const goal = useMemo(() => previewGoal(state), [state]);
   const queue = useMemo(() => galleryQueue(), []);
@@ -60,6 +63,7 @@ export function ComposerStackPreviewRoute() {
           status={running ? "running" : "idle"}
           pause={timelineLivePause(session.effectiveControl)}
           turnSummary={{ rolling: true }}
+          trailingState={skillReview ? <PreviewSkillReview kind={skillReview} /> : undefined}
         />
       </div>
       <div className="mb-1 w-full shrink-0 px-4 has-[>div:empty]:hidden sm:px-6">

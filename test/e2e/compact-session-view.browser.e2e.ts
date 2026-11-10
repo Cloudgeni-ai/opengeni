@@ -267,7 +267,7 @@ describe("compact session view on the live local workspace route (API fixture)",
             {
               code: "session_archive_blocked",
               message:
-                "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Agent tab first.",
+                "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Settings tab first.",
               blockers: [{ kind: "keep_live", sessionId: fixture.root.id }],
             },
             409,

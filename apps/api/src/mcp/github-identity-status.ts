@@ -105,7 +105,7 @@ export async function personalGitHubIdentityStatus(input: {
       connected: false,
       status: "disabled",
       ...empty,
-      note: "Personal GitHub sign-in is not enabled on this deployment; only the Opengeni app is available.",
+      note: "Personal GitHub sign-in is not enabled on this deployment; only the workspace's GitHub app is available.",
     };
   }
   const person = input.person;
@@ -156,7 +156,7 @@ export async function personalGitHubIdentityStatus(input: {
       ...empty,
       login,
       connectUrl: canConnect ? link : null,
-      note: "The person must reconnect their GitHub account before Opengeni can act as them.",
+      note: "The person must reconnect their GitHub account before the agent can act as them.",
     };
   }
   const repositoryCount = await input
@@ -178,7 +178,7 @@ export async function personalGitHubIdentityStatus(input: {
 
 /** Agent guidance shared by the GitHub status tool and its setup cards. */
 export const GITHUB_IDENTITIES_GUIDANCE =
-  "Two GitHub identities exist. Your GitHub (personal): the person's own account; commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose. Opengeni app: work appears as the Opengeni bot, shared with the workspace, installed per organization or account. 'Connect my GitHub', 'use my account' or 'do it as me' means personal; 'install the GitHub app' or 'give Opengeni access to the org/repos' means the app.";
+  "Two GitHub identities exist. Your GitHub (personal): the person's own account; commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose. GitHub app: work appears as the app's bot, shared with the workspace, installed per organization or account. 'Connect my GitHub', 'use my account' or 'do it as me' means personal; 'install the GitHub app' or 'give the app access to the org/repos' means the app.";
 
 /** Console origin for the person's links: the web console, never the API's own origin. */
 export function personalGitHubConsoleBaseUrl(input: {

@@ -7,7 +7,8 @@ credits only: top-ups and operator credit grants, which already carry the
 credit margin (`marginBps`, default 500). Plan credit and promotional credit
 never pay for API use.
 
-The origin is a funding decision only. It never grants or narrows access.
+The origin decides funding and whether connected subscriptions may serve the
+work. It never grants access to a workspace, session or credential.
 
 ## Which work is which
 
@@ -216,12 +217,17 @@ internal account is added the same way. Processes install it at boot
 
 A call served by the person's own API key (workspace or organization provider
 keys, workspace Gateway, organization Azure OpenAI, a custom endpoint key and
-similar) costs Opengeni nothing upstream. It pays a platform fee instead, in
-the app and over the API alike:
-`byokPlatformFeeBps` (`OPENGENI_BYOK_PLATFORM_FEE_BPS`, default 500 = 5%) of
-the call's list-price equivalent, rounded up to the micro-dollar. The fee is
+similar) costs Opengeni nothing upstream. Its platform fee, in the app and
+over the API alike, follows `byokPlatformFeeBps`
+(`OPENGENI_BYOK_PLATFORM_FEE_BPS`) as a proportion of the call's list-price
+equivalent, rounded up to the micro-dollar. The fee is
 charged only with Stripe billing (`OPENGENI_BILLING_MODE=stripe`), where people
-can buy the credit it needs; `0` turns it off. An account on legacy billing
+can buy the credit it needs; `0` disables both the debit and the paid-credit
+admission check. Production and staging use `0` as of 2 November 2026; do not
+infer a live fee from the code default (500 basis points). The billing page
+shows only fees actually charged this month, not an advertised rate. A charge
+from before a pause remains visible; a zero monthly charge has no fee row.
+An account on legacy billing
 terms (an internal account: CloudGeni or our own team, above) is skipped. Own
 subscriptions never pay this fee; they need a paid plan instead (see
 [Own subscriptions need a paid plan](#own-subscriptions-need-a-paid-plan)).
@@ -348,8 +354,8 @@ before them. An unrecorded top-up after the latest receipt repays fee debt
 first, and the next receipt records it and folds those rows into its totals.
 
 Workspace and member allowances count fee debits like any other debit, so an
-allowance that also counts unbilled usage at list price sees an own-key call
-at 105% of list.
+allowance that also counts unbilled usage at list price sees the list equivalent
+plus any fee actually charged. At a zero configured fee it sees list only.
 
 ## Own subscriptions need a paid plan
 
@@ -364,8 +370,45 @@ catalog price (`getOrganizationPlanStanding`); a plan with no catalog price
 (custom, or no longer listed) counts as custom. The rule applies only with
 Stripe billing and subscription plans enabled
 (`OPENGENI_BILLING_MODE=stripe`, `OPENGENI_SUBSCRIPTION_PLANS_ENABLED=true`),
-in the app and over the API alike, and skips accounts on legacy billing
-terms.
+for app-origin work, and skips accounts on legacy billing terms.
+
+### Connected subscriptions and API work
+
+API-origin work cannot use connected subscriptions, on any plan. Explicit
+subscription selections fail with HTTP 403 and `subscription_api_unavailable`:
+"Connected subscriptions are only available in the Opengeni apps. Choose a
+credit-billed model for API use." There is no purchase action: upgrading or
+adding credits cannot enable this route. Omitted API models skip subscriptions,
+including saved workspace and organization defaults. Admission rechecks the
+origin at the edge, scheduled dispatch, goal Resume/continuation, worker claim,
+between calls and stateless model calls. Sub-agents and compaction inherit their
+turn's origin. Published Sites remain app work; outside viewers already fall
+back to credit-billed models, while eligible workspace members may use a
+subscription. Internal legacy accounts retain their explicitly documented app
+funding treatment above; this change does not revoke that exception.
+
+A self-hosted operator that owns the subscriptions it connects can opt out of
+this refusal for its whole deployment with
+`OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED=true` (`apiConnectedSubscriptionsEnabled`,
+default `false`). It is operator configuration on the API and worker processes,
+never a request or tenant setting. With it on, API-origin work may select a
+connected subscription and omitted API models may resolve to one, on every
+path above and in transcription, realtime voice and titles; the origin still
+decides which credits pay for credit-billed work, and paid-plan requirements
+still apply where credit billing is active. The operator is responsible for
+its provider's terms. One predicate,
+`connectedSubscriptionsRefusedForOrigin` in `@opengeni/core`, makes the
+decision for every path.
+
+Transcription follows the same policy. An omitted recording model skips an
+ineligible saved subscription default. Explicit selections preserve the API
+refusal or paid-plan upgrade action instead of reporting a provider outage.
+Recording workers carry the version's frozen origin through transcription and
+automatic meeting notes.
+
+Connected Codex and SuperGrok realtime voice apply the same admission at call
+start and before every new provider connection. Their model catalog explains
+the API refusal or required upgrade, and eligible app calls never debit credits.
 
 An own-key or own-subscription route is told apart by its billing metadata:
 a model whose credential source or upstream payer is `connected_subscription`
@@ -385,9 +428,11 @@ other route Opengeni does not pay for upstream is an own API key.
   plan. It is never picked as the default model for a new chat or scheduled
   task while the plan does not allow it, so those fall through to a model the
   account can run. Free accounts can still use Opengeni's models within the
-  Free plan's monthly credit, or their own API keys with paid credit.
-- **Session titles:** a title generated on the person's own subscription costs
-  Opengeni nothing and is not gated or charged.
+  Free plan's monthly credit, or their own API keys (paid credit is required
+  only when a positive own-key fee is configured).
+- **Session titles:** a title generated on the person's own subscription is
+  fee-free, but still requires an eligible app plan and cannot serve API-origin
+  work. Delayed title jobs recheck eligibility before contacting the provider.
 
 ## Rollout
 
@@ -433,5 +478,5 @@ correct without it; until it exists the read finds the latest receipt through
 the account's `(account_id, created_at)` index, walking back over the spending
 since that receipt.
 
-The fee's default (500) turns it on wherever Stripe billing is active once
-deployed; set `OPENGENI_BYOK_PLATFORM_FEE_BPS=0` to deploy it switched off.
+Keep `OPENGENI_BYOK_PLATFORM_FEE_BPS=0` in the production and staging runtime
+overlays while the fee is paused. This change does not alter that setting.

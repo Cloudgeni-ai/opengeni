@@ -506,8 +506,8 @@ describe("vendored logo manifest document", () => {
       const asset = await readVendoredLogoAsset(entry!, VENDORED_LOGO_DIRECTORY);
       expect(asset.ok, `${entry!.file}: ${asset.ok ? "" : asset.reason}`).toBe(true);
     }
-    // Gmail, Google Drive, Google Calendar and Mobbin publish no reusable logo
-    // licence; the overlay keeps the monogram and no asset may be vendored for them.
+    // Google publishes no reusable Gmail, Drive or Calendar MCP logo asset, so
+    // nothing is vendored for them; @opengeni/react bundles their product marks.
     for (const { capabilityId } of suppressed) {
       expect(committed.has(capabilityId)).toBe(false);
     }
@@ -515,7 +515,6 @@ describe("vendored logo manifest document", () => {
       "calendarmcp.googleapis.com",
       "drivemcp.googleapis.com",
       "gmailmcp.googleapis.com",
-      "mobbin.com",
     ]);
     // Every vendored row is curated or a reviewed identity: the long tail is never vendored.
     for (const entry of VENDORED_LOGO_MANIFEST.entries) {
@@ -583,7 +582,6 @@ describe("vendor-catalog-logos script", () => {
       "calendarmcp.googleapis.com",
       "drivemcp.googleapis.com",
       "gmailmcp.googleapis.com",
-      "mobbin.com",
     ]);
     expect(result.manifest.entries).toHaveLength(fetchable.length - 2);
     expect(result.totalBytes).toBe(good.byteLength * (fetchable.length - 2));

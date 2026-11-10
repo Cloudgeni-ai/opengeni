@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import type { Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
+import type { ChatSession as Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
 import type { ComposerState, TimelineItem } from "../session";
 import { useSessionStartupState, type SessionStartupSource } from "./session-startup";
 
