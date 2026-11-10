@@ -165,6 +165,8 @@ hook, chat setup is server-owned: the hook returns the complete create
 request, so it is where the server chooses the agent, Skills, tools, and model
 policy, and the proxy refuses the routes that would change that setup later:
 
+<!-- doc-snippets: excerpt SessionProxyHandlerOptions from "@opengeni/sdk" -->
+
 ```ts
 createSession: ({ initialMessage, idempotencyKey }) => ({
   initialMessage,

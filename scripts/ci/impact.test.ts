@@ -251,6 +251,7 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toEqual([
       "format",
       "docs-refs",
+      "doc-snippets",
       "generated-fonts",
       "public-hygiene",
       "subscription-contract",

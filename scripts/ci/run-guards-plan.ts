@@ -8,6 +8,7 @@ const COMMANDS: Readonly<Record<string, readonly string[]>> = {
   format: ["bun", "run", "format:check"],
   "workspace-billing": ["bun", "scripts/check-workspace-billing-static.ts"],
   "docs-refs": ["bun", "scripts/check-docs-refs.ts"],
+  "doc-snippets": ["bun", "scripts/check-doc-snippets.ts"],
   "generated-fonts": ["bun", "run", "check:generated-fonts"],
   "public-hygiene": ["bun", "run", "check:public-hygiene"],
   "migration-ordinals": ["bun", "scripts/check-migration-ordinals.ts"],
