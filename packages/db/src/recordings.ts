@@ -1361,12 +1361,22 @@ export type UncompactedRecordingTrack = {
  * Finished meetings' audio tracks, across every workspace, whose kept file
  * is not yet in the kept format (its key does not end in `keptSuffix`) or
  * whose uploaded pieces are still stored beside it (migration 1240).
- * Identity only; the caller acts on each as its owner.
+ * Identity only; the caller acts on each as its owner. Null while the
+ * routine's runtime EXECUTE is withheld (runtime-posture
+ * DEFERRED_RUNTIME_PRIVATE_ROUTINES). The grant is checked in its own
+ * statement, because EXECUTE is checked when a statement starts.
  */
 export async function listUncompactedRecordingTracks(
   db: Database,
   input: { keptSuffix: string; limit?: number },
-): Promise<UncompactedRecordingTrack[]> {
+): Promise<UncompactedRecordingTrack[] | null> {
+  const [grant] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select coalesce(has_function_privilege(
+        to_regprocedure('opengeni_private.list_uncompacted_recording_tracks_v1(integer, text)')::oid,
+        'EXECUTE'), false) as granted`,
+  );
+  if (grant?.granted !== true) return null;
   const rows = await rawRows<{
     account_id: string;
     workspace_id: string;

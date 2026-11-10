@@ -48,6 +48,25 @@ const computerSessionId = randomUUID();
 const now = "2026-08-10T12:00:00.000Z";
 
 describe("interaction attempt tools", () => {
+  test("browser_open offers ephemeral contexts only where the server accepts them", () => {
+    const browserOpen = (ephemeralBrowserContexts?: boolean) =>
+      createInteractionAttemptToolDefinitions({
+        transport: unusedTransport(),
+        workspaceId,
+        sessionId,
+        selectedTools: ["browser_open"],
+        permissions: ["sessions:control"],
+        ...(ephemeralBrowserContexts === undefined ? {} : { ephemeralBrowserContexts }),
+      }).find((tool) => tool.identity.toolName === "browser_open")!;
+    for (const tool of [browserOpen(), browserOpen(false)]) {
+      expect(tool.description).not.toContain("ephemeral_context");
+      expect((tool.inputSchema.properties as Record<string, unknown>).storageMode).toBeUndefined();
+    }
+    const enabled = browserOpen(true);
+    expect(enabled.description).toContain("storageMode=ephemeral_context");
+    expect((enabled.inputSchema.properties as Record<string, unknown>).storageMode).toBeDefined();
+  });
+
   test("every native CUA tool exposes one top-level object schema", () => {
     const definitions = createInteractionAttemptToolDefinitions({
       transport: partialTransport({ callNativeComputerTool: async () => ({}) as never }),

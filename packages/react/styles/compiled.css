@@ -12168,6 +12168,12 @@
       pointer-events: none;
     }
   }
+:where(.og-root).\[\&_svg\]\:size-3,:where(.og-root) .\[\&_svg\]\:size-3 {
+    & svg {
+      width: calc(var(--spacing) * 3);
+      height: calc(var(--spacing) * 3);
+    }
+  }
 :where(.og-root).\[\&_svg\]\:size-3\.5,:where(.og-root) .\[\&_svg\]\:size-3\.5 {
     & svg {
       width: calc(var(--spacing) * 3.5);

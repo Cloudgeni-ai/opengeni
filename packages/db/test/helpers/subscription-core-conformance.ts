@@ -3374,6 +3374,26 @@ export function describeSubscriptionCoreConformance<Credential>(
       ).toEqual({ kind: "unavailable" });
     });
 
+    test("a disconnected source lends its live lease no credential", async () => {
+      const org = await organization();
+      const connectionId = await sharedConnection(org, `disconnected-${crypto.randomUUID()}`);
+      const turn = await runningTurn(org);
+      expect(await placeChecked(turn)).toMatchObject({ kind: "run", connectionId });
+      const lease = leaseOf(turn, connectionId);
+      expect(
+        await runtime().loadSubscriptionCoreCredential(db(), settings, turn.identity, lease),
+      ).toMatchObject({ kind: "loaded" });
+      // A disconnected row is disabled and scrubbed (a table check), so the
+      // read itself refuses it: a turn needs no separate source read first.
+      await admin()`update subscription_connections set disconnected_at = clock_timestamp(),
+          status = 'disabled', credential_encrypted = '', provider_account_id = null,
+          allocator_enabled = false
+        where id = ${connectionId}::uuid`;
+      expect(
+        await runtime().loadSubscriptionCoreCredential(db(), settings, turn.identity, lease),
+      ).toEqual({ kind: "unavailable" });
+    });
+
     test("each request is reserved and settled; an unknown outcome is never replayed", async () => {
       const org = await organization();
       const connectionId = await sharedConnection(org, `request-${crypto.randomUUID()}`);

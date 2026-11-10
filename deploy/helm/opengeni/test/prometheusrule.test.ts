@@ -263,7 +263,10 @@ describe("turn-capacity Prometheus alerts", () => {
     );
     const expected = new Map([
       ["OpenGeniTurnFailureRatioHigh", ["opengeni_turns_total", 'outcome="failed"']],
-      ["OpenGeniTurnRecoveryRatioHigh", ["opengeni_turn_recoveries_total", 'cause!="provider"']],
+      [
+        "OpenGeniTurnRecoveryRatioHigh",
+        ["opengeni_turn_recoveries_total", 'cause!~"provider|route_change"'],
+      ],
       [
         "OpenGeniTurnWorkerDeathRecovered",
         ["opengeni_turn_worker_death_recoveries_total", 'outcome="recovering"'],
@@ -665,7 +668,9 @@ describe("turn-capacity Prometheus alerts", () => {
       expect(block).not.toContain("vector(0)");
     }
     expect(critical).toContain("legacy video/retry");
-    expect(ruleBlock(template, "alert", "OpenGeniTurnCapacityMonitorStale")).toContain("for: 30s");
+    // Worker rollouts leave a new or draining pod unreported for a minute or
+    // two; only sustained blindness is worth a warning.
+    expect(ruleBlock(template, "alert", "OpenGeniTurnCapacityMonitorStale")).toContain("for: 5m");
   });
 
   test("scopes sustained Pending worker alerts to the exact release, not every Pod", async () => {
@@ -898,3 +903,24 @@ function renderDeploymentScope(
     .replaceAll("{{ .Release.Name | quote }}", JSON.stringify(scope.release))
     .replaceAll("{{ $environment | quote }}", JSON.stringify(scope.environment));
 }
+
+test("platform reliability ratios exclude customer-provider failures consistently", async () => {
+  const template = await readFile(
+    new URL("../templates/prometheusrule.yaml", import.meta.url),
+    "utf8",
+  );
+  for (const name of [
+    "OpenGeniTurnFailureRatioHigh",
+    "OpenGeniModelCallFailureRatioHigh",
+    "OpenGeniTurnStartupFirstByteAvailabilityLow",
+  ]) {
+    const selectors = metricSelectors(alertExpression(template, name));
+    expect(selectors.length).toBeGreaterThan(2);
+    for (const selector of selectors)
+      expect(selector).toContain('failure_origin!="customer_provider"');
+  }
+  // Recovery/exhaustion and other system signals are not suppressed by provider choice.
+  expect(alertExpression(template, "OpenGeniTurnRecoveryRatioHigh")).not.toContain(
+    "failure_origin",
+  );
+});

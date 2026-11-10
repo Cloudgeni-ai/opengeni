@@ -1,5 +1,80 @@
 # Modular prompt changelog
 
+Agents can start workers as the person on GitHub, and know when the person
+allowed all their repositories. No prompt module changes; three tool texts
+change. `session_create`'s `resources` description gains one sentence
+(136 bytes) only when personal GitHub OAuth is enabled, because the server now
+resolves a personal repository named by `uri`, `ref` and `connectionType` from
+the calling turn's Your GitHub access; other deployments keep their bytes.
+Only where All my repositories is offered
+(`OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED`), `github_connect_link`'s
+personal-OAuth description grows 188 bytes to name the new
+`personal.allRepositories` field and what it allows, and its shared identity
+guidance, also used by the `api:github-personal` catalog description, grows
+17 bytes so it no longer implies the person must choose each repository.
+Deployments without that mode keep both texts byte for byte.
+
+```text
+- … An empty array inherits no resources.
++ … An empty array inherits no resources. For a repository as the person, give uri, ref and connectionType "github_personal"; the rest comes from this turn's Your GitHub access.   (personal GitHub OAuth on)
+- The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl …
++ The personal field covers the person's own account: connected, login, repositoryCount (their chosen list) and allRepositories, or connectUrl … When allRepositories.enabled, any repository the person can reach on GitHub is usable as them up to allRepositories.access, without choosing it first.   (All my repositories offered)
+- … only in chats they start, on repositories they choose.
++ … only in chats they start, on repositories they choose or all of theirs.   (All my repositories offered)
+```
+
+Codemode's programmatic directive grows by 261 UTF-8 bytes (2,368 to 2,629),
+only where an attempt-scoped Codemode bearer is available. Its polling advice
+now explicitly applies within the live attempt: background processes retain
+their launching credentials, so delayed checks should wake the session and
+start a fresh command rather than reuse a sleeping script after the turn ends.
+Sessions without Codemode keep their prompt bytes. This is a static directive
+change; it introduces no per-request state, token renewal, history rewrite or
+automatic tool replay. The existing receipt/unknown-outcome guidance remains.
+
+The API's `agent_attempt_caller_stale` refusal now explains that the process's
+turn attempt is no longer active, says to stop retrying that process and start
+a fresh command in the current live turn, and warns to check receipts or actual
+state before resubmitting a possibly executed call. Its 403 status, typed
+reason and non-retryable outcome are unchanged; other authority failures keep
+their existing message. Clients already display the server's error message.
+
+A configured session without a sandbox or Connected Machine no longer gets
+text it cannot act on: editing files in the sandbox, publishing new files,
+workspace file links, sandbox paths, background-command acknowledgement and
+sandbox CLI lists. Site guidance stays, because the Site tools create a Site
+from inline HTML without compute. Without compute, the document rule instead
+says to export a native document when the user asks for a Word, Excel, PDF or
+PowerPoint file and the export tool lists that format. The verification rule
+names a goal and its completion audit only with goals, and an applicable Skill
+only with goals or a readable Skill. It is unchanged whenever goals are on, so
+a session with goals and a sandbox or Connected Machine keeps its bytes; a
+session with compute but without goals gets the goal-free verification rule.
+Measured with the Sonnet 5.5 tokenizer: "none" without compute 2,772 → 2,754
+system tokens; "all" without compute 8,963 → 8,702; "all" with a managed sandbox
+10,405 (unchanged).
+
+```text
+- … Read the documents Skill and create the native document artifact before authoring it; do not write a sandbox Markdown report first or treat publishing a file as native document creation. A Word, Excel, PDF or PowerPoint file the user sends to be changed is edited in the sandbox … unless the artifact export tool lists that format. Then give …
++ … Read the documents Skill and create the native document artifact before authoring it. When the user asks for a Word, Excel, PDF or PowerPoint file, export the native document if the artifact export tool lists that format. Then give …   (no compute)
+- … A sandbox path, a raw file ID, or an assertion that a report exists is not completed report delivery.
++ … A raw file ID or an assertion that a report exists is not completed report delivery.   (no compute)
+- Do not silently fall back to a sandbox link, invent an artifact reference, or claim success. Ordinary in-chat answers, brief progress updates, internal worker findings, source-code navigation, and explicitly requested local-file workflows do not become report deliverables merely because they contain Markdown or a file link.
++ Do not invent an artifact reference or claim success. Ordinary in-chat answers, brief progress updates, and internal worker findings do not become report deliverables merely because they contain Markdown.   (no compute)
+- Publish files you deliberately deliver so they are retained and discoverable in Artifacts; do not publish every temporary file.   (no compute)
+- Source-code navigation may still use workspace file links.   (no compute)
+- Never substitute a storage URL or a sandbox path for a published artifact reference.
++ Never substitute a storage URL for a published artifact reference.   (no compute)
+- For a sandbox image, publish the file first; a sandbox path is not an inline image source.   (no compute; also "A sandbox path is not an inline image source." without sandbox_file_publish)
+- Audit reads do not acknowledge command completion.   (no compute)
+- … rather than looping while holding the inference and sandbox.
++ … rather than looping while holding the inference.   (no compute)
+- `generate_image` is a runtime tool; integration catalogs and sandbox CLI lists do not enumerate it.
++ `generate_image` is a runtime tool; integration catalogs do not enumerate it.   (no compute)
+- Comprehensive audits or reconciliation requested by the goal, user, or applicable Skill … without dropping the full completion audit or required evidence.
++ Comprehensive audits or reconciliation requested by the user or applicable Skill … without dropping required evidence.   (no goals, with or without compute; "by the user" without a readable Skill)
+```
+
 A new first-party tool, `github_repository_attach`, lets the agent ask to
 attach a repository the workspace GitHub App offers to its own chat. It is
 registered only for a chat's own signed attempt with `github:use`, so other
@@ -1272,6 +1347,11 @@ unchanged.
   Integration setup drops "(see Session coordination)".
 - `workspaceAdmin` off: the rig `rig_propose_change`/`rig_get` sentences are
   omitted.
+- No sandbox or Connected Machine: the documents, file-publishing,
+  sandbox-path, command-acknowledgement and CLI-list clauses listed at the top
+  of this file are omitted or use their no-compute wording.
+- `goals` off: the verification rule names "the user or applicable Skill"
+  ("the user" without a readable Skill) and drops "the full completion audit".
 - Managed sandbox only: "Use the active workspace path exactly as exposed to
   you. Managed sandboxes normally use `/workspace`."
 - Connected Machine only: "… A Connected Machine uses its host-native workspace

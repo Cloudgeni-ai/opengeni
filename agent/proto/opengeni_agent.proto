@@ -1364,6 +1364,16 @@ message OpAck {
   // ABSOLUTE window REPLACEMENT: a stale consumer's ack could otherwise shrink the
   // live consumer's window (stall) or grant unintended credit (B2).
   uint64 attach_generation = 5;
+  // The consumer stops following the op's frames (the turn that launched it
+  // yielded, or a read ended) while the op stays retained for a later attach.
+  // The runner stops sending, keeps draining the child into retention without
+  // a credit window (a noisy unread command still ends typed at its retention
+  // quota, never parks), and resumes sending only on a later OpAttach. Applies
+  // only from the exact current generation, like every ack side effect;
+  // credit_bytes is then ignored. A consumer sets credit_bytes to the full
+  // uint64 range alongside it, so a runner without this field keeps draining
+  // too (it streams the output nobody reads).
+  bool detach = 6;
 }
 
 // =============================================================================

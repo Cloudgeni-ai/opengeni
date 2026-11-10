@@ -75,7 +75,7 @@ jobs:
   automation-admission:
     name: Admit automation Version PR
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 320
     permissions:
       actions: read # authenticate the exact Version PR producer run
@@ -235,7 +235,7 @@ jobs:
       !(needs.batch-receipt.result == 'success' && (needs.batch-receipt.outputs.kind == 'attested' || needs.batch-receipt.outputs.kind == 'intermediate')) &&
       !startsWith(github.event.head_commit.message, 'chore: version packages') &&
       !contains(github.event.head_commit.message, 'changeset-release/main') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       actions: write # cancel this run
@@ -265,7 +265,7 @@ jobs:
   batch-receipt:
     name: Batch receipt
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -304,7 +304,7 @@ jobs:
     name: Explain change impact
     needs: [automation-admission, main-ci-cadence, batch-receipt]
     if: ${{ !cancelled() && needs.main-ci-cadence.result != 'failure' && !(needs.batch-receipt.result == 'success' && needs.batch-receipt.outputs.kind == 'intermediate') && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 17
     outputs:
       attested: ${{ steps.receipt.outputs.attested }}
@@ -542,7 +542,7 @@ jobs:
     name: Source and type contracts
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
       - name: Check out repository
@@ -749,7 +749,7 @@ jobs:
     name: Unit tests (shard ${{ matrix.number }}/${{ matrix.total }})
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.unit_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       # Finish independent shards so one failure cannot hide other regressions.
@@ -860,7 +860,7 @@ jobs:
     name: Real-service shard ${{ matrix.number }}/${{ matrix.total }}
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.integration_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: true
@@ -912,7 +912,7 @@ jobs:
     name: Impacted E2E shard ${{ matrix.number }}/${{ matrix.total }}
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.e2e_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
       fail-fast: true
@@ -1002,7 +1002,7 @@ jobs:
     name: Real-service and recovery tests
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.mode != 'docs' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Check out repository
@@ -1109,7 +1109,7 @@ jobs:
     name: Browser and visual acceptance (${{ matrix.lane }})
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browser_lane_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 71
     strategy:
       fail-fast: false
@@ -1488,7 +1488,7 @@ jobs:
     name: Package and bundle contracts
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.build_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
       - name: Check out repository
@@ -1760,7 +1760,7 @@ jobs:
     name: Real Chromium browser controller
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.browserd_real_e2e == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && needs.plan.outputs.attested != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 17m browser installation + 2m recovery + 13m headless + 5m headed,
     # with 3m for checkout, dependencies and cleanup.
     timeout-minutes: 40
@@ -1832,7 +1832,7 @@ jobs:
     # result here canary admission refuses it (docs/merge-batcher.md).
     needs: [plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime, images, batch-receipt]
     if: ${{ always() && !(needs.batch-receipt.result == 'success' && needs.batch-receipt.outputs.kind == 'intermediate') && !(github.event_name == 'pull_request' && github.head_ref == 'main' && github.base_ref == 'production') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Require successful impact planning before candidate execution
@@ -1889,7 +1889,7 @@ jobs:
     # Every image-producing source needs the deployment receipt, including a
     # docs-only main push. Staging validates it before importing these images.
     if: ${{ !cancelled() && needs.plan.result == 'success' && (needs.plan.outputs.mode != 'docs' || needs.plan.outputs.bake_images == 'true') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Check out repository
@@ -2147,7 +2147,7 @@ jobs:
     # final aggregates still require every lane and image.
     needs: [automation-admission, plan, source-contracts, unit-shards, integration-shards, e2e-shards, test-suite, browser-acceptance, browserd-real-e2e, package-contracts, deployment, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && !startsWith(github.ref, 'refs/heads/batch/') && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -2204,7 +2204,7 @@ jobs:
     environment: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'public-release' || 'ci-build' }}
     needs: [automation-admission, plan, artifact-runtime, release-image-validation]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') && (github.event_name != 'push' || github.ref != 'refs/heads/main' || needs.release-image-validation.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -2275,6 +2275,15 @@ jobs:
             done
           done
 
+      # The signed binaries are staged under agent/install/baked. The cargo
+      # build tree (four release builds) and SDKs this job never uses would
+      # otherwise leave the two-architecture image build without disk.
+      - name: Free runner disk before the image build
+        run: |
+          sudo rm -rf agent/target "$HOME/.cargo/registry" \
+            /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
@@ -2310,7 +2319,7 @@ jobs:
     name: Build worker workload image
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
       contents: read
@@ -2359,7 +2368,7 @@ jobs:
     name: Build web workload image
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     permissions:
       contents: read
@@ -2406,7 +2415,7 @@ jobs:
     name: Build artifact materializer workload image
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
       contents: read
@@ -2461,7 +2470,7 @@ jobs:
     name: Build artifact outbox dispatcher workload image
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
       contents: read
@@ -2510,7 +2519,7 @@ jobs:
     name: Build relay workload image
     needs: [automation-admission, plan]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -2555,7 +2564,7 @@ jobs:
     name: Build headless sandbox workload image
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -2609,7 +2618,7 @@ jobs:
     name: Build desktop sandbox workload image
     needs: [automation-admission, plan, artifact-runtime]
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && needs.artifact-runtime.result == 'success' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -2685,7 +2694,7 @@ jobs:
       - sandbox-image
       - desktop-image
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -2802,7 +2811,7 @@ jobs:
     name: Report exact-head automation CI
     needs: [automation-admission, test, deployment, images]
     if: ${{ always() && github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       checks: write
@@ -2834,7 +2843,7 @@ jobs:
     # last full-green SHA, intermediate members included.
     needs: [batch-receipt]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && !(needs.batch-receipt.result == 'success' && needs.batch-receipt.outputs.kind == 'intermediate') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -2861,7 +2870,7 @@ jobs:
     # (test, images) already verify every lane they cover; require each direct
     # need explicitly and never publish from a cancelled run.
     if: ${{ !cancelled() && needs.plan.result == 'success' && needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && needs.merge-content.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.mode == 'full' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read

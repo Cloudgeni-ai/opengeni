@@ -448,6 +448,52 @@ describe("op-stream exec (fake runner)", () => {
     expect(await session.refreshOwnedCommand("owned-refresh")).toBe(false);
   });
 
+  test("an owner refresh after the result was stored and released reads the stored record, not a lost result", async () => {
+    const settled: string[] = [];
+    const { runner, session } = buildRig({
+      adoptBackgroundCommand: async ({ opId }) => ({ commandId: `cmd-${opId}` }),
+      captureBackgroundCommandOutput: async () => {},
+      settleBackgroundCommand: async ({ commandId }) => {
+        settled.push(commandId);
+      },
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    for (const name of ["released_read", "evicted_read"]) {
+      runner.script(`${name}:0`, {
+        frames: [{ channel: "stdout", bytes: "done" }],
+        live: true,
+        holdUntilCancel: true,
+      });
+      await runWithToolCallCorrelation(name, () =>
+        session.execCommand({ cmd: "work", yieldTimeMs: 1 }),
+      );
+      await session.cancelExecCommand(`${name}:0`);
+    }
+    // A concurrent collection stored the result and released it on the runner
+    // between the wait's snapshot and this refresh.
+    const released = runner.runs.get("released_read:0")!;
+    await runner.request(
+      `agent.${WORKSPACE}.${AGENT}.connection.${CONNECTION_INSTANCE}.rpc`,
+      {
+        requestId: crypto.randomUUID(),
+        epoch: 0,
+        op: {
+          $case: "opRelease",
+          opRelease: { opId: "released_read:0", exitSeq: released.exitSeq.toString() },
+        },
+      },
+      { timeoutMs: 1000 },
+    );
+    expect(await session.refreshOwnedCommand("cmd-released_read:0")).toBe(true);
+    expect(await session.refreshOwnedCommand("cmd-released_read:0")).toBe(false);
+    // Any other loss is still a real loss.
+    runner.lostOps.add("evicted_read:0");
+    await expect(session.refreshOwnedCommand("cmd-evicted_read:0")).rejects.toThrow(
+      "no longer available",
+    );
+    expect(settled).toEqual([]);
+  });
+
   test("attach-only command reads replay exact UTF-8 frames without starting, cancelling, or final-acking", async () => {
     const { runner, transport, session } = buildRig({
       adoptBackgroundCommand: async () => ({ commandId: "live-command" }),
@@ -532,6 +578,18 @@ describe("op-stream exec (fake runner)", () => {
       session.execCommand({ cmd: "live", yieldTimeMs: 0 }),
     );
     expect((await reader.readExisting("read_live:0", 5, async () => {})).status).toBe("running");
+    // A yielded consumer stops following: its generation's last word to the
+    // runner is a detach, so nothing keeps streaming to an unsubscribed
+    // subject over the machine's shared bulk connection. Older runners read
+    // the accompanying full credit range and keep draining as before.
+    const liveAcks = transport.decodedAcks().filter((ack) => ack.opId === "read_live:0");
+    const detaches = liveAcks.filter((ack) => ack.detach);
+    expect(detaches.length).toBeGreaterThan(0);
+    expect(liveAcks.at(-1)?.detach).toBe(true);
+    expect(detaches.every((ack) => ack.creditBytes === "18446744073709551615")).toBe(true);
+    expect(
+      liveAcks.filter((ack) => !ack.detach).every((ack) => BigInt(ack.creditBytes) < 2n ** 32n),
+    ).toBe(true);
     expect(runner.runs.get("read_live:0")!.exit.cancelled).toBe(false);
     expect(calls).not.toContain("opStart");
     expect(calls).not.toContain("opCancel");

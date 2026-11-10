@@ -15,10 +15,32 @@ work. It never grants access to a workspace, session or credential.
 | Origin | Work |
 | --- | --- |
 | app | A person signed in to Opengeni's web, desktop or mobile apps (canonical managed or local human session, including approved native app credentials). Slack and Teams bots, schedules and automations, published Sites and their viewers, voice. |
-| api | Organization and configured API keys, personal API keys, products on the SDK acting for their people (delegated tokens), outside agents over MCP (organization MCP sign-in or keys), external actors, and service initiators. Any person credential that is not a verified Opengeni app session. |
+| api | Organization and configured API keys, personal API keys, products on the SDK acting for their people (delegated tokens), outside agents over MCP (organization MCP sign-in or keys), external actors, and service initiators. Any person credential that is not a verified Opengeni app session. Every call to the direct model API (`/v1/workspaces/:workspaceId/chat/completions` and its `/models` list), whatever credential signs it. |
 
 Sub-agents and tools run under an internal `agent_attempt` credential. They
 inherit the origin of the chat they run in, never the credential's.
+
+### The direct model API is always API use
+
+The OpenAI-compatible endpoint is for outside tools, so a call to it is API
+use even when it is signed with a person's own Opengeni sign-in (a browser
+session cookie or a native app `ogapp_` credential), which would otherwise be
+app use. Free and other plan credit therefore never pays for it, and it cannot
+use connected subscriptions (see below). The route runs each call under
+`asDirectModelApiUse` (`apps/api/src/access-grant-rls.ts`), which fixes the
+origin to API with `withBillingOriginOverride`. Two callers keep the origin
+they already have, because they are work inside a chat rather than a person's
+own API use:
+
+- an agent attempt (`agent_attempt` credential) keeps its chat's origin, like
+  every other tool an agent uses;
+- a request a trusted in-process dispatcher already stamped
+  (`stampRequestBillingOrigin`), such as an agent's app action, keeps that
+  stamp. Published Sites stamp app use but only forward chat routes, so they
+  never reach this endpoint.
+
+Internal (legacy) accounts stay app use (`fundedBillingOrigin`). None of
+Opengeni's own apps call this endpoint with a person's sign-in.
 
 ## Where it is decided and stored
 
@@ -134,6 +156,8 @@ web search, image and video generation, and schedules. API work with no
 credits is refused with HTTP 402, code `api_credits_required`, the message
 "API usage uses credits, not your plan credit." and an Add credits action
 (`details.action = { type: "add_credits", href: "/billing" }`).
+The direct model API answers in OpenAI's error shape, so it carries no
+action; its message ends "Add credits to use the API." instead.
 
 Machine work outside a request takes the origin it is funded under:
 goal continuations and Resume read the chat's origin (its latest decided turn,

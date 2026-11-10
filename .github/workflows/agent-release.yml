@@ -12,7 +12,7 @@ name: Agent Release
 # truth, and a dormant-until-opted-in guard (RELEASE_ENABLED) for tag pushes.
 #
 # Build matrix → native runners → correct platform binaries + real cargo test:
-#   x86_64/aarch64-unknown-linux-musl  (ubuntu-latest, static via cargo-zigbuild)
+#   x86_64/aarch64-unknown-linux-musl  (ubuntu-24.04, static via cargo-zigbuild)
 #   universal-apple-darwin             (macos-26 lipo of x86_64 + arm64)
 #   x86_64/aarch64-pc-windows-msvc     (windows-latest)
 #
@@ -53,7 +53,7 @@ jobs:
   # fat-fingered tag fails in seconds rather than after a 20-min macOS build.
   guard:
     name: Guard
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     if: ${{ vars.RELEASE_ENABLED == 'true' || github.event_name == 'workflow_dispatch' }}
     outputs:
@@ -126,7 +126,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-musl
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
             asset: opengeni-agent-x86_64-unknown-linux-musl
             kind: linux
           - target: aarch64-unknown-linux-musl
@@ -691,7 +691,7 @@ jobs:
     name: Publish release
     needs: [guard, build]
     if: ${{ needs.guard.outputs.publish == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write

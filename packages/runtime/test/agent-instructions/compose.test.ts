@@ -463,6 +463,139 @@ describe("modular composer: renderer (AC15)", () => {
   });
 });
 
+describe("modular composer: text that needs attached compute", () => {
+  const SANDBOX: AgentPromptResources = { ...NO_RESOURCES, managedSandbox: true };
+  const MACHINE: AgentPromptResources = { ...NO_RESOURCES, connectedMachine: true };
+  // Sandbox files, publishing new files, workspace file links, sandbox paths,
+  // background commands and CLI lists exist only with a sandbox or machine.
+  // Sites are created from inline HTML by the Site tools, so they stay.
+  const COMPUTE_ONLY = [
+    "edited in the sandbox with ordinary tools",
+    "do not write a sandbox Markdown report first",
+    "A sandbox path, a raw file ID",
+    "fall back to a sandbox link",
+    "source-code navigation",
+    "Publish files you deliberately deliver",
+    "Source-code navigation may still use workspace file links.",
+    "or a sandbox path for a published artifact reference",
+    "For a sandbox image, publish the file first",
+    "Audit reads do not acknowledge command completion.",
+    "holding the inference and sandbox",
+    "sandbox CLI lists",
+  ];
+  // Said only without compute, where the sandbox file-format sentence is gone.
+  const NO_COMPUTE_ONLY = [
+    "export the native document if the artifact export tool lists that format",
+  ];
+  const KEPT = [
+    "# Documents, files, and visuals",
+    "Create a document Artifact only when",
+    "## Visuals in chat",
+    "Never substitute a storage URL",
+    "Inline HTML stays in chat unless explicitly saved as a Site.",
+    "read the sites Skill",
+    "Sites and native documents keep their tool-returned canonical links.",
+    "documents, Sites, and visuals",
+    "a Site reaches the model and workspace tools",
+    "# Session coordination",
+    "Decide the design before building it.",
+    "# Images and video",
+  ];
+
+  test("renders with a sandbox or a Connected Machine and is left out without one", () => {
+    const without = compose(allAgentCapabilities(), NO_RESOURCES).composed;
+    for (const resources of [SANDBOX, MACHINE]) {
+      const withCompute = compose(allAgentCapabilities(), resources).composed;
+      for (const text of COMPUTE_ONLY) expect(withCompute).toContain(text);
+      for (const text of NO_COMPUTE_ONLY) expect(withCompute).not.toContain(text);
+      for (const text of KEPT) expect(withCompute).toContain(text);
+    }
+    for (const text of COMPUTE_ONLY) expect(without).not.toContain(text);
+    for (const text of NO_COMPUTE_ONLY) expect(without).toContain(text);
+    for (const text of KEPT) expect(without).toContain(text);
+    expect(without).toContain("Do not invent an artifact reference or claim success.");
+    expect(without).toContain(
+      "Ordinary in-chat answers, brief progress updates, and internal worker findings do not become report deliverables merely because they contain Markdown.",
+    );
+    expect(without).toContain("integration catalogs do not enumerate it.");
+    expect(without).toContain("rather than looping while holding the inference.");
+  });
+
+  test("a smaller configuration without compute drops the same text", () => {
+    const features = {
+      ...noneAgentCapabilities(),
+      artifacts: true,
+      media: true,
+      subagents: true,
+      goals: true,
+    };
+    const without = compose(features, NO_RESOURCES).composed;
+    const withCompute = compose(features, SANDBOX).composed;
+    for (const text of COMPUTE_ONLY) expect(without).not.toContain(text);
+    for (const text of NO_COMPUTE_ONLY) expect(without).toContain(text);
+    expect(withCompute).toContain("edited in the sandbox with ordinary tools");
+    expect(withCompute).toContain("For a sandbox image, publish the file first");
+  });
+
+  test("the markdown renderer without compute keeps only renderer-neutral delivery rules", () => {
+    const markdown = compose(allAgentCapabilities(), NO_RESOURCES, "markdown").composed;
+    for (const text of COMPUTE_ONLY) expect(markdown).not.toContain(text);
+    expect(markdown).toContain(
+      "Sites and native documents keep their tool-returned canonical links.",
+    );
+    expect(markdown).not.toContain("Inline HTML stays in chat");
+  });
+
+  test("the image paragraph names no sandbox path without compute, with or without file publishing", () => {
+    for (const unavailable of [[], ["sandbox_file_publish"]] as const) {
+      const render = (resources: AgentPromptResources) =>
+        composeModularAgentInstructions({
+          capabilities: allAgentCapabilities(),
+          renderer: "opengeni",
+          identity: DEFAULT_AGENT_IDENTITY,
+          resources,
+          toolAvailability: { unavailable: [...unavailable] },
+        }).composed;
+      const without = render(NO_RESOURCES);
+      expect(without).toContain(
+        "Display images with ![descriptive alt text](artifact:<artifactId>).",
+      );
+      expect(without).not.toContain("A sandbox path is not an inline image source.");
+      expect(without).not.toContain("a sandbox path is not an inline image source.");
+      expect(render(SANDBOX)).toMatch(/[Aa] sandbox path is not an inline image source\./u);
+    }
+  });
+
+  test("the verification rule names goals and Skills only when the session has them", () => {
+    const rule = (capabilities: ResolvedAgentCapabilities) =>
+      compose(capabilities, NO_RESOURCES)
+        .composed.split("\n")
+        .find((line) => line.startsWith("- Match verification"))!;
+    expect(rule(allAgentCapabilities())).toContain(
+      "requested by the goal, user, or applicable Skill are substantive work",
+    );
+    expect(rule(allAgentCapabilities())).toContain(
+      "without dropping the full completion audit or required evidence.",
+    );
+    const noGoals = rule({ ...allAgentCapabilities(), goals: false });
+    expect(noGoals).toContain("requested by the user or applicable Skill are substantive work");
+    expect(noGoals).toContain("without dropping required evidence.");
+    const none = rule({ ...noneAgentCapabilities(), skills: false });
+    expect(none).toContain("requested by the user are substantive work");
+    expect(none).not.toMatch(/goal|Skill|completion audit/u);
+    // Compute does not change the rule: a sandbox session without goals gets
+    // the same goal-free wording.
+    const sandboxNoGoals = compose({ ...allAgentCapabilities(), goals: false }, SANDBOX)
+      .composed.split("\n")
+      .find((line) => line.startsWith("- Match verification"))!;
+    expect(sandboxNoGoals).toBe(noGoals);
+    const sandboxGoals = compose(allAgentCapabilities(), SANDBOX)
+      .composed.split("\n")
+      .find((line) => line.startsWith("- Match verification"))!;
+    expect(sandboxGoals).toBe(rule(allAgentCapabilities()));
+  });
+});
+
 describe("modular composer: identity and precedence (AC12, AC14)", () => {
   test("identity tiers replace each other in order", () => {
     const deploymentTemplate = "You are Deploy Bot. {{core}}";

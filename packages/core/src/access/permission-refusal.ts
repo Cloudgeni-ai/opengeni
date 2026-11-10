@@ -1,4 +1,4 @@
-import type { Permission } from "@opengeni/contracts";
+import type { AuthenticationRequiredReason, Permission } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 
 /** The typed `details.code` of every refusal for a missing permission. */
@@ -96,4 +96,25 @@ export class MissingPermissionRefusal extends HTTPException {
 /** The permission a refusal names, or null for any other error. */
 export function missingPermissionOf(error: unknown): Permission | null {
   return error instanceof MissingPermissionRefusal ? error.permission : null;
+}
+
+/**
+ * A 401 for a request that signs no one in. The message stays the plain
+ * "authentication required"; `reason` says whether a sign-in was missing or
+ * no longer valid, so the error envelope carries it as `details.code`, a
+ * signed-in client can tell its sign-in is gone, and refusal telemetry can
+ * tell a lapsed sign-in from a missing permission.
+ */
+export class AuthenticationRequiredRefusal extends HTTPException {
+  readonly reason: AuthenticationRequiredReason;
+
+  constructor(reason: AuthenticationRequiredReason) {
+    super(401, { message: "authentication required" });
+    this.name = "AuthenticationRequiredRefusal";
+    this.reason = reason;
+  }
+
+  get details(): { code: AuthenticationRequiredReason } {
+    return { code: this.reason };
+  }
 }

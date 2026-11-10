@@ -1,3 +1,11 @@
+import { betterAuthLogArguments, betterAuthLogText } from "./better-auth-log";
+import {
+  MANAGED_AUTH_NEW_PASSWORD_FIELDS,
+  ManagedAuthPasswordCompromisedError,
+  managedAuthBreachedPasswordCheckEnabled,
+  managedAuthPasswordBreached,
+  type PasswordBreachLookup,
+} from "./password-breach";
 import { requireSignupChallenge } from "./signup-challenge";
 import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
 import {
@@ -265,20 +273,23 @@ export async function verifyManagedAuthPassword(password: string, hash: string):
 type ManagedAuthPoolObservability = Pick<Observability, "warn" | "incrementCounter">;
 
 /**
- * Better Auth's default console output, plus handing logged failures to the
+ * Better Auth's console output with every argument projected through
+ * `betterAuthLogArguments`, so request bodies, tokens, links and addresses
+ * never reach the log. The raw failures still go, in process only, to the
  * session-lookup boundary so a lost database connection behind its generic
  * INTERNAL_SERVER_ERROR stays recognizable (see `withManagedAuthSessionLookup`).
  */
-function logBetterAuthMessage(
+export function logBetterAuthMessage(
   level: "debug" | "info" | "warn" | "error",
   message: string,
   ...args: unknown[]
 ): void {
   if (level === "error") recordManagedAuthLoggedFailure(args);
-  const line = `${new Date().toISOString()} ${level.toUpperCase()} [Better Auth]: ${message}`;
-  if (level === "error") console.error(line, ...args);
-  else if (level === "warn") console.warn(line, ...args);
-  else console.log(line, ...args);
+  const line = `${new Date().toISOString()} ${level.toUpperCase()} [Better Auth]: ${betterAuthLogText(String(message))}`;
+  const logged = betterAuthLogArguments(args);
+  if (level === "error") console.error(line, ...logged);
+  else if (level === "warn") console.warn(line, ...logged);
+  else console.log(line, ...logged);
 }
 
 /**
@@ -453,6 +464,8 @@ export function createManagedAuth(
   options: {
     observability?: ManagedAuthPoolObservability;
     newSignupsGate?: ManagedAuthNewSignupsGate;
+    /** Breached-password lookup; Have I Been Pwned unless a test replaces it. */
+    passwordBreachLookup?: PasswordBreachLookup;
   } = {},
 ): ManagedAuth | null {
   if (settings.productAccessMode !== "managed") {
@@ -498,6 +511,26 @@ export function createManagedAuth(
         db,
         settings.betterAuthSecret ?? MANAGED_AUTH_EMAIL_THROTTLE_FALLBACK_KEY,
         async ({ path, body }) => {
+          // A new password found in a breach is refused before Better Auth
+          // hashes it (sign-up, including a repeated unverified sign-up, and
+          // password reset).
+          const newPasswordField = Object.hasOwn(MANAGED_AUTH_NEW_PASSWORD_FIELDS, path)
+            ? MANAGED_AUTH_NEW_PASSWORD_FIELDS[path]!
+            : null;
+          const newPassword = newPasswordField
+            ? (body as Record<string, unknown> | undefined)?.[newPasswordField]
+            : undefined;
+          if (
+            typeof newPassword === "string" &&
+            (await managedAuthPasswordBreached(newPassword, {
+              enabled: managedAuthBreachedPasswordCheckEnabled(settings),
+              ...(options.passwordBreachLookup ? { lookup: options.passwordBreachLookup } : {}),
+              onUnavailable: (reason) =>
+                options.observability?.warn("Breached-password lookup unavailable", { reason }),
+            }))
+          ) {
+            throw new ManagedAuthPasswordCompromisedError();
+          }
           // An address the deployment doesn't allow can never get a session,
           // so email sign-in says so before the password is checked: the
           // answer is the same for a right or wrong password. The session

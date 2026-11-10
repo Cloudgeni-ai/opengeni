@@ -406,7 +406,7 @@ export class Dictation {
         void this.deliver(active, report.text, report.audio ?? null);
         return;
       case "failed":
-        this.fail(report.message, report.retryable);
+        this.fail(report.message, report.retryable, report.fix === "settings");
         return;
       case "cancelled":
         // Cancelled on the page itself.
@@ -703,7 +703,8 @@ export class Dictation {
     this.send({ kind: "retry", dictationId: active.id });
   }
 
-  private fail(message: string, retryable: boolean): void {
+  /** `settings`: the fix is in the dictation settings, so the window offers them. */
+  private fail(message: string, retryable: boolean, settings = false): void {
     const active = this.active;
     if (!active) return;
     this.clearWatchdog();
@@ -715,7 +716,11 @@ export class Dictation {
       kind: "notice",
       tone: "error",
       message,
-      actions: retryable ? ["retry", "dismiss"] : ["dismiss"],
+      actions: [
+        ...(retryable ? ["retry" as const] : []),
+        ...(settings ? ["settings" as const] : []),
+        "dismiss",
+      ],
     });
   }
 
@@ -828,6 +833,13 @@ export class Dictation {
         return;
       case "open":
         this.show({ kind: "hidden" });
+        this.deps.reveal();
+        return;
+      case "settings":
+        // The page that failed it shows the settings; the dictation is let go.
+        this.send({ kind: "settings" });
+        if (this.active?.phase === "failed") this.dismiss();
+        else this.show({ kind: "hidden" });
         this.deps.reveal();
         return;
     }

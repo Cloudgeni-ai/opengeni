@@ -5236,9 +5236,7 @@ describe("useComposer durable draft and control binding", () => {
     const failed = hook.result.current.optimisticMessages?.find(
       (message) => message.state === "failed",
     );
-    expect(failed?.error).toBe(
-      "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
-    );
+    expect(failed?.error).toBe("Ask an organization owner to add credits to use your own key.");
     await hook.unmount();
   });
 

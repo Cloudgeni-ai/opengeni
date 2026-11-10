@@ -2260,6 +2260,18 @@ export interface OpAck {
    * live consumer's window (stall) or grant unintended credit (B2).
    */
   attachGeneration: string;
+  /**
+   * The consumer stops following the op's frames (the turn that launched it
+   * yielded, or a read ended) while the op stays retained for a later attach.
+   * The runner stops sending, keeps draining the child into retention without
+   * a credit window (a noisy unread command still ends typed at its retention
+   * quota, never parks), and resumes sending only on a later OpAttach. Applies
+   * only from the exact current generation, like every ack side effect;
+   * credit_bytes is then ignored. A consumer sets credit_bytes to the full
+   * uint64 range alongside it, so a runner without this field keeps draining
+   * too (it streams the output nobody reads).
+   */
+  detach: boolean;
 }
 
 /**
@@ -14879,7 +14891,7 @@ export const OpProgress: MessageFns<OpProgress> = {
 };
 
 function createBaseOpAck(): OpAck {
-  return { opId: "", ackedSeq: "0", creditBytes: "0", final: false, attachGeneration: "0" };
+  return { opId: "", ackedSeq: "0", creditBytes: "0", final: false, attachGeneration: "0", detach: false };
 }
 
 export const OpAck: MessageFns<OpAck> = {
@@ -14898,6 +14910,9 @@ export const OpAck: MessageFns<OpAck> = {
     }
     if (message.attachGeneration !== "0") {
       writer.uint32(40).uint64(message.attachGeneration);
+    }
+    if (message.detach !== false) {
+      writer.uint32(48).bool(message.detach);
     }
     return writer;
   },
@@ -14949,6 +14964,14 @@ export const OpAck: MessageFns<OpAck> = {
           message.attachGeneration = reader.uint64().toString();
           continue;
         }
+        case 6: {
+          if (tag !== 48) {
+            break;
+          }
+
+          message.detach = reader.bool();
+          continue;
+        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -14981,6 +15004,7 @@ export const OpAck: MessageFns<OpAck> = {
         : isSet(object.attach_generation)
         ? globalThis.String(object.attach_generation)
         : "0",
+      detach: isSet(object.detach) ? globalThis.Boolean(object.detach) : false,
     };
   },
 
@@ -15001,6 +15025,9 @@ export const OpAck: MessageFns<OpAck> = {
     if (message.attachGeneration !== "0") {
       obj.attachGeneration = message.attachGeneration;
     }
+    if (message.detach !== false) {
+      obj.detach = message.detach;
+    }
     return obj;
   },
 
@@ -15014,6 +15041,7 @@ export const OpAck: MessageFns<OpAck> = {
     message.creditBytes = object.creditBytes ?? "0";
     message.final = object.final ?? false;
     message.attachGeneration = object.attachGeneration ?? "0";
+    message.detach = object.detach ?? false;
     return message;
   },
 };
