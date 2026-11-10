@@ -25,6 +25,8 @@ let preCompatibility: Awaited<ReturnType<typeof loadRuntimePostureBaseline>> | n
 // and it differs from the pin. The pin is still checked either way.
 let liveProduction: Awaited<ReturnType<typeof loadRuntimePostureBaseline>> | null = null;
 const liveProductionSource = process.env.OPENGENI_RUNTIME_POSTURE_LIVE_SOURCE?.trim() || null;
+// Production can change without a commit, so pushes only warn on a live failure.
+const liveProductionAdvisory = process.env.OPENGENI_RUNTIME_POSTURE_LIVE_ADVISORY === "1";
 const options = { rlsStrategy: "force" as const, targetSchema: "og_data" };
 
 beforeAll(async () => {
@@ -36,7 +38,11 @@ beforeAll(async () => {
   baseline = await loadRuntimePostureBaseline(root, pin.sourceCommit);
   preCompatibility = await loadRuntimePostureBaseline(root, PRE_COMPATIBILITY_PRODUCTION_SOURCE);
   if (liveProductionSource && liveProductionSource !== pin.sourceCommit) {
-    liveProduction = await loadRuntimePostureBaseline(root, liveProductionSource);
+    try {
+      liveProduction = await loadRuntimePostureBaseline(root, liveProductionSource);
+    } catch (error) {
+      console.warn(`live production revision ${liveProductionSource} could not be loaded; checked the pin only`, error);
+    }
   }
   console.log(
     `runtime posture baseline: ${pin.status} ${pin.sourceCommit} (${pin.release ?? "not yet a production release"})`,
@@ -106,6 +112,10 @@ realTest(
     );
     if (violations.length > 0) {
       console.log(`live production ${liveProductionSource} violations`, JSON.stringify(violations));
+      if (liveProductionAdvisory) {
+        console.log(`::warning title=Live production would go unready::${liveProductionSource} rejects this schema; the release gate will refuse it.`);
+        return;
+      }
     }
     expect(violations).toEqual([]);
   },

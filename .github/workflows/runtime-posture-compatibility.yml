@@ -78,12 +78,19 @@ jobs:
         # The pin can lag production (it once pointed at a commit production
         # never ran). Production reports its revision publicly; when it can be
         # read and differs from the pin, the readiness test checks it too.
-        # An unreadable revision only warns: the pinned check still runs.
+        # An unreadable revision only warns: the pinned check still runs. On
+        # pushes (main, batches) a live failure only warns, because production
+        # can change without any commit; pull requests and the release gate in
+        # opengeni-ops enforce it.
         env:
           GH_TOKEN: ${{ github.token }}
           LIVE_HEALTHZ_URL: https://app.opengeni.ai/healthz
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -uo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "OPENGENI_RUNTIME_POSTURE_LIVE_ADVISORY=1" >> "$GITHUB_ENV"
+          fi
           pin="$(bun -e 'import {readRuntimePostureBaseline} from "./scripts/runtime-posture-baseline"; console.log((await readRuntimePostureBaseline(process.cwd())).sourceCommit)')"
           healthz="$(curl --fail --silent --show-error --max-time 10 --retry 3 --retry-all-errors "$LIVE_HEALTHZ_URL" || true)"
           live="$(printf '%s' "$healthz" | bun -e 'import {parseLiveProductionRevision} from "./scripts/runtime-posture-baseline"; let raw = await Bun.stdin.text(); let value = null; try { value = JSON.parse(raw); } catch {} console.log(parseLiveProductionRevision(value) ?? "")')"

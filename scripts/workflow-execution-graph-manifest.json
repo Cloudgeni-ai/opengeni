@@ -150,7 +150,7 @@
     },
     {
       "path": ".github/workflows/runtime-posture-compatibility.yml",
-      "sha256": "8feade3f81c4f1bab3cb552e7a5990ba445b8c1facedd374e58ac44c36ffc635"
+      "sha256": "5f5eb5a3179e50d66d2557ffcae8fb654b95d36f1817fc9eca1a8b9914e4311f"
     },
     {
       "path": ".github/workflows/seal-release-head.yml",
@@ -2279,7 +2279,7 @@
       "workflow": ".github/workflows/runtime-posture-compatibility.yml",
       "job": "compatibility",
       "step": "Also check the revision production actually runs",
-      "sha256": "ee4c7e7682aad3ff053ced157473b825ec47a4e285ecd4a7292eb307add7d520"
+      "sha256": "5d9d29169962d4ff2303d1f710e899e6efeef74130859230618c28179b649479"
     },
     {
       "workflow": ".github/workflows/runtime-posture-compatibility.yml",
