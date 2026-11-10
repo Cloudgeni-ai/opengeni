@@ -47,6 +47,7 @@ export function filterNeedsYou<T extends Session>(sessions: readonly T[]): T[] {
     (session) =>
       roots.has(session.rootSessionId) ||
       (session.parentSessionId !== null &&
-        (awaitsPerson(session) || (session.status === "failed" && !failureHandledByAgent(session)))),
+        (awaitsPerson(session) ||
+          (session.status === "failed" && !failureHandledByAgent(session)))),
   );
 }

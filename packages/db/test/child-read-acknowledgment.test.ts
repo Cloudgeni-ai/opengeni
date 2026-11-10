@@ -1290,7 +1290,12 @@ describe("child read acknowledgment on parent consumption", () => {
   });
 
   /** What the rail shows `subjectId` about one parent's failed child. */
-  async function failureAttention(grant: Grant, subjectId: string, parentId: string, childId: string) {
+  async function failureAttention(
+    grant: Grant,
+    subjectId: string,
+    parentId: string,
+    childId: string,
+  ) {
     const listed = await listSessionsForSubject(client.db, grant.workspaceId, {
       subjectId,
       parentSessionId: null,
@@ -1317,15 +1322,15 @@ describe("child read acknowledgment on parent consumption", () => {
     await settleIdle(grant, parent);
     // Until the parent agent takes the failure, every member is asked to look.
     for (const subjectId of [grant.subjectId, other]) {
-      expect(
-        await failureAttention(grant, subjectId, parent.session.id, child.session.id),
-      ).toEqual({
-        unreadFailedDescendants: 1,
-        unreadDescendants: 1,
-        projectFailed: 1,
-        childUnread: true,
-        childFailureHandled: false,
-      });
+      expect(await failureAttention(grant, subjectId, parent.session.id, child.session.id)).toEqual(
+        {
+          unreadFailedDescendants: 1,
+          unreadDescendants: 1,
+          projectFailed: 1,
+          childUnread: true,
+          childFailureHandled: false,
+        },
+      );
     }
 
     await enqueueHumanTurn(grant, parent.session.id);
@@ -1343,15 +1348,15 @@ describe("child read acknowledgment on parent consumption", () => {
     // other member never read anything), but neither the failure nor that late
     // event reaches anyone through the parent.
     for (const subjectId of [grant.subjectId, other]) {
-      expect(
-        await failureAttention(grant, subjectId, parent.session.id, child.session.id),
-      ).toEqual({
-        unreadFailedDescendants: 0,
-        unreadDescendants: 0,
-        projectFailed: 0,
-        childUnread: true,
-        childFailureHandled: true,
-      });
+      expect(await failureAttention(grant, subjectId, parent.session.id, child.session.id)).toEqual(
+        {
+          unreadFailedDescendants: 0,
+          unreadDescendants: 0,
+          projectFailed: 0,
+          childUnread: true,
+          childFailureHandled: true,
+        },
+      );
     }
     const listed = await listSessionsForSubject(client.db, grant.workspaceId, {
       subjectId: other,

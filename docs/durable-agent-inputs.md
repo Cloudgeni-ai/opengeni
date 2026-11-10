@@ -441,7 +441,21 @@ resolved. A failed lifecycle remains visible inside the session, while the
 rail's red failure-attention marker is viewer-specific and appears only while
 that failed session's latest event is unread. Parent tree projections expose a
 separate `unreadFailedDescendants` count so an acknowledged historical failure
-does not color every ancestor forever. The fence is monotone: a human who has
+does not color every ancestor forever.
+
+A failure the parent agent consumed is that agent's to follow up, so it never
+asks a person through an ancestor at all. A failed session is
+`failureHandled` when the newest `child_terminal_result` its parent holds about
+it reports the failure and is `delivered` (claimed into a parent turn) or
+`superseded` (read whole through a tool). Such a session is left out of every
+ancestor's `unreadFailedDescendants` and `unreadDescendants`, project and Site
+totals and Needs you, even when it logs a late event such as a workspace capture
+after the acknowledgment. The rule is viewer-independent: it holds for members
+whose personal state the claim never acknowledged. A root session, a notice
+still pending (its parent paused, gone or not yet run) or a cancelled one stays
+unhandled, and a retried child that fails again has a new pending notice, so it
+asks again until its parent takes that failure. The session's own row keeps its
+own unread state. The fence is monotone: a human who has
 already read further, or a racing claim that observed a later sequence, is
 never regressed.
 

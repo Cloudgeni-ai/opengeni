@@ -95,8 +95,6 @@ describe("failures a parent agent already handled", () => {
 
   test("are not listed under Needs you", () => {
     const root = session({ id: "root" });
-    expect(filterNeedsYou([root, handled, unhandled]).map((row) => row.id)).toEqual([
-      "unhandled",
-    ]);
+    expect(filterNeedsYou([root, handled, unhandled]).map((row) => row.id)).toEqual(["unhandled"]);
   });
 });
