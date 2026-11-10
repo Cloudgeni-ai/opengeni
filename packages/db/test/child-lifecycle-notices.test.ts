@@ -1666,7 +1666,7 @@ describe("child lifecycle notices", () => {
     // second notice naming the reset that now holds, and the worker's
     // timeline a waiting event; the person still gets nothing.
     const laterReset = new Date(resetsAt.getTime() + 2 * 24 * 60 * 60_000);
-    const reconcileCodex = (earliestResetAt: Date | null) =>
+    const reconcileCodex = (earliestResetAt: Date | null, healthRetryAt: Date | null = null) =>
       reconcileSubscriptionCoreCapacityWait(client.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -1678,7 +1678,7 @@ describe("child lifecycle notices", () => {
           kind: "wait",
           waitReason: "no_eligible_capacity",
           earliestResetAt,
-          healthRetryAt: null,
+          healthRetryAt,
         },
       });
     const restated = await reconcileCodex(laterReset);
@@ -1706,6 +1706,20 @@ describe("child lifecycle notices", () => {
     // Unchanged or sooner: nothing more is said.
     expect((await reconcileCodex(laterReset)).events).toEqual([]);
     expect((await reconcileCodex(resetsAt)).events).toEqual([]);
+    // A health-retry time that moves later while the told time still lies
+    // ahead does not wake the parent at every check.
+    const laterRetry = new Date(laterReset.getTime() + 60 * 60_000);
+    expect((await reconcileCodex(null, laterRetry)).events).toEqual([]);
+    expect(
+      await outbox(
+        grant,
+        childWaitingCapacityDedupeKey({
+          childSessionId: codexChild.session.id,
+          waiterId: codex.waiter.waiterId,
+          restatedResetsAt: laterRetry.toISOString(),
+        }),
+      ),
+    ).toBeFalsy();
     expect(
       (await listSessionEvents(client.db, grant.workspaceId, codexChild.session.id)).some(
         (event) => event.type === "session.notification.posted",

@@ -28135,6 +28135,22 @@ export async function reconcileSubscriptionCoreCapacityWait(
           const restate =
             attention !== null &&
             (!told || capacityWaitNoticeNeedsRestating(told, attention.resetsAt));
+          // What agents see (a worker's parent woken by a notice, the
+          // session's own timeline) is restated only for a real change: the
+          // first long wait, a told time that passed without capacity, a
+          // limit's reset that now binds later, or a reset that became
+          // unknown. A health-retry time that moves later at each check while
+          // the told time still lies ahead would otherwise wake the parent at
+          // every check; the person's silent in-place notification still
+          // follows it.
+          const toldTimePassed =
+            typeof told?.resetsAt === "string" && Date.parse(told.resetsAt) <= now.getTime();
+          const restateToAgents =
+            restate &&
+            (!told ||
+              toldTimePassed ||
+              waitEvaluation.earliestResetAt !== null ||
+              attention!.resetsAt === null);
           const openNotice = session.parentSessionId ? null : told;
           const personNotice =
             restate && !session.parentSessionId
@@ -28150,7 +28166,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
               : null;
           const waitingText =
             changedReasonText ??
-            (restate
+            (restateToAgents
               ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
               : null);
           const restated = [
@@ -28217,7 +28233,7 @@ export async function reconcileSubscriptionCoreCapacityWait(
           // system-update outbox delivers it), keyed by that reset so it never
           // collides with the arm's notice or an earlier restatement.
           const parentNoticeKey =
-            restate && session.parentSessionId
+            restateToAgents && session.parentSessionId
               ? childWaitingCapacityDedupeKey({
                   childSessionId: session.id,
                   waiterId: waiter.waiterId,
