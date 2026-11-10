@@ -629,10 +629,10 @@ spec:
             (
               sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"provider_declared_error|auth_needed|outcome_uncertain|timeout|thrown_transport_error|thrown_protocol_error"}[10m]))
               /
-              clamp_min(sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
+              clamp_min(sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome!="rejected"}[10m])), 1)
             ) > 0.2
             and on()
-            sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
+            sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome!="rejected"}[10m])) >= 5
           for: 5m
           labels:
             severity: warning
@@ -642,7 +642,7 @@ spec:
             value: '{{ "{{ $value | humanizePercentage }}" }} of tool calls failed (10 min)'
             user_impact: 'Agents hit errors when using tools, so tasks take longer or fail.'
             next_step: 'Split by outcome in Grafana: auth_needed means users must reconnect; timeouts or transport errors point at a tool server outage.'
-            description: Includes provider-declared, authentication, timeout, uncertain, transport, and protocol outcomes. User cancellation remains visible in Grafana but does not page operators.
+            description: Includes provider-declared, authentication, timeout, uncertain, transport, and protocol outcomes. User cancellation and calls a tool refused because of the caller's own arguments (outcome rejected, the agent's mistake rather than a tool failure) remain visible in Grafana but do not page operators.
         - alert: OpenGeniMcpToolOutcomeUncertain
           expr: |
             sum(increase(opengeni_mcp_tool_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="outcome_uncertain"}[5m])) > 0

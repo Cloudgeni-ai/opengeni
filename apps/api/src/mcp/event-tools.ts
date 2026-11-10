@@ -43,6 +43,7 @@ import {
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import { githubAppWebhookPort } from "../github-access";
+import { ToolArgumentError } from "./tool-argument-error";
 
 type JsonResult = (value: unknown) => { content: Array<{ type: "text"; text: string }> };
 
@@ -66,7 +67,7 @@ const FormatInput = z4
 function parseFormat(format: Record<string, unknown>): WebhookFormat {
   const parsed = WebhookFormat.safeParse(format);
   if (parsed.success) return parsed.data;
-  throw new Error(`The format is not valid:\n${z4.prettifyError(parsed.error)}`);
+  throw new ToolArgumentError(`The format is not valid:\n${z4.prettifyError(parsed.error)}`);
 }
 
 /**
@@ -76,7 +77,7 @@ function parseFormat(format: Record<string, unknown>): WebhookFormat {
  */
 function assertResolvedSecret(signingSecret: string | undefined): void {
   if (signingSecret !== undefined && containsSecretReference(signingSecret)) {
-    throw new Error(
+    throw new ToolArgumentError(
       "signingSecret is still a secret reference because this agent can't use secrets. Ask a person to paste the secret in Automations.",
     );
   }
@@ -293,7 +294,7 @@ export function registerEventTools(
     },
     async ({ eventId, scheduledTaskRunId, offset }) => {
       if ((eventId === undefined) === (scheduledTaskRunId === undefined))
-        throw new Error("Pass either eventId or scheduledTaskRunId");
+        throw new ToolArgumentError("Pass either eventId or scheduledTaskRunId");
       if (eventId) {
         const [event] = await getInboundEvents(deps.db, grant.workspaceId, [eventId]);
         const visible =
@@ -309,11 +310,11 @@ export function registerEventTools(
             () => false,
           ));
         if (!event || !visible)
-          throw new Error(`Event not found: ${eventId}. Events are kept for 30 days.`);
+          throw new ToolArgumentError(`Event not found: ${eventId}. Events are kept for 30 days.`);
         return json({ event });
       }
       const run = await getEventRunOccurrence(deps.db, grant.workspaceId, scheduledTaskRunId!);
-      if (!run) throw new Error(`Run ${scheduledTaskRunId} is not an event run`);
+      if (!run) throw new ToolArgumentError(`Run ${scheduledTaskRunId} is not an event run`);
       await requireVisibleTask(run.taskId);
       const start = offset ?? 0;
       const events = run.occurrence.events.slice(start, start + RUN_EVENTS_PAGE_SIZE);
@@ -364,7 +365,7 @@ export function registerEventTools(
     },
     async ({ name, preset, format, signingSecret, visibility }) => {
       if ((preset === undefined) === (format === undefined))
-        throw new Error("Pass either preset or format");
+        throw new ToolArgumentError("Pass either preset or format");
       assertResolvedSecret(signingSecret);
       const request = CreateEventSourceRequest.parse({
         kind: "webhook",
@@ -411,7 +412,7 @@ export function registerEventTools(
         Object.entries(changes).filter(([, value]) => value !== undefined),
       );
       if (format) patch.format = parseFormat(format);
-      if (Object.keys(patch).length === 0) throw new Error("Pass at least one change");
+      if (Object.keys(patch).length === 0) throw new ToolArgumentError("Pass at least one change");
       const updated = await updateEventSourceForViewer({
         db: deps.db,
         settings: deps.settings,

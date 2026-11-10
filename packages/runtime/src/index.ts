@@ -195,6 +195,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -8868,6 +8869,27 @@ function exactErrorMessage(error: unknown): string {
   }
 }
 
+/**
+ * Read and remove the first-party server's mark that it refused the caller's
+ * arguments. The mark is honored only from the first-party server, and is
+ * removed so the result every caller sees is unchanged.
+ */
+function takeFirstPartyArgumentRejection(
+  result: AttemptToolResultValue,
+  firstParty: boolean,
+): { result: AttemptToolResultValue; argumentRejected: boolean } {
+  const meta = result._meta;
+  if (!firstParty || !meta || !Object.hasOwn(meta, FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY)) {
+    return { result, argumentRejected: false };
+  }
+  const { [FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY]: mark, ...rest } = meta;
+  const { _meta: _removed, ...withoutMeta } = result;
+  return {
+    result: Object.keys(rest).length > 0 ? { ...withoutMeta, _meta: rest } : withoutMeta,
+    argumentRejected: mark === true && result.isError === true,
+  };
+}
+
 function mcpThrownToolCallOutcome(error: unknown, signal?: AbortSignal): McpToolCallOutcome {
   try {
     // The MCP SDK owns a precise timeout marker; check it before cancellation
@@ -10929,14 +10951,21 @@ export class PrefixedMcpServer implements MCPServer {
           });
         },
       });
-      const result = AttemptToolResult.parse(output);
+      const { result, argumentRejected } = takeFirstPartyArgumentRejection(
+        AttemptToolResult.parse(output),
+        this.firstPartyCatalog,
+      );
       assertMcpPayloadWithinBytes(
         result,
         options?.maxResultBytes ?? MCP_MAX_TOOL_RESULT_BYTES,
         "MCP tool result",
       );
       recordOutcome(
-        result.isError === true && !exchange?.requested ? "provider_declared_error" : "success",
+        result.isError !== true || exchange?.requested
+          ? "success"
+          : argumentRejected
+            ? "rejected"
+            : "provider_declared_error",
       );
       const delivered = completeWait && result.isError !== true ? completeWait(true) : false;
       if (finalReply !== null && result.isError !== true && !delivered) {
