@@ -29,6 +29,8 @@ export type SupportDesk = {
   bookings: SupportBooking[];
   accountDeleted: boolean;
   refunds: Array<{ bookingId: string; amountEur: number }>;
+  /** When the customer first answered after the opening message (structured answer or follow-up). */
+  firstAnswerAt: number | null;
   close: () => void;
 };
 
@@ -131,9 +133,11 @@ export function startSupportDesk(): SupportDesk {
     bookings: initialBookings(),
     accountDeleted: false,
     refunds: [] as Array<{ bookingId: string; amountEur: number }>,
+    firstAnswerAt: null as number | null,
   };
   const find = (id: unknown) => desk.bookings.find((booking) => booking.id === id);
-  const call = (name: string, args: Record<string, unknown>): unknown => {
+  const call = (name: string, args: Record<string, unknown>): { error: string } | object => {
+    if (desk.accountDeleted) return { error: "the account has been deleted" };
     switch (name) {
       case "list_bookings":
         return { bookings: desk.bookings };
@@ -188,7 +192,11 @@ export function startSupportDesk(): SupportDesk {
           arguments?: Record<string, unknown>;
         };
       } | null;
-      if (!message?.method) return new Response("bad request", { status: 400 });
+      if (!message?.method)
+        return Response.json(
+          { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } },
+          { status: 400 },
+        );
       if (message.id === undefined) return new Response(null, { status: 202 });
       switch (message.method) {
         case "initialize":
@@ -205,8 +213,10 @@ export function startSupportDesk(): SupportDesk {
           const name = message.params?.name ?? "";
           const args = message.params?.arguments ?? {};
           desk.calls.push({ name, arguments: args, at: Date.now() });
+          const result = call(name, args);
           return reply(message.id, {
-            content: [{ type: "text", text: JSON.stringify(call(name, args)) }],
+            content: [{ type: "text", text: JSON.stringify(result) }],
+            ...("error" in result ? { isError: true } : {}),
           });
         }
         default:

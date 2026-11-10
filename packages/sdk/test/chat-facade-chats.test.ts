@@ -112,6 +112,8 @@ describe("chat facade chats and agent", () => {
     { agent: { renderer: "markdown" } },
     { create: { agent: { renderer: "opengeni" } } },
     { create: { agent: { instructions: "Brief" } } },
+    { agent: { guidance: "lean" } },
+    { create: { agent: { guidance: "lean" } } },
     { agent: {} },
   ] satisfies Partial<ChatOptions>[])(
     "explicit agent config never falls back, even after cached rejection (%j)",

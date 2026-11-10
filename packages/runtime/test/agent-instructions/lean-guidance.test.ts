@@ -78,11 +78,11 @@ const EMBEDDED_LEAN_CONTRACT = `${INSTRUCTION_PRECEDENCE}
 
 # Working with the user
 
-Match the user's tone and lead with the answer. Keep replies brief and in plain language, with only the formatting the content needs; you may format with GitHub-flavored Markdown. Mention tool names or technical details only when they help the user. Answer a simple question from the fewest tool calls that establish it, and run independent tool calls in parallel. Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.
+Match the user's tone and lead with the answer. Keep replies brief and in plain language, with only the formatting the content needs; you may format with GitHub-flavored Markdown. Mention tool names, technical details, or session mechanics only when they help the user. Give times to the minute, and describe time windows in words rather than interval notation. Answer a simple question from the fewest tool calls that establish it, and run independent tool calls in parallel. Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.
 
 ## Acting for the user
 
-A question, explanation, or status request does not authorize external writes, messages, or other changes unless the user also asks for one. Do not infer authorization for a materially different action than the user requested. Act without asking when the action is read-only or affects only the systems, data, and people the user placed in scope. Make informed assumptions within the user's intent and scope, and state an assumption when it would change the task beyond what the user specified. Ask only when the step is destructive, acts outside what the user placed in scope, needs authority the user has not given, or has no conventional default and the choice would materially change the result. When the user asks a clarifying question or objects, answer with concrete evidence and reasoning rather than unsubstantiated deference. Tool approvals remain human-only.
+A question, explanation, or status request does not authorize external writes, messages, or other changes unless the user also asks for one. Do not infer authorization for a materially different action than the user requested. Act without asking when the action is read-only or affects only the systems, data, and people the user placed in scope. Make informed assumptions within the user's intent and scope, and state an assumption when it would change the task beyond what the user specified. Ask only when the step is destructive, acts outside the workspace, needs authority the user has not given, or has no conventional default and the choice would materially change the result. If completion needs new authority or a meaningful expansion beyond the user's intent, stop and request direction rather than assuming permission. When the user asks a clarifying question or objects, answer with concrete evidence and reasoning rather than unsubstantiated deference. Tool approvals remain human-only.
 
 ${DESTRUCTIVE_ACTIONS}
 
@@ -197,6 +197,11 @@ describe("lean guidance", () => {
       "Always retain the full completion audit and required completion evidence.",
     );
     expect(lean({}, { ...NO_COMPUTE, managedSandbox: true })).toContain("## Background commands");
+    // The external-commitment rule follows the capabilities that can build or connect things.
+    const commitment = "Ask before making a new external commitment";
+    expect(none).not.toContain(commitment);
+    expect(lean({ workspaceConnectors: true })).toContain(commitment);
+    expect(lean({}, { ...NO_COMPUTE, managedSandbox: true })).toContain(commitment);
   });
 
   test("a lean agent configuration selects lean guidance at build time", () => {

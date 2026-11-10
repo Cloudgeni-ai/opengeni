@@ -48,6 +48,8 @@ These variants run the conversational scenarios only, including five support
 conversations (`r`–`v`) against a fake booking desk (`support-mcp.ts`): an
 ambiguous cancellation, a clear change, a refund above the product's policy
 limit, an irreversible account deletion, and a lookup followed by "thanks".
+Variants without a scenario list (`legacy`, `modular-all`) now run `r`–`v` too,
+so their totals are not comparable with runs from before these scenarios existed.
 
 Credentials: `--env-file <path>` (or `OPENGENI_EVAL_ENV_FILE`), otherwise
 `./.env`, then the main checkout's `.env`. Only `OPENGENI_OPENAI_*` and

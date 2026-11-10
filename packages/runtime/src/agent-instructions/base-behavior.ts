@@ -179,6 +179,23 @@ function learningRule(context: AgentPromptContext): string | undefined {
     : undefined;
 }
 
+/**
+ * Design guidance applies where the agent can build something: compute,
+ * artifacts and Sites, a browser, connectors, or workspace setup.
+ */
+function canBuild(context: AgentPromptContext): boolean {
+  return (
+    hasSandbox(context) ||
+    context.capabilities.artifacts ||
+    context.capabilities.browser ||
+    context.capabilities.workspaceConnectors ||
+    context.capabilities.workspaceAdmin
+  );
+}
+
+const EXTERNAL_COMMITMENT_RULE =
+  "Ask before making a new external commitment or materially departing from the established architecture beyond the authorized scope: name the candidate designs, and do not start parallel work that assumes the unresolved choice.";
+
 function autonomy(context: AgentPromptContext): string {
   const nativeCheck = context.capabilities.artifacts
     ? "First check whether the workspace already provides the capability natively (for example, a Site reaches the model and workspace tools through the host bridge and needs no server of its own)."
@@ -189,14 +206,7 @@ function autonomy(context: AgentPromptContext): string {
   const monitorOrWait = canWaitOrSchedule(context)
     ? "- Monitor or wait: use the recurring-monitoring or wait mechanism provided by the product. Unchanged external state is expected and is not by itself a blocker.\n"
     : "";
-  // Design guidance applies where the agent can build something: compute,
-  // artifacts and Sites, a browser, connectors, or workspace setup.
-  const builds =
-    hasSandbox(context) ||
-    context.capabilities.artifacts ||
-    context.capabilities.browser ||
-    context.capabilities.workspaceConnectors ||
-    context.capabilities.workspaceAdmin;
+  const builds = canBuild(context);
   return blocks(
     `## Autonomy and persistence
 
@@ -221,7 +231,7 @@ If completion requires new authority, external coordination, or a meaningful exp
         nativeCheck,
         "If a native path fits, use it.",
         "Follow the project's established architecture and choices the user has already authorized or delegated; the user need not name each host, provider, or credential.",
-        "Ask before making a new external commitment or materially departing from the established architecture beyond the authorized scope: name the candidate designs, and do not start parallel work that assumes the unresolved choice.",
+        EXTERNAL_COMMITMENT_RULE,
         "The absence of a native path alone does not require a question; continue with routine implementation choices within scope.",
       ),
   );
@@ -243,9 +253,10 @@ After deleting anything material, briefly tell the user what was removed and whe
 /**
  * Lean guidance (`guidance: "lean"`) for short conversations a person answers
  * turn by turn. Keeps precedence, the authorization limits and when to ask,
- * destructive-action care, and every clause tied to a tool the session has;
- * leaves out autonomy and persistence detail, progress-update cadence and
- * final-answer formatting, which serve long-running work.
+ * destructive-action care, and the clauses for tools such a conversation uses
+ * (setup cards, privacy facts, web sources, learning, external commitments);
+ * leaves out autonomy and persistence detail, progress-update cadence, design
+ * and build guidance, and final-answer formatting, which serve long-running work.
  */
 function renderLeanBaseBehavior(context: AgentPromptContext): string {
   const blockedFix = blockedFixRule(context);
@@ -255,7 +266,8 @@ function renderLeanBaseBehavior(context: AgentPromptContext): string {
     sentences(
       "Match the user's tone and lead with the answer.",
       "Keep replies brief and in plain language, with only the formatting the content needs; you may format with GitHub-flavored Markdown.",
-      "Mention tool names or technical details only when they help the user.",
+      "Mention tool names, technical details, or session mechanics only when they help the user.",
+      "Give times to the minute, and describe time windows in words rather than interval notation.",
       "Answer a simple question from the fewest tool calls that establish it, and run independent tool calls in parallel.",
       "Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.",
       reachesWeb(context) && WEB_SOURCES_RULE,
@@ -267,7 +279,9 @@ function renderLeanBaseBehavior(context: AgentPromptContext): string {
       "Do not infer authorization for a materially different action than the user requested.",
       "Act without asking when the action is read-only or affects only the systems, data, and people the user placed in scope.",
       "Make informed assumptions within the user's intent and scope, and state an assumption when it would change the task beyond what the user specified.",
-      "Ask only when the step is destructive, acts outside what the user placed in scope, needs authority the user has not given, or has no conventional default and the choice would materially change the result.",
+      "Ask only when the step is destructive, acts outside the workspace, needs authority the user has not given, or has no conventional default and the choice would materially change the result.",
+      "If completion needs new authority or a meaningful expansion beyond the user's intent, stop and request direction rather than assuming permission.",
+      canBuild(context) && EXTERNAL_COMMITMENT_RULE,
       "When the user asks a clarifying question or objects, answer with concrete evidence and reasoning rather than unsubstantiated deference.",
       "Tool approvals remain human-only.",
       learningRule(context),

@@ -1274,16 +1274,23 @@ function resolveInstructionsAlias(
 export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgentConfigResult {
   const { request } = input;
   const instructions = resolveInstructionsAlias(request, input.instructions);
+  const parent = input.parent;
+  const workspaceDefaults = input.workspace.defaults;
+  // `"full"` equals omitting guidance, so it counts as a config field only where it
+  // overrides an inherited or workspace-default `"lean"`.
+  const guidanceChanges =
+    request?.guidance === "lean" ||
+    (request?.guidance === "full" &&
+      (parent
+        ? parent.kind === "configured" && parent.config.guidance === "lean"
+        : workspaceDefaults?.guidance === "lean"));
   const requestConfigFields =
     request !== undefined &&
     (request.capabilities !== undefined ||
       request.identity !== undefined ||
       request.renderer !== undefined ||
-      request.guidance !== undefined ||
+      guidanceChanges ||
       request.instructions !== undefined);
-
-  const parent = input.parent;
-  const workspaceDefaults = input.workspace.defaults;
 
   // --- Omitted agent ---------------------------------------------------------
   if (!requestConfigFields) {
@@ -1332,6 +1339,31 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
 
   const ceiling = parent.kind === "configured" ? parent.config.capabilities : parent.ceiling;
   const parentConfig = parent.kind === "configured" ? parent.config : null;
+  // Guidance alone changes only the guidance: the child keeps its parent's exact
+  // capabilities, identity and renderer, as when the agent is omitted.
+  if (
+    parentConfig &&
+    request.guidance !== undefined &&
+    request.capabilities === undefined &&
+    request.identity === undefined &&
+    request.renderer === undefined
+  ) {
+    const { guidance: _parentGuidance, ...inherited } = parentConfig;
+    const guidance = request.guidance ?? parentConfig.guidance;
+    return {
+      config: withGoalImplication(
+        {
+          ...inherited,
+          ...(guidance === "lean" ? { guidance: "lean" as const } : {}),
+          source: "request",
+        },
+        input.goal,
+        false,
+        parentConfig.capabilities,
+      ),
+      instructions,
+    };
+  }
   const requested = request.capabilities
     ? normalizeCapabilities(request.capabilities)
     : { from: (parentConfig?.from ?? "all") as AgentCapabilityStartingPoint, toggles: {} };

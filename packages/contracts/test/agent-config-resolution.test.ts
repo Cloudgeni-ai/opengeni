@@ -813,6 +813,27 @@ describe("guidance", () => {
     );
   });
 
+  test("guidance alone never changes a child's capabilities", () => {
+    const parentConfig = resolve({
+      request: { capabilities: { from: "none", webSearch: true, goals: true } },
+    }).config!;
+    const parent = { kind: "configured" as const, config: parentConfig };
+    const lean = resolve({ parent, request: { guidance: "lean" } }).config!;
+    expect(lean.capabilities).toEqual(parentConfig.capabilities);
+    expect(lean.from).toBe(parentConfig.from);
+    expect(lean.guidance).toBe("lean");
+    const full = resolve({ parent, request: { guidance: "full" } }).config!;
+    expect(full).toEqual({ ...parentConfig, source: "inherited" });
+    const leanParent = { kind: "configured" as const, config: lean };
+    const back = resolve({ parent: leanParent, request: { guidance: "full" } }).config!;
+    expect(back.capabilities).toEqual(parentConfig.capabilities);
+    expect(Object.hasOwn(back, "guidance")).toBe(false);
+    // "full" equals omitted: a legacy tree stays legacy, a top-level session keeps its source.
+    const legacy = { kind: "legacy" as const, ceiling: parentConfig.capabilities };
+    expect(resolve({ parent: legacy, request: { guidance: "full" } }).config).toBeNull();
+    expect(resolve({ request: { guidance: "full" } }).config!.source).toBe("deployment_default");
+  });
+
   test("a mid-session update sets, keeps, or clears it", () => {
     const update = (current: ResolvedAgentConfig | null, request: AgentConfigRequest) =>
       resolveAgentConfigUpdate({

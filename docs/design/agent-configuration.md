@@ -291,13 +291,15 @@ Two additions the legacy text lacked, both shipped in the modular composer
    person answers turn by turn (support, booking): base behavior keeps
    precedence, authorization limits and when to ask, destructive-action care and
    the tool-tied clauses (web sources, `privacy_facts`, setup cards, learning
-   policy); runtime mechanics keeps tool discovery, a short new-message rule,
+   policy, the external-commitment rule); runtime mechanics keeps tool discovery, a short new-message rule,
    waiting and background commands when their tools exist, and a short
    compaction rule. Personality, writing style, effort, progress updates, final
    answer, verification and autonomy and persistence detail are left out.
-   Capability modules and every other layer are identical. Resolution follows
-   `renderer`: request, then workspace default, then parent; updates keep it when
-   omitted. User docs: `docs-site/integrate/configure-the-agent.mdx` (Guidance).
+   Capability modules and every other layer are identical. A top-level session
+   takes the request's value, else the workspace default; a child takes the
+   request's value, else its parent's, and guidance alone never changes its
+   capabilities. `"full"` counts only where it overrides an inherited or default
+   `lean`. Updates keep it when omitted. User docs: `docs-site/integrate/configure-the-agent.mdx` (Guidance).
 
 Resulting tiers:
 

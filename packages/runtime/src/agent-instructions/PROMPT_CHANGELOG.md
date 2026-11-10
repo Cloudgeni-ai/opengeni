@@ -4,15 +4,21 @@ A new agent configuration option, `guidance: "lean"`, renders a short base
 behavior and runtime mechanics for conversations a person answers turn by turn
 (support or booking assistants). Omitted or `"full"` keeps every prompt byte
 for byte; the resolved configuration stores the field only when lean. Lean
-keeps identity, the precedence rule, the destructive-actions section, and every
-clause tied to a tool or capability the session has (web sources, `privacy_facts`,
-setup cards and app actions, learning policy, tool discovery, waiting,
-background commands, the goal completion audit). Capability modules and every
-later layer are unchanged. Measured with the Sonnet 5.5 tokenizer for "none"
-without compute or tool search: 2,754 → 892 system tokens (Personality 110,
-Writing style 163, Match effort 213, Progress updates 217, Final answer 171 and
-Rules for getting work done 205 leave; Working with the user 35 → 161; Autonomy
-and persistence 872 → Acting for the user 243; New messages 231 → 80;
+keeps identity, the precedence rule, the authorization limits and when to ask
+(with the full prompt's wording), the destructive-actions section, and these
+tool-tied clauses when the session has the tool or capability: web sources,
+`privacy_facts`, setup cards and app actions, learning policy, the
+external-commitment rule (compute, artifacts, browser, connectors or admin),
+tool discovery, waiting, background commands and the goal completion audit
+after compaction. It leaves out other capability-tied clauses that serve
+long-running work: design and build guidance, "Answer in chat by default", the
+monitor-or-wait request type, the goal clauses in new-message handling and the
+verification rule, and the web-search progress sentence. Capability modules
+and every later layer are unchanged. Measured with the Sonnet 5.5 tokenizer for
+"none" without compute or tool search: 2,754 → 960 system tokens (Personality
+110, Writing style 163, Match effort 213, Progress updates 217, Final answer 171
+and Rules for getting work done 205 leave; Working with the user 35 → 192;
+Autonomy and persistence 872 → Acting for the user 280; New messages 231 → 80;
 Compaction 218 → 89).
 
 ```text
@@ -21,10 +27,10 @@ Compaction 218 → 89).
 - ## Match effort to the request … ## Progress updates … ## Final answer … ### Formatting rules … (all four sections)
 - # Rules for getting work done … (parallel calls, unsolicited warnings, verification rule)
 - ## Autonomy and persistence … (whole section)
-+ Match the user's tone and lead with the answer. Keep replies brief and in plain language, with only the formatting the content needs; you may format with GitHub-flavored Markdown. Mention tool names or technical details only when they help the user. Answer a simple question from the fewest tool calls that establish it, and run independent tool calls in parallel. Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.
++ Match the user's tone and lead with the answer. Keep replies brief and in plain language, with only the formatting the content needs; you may format with GitHub-flavored Markdown. Mention tool names, technical details, or session mechanics only when they help the user. Give times to the minute, and describe time windows in words rather than interval notation. Answer a simple question from the fewest tool calls that establish it, and run independent tool calls in parallel. Do not introduce unsolicited warnings, disclaimers, approval flows, or safety/compliance checklists due to hypothetical risk.
 + [web sources rule with webSearch or browser] [privacy_facts rule with privacyFacts]
 + ## Acting for the user
-+ A question, explanation, or status request does not authorize external writes, messages, or other changes unless the user also asks for one. Do not infer authorization for a materially different action than the user requested. Act without asking when the action is read-only or affects only the systems, data, and people the user placed in scope. Make informed assumptions within the user's intent and scope, and state an assumption when it would change the task beyond what the user specified. Ask only when the step is destructive, acts outside what the user placed in scope, needs authority the user has not given, or has no conventional default and the choice would materially change the result. When the user asks a clarifying question or objects, answer with concrete evidence and reasoning rather than unsubstantiated deference. Tool approvals remain human-only. [learning-policy sentence with Knowledge or Skill management]
++ A question, explanation, or status request does not authorize external writes, messages, or other changes unless the user also asks for one. Do not infer authorization for a materially different action than the user requested. Act without asking when the action is read-only or affects only the systems, data, and people the user placed in scope. Make informed assumptions within the user's intent and scope, and state an assumption when it would change the task beyond what the user specified. Ask only when the step is destructive, acts outside the workspace, needs authority the user has not given, or has no conventional default and the choice would materially change the result. If completion needs new authority or a meaningful expansion beyond the user's intent, stop and request direction rather than assuming permission. [external-commitment rule with compute, artifacts, browser, connectors or admin] When the user asks a clarifying question or objects, answer with concrete evidence and reasoning rather than unsubstantiated deference. Tool approvals remain human-only. [learning-policy sentence with Knowledge or Skill management]
 + [setup-card or app-action blocker rule when the session can show cards]
 - The user may send a new message while you are still working. … (whole paragraph)
 + When the user sends a new message while you work, decide whether it replaces the active request or adds to it, and handle it accordingly. [wait_for_input in-flight sentence when the tool exists] Treat "thanks", "nice", and similar replies as acknowledgement, not approval of a next step.
