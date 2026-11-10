@@ -11,7 +11,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 compute-guest = { path = "../compute-guest" }
 flate2 = "1"
 futures = "0.3"

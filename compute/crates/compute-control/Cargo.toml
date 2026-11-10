@@ -16,7 +16,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "matched-path", "query", "tokio"] }
-base64 = "0.22"
+base64 = "0.23"
 blake3 = "1.8"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
