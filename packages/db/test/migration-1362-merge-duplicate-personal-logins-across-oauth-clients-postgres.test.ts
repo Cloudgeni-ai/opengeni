@@ -10,7 +10,7 @@ import { migrate } from "../src/migrate";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const migration = readFileSync(
   new URL(
-    "../drizzle/1354_merge_duplicate_personal_logins_across_oauth_clients.sql",
+    "../drizzle/1362_merge_duplicate_personal_logins_across_oauth_clients.sql",
     import.meta.url,
   ),
   "utf8",
@@ -139,7 +139,7 @@ async function turnedOnIn(authorityId: string) {
   return rows.map((row) => row.workspaceId);
 }
 
-describe("1354 merges duplicate personal logins made with different OAuth clients (real PostgreSQL)", () => {
+describe("1362 merges duplicate personal logins made with different OAuth clients (real PostgreSQL)", () => {
   test("the same verified account under an earlier client merges into the kept login", async () => {
     if (!owned || !ownerSql) return;
     const forced = async () =>
