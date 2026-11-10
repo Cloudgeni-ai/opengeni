@@ -23,7 +23,11 @@ import {
 import { writeCompressedJsonLines } from "@opengeni/storage";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
-import { createSessionArchiveActivities } from "../src/activities/session-archive";
+import postgres from "postgres";
+import {
+  createSessionArchiveActivities,
+  type ArchiveIdleSessionsResult,
+} from "../src/activities/session-archive";
 import type { ActivityServices } from "../src/activities/types";
 
 let shared: SharedTestDatabase;
@@ -426,6 +430,77 @@ describe("idle-session archive worker", () => {
       });
       expect((await archiveMatchesReread(scope)).events).toBe(kept);
     }
+  }, 120_000);
+
+  test("kept events appended after the bundle read its events are still in the transcript", async () => {
+    const scope = await idleSession();
+    const objects = new Map<string, Uint8Array>();
+    const before = await rereadTranscript(scope);
+    // Hold the export at session_history_items, the table after session_events,
+    // and append events there, as a session can while it is being archived.
+    const holder = postgres(shared.adminUrl, { max: 1, onnotice: () => undefined });
+    let archiving: Promise<{ result?: ArchiveIdleSessionsResult; error?: unknown }> | undefined;
+    try {
+      await holder.begin(async (sql) => {
+        await sql`lock table session_history_items in access exclusive mode`;
+        archiving = inMemoryArchive(objects)
+          .archiveIdleSessions()
+          .then(
+            (result) => ({ result }),
+            (error: unknown) => ({ error }),
+          );
+        for (let waited = 0; ; waited += 1) {
+          const [blocked] = await shared.admin<{ count: number }[]>`
+            select count(*)::int as count from pg_stat_activity
+            where datname = current_database() and wait_event_type = 'Lock'
+              and query like '%session_history_items%'`;
+          if (blocked!.count > 0) break;
+          if (waited > 2_000) throw new Error("the archive never reached session_history_items");
+          await Bun.sleep(10);
+        }
+        // More than one page (500) of kept events, with purged ones between them.
+        await shared.admin.begin(async (inject) => {
+          await inject`set local session_replication_role = replica`;
+          await inject`insert into session_events (account_id, workspace_id, session_id, sequence,
+              type, payload, occurred_at)
+            select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
+              case when n % 3 = 0 then 'agent.message.delta' else 'user.message' end,
+              jsonb_build_object('text', 'appended ' || n), now() + n * interval '1 millisecond'
+            from (select max(sequence) as last from session_events
+              where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
+              generate_series(1, 900) n`;
+        });
+      });
+    } finally {
+      await holder.end();
+    }
+    const { result, error } = await archiving!;
+    if (error) throw error;
+    expect(result!.failed).toBe(0);
+    const [row] =
+      await shared.admin`select content_archive from sessions where id = ${scope.sessionId}`;
+    const manifest = row!.content_archive as {
+      bundle: { key: string };
+      transcript: { key: string; events: number };
+      rowCounts: Record<string, number>;
+    };
+    // The bundle read its events before the append: none of them are in it.
+    const bundleEvents = lines(objects.get(manifest.bundle.key)!).filter(
+      (line) => line.table === "session_events",
+    );
+    expect(bundleEvents.length).toBe(manifest.rowCounts.session_events!);
+    expect(
+      bundleEvents.filter((line) =>
+        String((line.row as { payload: { text?: unknown } }).payload.text).startsWith("appended "),
+      ),
+    ).toEqual([]);
+    // The transcript lists every kept event, appended ones included, exactly as
+    // a read of the kept events (which stay live) does.
+    const text = new TextDecoder().decode(zstdDecompressSync(objects.get(manifest.transcript.key)!));
+    const after = await rereadTranscript(scope);
+    expect(after.events).toBe(before.events + 600);
+    expect(text).toBe(after.text);
+    expect(manifest.transcript.events).toBe(after.events);
   }, 120_000);
 
   test("one pass keeps taking batches until no idle session is left", async () => {

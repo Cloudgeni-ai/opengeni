@@ -192,7 +192,9 @@ archived by a person qualifies when all of these hold for the idle period:
      `SessionEvent` objects (`{"event": ...}`), then a footer. This is the
      stable, documented readable section and does not require Opengeni's
      internal tables to interpret. It is made from the event rows the bundle
-     export reads, so kept events are not read a second time.
+     export reads, so kept events are not read a second time. Kept events
+     added while the session archives, after the bundle read its events, are
+     not in the bundle but still appear in the transcript.
 3. The manifest (object keys, sizes, SHA-256 digests, row counts) is recorded
    and the state becomes `archived`.
 4. Only then are the bulky tables purged in bounded batches: realtime entries,
