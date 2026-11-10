@@ -1,5 +1,6 @@
 import {
   boolean,
+  index,
   jsonb,
   pgTable,
   primaryKey,
@@ -8,6 +9,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 /** Source identity, not another mutable Skill head. Portable ownership stays upstream. */
 export const skillSourceBindings = pgTable(
@@ -38,7 +40,17 @@ export const skillWriteReceipts = pgTable(
     activationEventId: uuid("activation_event_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [primaryKey({ columns: [table.workspaceId, table.operationId] })],
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.operationId] }),
+    // Activation-authority lookups for preference snapshot descriptors
+    // (migrations 1357 and 1358): by activation event, and by the text form
+    // of operation_id that a deferred publication receipt names.
+    index("skill_write_receipts_activation_event_idx").on(table.accountId, table.activationEventId),
+    index("skill_write_receipts_operation_text_idx").on(
+      table.workspaceId,
+      sql`(${table.operationId}::text)`,
+    ),
+  ],
 );
 
 /** Immutable maintenance evidence; never an execution configuration head. */
