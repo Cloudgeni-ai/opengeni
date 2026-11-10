@@ -86,7 +86,12 @@ test("subscription wire identity matches the pinned client while request identif
   expect(a.body.system[1].text).toBe("Opengeni instructions");
   expect(a.body.system[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   // Reasoning summaries stay readable, Opus 5.5 included.
-  expect(a.body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+  // Prefix-bound thinking also opts into the provider's binding reset.
+  expect(a.body.thinking).toEqual({
+    type: "adaptive",
+    display: "summarized",
+    block_binding: { prefix_mismatch_behavior: "drop_block" },
+  });
   expect(a.body.output_config.effort).toBe("high");
   expect(a.body.max_tokens).toBe(32000);
   const betas = a.headers.get("anthropic-beta")!.split(",");
