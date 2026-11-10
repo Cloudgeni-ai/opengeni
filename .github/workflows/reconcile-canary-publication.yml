@@ -29,7 +29,7 @@ permissions:
 jobs:
   reconcile:
     name: Reconcile acknowledged canary receipts
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - name: Admit protected recovery controller

@@ -6,11 +6,11 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "15db952b6aa60b27e7bc157d4f2d95549e8161b33d3305c4a5fed5be685d6eda"
+      "sha256": "416d223a6a938b3bb5e9aff507b42ad3a196ae67f0b25721371eef5987bfe333"
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "d9161919730e91b5a7ae4520e1ee3f6ef974f28364bfd505993278718e622882"
+      "sha256": "f235f8d254b9e382391a4cb53b2de7006d71627273309594c8a9f3a53eb8f6bc"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -18,19 +18,19 @@
     },
     {
       "path": ".github/workflows/backup-image.yml",
-      "sha256": "e22a85bc802c6e2e5facd973ea6e5884a857d5f3d5c4bd6c092501e8faa94f58"
+      "sha256": "3c820b27c71c4bb325a2d5cc9d6ace054b5a9c7d164c6f74b4bc96e0ba76b56f"
     },
     {
       "path": ".github/workflows/browser-engine-pins.yml",
-      "sha256": "569443ff3f219650fb560dbbd46e7cdcc8045685a216eb573f04bdae902dedbd"
+      "sha256": "a54a211bd0e0d439a1c88b9ec046872536ba4f54762fd8d409859ef0b02054b9"
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "1690604efe0fd95425154c596b467907f6dab69aa0df100d1c9848e7cffa2150"
+      "sha256": "eaf689ce66e527583f90c7c122157dd8006fcc5383a7d6e8e7fdbfce6b2283ed"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
-      "sha256": "4562843afc6048d299684baa306ffceeb8af60385e3686010a0f084b7a5d02d6"
+      "sha256": "989bee8731ec356966bfc56d3471d50fe78b10063e03965e777bea79a9f56ede"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
@@ -46,137 +46,137 @@
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
-      "sha256": "6ff28262c98fadb42eb24b5f96a72fcb2a1d421ed0f3be6737d623c60e9dae17"
+      "sha256": "e4d3ac06badd7a281759be54fec44e3ce62cd846e61b1e3be6361d3b46746f00"
     },
     {
       "path": ".github/workflows/local-startup.yml",
-      "sha256": "0abc0e89782fa279bc500c1cb7fb0e251724e0732d8510b39b3cf4fa20c25b82"
+      "sha256": "636a25401375f62b9882524c37f55864080406d19b9c349b38de4516e9cd055b"
     },
     {
       "path": ".github/workflows/main-approval-superseded.yml",
-      "sha256": "915ab55dcc6aa7226149bd7600a3e218d5844785c36db997ccb6f8cb8261acf9"
+      "sha256": "3c0c384e8b824654e402e3653daae9f5021bc24d95c78a2fa1756ec65fcb3557"
     },
     {
       "path": ".github/workflows/merge-batcher.yml",
-      "sha256": "b06d2043db94ef8978feb25b8cada13f5ccb20f65fc2218fbabffb700a2c7d95"
+      "sha256": "0708f7a28630d87f65dc6d280344b1e526350aacae9e66b54401c8dc7fb0884f"
     },
     {
       "path": ".github/workflows/merge-content.yml",
-      "sha256": "2750e500167e7902d815e8f37d73fbfb3ef0b1352a2a8c340cf5b667e552afbe"
+      "sha256": "b0334ee5addff16539d0f28b8632195f7e00f781e065e06b803ec168e9f95a7c"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
-      "sha256": "2774844f4b0e22cb89e68af137711c61ef6b337b6f27e045d0cd407e6f5480ea"
+      "sha256": "e4f5749234d53f569c51f44cea60f8ab10a5875c8b88868d6515d2602b7f328c"
     },
     {
       "path": ".github/workflows/pr-ci-superseded.yml",
-      "sha256": "46bc458f4e59641612fb9d21ed7dcd775c06963e450268e1a293b8827ac4472f"
+      "sha256": "e6b1c88e9d127589876e9ea2ad200f465f796d908a5b5c7f5356f9a442b7bd90"
     },
     {
       "path": ".github/workflows/pr-ci.yml",
-      "sha256": "acd19756ad14de15828eda3066d0742d4db131e25eda265ff11b93078adec7a2"
+      "sha256": "5233b82d672f087a49e8effe0e8adc92a081c76df951d47cc93591f24e21c32c"
     },
     {
       "path": ".github/workflows/production-pr-heads.yml",
-      "sha256": "48a8726756c75dc74b33e4824adcd0fdad9bc50fa1f55da1e410375e7dd2db3a"
+      "sha256": "e4ecc4478521959adbeda5e6751ae0d2a178e001fc4a63f742677fc943285e34"
     },
     {
       "path": ".github/workflows/publish-artifact-runtime.yml",
-      "sha256": "92543a710cd808d8d930c827c8f877953406993e8965e1c01d1097afef7f9a47"
+      "sha256": "a3d421a5ac95919dc52d779a0fd35eeaa0b083dea248caaf1a7262e477640962"
     },
     {
       "path": ".github/workflows/publish-browser-extension.yml",
-      "sha256": "623e106b87f3c8917bae342d24ddf617fdf5b370b01fe7681a9afab998cdc190"
+      "sha256": "56ddcfbb740b58a08bba725a6e74be3c55e248dfd60f732b879e927896a978ef"
     },
     {
       "path": ".github/workflows/publish-canary-chart.yml",
-      "sha256": "d83050b580e5dbb89635e035ab06a42120d13454f09ba91104aa0fc6f00f2946"
+      "sha256": "62d876b891116e79e0de41ef1f80bcaf3672551e28c7c3346358d86d02a0a958"
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "99424d69bde4372a4d022e2df1c53006d649baf9f437f892f6a3e30826a1ffa5"
+      "sha256": "a65f4127763e228858b48158a708545a8f5941b021000a86ed044f94aabad244"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "7937e21ad958a66fc1ef649ebbcb70acf1b5b5cb1a6c29197e8afc701ba3cbed"
+      "sha256": "41f51e544f8048ba6c14fa3f56d8f5c75c3ead395682dd5867cb4241be7feeed"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
-      "sha256": "d3ff6b3faeb2fc01ac1e53e5785bf67b16f43afef97f27f4e21d293bbcbe1919"
+      "sha256": "879879c36bb7136f21ba62d73f4ea6a92226f8d6e05ec4a3ddbcb16c596298bb"
     },
     {
       "path": ".github/workflows/publish-stable.yml",
-      "sha256": "8e98bdf4d721c5be4e5246d7798a8b0f3b307149c016eea391f2a9b5a4381ad5"
+      "sha256": "2d162069faf5cb909ef237a60a663bda73b0377df0b77f1f716c7024c9c41c90"
     },
     {
       "path": ".github/workflows/reconcile-canary-publication.yml",
-      "sha256": "cdd155ca9c580162462762887dd88ef23060e1812563a46dbd1c645a06b753e5"
+      "sha256": "97af2b23114b754a38a3ed6cb28af3de122bebb8fd422988982defda64bbe21b"
     },
     {
       "path": ".github/workflows/reconcile-production-packages.yml",
-      "sha256": "d05f65de51d9684c0c2ee08ffdacde3ab7a7ae7e1c09322edbd06ef37636014b"
+      "sha256": "84f9d9294607c3437ed3f9825aa40310a70246e5c1dc608bde823790ac375c21"
     },
     {
       "path": ".github/workflows/regenerate-generated.yml",
-      "sha256": "3339ea42d0c997f279bb50a454c995d0eb5aab21f0d30163f97a9628b7e9f43a"
+      "sha256": "5062e441f8f7de773a07bddcc3f41b380f65f143a9e0c598909f54c6aa203095"
     },
     {
       "path": ".github/workflows/release-acceptance.yml",
-      "sha256": "04666f5e318cf3f486cabedfc2d2cef18248d4fb1feaee634f7e42582def4f10"
+      "sha256": "7866686e1753667e63b7246800e1722878915829b24c4e1da0d6e19a6b1f632e"
     },
     {
       "path": ".github/workflows/release-candidate.yml",
-      "sha256": "b53d79fc0c158287b875dfe07e6629e6e6cf95e995cb7f1b196c0ee5f492a691"
+      "sha256": "f3098979f42f7eee255e78a1fec821047c59fe36f53e89ad66d4f822405bf2e2"
     },
     {
       "path": ".github/workflows/release-embedded.yml",
-      "sha256": "b127d270063ed2f5e8694ae1a752111a2c0f5c9ae19c07c5992d37cfd8a0dc63"
+      "sha256": "4183ed71f1cce42b4732108520ffa5d453f5198c8666669ade028b5b3ee80c57"
     },
     {
       "path": ".github/workflows/release-publication-admission.yml",
-      "sha256": "89edcd563954157aadee01b7372fa45d416ccf03fe7be500cb0586782fb6f575"
+      "sha256": "d0d6c98906a4d6bef9cad883c6cae98e87c95f6917ac194bbaf25d6dcad5fe61"
     },
     {
       "path": ".github/workflows/release-source-admission.yml",
-      "sha256": "579b718c63349de28d25d41a6184b072c9f9b0f273b0009fe24626b5e3c2a4f7"
+      "sha256": "3dbce929aefd1a741c6e16dc6357b9b3df87906ca284780a50d55fc1646670b0"
     },
     {
       "path": ".github/workflows/release.yml",
-      "sha256": "75693b9dd238a0cbe5742b3e0a2c5a4b795c15cc607081fb8bdf010feec38fa3"
+      "sha256": "71a0058c00282bede31e85f4ebd8ab5c9b6d551385daf3b09bcd87d2dec67b52"
     },
     {
       "path": ".github/workflows/retain-release-controller.yml",
-      "sha256": "0e23abea6dedd011ac5280d5bf9c6abab2c91bffc06e77a5fc251c409b05e23c"
+      "sha256": "5deafad692598594f85cf9bfa893b6d282613fb376fd8e55b491b75a62150942"
     },
     {
       "path": ".github/workflows/runtime-posture-compatibility.yml",
-      "sha256": "1eb5f05af3e50ac2b7524a4fb36755f866740223a68b1b0de1082ace0cf342ba"
+      "sha256": "1b96c214a097a6511f76df0e70cdd0d4131da261aa37a505be08023168e68549"
     },
     {
       "path": ".github/workflows/seal-release-head.yml",
-      "sha256": "62dc8c926a23692a931c6257100a4ded7d4d80d2e127868255c057e1a123a022"
+      "sha256": "d0bafdff28b896e069dc78d21a3c53c3ee1fa74d35bb0c6af74650d6fd5cabfd"
     },
     {
       "path": ".github/workflows/source-admission.yml",
-      "sha256": "969a9015d7d38d7c1198ecc98fe484bd25c18c7096810237dc4417d73781e28e"
+      "sha256": "0bc87474e0bdc0f6175fb2373a2942de75f419aa185f7b19575a1b27afa3efe3"
     },
     {
       "path": ".github/workflows/staging-canary-dispatch.yml",
-      "sha256": "0adf0313cd053d5d459d0a6f7ef440cdc91d51542c9b07d7c7294e165797cd52"
+      "sha256": "8cd9a690b2fd4351d9c40c46b85afa3a050800ea7a14bc2a69371bd057da969d"
     },
     {
       "path": ".github/workflows/verify-public-container-packages.yml",
-      "sha256": "d741d74897672d7c6e6a50bfbb772c9679cc98d997a915cc2814045e10dfbde8"
+      "sha256": "53050b9b6bddb41e9f02b8ce32b53b0f06c39eb23df8614952a57bf6aa0f3dd8"
     },
     {
       "path": ".github/workflows/xai-client-version-pin.yml",
-      "sha256": "63aa1b9a3c40fa23aede34d1a21e3959c98e40001c1fa32bf9adf62e9c079303"
+      "sha256": "bd9aaaa3a10bae03eaed3ebb59916705efecdf73ec33f77696c20ccf68acb205"
     }
   ],
   "actions": [
     {
       "path": ".github/actions/playwright-browsers/action.yml",
-      "sha256": "d69c34096c59fb5c9e52057cc024e541b62a9efeab2193aba6d75dafa8f58041"
+      "sha256": "9dba373599d4e3ef644b91e8300e3ac491fe01bf0b70ccb4876204a9aca6c57a"
     },
     {
       "path": ".github/actions/public-oci-login/action.yml",
@@ -642,6 +642,12 @@
       "job": "api-image",
       "step": "Bake exact-SHA canary agent",
       "sha256": "f264206803d4a233919c8fc7d67caf59e58aff9db2031ec0f2947cd343443b18"
+    },
+    {
+      "workflow": ".github/workflows/ci.yml",
+      "job": "api-image",
+      "step": "Free runner disk before the image build",
+      "sha256": "5b608cef71bb65718bd85a5a96eb75935244c907961bfda30ef9d4da2300de8a"
     },
     {
       "workflow": ".github/workflows/ci.yml",

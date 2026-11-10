@@ -83,7 +83,10 @@ function parse(raw: string | null): Remembered | null {
  */
 export function rememberSignIn(memory: ConnectAttemptHints | null, attempt: ConnectAttempt): void {
   if (!memory || attempt.nextAction.type !== "authorize") return;
-  const approval = organizationAppApproval(attempt.nextAction.url);
+  const approval = organizationAppApproval(
+    attempt.nextAction.url,
+    attempt.nextAction.organizationApprovalUrl,
+  );
   if (!approval) return;
   memory.remember(
     memoryKey(attempt.workspaceId, attempt.providerId),

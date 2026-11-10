@@ -229,7 +229,8 @@ describe("composer refusal", () => {
     expect(composerSubmissionCanRetry(error)).toBe(false);
     const message = composerSubmissionErrorMessage(englishText, error);
     expect(message).toBe(COMPOSER_SESSION_USAGE_LIMIT_MESSAGE);
-    expect(message).toContain("Your message is saved.");
+    // The draft is visible in the composer, so the line never says it is saved.
+    expect(message).not.toMatch(/saved/i);
     // What happened only: the one recovery action lives in the notice.
     expect(message).not.toContain("Raise or remove");
     expect(message).not.toMatch(/credit|payment|billing/i);
@@ -239,6 +240,9 @@ describe("composer refusal", () => {
       "This task's usage limit is reached. Raise or remove the limit to continue. Your message is saved.";
     expect(isSessionUsageLimitSubmissionError(new Error(legacy))).toBe(true);
     expect(composerSubmissionCanRetry(new Error(legacy))).toBe(false);
+    const saved = "This task's usage limit is reached. Your message is saved.";
+    expect(isSessionUsageLimitSubmissionError(new Error(saved))).toBe(true);
+    expect(composerSubmissionCanRetry(new Error(saved))).toBe(false);
     // Ordinary payment refusals are unchanged.
     expect(
       composerSubmissionCanRetry(
