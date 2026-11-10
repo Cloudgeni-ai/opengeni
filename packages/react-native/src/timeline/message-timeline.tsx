@@ -1248,9 +1248,6 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
       <Pressable
         accessibilityRole="button"
         accessibilityState={{ expanded: open }}
-        {...(item.retriedAttempt
-          ? { accessibilityLabel: t("messageTimeline.attemptFailedRetried") }
-          : {})}
         onPress={() => setOpen((value) => !value)}
         style={{ paddingVertical: 4 }}
       >

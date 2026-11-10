@@ -137,12 +137,18 @@ describe("a failure is shown once", () => {
 
   test("a retried attempt is one quiet step that keeps its recorded text", () => {
     const { events } = retriedTwice();
-    const notices = flatten(
-      groupTimeline(t, buildTimeline(t, events), { readableTurns: true }),
-    ).filter((item) => item.kind === "notice");
-    expect(notices).toHaveLength(1);
-    expect(notices[0]).toMatchObject({ retriedAttempt: true, tone: "failed" });
-    expect(JSON.stringify(notices[0])).toContain("Invalid `signature`");
+    for (const readableTurns of [true, false]) {
+      const groups = groupTimeline(t, buildTimeline(t, events), { readableTurns });
+      const notices = flatten(groups).filter((item) => item.kind === "notice");
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toMatchObject({ retriedAttempt: true, tone: "failed" });
+      expect(JSON.stringify(notices[0])).toContain("Invalid `signature`");
+      if (!readableTurns) {
+        // The non-rolling view folds the whole turn once, with its final outcome.
+        const turns = groups.filter((group) => group.kind === "turn");
+        expect(turns).toHaveLength(1);
+      }
+    }
   });
 
   test("a failure the host presents keeps only its outcome on the turn row", () => {

@@ -440,6 +440,24 @@ export function chatComposerPlaceholder(input: {
 }
 
 /**
+ * The recorded text to keep behind Details under a failure headline, or
+ * nothing when the headline already says exactly that. The timeline leaves a
+ * presented failure's text to the banner, so text the headline replaced must
+ * stay reachable here.
+ */
+export function detailBeyondHeadline(
+  headline: unknown,
+  detail: string | null | undefined,
+): string | undefined {
+  const text = detail?.trim();
+  if (!text) return undefined;
+  return typeof headline === "string" &&
+    text.replace(/\s+/g, " ") === headline.replace(/\s+/g, " ").trim()
+    ? undefined
+    : text;
+}
+
+/**
  * The plain failure line shown while the banner loads or if it fails: the
  * banner's headline, so a member is told to ask an owner there too.
  */

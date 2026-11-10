@@ -3010,6 +3010,9 @@ export function groupTimeline(
   if (options.readableTurns || options.foldExchanges)
     return groupReadableTurns(t, items, options.pauses ?? []);
   const groups: TimelineGroup[] = [];
+  const retriedNoticeIds = new Set(
+    items.flatMap((item) => (item.kind === "notice" && item.retriedAttempt ? [item.id] : [])),
+  );
   for (const item of items) {
     // A recovered capacity wait is over; it leaves no warning behind.
     if (item.kind === "notice" && item.capacityWait && item.resolvedAt) continue;
@@ -3027,6 +3030,15 @@ export function groupTimeline(
       continue;
     }
     if (item.kind === "turn-end") {
+      // An attempt a Retry replaced is one quiet step; the turn's final
+      // settlement folds it together with the rest of the turn.
+      if (item.resumedAt && item.outcome === "failed") {
+        // An attempt that failed before any work already has its own quiet
+        // step: the failure's notice (`buildTimeline` keys its turn end by it).
+        if (!retriedNoticeIds.has(item.id.replace(/-turn-end$/, "")))
+          groups.push({ kind: "item", item: retriedAttemptNotice(t, item) });
+        continue;
+      }
       stampTurnOutcome(groups, item);
       foldSettledTurn(groups, item);
       continue;
@@ -3056,11 +3068,28 @@ function withoutPresentedFailureText(
     )
       return [];
     if (item.kind === "turn-end" && item.outcome === "failed" && turnEnds.has(item.id)) {
+      // A retried attempt keeps its own text on its quiet step.
+      if (item.resumedAt) return [item];
       const { failureDetail: _detail, ...rest } = item;
       return [{ ...rest, failureText: null }];
     }
     return [item];
   });
+}
+
+/** The quiet "Attempt failed · retried" step for an attempt a Retry replaced. */
+function retriedAttemptNotice(t: OpenGeniText, item: TurnEndItem): NoticeItem {
+  return {
+    kind: "notice",
+    id: item.id,
+    tone: "failed",
+    text: item.failureText ?? t("timeline.projection.theTurnFailedBeforeRetrying"),
+    retriedAttempt: true,
+    ...(item.failureDetail
+      ? { details: { label: t("timeline.projection.details"), value: item.failureDetail } }
+      : {}),
+    occurredAt: item.occurredAt,
+  };
 }
 
 /** Live prose stays primary; settled progress joins its own turn's work history. */
@@ -3237,19 +3266,7 @@ function groupReadableTurns(
         if (item.resumedAt) {
           group.work.details.push({
             kind: "item",
-            item: {
-              kind: "notice",
-              id: item.id,
-              tone: "failed",
-              text: item.failureText ?? t("timeline.projection.theTurnFailedBeforeRetrying"),
-              retriedAttempt: true,
-              ...(item.failureDetail
-                ? {
-                    details: { label: t("timeline.projection.details"), value: item.failureDetail },
-                  }
-                : {}),
-              occurredAt: item.occurredAt,
-            },
+            item: retriedAttemptNotice(t, item),
           });
           continue;
         }

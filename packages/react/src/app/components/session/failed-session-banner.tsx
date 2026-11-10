@@ -4,7 +4,7 @@ import { Link } from "../../lib/navigation";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { Button } from "../../../ui/button";
 import type { SessionFailureSummary } from "../../lib/events";
-import { failedSessionCopy } from "../../lib/failed-session-copy";
+import { detailBeyondHeadline, failedSessionCopy } from "../../lib/failed-session-copy";
 import type { FreeCreditGap } from "../../lib/free-credit-gap";
 import {
   creditRefusalHeadline,
@@ -155,6 +155,9 @@ export function FailedSessionBanner({
           ? // Without billing access the one fix is asking an owner.
             creditRefusalHeadline(t, creditRefusal, false)
           : reason;
+  // The timeline leaves this failure's text to the banner: keep the recorded
+  // text reachable, including where the headline replaced it (Codex usage).
+  const shownDetail = detailBeyondHeadline(headline, detail ?? (codexUsageFailure ? reason : null));
   // Retrying the same request on the same model cannot fix a missing model or
   // rejected credentials; a new model can. Billing, access and limit failures
   // keep Retry because their condition can clear.
@@ -224,13 +227,13 @@ export function FailedSessionBanner({
           />
           {headline}
         </span>
-        {detail && detail.replace(/\s+/g, " ").trim() !== headline ? (
+        {shownDetail ? (
           <details className="group min-w-0 max-w-full text-xs open:basis-full">
             <summary className="cursor-pointer select-none text-fg-subtle hover:text-fg-muted">
               Details
             </summary>
             <p className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-2xs text-fg-muted">
-              {detail}
+              {shownDetail}
             </p>
           </details>
         ) : null}

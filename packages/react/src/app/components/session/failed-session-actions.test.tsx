@@ -1076,6 +1076,8 @@ test("a Codex usage limit shows when it resets and a Continue at reset switch in
   );
   const banner = container.querySelector('[data-testid="failed-session-banner"]');
   expect(banner?.textContent).toContain("Codex usage limit reached. Resets Sat 14:05.");
+  // The headline replaced the recorded sentence, which stays behind Details.
+  expect(banner?.querySelector("details")?.textContent).toBe(`Details${limited.reason}`);
   expect(banner?.textContent).not.toContain("Retry");
   expect(banner?.textContent).not.toContain("Continue with");
   const toggle = container.querySelector<HTMLButtonElement>(

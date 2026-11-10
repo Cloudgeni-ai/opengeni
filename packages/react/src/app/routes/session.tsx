@@ -48,6 +48,7 @@ import { useSessionStartupTimeline } from "../../lib/session-startup-timeline";
 import { useComposerWithStreamState } from "../../lib/use-calm-service-failure";
 import {
   chatComposerPlaceholder,
+  detailBeyondHeadline,
   failedSessionCopy,
   failureFallbackReason,
   MACHINE_ACCESS_REQUIRED_CODE,
@@ -3183,7 +3184,12 @@ function SessionChatPane(props: {
   const bannerFailureIds = useMemo(
     () =>
       props.failure
-        ? bannerFailureEventIds(props.events, props.failure, props.creditExhausted)
+        ? bannerFailureEventIds(
+            props.events,
+            props.failure,
+            // As the banner: a structural sandbox failure outranks a credit stop.
+            props.creditExhausted && !props.failure.structuralSandboxFailure,
+          )
         : undefined,
     [props.events, props.failure, props.creditExhausted],
   );
@@ -3210,16 +3216,18 @@ function SessionChatPane(props: {
         stopRefusal,
       )
     : null;
+  const fallbackReason = fallbackCopy ? failureFallbackReason(fallbackCopy, canBuyCredits) : "";
+  const fallbackDetail = detailBeyondHeadline(fallbackReason, fallbackCopy?.detail);
   const failureFallback = fallbackCopy ? (
     <div role="alert" className={cn("mx-auto my-2 w-full max-w-3xl text-sm text-fg-muted", gutter)}>
-      {failureFallbackReason(fallbackCopy, canBuyCredits)}
-      {fallbackCopy.detail ? (
+      {fallbackReason}
+      {fallbackDetail ? (
         <details className="mt-1 text-xs">
           <summary className="cursor-pointer select-none text-fg-subtle hover:text-fg-muted">
             Details
           </summary>
           <p className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-2xs">
-            {fallbackCopy.detail}
+            {fallbackDetail}
           </p>
         </details>
       ) : null}
