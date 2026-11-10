@@ -537,7 +537,9 @@ test("the bot card is named after the deployment's Teams app, with Opengeni as t
     try {
       expect(adapter?.model.name).toBe(expected);
       const link = adapter?.model.options.find((option) => option.id === "teams-account-link");
-      expect(link?.kind === "link" ? link.description : undefined).toBe(`Message ${expected} in Teams to link your account.`);
+      expect(link?.kind === "link" ? link.description : undefined).toBe(
+        `Message ${expected} in Teams to link your account.`,
+      );
     } finally {
       await view.cleanup();
     }
