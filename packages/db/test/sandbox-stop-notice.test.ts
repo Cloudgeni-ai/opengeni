@@ -133,11 +133,17 @@ test("a Connected Machine's drain is not reported as a stop", async () => {
   });
 }, 60_000);
 
-test("a box replaced while a tool ran is not reported once the tool's result is in", async () => {
+test("a person's answer recorded after the stop does not hide it", async () => {
   if (!client) return;
   const { append, read } = await chat();
-  await append([toolCall("call-1")]);
-  await append([{ type: "sandbox.box.lost", payload: { sandboxId: "sb-gone" } }]);
-  await append([{ type: "agent.toolCall.output", payload: { id: "call-1", output: "ok" } }]);
-  expect(await read()).toBeNull();
+  // The agent asks through a tool; the box is stopped while it waits; the
+  // answer is then recorded as that tool's result.
+  await append([toolCall("call-ask")]);
+  const [stop] = await append([idleStop]);
+  await append([{ type: "agent.toolCall.output", payload: { id: "call-ask", output: "yes" } }]);
+  expect(await read()).toEqual({
+    kind: "stopped",
+    at: new Date(stop!.occurredAt).toISOString(),
+    reason: "idle",
+  });
 }, 60_000);
