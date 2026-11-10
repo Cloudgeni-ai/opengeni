@@ -21,7 +21,7 @@ opengeni-artifact-kernel-binding-protocol = { path = "../protocol" }
 napi-build = "2.4.0"
 
 [dev-dependencies]
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 opengeni-artifact-kernel = { path = "../.." }
 
 [profile.release]
