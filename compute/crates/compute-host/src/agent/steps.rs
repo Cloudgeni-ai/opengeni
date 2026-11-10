@@ -109,6 +109,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Event::ImageSized { image, length } => self.image_sized(image, length),
             Event::ImageFetched { image, result } => self.fetch_ended(image, &result),
             Event::ReliefMeasured(measured) => self.relief_measured(*measured),
+            Event::RestingMeasured(readings) => self.resting_measured(readings),
             Event::CacheGone { cache, removed } => self.cache_gone(cache, removed),
             Event::Claimed {
                 id,
@@ -548,6 +549,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // What the VM does from here is the step's work, not the guest's,
         // unless it is a checkpoint, whose guest runs on while it reads it.
         slot.usage.step_started(step == Step::Checkpoint);
+        slot.steps += 1;
         slot.op = Some(Running {
             op,
             step,

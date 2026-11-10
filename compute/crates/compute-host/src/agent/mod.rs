@@ -518,6 +518,9 @@ enum Event<V> {
     },
     /// A measurement of what disk relief may free ended (see [`relief`]).
     ReliefMeasured(Box<relief::Measured>),
+    /// A measurement of what disks at rest may still grow by ended (see
+    /// [`HostAgent::measure_resting`]).
+    RestingMeasured(Vec<disk::RestingReading>),
     /// The removal disk relief asked for of `cache` ended, having
     /// `removed` it or not.
     CacheGone {
@@ -581,6 +584,10 @@ struct Slot<V> {
     /// see [`HostAgent::tell_clocks`].
     runs_since: Option<Instant>,
     op: Option<Running>,
+    /// Steps started for it since the agent started. A reading of its
+    /// disk at rest taken before the last one started may be stale (see
+    /// [`HostAgent::resting_measured`]).
+    steps: u64,
     destroy: bool,
     removers: Vec<Reply<()>>,
     /// Requests waiting for the sandbox to run.
@@ -850,6 +857,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Readings given in place of the agent's own; see
     /// [`HostConfig::disk_reading`].
     disk_gauge: Option<DiskGauge>,
+    /// When the measurement of disks at rest under way began, if one is (see
+    /// [`HostAgent::measure_resting`]).
+    measuring_resting: Option<Instant>,
     /// The VMs' processor share, read again every few seconds; see
     /// [`HostConfig::processor_share`].
     processor_share: Option<ShareCheck>,
@@ -1046,6 +1056,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sample_every: config.sample_every,
             first_wake_within: config.first_wake_within,
             disk_gauge: config.disk_reading,
+            measuring_resting: None,
             processor_share: ShareCheck::of(config.processor_share, config.policy.cpu_budget),
             guest_ports: config.guest_ports.into(),
             restore_notice_port: config.restore_notice_port,
@@ -1193,6 +1204,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 link_clock,
                 runs_since: None,
                 op: None,
+                steps: 0,
                 destroy: false,
                 removers: Vec::new(),
                 waiters: Vec::new(),

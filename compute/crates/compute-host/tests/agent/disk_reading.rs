@@ -640,3 +640,104 @@ async fn read_free(gauge: &DiskGauge, lab: &Lab, change: Option<Box<dyn FnOnce()
     }
     lab.status().await.disk.expect("a disk policy").free
 }
+
+/// Waits until `done` holds of `gauge`, saying `what` if it never does.
+async fn gauge_until(gauge: &DiskGauge, what: &str, done: impl Fn(&DiskGauge) -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !done(gauge) {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// A lab as [`awake_with_written_disk`] makes it, its sandbox saved since,
+/// with the path of its disk at rest.
+async fn saved_with_written_disk(gauge: &DiskGauge) -> (Lab, PathBuf) {
+    let (lab, disk, _) = awake_with_written_disk(gauge).await;
+    lab.sleep_to(id(1), LevelName::Saved).await;
+    lab.wait_level(id(1), LevelName::Saved).await;
+    read_free(gauge, &lab, None).await;
+    (lab, disk)
+}
+
+/// Measuring the disks at rest, which under memory and I/O pressure takes
+/// tens of seconds on a host with many, never holds up a request: the
+/// host's status still comes at once. Nor does another measurement start
+/// while one is under way, so slow ones never pile up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_measurement_of_disks_at_rest_holds_up_no_request() {
+    let gauge = DiskGauge::default();
+    let (lab, _disk) = saved_with_written_disk(&gauge).await;
+
+    gauge.hold_resting();
+    gauge_until(&gauge, "a measurement held back", |gauge| {
+        gauge.resting_held() == 1
+    })
+    .await;
+    let started = gauge.resting_started();
+    // Several samples apart, each of which would have read the disk. The
+    // measurement is let through before anything is asserted, so an agent
+    // that waits for it fails here rather than hanging.
+    let mut unanswered = 0;
+    for _ in 0..5 {
+        if tokio::time::timeout(Duration::from_secs(1), lab.status())
+            .await
+            .is_err()
+        {
+            unanswered += 1;
+        }
+        sleep(Duration::from_millis(500)).await;
+    }
+    let again = gauge.resting_started() - started;
+    gauge.let_resting_through();
+    assert_eq!(
+        unanswered, 0,
+        "the status did not come while disks at rest were measured"
+    );
+    assert_eq!(again, 0, "no second measurement while one is under way");
+    gauge_until(&gauge, "the next measurement", |gauge| {
+        gauge.resting_started() > started
+    })
+    .await;
+    lab.assert_clean();
+}
+
+/// A measurement of a disk at rest that ends once its sandbox woke tells
+/// of the disk as it was: it is ignored, and the disk books what its
+/// running VM may write. Here the disk could not be read as it rested,
+/// which would book all a disk may take.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_measurement_of_a_disk_at_rest_that_woke_meanwhile_is_ignored() {
+    let gauge = DiskGauge::default();
+    let (lab, disk) = saved_with_written_disk(&gauge).await;
+
+    let away = disk.with_extension("away");
+    std::fs::rename(&disk, &away).unwrap();
+    gauge.hold_resting();
+    gauge_until(&gauge, "a measurement held back", |gauge| {
+        gauge.resting_held() == 1
+    })
+    .await;
+    std::fs::rename(&away, &disk).unwrap();
+    let woken = lab.wake(id(1)).await;
+    assert!(
+        matches!(woken, compute_host::protocol::Reply::Woken { .. }),
+        "{woken:?}"
+    );
+    lab.wait_level(id(1), LevelName::Running).await;
+    let running = read_free(&gauge, &lab, None).await;
+
+    let delivered = gauge.resting_delivered();
+    gauge.let_resting_through();
+    gauge_until(&gauge, "the held measurement handed over", |gauge| {
+        gauge.resting_delivered() > delivered
+    })
+    .await;
+    // Handed over before the status is asked for, so taken in first.
+    let after = lab.status().await.disk.expect("a disk policy").free;
+    assert!(
+        running.saturating_sub(after) < WRITTEN / 2,
+        "a stale measurement booked the running disk whole: {running} then {after}"
+    );
+    lab.assert_clean();
+}

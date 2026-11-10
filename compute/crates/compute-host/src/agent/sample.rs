@@ -2,7 +2,7 @@
 //! traffic; the checks of running guests start from it too (see
 //! [`super::check`]).
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use compute_core::{DiskSpace, Input, Level, SandboxId, Step};
@@ -19,6 +19,9 @@ use super::{BusyRule, HostAgent};
 /// How often the VMs' processor share is read again: groups beside them
 /// that start holding processes take their share from then on.
 const SHARE_EVERY: Duration = Duration::from_secs(5);
+
+/// The longest a [`DiskGauge`] holds back a measurement of disks at rest.
+const HELD_AT_MOST: Duration = Duration::from_secs(10);
 
 /// The VMs' processor share and the processor time the host last told
 /// its core it guarantees with it (see [`crate::cpu_share`]).
@@ -93,6 +96,22 @@ impl ShareCheck {
 #[derive(Clone, Default)]
 pub struct DiskGauge {
     next: Arc<Mutex<Option<Next>>>,
+    resting: Arc<(Mutex<Resting>, Condvar)>,
+}
+
+/// What a [`DiskGauge`] knows of the measurements of disks at rest, which
+/// the agent makes on the blocking pool (see
+/// [`HostAgent::measure_resting`]).
+#[derive(Debug, Default)]
+struct Resting {
+    /// Whether measurements started from now on are held back once read.
+    holding: bool,
+    /// Measurements read and held back now.
+    held: usize,
+    /// Measurements started.
+    started: usize,
+    /// Measurements whose result was handed to the agent.
+    delivered: usize,
 }
 
 /// A reading given to a [`DiskGauge`], and what changes just before it.
@@ -146,6 +165,81 @@ impl DiskGauge {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Next>> {
         self.next.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Holds back, once read, every measurement of disks at rest started
+    /// from now on until [`Self::let_resting_through`]: as one whose reads
+    /// take long, and whose result tells of disks as they were.
+    pub fn hold_resting(&self) {
+        self.resting_lock().holding = true;
+    }
+
+    /// Hands the agent the measurements held back, and holds no more.
+    pub fn let_resting_through(&self) {
+        self.resting_lock().holding = false;
+        self.resting.1.notify_all();
+    }
+
+    /// How many measurements of disks at rest are read and held back now.
+    #[must_use]
+    pub fn resting_held(&self) -> usize {
+        self.resting_lock().held
+    }
+
+    /// How many measurements of disks at rest the agent started.
+    #[must_use]
+    pub fn resting_started(&self) -> usize {
+        self.resting_lock().started
+    }
+
+    /// How many measurements of disks at rest the agent was handed.
+    #[must_use]
+    pub fn resting_delivered(&self) -> usize {
+        self.resting_lock().delivered
+    }
+
+    /// Counts a measurement of disks at rest starting, and says whether it
+    /// is to be held back once read.
+    pub(super) fn sweep_started(&self) -> bool {
+        let mut resting = self.resting_lock();
+        resting.started += 1;
+        resting.holding
+    }
+
+    /// Waits, if `held`, until measurements are let through, or at most
+    /// [`HELD_AT_MOST`], so that an agent that waits for one on its loop
+    /// fails its test rather than hanging it. Blocks.
+    pub(super) fn hold_back(&self, held: bool) {
+        if !held {
+            return;
+        }
+        let until = std::time::Instant::now() + HELD_AT_MOST;
+        let mut resting = self.resting_lock();
+        resting.held += 1;
+        while resting.holding {
+            let Some(left) = until.checked_duration_since(std::time::Instant::now()) else {
+                break;
+            };
+            resting = self
+                .resting
+                .1
+                .wait_timeout(resting, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        resting.held -= 1;
+    }
+
+    /// Counts a measurement of disks at rest handed to the agent.
+    pub(super) fn sweep_delivered(&self) {
+        self.resting_lock().delivered += 1;
+    }
+
+    fn resting_lock(&self) -> std::sync::MutexGuard<'_, Resting> {
+        self.resting
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -257,6 +351,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.retire_unused();
         self.retire_unused_images();
         self.measure_relief();
+        self.measure_resting();
         self.check_guests();
         self.refill();
     }

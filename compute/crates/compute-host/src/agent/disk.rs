@@ -32,8 +32,18 @@
 //! ([`SandboxConfig::disk_mib`]): its copy is made that long at once, the
 //! new end a hole its guest's file system grows into, and it is booked at
 //! that length like any disk.
+//!
+//! A disk at rest, its sandbox saved or archived with no step under way,
+//! does not grow, but what it may grow by when it next wakes changes as
+//! the files it shares extents with go. It is measured as it comes to
+//! rest, and before a wake's admission, and again on the blocking pool
+//! between samples, one measurement at a time, so that reading many disks
+//! (on XFS each read walks the shared-extent tree, which memory pressure
+//! may have pushed out to disk) never holds up the agent's loop; see
+//! [`HostAgent::measure_resting`].
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use compute_core::{DiskSpace, Input, Level, Outcome, SandboxId, Step};
@@ -46,7 +56,7 @@ use crate::protocol::SandboxConfig;
 use crate::state::Record;
 use crate::store::{Claimed, OwnerEpoch, Store};
 
-use super::{HostAgent, HostError, Reply};
+use super::{DiskGauge, Event, HostAgent, HostError, Reply};
 use crate::protocol::{Id, ImageId};
 
 /// Inodes a new sandbox's or a ready sandbox's files take at most: its
@@ -77,6 +87,11 @@ const DIRTIED_SLACK: u64 = 256 << 10;
 /// [`Engine::settle_writes`]). A VM whose writes have not by then books
 /// all its disk may take, for that reading.
 const SETTLE_WITHIN: Duration = Duration::from_millis(100);
+
+/// How long a measurement of disks at rest may take before the agent
+/// says so: a disk is read in milliseconds, unless memory pressure pushed
+/// out of memory what its file system maps it with.
+const RESTING_SLOW: Duration = Duration::from_secs(5);
 
 pub(super) use crate::layout::lengthen;
 
@@ -156,12 +171,26 @@ pub(super) enum AfterReading {
 }
 
 /// What each VM had written, read just before the disk reading of a
-/// sample, with whether its memory image was still being filled and the
-/// headroom of disks at rest; see [`HostAgent::disk_readings`].
+/// sample, with whether its memory image was still being filled; see
+/// [`HostAgent::disk_readings`].
 #[derive(Debug, Default)]
 pub(super) struct BeforeReading {
     writes: Vec<(SandboxId, Option<Writes>)>,
     inputs: Vec<Input>,
+}
+
+/// What one disk at rest may still grow by, as a measurement on the
+/// blocking pool read it (see [`HostAgent::measure_resting`]).
+#[derive(Debug)]
+pub(super) struct RestingReading {
+    sandbox: SandboxId,
+    /// The files it was read under, which a sandbox made again under the
+    /// same id does not share.
+    paths: Arc<Paths>,
+    /// The steps started for it when it was read; see `Slot::steps`.
+    steps: u64,
+    /// What it may still grow by, or `None` if it could not be read.
+    headroom: Option<Headroom>,
 }
 
 /// When a new sandbox fits; see [`HostAgent::room_for`].
@@ -187,6 +216,122 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .headroom(id, &slot.paths.disk)
             .map_or_else(|| self.record_size(&record).disk, |headroom| headroom.left);
         Some(Input::DiskGrowth { sandbox: id, bytes })
+    }
+
+    /// Whether sandbox `id` is at rest, so its disk may be measured as
+    /// [`Self::resting_disk`] does: saved or archived, with no VM, no step
+    /// under way or about to start, and not being removed.
+    fn at_rest(&self, id: SandboxId) -> bool {
+        let Some(slot) = self.slots.get(&id) else {
+            return false;
+        };
+        slot.vm.is_none()
+            && slot.op.is_none()
+            && !slot.destroy
+            && !self.tearing_down.contains_key(&id)
+            && self.core.sandbox(id).is_some_and(|view| {
+                view.step.is_none() && matches!(view.state.level, Level::Saved | Level::Archived)
+            })
+    }
+
+    /// Measures again, on the blocking pool, what every disk at rest may
+    /// still grow by, unless a measurement is still under way;
+    /// [`Event::RestingMeasured`] brings the result. Each read of a disk
+    /// blocks for as long as its file system takes to map the disk's
+    /// extents, which under memory and I/O pressure, with many disks at
+    /// rest, adds up to tens of seconds: on the agent's loop that would
+    /// hold up every request, its status too. One measurement at a time
+    /// keeps them from piling up on the blocking pool when reads are slow.
+    pub(super) fn measure_resting(&mut self) {
+        // Without a disk policy, or a reading yet, the core books no disk.
+        if self.measuring_resting.is_some() || self.core.disk().is_none() {
+            return;
+        }
+        let resting: Vec<(SandboxId, Arc<Paths>, u64)> = self
+            .slots
+            .iter()
+            .filter(|(id, _)| self.at_rest(**id))
+            .map(|(id, slot)| (*id, Arc::clone(&slot.paths), slot.steps))
+            .collect();
+        if resting.is_empty() {
+            return;
+        }
+        self.measuring_resting = Some(tokio::time::Instant::now());
+        // A save writes one copy of memory only where files share extents.
+        let (unit, shares) = (self.allocation_unit, self.save_copies == 1);
+        let (events, gauge) = (self.events_tx.clone(), self.disk_gauge.clone());
+        let held = gauge.as_ref().is_some_and(DiskGauge::sweep_started);
+        tokio::task::spawn_blocking(move || {
+            let readings = resting
+                .into_iter()
+                .map(|(sandbox, paths, steps)| {
+                    let headroom = disk_growth::headroom(&paths.disk, unit, shares)
+                        .inspect_err(|error| {
+                            tracing::debug!(
+                                sandbox = %Id(sandbox),
+                                %error,
+                                "could not read how much a disk at rest may still grow"
+                            );
+                        })
+                        .ok();
+                    RestingReading {
+                        sandbox,
+                        paths,
+                        steps,
+                        headroom,
+                    }
+                })
+                .collect();
+            if let Some(gauge) = &gauge {
+                gauge.hold_back(held);
+            }
+            let _ = events.send(Event::RestingMeasured(readings));
+            if let Some(gauge) = &gauge {
+                gauge.sweep_delivered();
+            }
+        });
+    }
+
+    /// Tells the core what a measurement of disks at rest found, for each
+    /// disk still at rest as it was read: one that woke, had a step start
+    /// or was removed meanwhile was measured again as that happened, or
+    /// will be once it rests again. A disk that could not be read books
+    /// its whole bound, as [`Self::resting_disk`] has it.
+    pub(super) fn resting_measured(&mut self, readings: Vec<RestingReading>) {
+        if let Some(began) = self.measuring_resting.take()
+            && began.elapsed() >= RESTING_SLOW
+        {
+            tracing::info!(
+                disks = readings.len(),
+                took_ms = began.elapsed().as_millis(),
+                "measuring what disks at rest may grow by took long; the agent served on meanwhile"
+            );
+        }
+        let inputs: Vec<Input> = readings
+            .into_iter()
+            .filter_map(|reading| {
+                let slot = self.slots.get(&reading.sandbox)?;
+                if !Arc::ptr_eq(&slot.paths, &reading.paths)
+                    || slot.steps != reading.steps
+                    || !self.at_rest(reading.sandbox)
+                {
+                    return None;
+                }
+                let bytes = if let Some(headroom) = reading.headroom {
+                    headroom.left
+                } else {
+                    let record = self.records.get(Id(reading.sandbox))?;
+                    self.record_size(&record).disk
+                };
+                Some(Input::DiskGrowth {
+                    sandbox: reading.sandbox,
+                    bytes,
+                })
+            })
+            .collect();
+        if !inputs.is_empty() {
+            self.inputs(inputs);
+        }
     }
 
     /// At rest, a disk needs no running-VMM race allowance. Measure before
@@ -270,17 +415,12 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
     /// image is still being filled from object storage. Read just before
     /// the disk reading of the same sample, which then shows what the fill
     /// wrote; the disks themselves are read after it, by
-    /// [`Self::disk_growth_readings`].
+    /// [`Self::disk_growth_readings`]. Disks at rest are measured apart,
+    /// off the agent's loop (see [`Self::measure_resting`]).
     pub(super) fn disk_readings(&self) -> BeforeReading {
         let mut before = BeforeReading::default();
         for (id, slot) in &self.slots {
             let Some(live) = slot.vm.as_ref() else {
-                if self.core.sandbox(*id).is_some_and(|view| {
-                    view.step.is_none()
-                        && matches!(view.state.level, Level::Saved | Level::Archived)
-                }) {
-                    before.inputs.extend(self.resting_disk(*id));
-                }
                 continue;
             };
             before.writes.push((*id, self.vm_writes(*id, &live.vm)));
