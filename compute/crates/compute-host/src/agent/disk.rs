@@ -306,32 +306,28 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let (events, gauge) = (self.events_tx.clone(), self.disk_gauge.clone());
         let held = gauge.as_ref().is_some_and(DiskGauge::sweep_started);
         tokio::task::spawn_blocking(move || {
-            let read = move || {
-                measure
-                    .into_iter()
-                    .map(|(sandbox, paths, epoch)| {
-                        let headroom = disk_growth::headroom(&paths.disk, unit, shares)
-                            .inspect_err(|error| {
-                                tracing::debug!(
-                                    sandbox = %Id(sandbox),
-                                    %error,
-                                    "could not read how much a disk at rest may still grow"
-                                );
-                            })
-                            .ok();
-                        RestingReading {
-                            sandbox,
-                            paths,
-                            epoch,
-                            headroom,
-                        }
-                    })
-                    .collect()
-            };
-            // Always answered, so the next measurement is never kept from
-            // starting: one that ended part way tells nothing.
-            let readings =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(read)).unwrap_or_default();
+            // A panic here ends the agent (release builds abort), so the
+            // measurement under way always answers or the process restarts.
+            let readings: Vec<RestingReading> = measure
+                .into_iter()
+                .map(|(sandbox, paths, epoch)| {
+                    let headroom = disk_growth::headroom(&paths.disk, unit, shares)
+                        .inspect_err(|error| {
+                            tracing::debug!(
+                                sandbox = %Id(sandbox),
+                                %error,
+                                "could not read how much a disk at rest may still grow"
+                            );
+                        })
+                        .ok();
+                    RestingReading {
+                        sandbox,
+                        paths,
+                        epoch,
+                        headroom,
+                    }
+                })
+                .collect();
             if let Some(gauge) = &gauge {
                 gauge.hold_back(held);
             }
