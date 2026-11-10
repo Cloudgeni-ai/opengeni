@@ -1,5 +1,25 @@
 # Modular prompt changelog
 
+Agents can start workers as the person on GitHub, and know when the person
+allowed all their repositories. No prompt module changes; three tool texts
+change. `session_create`'s `resources` description gains one sentence
+(136 bytes) only when personal GitHub OAuth is enabled, because the server now
+resolves a personal repository named by `uri`, `ref` and `connectionType` from
+the calling turn's Your GitHub access; other deployments keep their bytes.
+`github_connect_link`'s personal-OAuth description grows 188 bytes to name the
+new `personal.allRepositories` field and what it allows. Its shared identity
+guidance, also used by the `api:github-personal` catalog description, grows
+17 bytes so it no longer implies the person must choose each repository.
+
+```text
+- … An empty array inherits no resources.
++ … An empty array inherits no resources. For a repository as the person, give uri, ref and connectionType "github_personal"; the rest comes from this turn's Your GitHub access.   (personal GitHub OAuth on)
+- The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl …
++ The personal field covers the person's own account: connected, login, repositoryCount (their chosen list) and allRepositories, or connectUrl … When allRepositories.enabled, any repository the person can reach on GitHub is usable as them up to allRepositories.access, without choosing it first.
+- … only in chats they start, on repositories they choose.
++ … only in chats they start, on repositories they choose or all of theirs.
+```
+
 A configured session without a sandbox or Connected Machine no longer gets
 text it cannot act on: editing files in the sandbox, publishing new files,
 workspace file links, sandbox paths, background-command acknowledgement and

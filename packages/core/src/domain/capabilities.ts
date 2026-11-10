@@ -2900,7 +2900,7 @@ export function nativeConnectionCapabilityRecommendations(
         source: "built_in",
         name: "Your GitHub",
         description:
-          "The person's own GitHub account: commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose. Use for 'connect my GitHub', 'use my account' or 'do it as me'.",
+          "The person's own GitHub account: commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose or all of theirs. Use for 'connect my GitHub', 'use my account' or 'do it as me'.",
         category: "source-control",
         tags: [
           "github",
