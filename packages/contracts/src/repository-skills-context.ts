@@ -13,7 +13,7 @@
 export const REPOSITORY_SKILLS_CONTEXT_PREFIX = "<opengeni_repository_skills>\n";
 export const REPOSITORY_SKILLS_CONTEXT_SUFFIX = "\n</opengeni_repository_skills>";
 const GUIDANCE =
-  "This is the current Repository skills index of the live workspace and replaces earlier ones.\n\n";
+  "This is the Repository skills index from the last time the live workspace was indexed, and it replaces earlier ones. Files may have changed since.\n\n";
 
 export function repositorySkillsContextItem(index: string): Record<string, unknown> {
   return {

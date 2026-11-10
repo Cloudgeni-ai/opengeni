@@ -574,7 +574,7 @@ export function repositorySkillsNotice(searchPaths: readonly WorkspaceSkillSearc
 
 Repository skills are instructions already present in the live workspace, in skill folders under ${folders} (paths from the workspace root). A skill's identifier is repository: followed by its SKILL.md path, such as repository:${example}/<folder>/SKILL.md. Read skills with repository_skill_read, which returns current live files; ordinary filesystem tools execute referenced scripts and read binary assets. Configured Skills use their separate skill_read index.
 
-Once the workspace has been indexed, the current index appears in the conversation as a Repository skills context message; the latest one replaces earlier ones. Without one, if the task involves the repository, look in those folders yourself.
+Once the workspace has been indexed, its index appears in the conversation as a Repository skills context message; the latest one replaces earlier ones. If there is none, or it may be out of date, and the task involves the repository, look in those folders yourself.
 
 - If the user names a skill, or the task clearly matches a skill description, read its complete SKILL.md before acting.
 - Resolve referenced scripts, references, assets, and templates relative to that skill directory.

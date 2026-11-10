@@ -36,8 +36,10 @@ export type HistoryWithRepositorySkills = (
  * binding of this run's reasoning to its request prefix.
  *
  * Nothing changes when the input already shows the same index (a retry that
- * loaded it, or an unchanged index), when the prefix was rewritten (for
- * example by compaction during the run), or when `withIndex` fails.
+ * loaded it, or an unchanged index), or when the prefix was rewritten (for
+ * example by compaction during the run). A failure to build the history fails
+ * the request: the index is already stored, so going on without it would make
+ * this turn's requests differ from what later turns load, and a retry loads it.
  */
 export function repositorySkillsContextInputFilter(
   state: RepositorySkillsContextState,
@@ -64,8 +66,7 @@ export function repositorySkillsContextInputFilter(
     if (input.length < historyLength || prefix.some((item, index) => input[index] !== item))
       return modelData;
     if (latestRepositorySkillsIndex(input) === visible) return modelData;
-    if (built?.index !== visible)
-      built = { index: visible, items: withIndex(visible).catch(() => null) };
+    if (built?.index !== visible) built = { index: visible, items: withIndex(visible) };
     const history = await built.items;
     if (!history) return modelData;
     return { ...modelData, input: [...history, ...input.slice(historyLength)] };

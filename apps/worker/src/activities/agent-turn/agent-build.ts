@@ -933,12 +933,16 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           : {}),
         ...(sandboxArtifactRuntime.available ? { artifactRuntimeAvailable: true } : {}),
         ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
-        ...(deps.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
         // The run's repository Skill index is a durable history item before
         // this turn, like the Skill catalog above; the system prompt keeps
-        // only a stable notice. Maintenance turns never reach the model.
-        ...(turn.source !== "compaction"
-          ? {
+        // only a stable notice. A compaction turn neither indexes nor shows
+        // one: it has no history of its own to store it in.
+        ...(deps.deferRepositorySkillIndex || turn.source === "compaction"
+          ? { deferRepositorySkillIndex: true }
+          : {}),
+        ...(turn.source === "compaction"
+          ? { publishRepositorySkills: async () => null }
+          : {
               publishRepositorySkills: async (index: RepositorySkillsIndex | null) =>
                 await ensureSessionRepositorySkills(db, {
                   accountId: input.accountId,
@@ -951,8 +955,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
                   // workspace has none rather than searching for them.
                   index: index?.text ?? null,
                 }),
-            }
-          : {}),
+            }),
         // W1: `{{secret:…}}` references resolve at the exec boundary, and the
         // session's credential profile adds its variables to every command
         // through the same resolver.
