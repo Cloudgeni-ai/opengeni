@@ -17,6 +17,7 @@ import {
   settleConnectedMachineSessionBackgroundCommand,
   waitForSessionInputWithEvent,
   settleSessionInputWait,
+  childFailedTurnDedupeKey,
   claimPendingSessionSystemUpdateOutbox,
   claimSessionWorkForAttempt,
   configureChildLifecycleNotices,
@@ -1469,6 +1470,50 @@ describe("child read acknowledgment on parent consumption", () => {
       (await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id))
         .childFailureHandled,
     ).toBe(false);
+  });
+
+  test("a failure before the retry was claimed is handled once its parent takes it", async () => {
+    const grant = await workspace();
+    const parent = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent, message: "work" });
+    await settleFailed(grant, child);
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    await settleIdle(grant, parent);
+    const [episode] = await shared.admin<Array<{ dedupe_key: string }>>`
+      select dedupe_key from session_system_update_outbox
+      where source_session_id = ${child.session.id} and kind = 'child_terminal_result'`;
+    // Pins the key the handled-failure SQL rebuilds to recognize the failed turn.
+    expect(episode?.dedupe_key).toBe(childFailedTurnDedupeKey(child.session.id, child.turn.id));
+    await enqueueHumanTurn(grant, parent.session.id);
+    const parentTurn = await claim(grant, parent.session.id);
+    if (parentTurn.action !== "claimed") throw new Error("parent turn was not claimed");
+
+    // The retry fails before any attempt claims it.
+    await enqueueHumanTurn(grant, child.session.id);
+    const failed = await failSessionWorkBeforeAttemptClaim(client.db, grant.workspaceId, {
+      accountId: grant.accountId,
+      sessionId: child.session.id,
+      workflowId: `session-${child.session.id}`,
+      trigger: { kind: "next" },
+      error: "Agent turn admission failed before attempt claim.",
+      admissionFailure: { disposition: "permanent", code: "claim_invariant" },
+    });
+    expect(failed.action).toBe("failed");
+    expect(await deliverOutboxTo(parent.session.id)).toBe(1);
+    expect(
+      await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id),
+    ).toMatchObject({ unreadFailedDescendants: 1, childFailureHandled: false });
+
+    await settleIdle(grant, {
+      session: parent.session,
+      turn: parentTurn.turn,
+      attemptId: parentTurn.attemptId,
+    });
+    await enqueueHumanTurn(grant, parent.session.id);
+    expect((await claim(grant, parent.session.id)).action).toBe("claimed");
+    expect(
+      await failureAttention(grant, grant.subjectId, parent.session.id, child.session.id),
+    ).toMatchObject({ unreadFailedDescendants: 0, childFailureHandled: true });
   });
 
   test("an acknowledgment already ahead of the consumed child is never regressed", async () => {

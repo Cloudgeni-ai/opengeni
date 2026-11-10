@@ -457,7 +457,9 @@ turn since. Such a session is left out of every ancestor's
 the flat child list in Needs you, even when it logs a late event such as a
 workspace capture after the acknowledgment. Its own row, when expanded, shows
 as unread rather than failed. The rule is viewer-independent: it holds for
-members whose personal state the claim never acknowledged.
+members whose personal state the claim never acknowledged. The one exception
+fails safe: a viewer who can see the child but not its parent cannot read the
+notices between them, so the failure stays unhandled for that viewer.
 
 Everything else stays unhandled and keeps its red marker: a root session; a
 failure whose notice has not been delivered yet, is still pending (its parent

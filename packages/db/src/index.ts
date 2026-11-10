@@ -36001,9 +36001,9 @@ function sessionFailureHandledByParentSql(
           and later.session_id = ${sessionId}
           and later.finished_at is not null
           and later.finished_at > episode.created_at
-          -- The failed turn's own notice is keyed by that turn (see
-          -- enqueueFailedChildOutboxForTurnTx); any other turn is newer work.
-          and episode.dedupe_key <> ('child-completion:' || (${sessionId})::text || ':turn:' || later.id::text)
+          -- The failed turn's own notice is keyed by that turn; any other
+          -- turn is newer work.
+          and episode.dedupe_key <> ${childFailedTurnDedupeKeySql(sessionId, sql`later.id`)}
       )
     from ${schema.sessionSystemUpdateOutbox} episode
     where episode.workspace_id = ${workspaceId}
@@ -36326,12 +36326,20 @@ export async function sessionTreeStatsForSessions(
               end,
               0
             ) as unread,
-            -- Probed only for failed descendants; see sessionFailureHandledByParentSql.
-            case when numbered.status = 'failed' then ${sessionFailureHandledByParentSql(
-              workspaceId,
-              sql`numbered.id`,
-              sql`numbered.parent_session_id`,
-            )} else false end as failure_handled
+            -- Probed only for unread failed descendants, the only ones a
+            -- handled verdict changes; see sessionFailureHandledByParentSql.
+            case when numbered.status = 'failed' and ${subjectId ?? null}::text is not null
+              and numbered.last_sequence > coalesce(
+                case
+                  when personal.manually_unread_through is not null then -1
+                  else personal.acknowledged_sequence
+                end,
+                0
+              ) then ${sessionFailureHandledByParentSql(
+                workspaceId,
+                sql`numbered.id`,
+                sql`numbered.parent_session_id`,
+              )} else false end as failure_handled
           from numbered
           left join ${schema.sessionPins} personal
             on ${subjectId ?? null}::text is not null
@@ -36805,7 +36813,10 @@ async function sessionListTotalsInScope(
         root.updated_at as root_updated_at, root.created_at as root_created_at,
         root.origin_title as root_origin_title,
         cursor.last_meaningful_sequence > nodes.acknowledged_sequence as unread,
-        case when nodes.status = 'failed' then ${sessionFailureHandledByParentSql(
+        -- Probed only for unread failures, the only ones it changes.
+        case when nodes.status = 'failed'
+          and cursor.last_meaningful_sequence > nodes.acknowledged_sequence
+        then ${sessionFailureHandledByParentSql(
           workspaceId,
           sql`nodes.id`,
           sql`nodes.parent_session_id`,
@@ -91201,8 +91212,22 @@ async function enqueueFailedChildOutboxForTurnTx(
   }
   await enqueueFailedChildOutboxTx(tx, workspaceId, session, {
     turnId: turn.id,
-    dedupeKey: `child-completion:${turn.sessionId}:turn:${turn.id}`,
+    dedupeKey: childFailedTurnDedupeKey(turn.sessionId, turn.id),
   });
+}
+
+/**
+ * Dedupe key of the notice a child's failed turn sends its parent. The SQL twin
+ * below must build the same string: sessionFailureHandledByParentSql relies on
+ * it to tell the failed turn itself from later work.
+ */
+export function childFailedTurnDedupeKey(childSessionId: string, turnId: string): string {
+  return `child-completion:${childSessionId}:turn:${turnId}`;
+}
+
+/** SQL form of childFailedTurnDedupeKey; keep the two in step. */
+function childFailedTurnDedupeKeySql(childSessionId: SQL, turnId: SQL): SQL {
+  return sql`('child-completion:' || (${childSessionId})::text || ':turn:' || (${turnId})::text)`;
 }
 
 async function enqueueFailedChildOutboxWithoutTurnTx(
