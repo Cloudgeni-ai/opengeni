@@ -22,6 +22,10 @@
       "types": "./src/machine-access.ts",
       "default": "./src/machine-access.ts"
     },
+    "./encrypted-reasoning-refusal": {
+      "types": "./src/encrypted-reasoning-refusal.ts",
+      "default": "./src/encrypted-reasoning-refusal.ts"
+    },
     "./browser-response-headers": {
       "types": "./src/browser-response-headers.ts",
       "default": "./src/browser-response-headers.ts"
