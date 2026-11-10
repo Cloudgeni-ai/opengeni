@@ -3,6 +3,8 @@
 // the owner's Usage page in a Personal workspace that has spent its limit.
 // `?limit=` (dollars, empty for none) sets the control's starting limit; the
 // usage page always shows a spent $50 limit. Saves land on window.
+// `?refuse` makes saves fail as a server with usage allowances switched off
+// does; `?theme=light|dark` and `?platform=macos|browser` pick the look.
 import { createRoot } from "react-dom/client";
 
 import { AppContext, type AppContextValue } from "@opengeni/react/app/app-context";
@@ -11,6 +13,7 @@ import type { OrganizationPrivacySettings } from "@opengeni/react/app/types";
 import { SectionStack } from "@opengeni/react/ui/section";
 import { SectionVariantProvider } from "@opengeni/react/ui/section-variant";
 import { TooltipProvider } from "@opengeni/react/ui/tooltip";
+import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { PersonalWorkspaceLimitSection } from "../src/components/usage/personal-workspace-limit-section";
 import { WorkspaceUsagePage } from "../src/components/usage/workspace-usage-page";
 import "../src/styles.css";
@@ -21,6 +24,14 @@ declare global {
   }
 }
 window.personalLimitSaves = [];
+
+const params = new URLSearchParams(window.location.search);
+const theme = params.get("theme") === "light" ? "light" : "dark";
+document.documentElement.classList.toggle("dark", theme === "dark");
+document.documentElement.dataset.ogTheme = theme;
+const platform = params.get("platform") ?? "browser";
+if (platform !== "browser") document.documentElement.dataset.desktop = platform;
+const refuse = params.has("refuse");
 
 const organizationId = "33333333-3333-4333-8333-333333333333";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
@@ -53,6 +64,20 @@ const client = {
   getOrganizationPrivacySettings: async () => later(privacy),
   updateOrganizationPrivacySettings: async (_organizationId: string, change: object) => {
     window.personalLimitSaves.push(change);
+    if (refuse) {
+      await later(null);
+      throw new OpenGeniApiError(
+        409,
+        JSON.stringify({
+          error: {
+            message:
+              "Usage allowance changes are not enabled. Upgrade every API and worker before enabling usage allowances.",
+            requestId: "386126c7-51c0-448e-9c5a-56fbec012f9f",
+          },
+        }),
+        { mutation: true },
+      );
+    }
     privacy = { ...privacy, ...change };
     return later(privacy);
   },

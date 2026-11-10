@@ -160,6 +160,7 @@ export async function selectServingTurnCapacity(
       );
       deps.control.activityStatus = "recovering";
       deps.control.turnMetricOutcome = "recovering";
+      deps.control.turnRecoveryCause = "provider";
       return { exit: deps.claimedResult({ status: "recovering" }) };
     }
   }

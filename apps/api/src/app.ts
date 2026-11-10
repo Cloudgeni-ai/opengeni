@@ -73,6 +73,7 @@ import {
   canonicalPublicOrigin,
   configuredAllowedReasoningEfforts,
   environmentsEncryptionKeyBytes,
+  landingOriginEntries,
   resolveFirstPartyMcpToolPolicy,
   UnsupportedLatencyModeError,
   voiceInputPricingIssues,
@@ -176,6 +177,7 @@ import {
   githubRepositoryUnavailableHttpError,
   connectionAccountSelectionHttpError,
   regionRestrictedHttpError,
+  authenticationRequiredHttpError,
   missingPermissionHttpError,
   scheduledTaskTargetAccessHttpError,
   sessionUsageLimitHttpError,
@@ -458,6 +460,7 @@ import {
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
+  DISPLAY_IDENTITY_PATH,
   registerManagedAuthSessionSetRoutes,
   requireManagedAuthProviderRouteAllowed,
   scrubManagedAuthProviderResponse,
@@ -961,6 +964,16 @@ export function createAppComposition(
       allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null,
   });
 
+  // The marketing site may read only the display identity, with cookies, and
+  // only from its exact configured origins. This never widens the regex above.
+  const landingOrigins = new Set(landingOriginEntries(deps.settings.landingOrigins));
+  const displayIdentityCors = cors({
+    allowHeaders: ["Accept"],
+    allowMethods: ["GET"],
+    credentials: true,
+    origin: (origin) => origin,
+  });
+
   const localCorsOriginAllowed = createLocalCorsOriginPolicy(deps.settings, localBrowserBoundary);
   const localCors = localCorsOriginAllowed
     ? cors({
@@ -980,10 +993,21 @@ export function createAppComposition(
       // CORS grant (in local development the boundary above refused them).
       return origin ? localCors(c, next) : next();
     }
+    if (origin && landingOrigins.has(origin) && c.req.path === DISPLAY_IDENTITY_PATH) {
+      return displayIdentityCors(c, next);
+    }
     const middleware =
       origin && allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
         ? credentialedCors
         : publicApiCors;
+    if (middleware === publicApiCors && c.req.path === DISPLAY_IDENTITY_PATH) {
+      // The answer depends on the caller's origin and cookie; caches must not
+      // share it across origins (the credentialed middlewares add Vary already).
+      return middleware(c, async () => {
+        await next();
+        c.res.headers.append("vary", "Origin");
+      });
+    }
     return middleware(c, next);
   });
 
@@ -1771,6 +1795,7 @@ export function createAppComposition(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
         claudeSubscriptionEnabled: deps.settings.claudeSubscriptionEnabled,
+        ...(deps.settings.claudeCodeApiKeyEnabled ? { claudeCodeApiKeyEnabled: true } : {}),
         ...(azureOpenAIDeploymentIdentityAvailable(deps.settings)
           ? { azureOpenAIDeploymentIdentity: true }
           : {}),
@@ -2737,6 +2762,7 @@ export function createAppComposition(
               details: { code: rawError.code },
             })
           : (missingPermissionHttpError(rawError) ??
+            authenticationRequiredHttpError(rawError) ??
             sessionUsageLimitHttpError(rawError) ??
             allowanceExhaustedHttpError(rawError) ??
             insufficientCreditsHttpError(rawError) ??

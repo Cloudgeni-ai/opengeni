@@ -241,8 +241,8 @@ The waiter stores no credential material. It carries the blocked turn
 generation, pool scope, optional active-goal id/version fence, reset/check time,
 and revisioned wake state. PostgreSQL is authoritative; Temporal signals are
 repairable hints, and `session_workflow_wake_outbox` repairs commit-to-signal
-loss. A session Pause or model switch releases the waiting turn (see
-[run lifecycle](run-lifecycle.md)); a workspace Pause preserves the waiter. Steer, cancellation, goal change, authority
+loss. A session or workspace Pause or a model switch releases the waiting turn
+(see [run lifecycle](run-lifecycle.md)). Steer, cancellation, goal change, authority
 change, active-turn change, or another semantic fence supersedes it cleanly.
 The protocol never creates a queue row, synthetic user message, model polling
 turn, consent prompt, or ambient-user fallback.

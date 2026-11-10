@@ -16,7 +16,7 @@ export type ComposerLaunchSearch = {
   channelId?: string | undefined;
   /** One installed session-selected Skill to freeze onto the new session. */
   skillCapabilityId?: string | undefined;
-  /** `?agent=`: start the new chat with this agent; its First message fills the composer. */
+  /** `?agent=`: start the new chat with this agent selected and an empty composer. */
   agent?: string | undefined;
   /** `?botTemplateId=` from older links: bot templates are agents with the same ids. */
   botTemplateId?: string | undefined;

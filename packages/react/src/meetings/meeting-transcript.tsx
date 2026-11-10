@@ -20,11 +20,13 @@ import {
   AudioLinesIcon,
   CheckIcon,
   ChevronDownIcon,
+  MicOffIcon,
   MoreHorizontalIcon,
   PencilIcon,
   UserIcon,
   UserPlusIcon,
   UsersIcon,
+  VolumeXIcon,
   XIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -55,10 +57,15 @@ import { cn } from "../app/lib/utils";
 import {
   formatClock,
   groupTranscriptTurns,
+  interleaveUnrecordedMarks,
   speakerColorSlots,
   speakerDisplayName,
   speakerIsNamed,
+  trackSpeakerName,
+  transcriptUnrecordedMarks,
+  unrecordedMarkText,
   type TranscriptTurn,
+  type TranscriptUnrecordedMark,
 } from "../recordings";
 import { MeetingsOverlayScope } from "./overlay-scope";
 
@@ -554,11 +561,42 @@ function EditTurnDialog({
   );
 }
 
+/**
+ * A quiet line where one track recorded nothing (its microphone was
+ * unplugged, tab sharing ended), so a missing voice reads as missing audio
+ * rather than as a transcript that skipped what was said.
+ */
+function UnrecordedLine({
+  mark,
+  speakerName,
+}: {
+  mark: TranscriptUnrecordedMark;
+  /** The one person heard on the mark's microphone, if someone named them. */
+  speakerName: string | null;
+}) {
+  const msg = useOpenGeniText();
+  const Icon = mark.source === "microphone" ? MicOffIcon : VolumeXIcon;
+  return (
+    // Lined up with the speaker names and as wide as a turn, so it reads as a
+    // note in the conversation's flow, and wraps cleanly when it is long.
+    <li
+      data-unrecorded=""
+      className="flex max-w-[72ch] min-w-0 items-start gap-1.5 pl-1 text-fg-muted"
+    >
+      <Icon aria-hidden="true" className="mt-px size-3.5 shrink-0" />
+      <span className="text-xs leading-4 text-pretty tabular-nums">
+        {unrecordedMarkText(mark, msg, speakerName)}
+      </span>
+    </li>
+  );
+}
+
 function MeetingTranscriptContent({
   segments,
   speakers,
   tracks,
   people,
+  durationMilliseconds,
   activeSegment,
   actions,
   onSeek,
@@ -566,6 +604,11 @@ function MeetingTranscriptContent({
   segments: readonly RecordingTranscriptSegment[];
   speakers: readonly RecordingSpeaker[];
   tracks: readonly RecordingTrack[];
+  /**
+   * The meeting's length, where a track that stopped for good stops being
+   * missing; defaults to its longest track.
+   */
+  durationMilliseconds?: number;
   people: readonly RecordingPerson[];
   /** The segment playing now. */
   activeSegment: number | null;
@@ -574,7 +617,20 @@ function MeetingTranscriptContent({
   onSeek: ((milliseconds: number) => void) | null;
 }) {
   const msg = useOpenGeniText();
-  const turns = useMemo(() => groupTranscriptTurns(segments), [segments]);
+  const length =
+    durationMilliseconds ?? Math.max(0, ...tracks.map((track) => track.durationMilliseconds));
+  const marks = useMemo(() => transcriptUnrecordedMarks(tracks, length), [tracks, length]);
+  // No turn runs across a stretch without audio, so its line sits between them.
+  const turns = useMemo(
+    () =>
+      groupTranscriptTurns(
+        segments,
+        undefined,
+        marks.map((mark) => mark.startMilliseconds),
+      ),
+    [segments, marks],
+  );
+  const items = useMemo(() => interleaveUnrecordedMarks(turns, marks), [turns, marks]);
   const slots = useMemo(() => speakerColorSlots(segments), [segments]);
   const labels = useMemo(() => [...slots.keys()], [slots]);
   const [naming, setNaming] = useState<string | null>(null);
@@ -609,7 +665,21 @@ function MeetingTranscriptContent({
   return (
     <>
       <ol ref={listRef} className="grid gap-6" aria-label={msg("meetings.transcript.transcript")}>
-        {turns.map((turn) => {
+        {items.map((item) => {
+          if (item.kind === "unrecorded") {
+            return (
+              <UnrecordedLine
+                key={`unrecorded-${item.mark.key}`}
+                mark={item.mark}
+                speakerName={
+                  item.mark.trackNumber === null
+                    ? null
+                    : trackSpeakerName(item.mark.trackNumber, segments, speakers)
+                }
+              />
+            );
+          }
+          const turn = item.turn;
           const name = nameOf(turn.speakerLabel);
           const unnamed = turn.speakerLabel ? !speakerIsNamed(turn.speakerLabel, speakers) : false;
           const suggested = speakerIsSuggested(turn.speakerLabel, speakers);

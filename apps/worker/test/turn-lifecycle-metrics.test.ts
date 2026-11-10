@@ -216,3 +216,17 @@ describe("turn lifecycle metrics", () => {
     }
   });
 });
+
+test("customer provider failures stay observable without hiding platform failures on the same worker", async () => {
+  const obs = createObservability(testSettings(), { component: "worker" });
+  initializeWorkerOutcomeMetrics(obs);
+  const tracker = new TurnLifecycleMetrics(obs);
+  tracker.finish({ attemptId: "quota", outcome: "failed", failureOrigin: "customer_provider" });
+  tracker.finish({ attemptId: "invalid-tool-name", outcome: "failed" });
+  recordWorkerDeathRecoveryMetrics(obs, { outcome: "exhausted", timeoutType: "HEARTBEAT" });
+  const lines = (await obs.prometheusMetrics())
+    .split("\n")
+    .filter((line) => line.startsWith("opengeni_turns_total{"));
+  expect(lines.find((line) => line.includes('failure_origin="customer_provider"'))).toEndWith(" 1");
+  expect(lines.find((line) => line.includes('failure_origin="platform"'))).toEndWith(" 2");
+});

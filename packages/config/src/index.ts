@@ -624,9 +624,12 @@ const SettingsSchema = z.object({
   creditPromotionPolicy: EnvCreditPromotionPolicy,
   entitlementsMode: EntitlementsMode.default("none"),
   usageLimitsMode: UsageLimitsMode.default("none"),
-  // Gate new allowance policies until every API/worker in the fleet enforces
-  // them. Persisted-policy enforcement and recovery reads/clears stay active.
-  usageAllowancesEnabled: EnvBoolean.default(false),
+  // New allowance policies (workspace budgets, member and per-person limits).
+  // On by default: this release only runs on a database past the 0977
+  // migration baseline, so every API and worker beside it already enforces
+  // them. `false` is an operator opt-out of new policies only; persisted ones
+  // stay enforced and can still be cleared.
+  usageAllowancesEnabled: EnvBoolean.default(true),
   staticEntitlementsJson: z.string().default("{}"),
   staticUsageLimitsJson: z.string().default("{}"),
   delegationSecret: z.string().optional(),
@@ -783,6 +786,9 @@ const SettingsSchema = z.object({
   teamsBotClientId: z.string().uuid().optional(),
   teamsBotClientSecret: z.string().min(1).optional(),
   teamsBotTenantId: z.string().uuid().optional(),
+  // The app name the Teams bot uses for itself (welcome, help). Keep it the
+  // same as the package's name.short (OPENGENI_TEAMS_APP_NAME there too).
+  teamsAppName: z.string().trim().min(1).max(30).default("Opengeni"),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   integrationsPrivateNetworkAllowedHosts: z.preprocess(
@@ -984,6 +990,11 @@ const SettingsSchema = z.object({
   // that may call the unauthenticated API besides this stack's own web and
   // public origins. Local access mode ignores `corsAllowOriginRegex`.
   localAllowedOrigins: z.string().optional(),
+  // Exact marketing-site origins, comma-separated, that may read the signed-in
+  // visitor's display name and avatar from `GET /v1/auth/display-identity` with
+  // cookies. Grants credentialed CORS on that one read-only path only; empty
+  // (the default) disables it. Never widens `corsAllowOriginRegex`.
+  landingOrigins: z.string().optional(),
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
@@ -1298,6 +1309,10 @@ const SettingsSchema = z.object({
   // account pool and a distinct rail from the existing xai/* API-key provider.
   supergrokSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
   claudeSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED
+  // Offers "Claude Code (API key)" in Connect provider: the Anthropic API key
+  // connection, explained for people whose Claude plan includes monthly API
+  // credits. Display only; it is independent of the Claude subscription.
+  claudeCodeApiKeyEnabled: EnvBoolean.default(false), // OPENGENI_CLAUDE_CODE_API_KEY_ENABLED
   // Maximum silence between complete, valid SuperGrok SSE data events. This is
   // not a request/run duration cap; every valid event resets the timer.
   supergrokResponseStreamIdleTimeoutMs: z.coerce
@@ -2381,6 +2396,11 @@ const SettingsSchema = z.object({
   managedAuthPasskeySignUpEnabled: EnvBoolean.default(false),
   // Unset retains environment-based verification (required outside local).
   managedAuthRequireEmailVerification: EnvBoolean.optional(),
+  // Refuse new passwords found in the Have I Been Pwned breached-password
+  // corpus (k-anonymity lookup; only a 5-character SHA-1 prefix leaves the
+  // API). Unset checks outside local and test. An unreachable lookup never
+  // blocks sign-up or a password change.
+  managedAuthBreachedPasswordCheck: EnvBoolean.optional(),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
   // web image understands only fragment bearers, so API replicas must keep
   // generating fragment links until the compatible web fleet has converged.
@@ -5060,8 +5080,9 @@ function opperCapabilities(input: {
  * `opperModels` (database mode).
  */
 /**
- * Default automatic-compaction threshold for Claude Opus 5.5 on every route.
- * Workspaces can still choose another threshold per model.
+ * Default automatic-compaction threshold for Claude Opus 5.5 on every route,
+ * also used for Claude Fable 5.2. Workspaces can still choose another
+ * threshold per model.
  */
 export const OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT = 300_000;
 
@@ -5597,9 +5618,12 @@ export const reviewedModelListPricing: Record<string, ModelPricingScheduleV1> = 
   // https://platform.claude.com/docs/en/about-claude/pricing (2026-10-08).
   // Opus/Sonnet 5.5 cache reads are 5%, unlike the older models' 10%; none of these
   // models has a long-context premium.
+  // Fable 5.2: https://platform.claude.com/docs/en/models/fable-5-2/overview
+  // (2026-11-09); its cache reads are 2.5% of input.
   ...Object.fromEntries(
     (
       [
+        ["claude-fable-5-2", 8_000_000, 200_000, 10_000_000, 40_000_000],
         ["claude-opus-5-5", 4_000_000, 200_000, 5_000_000, 20_000_000],
         ["claude-sonnet-5-5", 2_000_000, 100_000, 2_500_000, 10_000_000],
         ["claude-opus-5", 5_000_000, 500_000, 6_250_000, 25_000_000],
@@ -5992,6 +6016,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     teamsBotClientId: optional("OPENGENI_TEAMS_BOT_CLIENT_ID"),
     teamsBotClientSecret: optional("OPENGENI_TEAMS_BOT_CLIENT_SECRET"),
     teamsBotTenantId: optional("OPENGENI_TEAMS_BOT_TENANT_ID"),
+    teamsAppName: optional("OPENGENI_TEAMS_APP_NAME"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
@@ -6046,6 +6071,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),
     corsAllowOriginRegex: optional("OPENGENI_CORS_ALLOW_ORIGIN_REGEX"),
     localAllowedOrigins: optional("OPENGENI_LOCAL_ALLOWED_ORIGINS"),
+    landingOrigins: optional("OPENGENI_LANDING_ORIGINS"),
     openaiProvider: optional("OPENGENI_OPENAI_PROVIDER"),
     openaiApiKey: optional("OPENGENI_OPENAI_API_KEY") ?? optional("OPENAI_API_KEY"),
     openaiBaseUrl: optional("OPENGENI_OPENAI_BASE_URL") ?? optional("OPENAI_BASE_URL"),
@@ -6144,6 +6170,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
+    claudeCodeApiKeyEnabled: optional("OPENGENI_CLAUDE_CODE_API_KEY_ENABLED"),
     supergrokResponseStreamIdleTimeoutMs: optional(
       "OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS",
     ),
@@ -6573,6 +6600,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedAuthRequireEmailVerification: optional(
       "OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION",
     ),
+    managedAuthBreachedPasswordCheck: optional("OPENGENI_MANAGED_AUTH_BREACHED_PASSWORD_CHECK"),
     organizationUserSetupEmailTokenTransport: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",
     ),
@@ -12181,7 +12209,13 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // access) or runs at once (a read, or full access); the API enforces it.
       // A bot send follows the person's own Slack send permission in an
       // interactive chat; the worker decides it per call the same way.
-      requireApproval: ["admin_action_call", "slack_bot_send_prepared_message"],
+      // An agent's request to attach a repository always waits for a person,
+      // and the API attaches only a call a person approved.
+      requireApproval: [
+        "admin_action_call",
+        "slack_bot_send_prepared_message",
+        "github_repository_attach",
+      ],
     },
     ...(hasFiles
       ? []
@@ -12353,6 +12387,19 @@ export function trustedProxyCidrEntries(raw: string): TrustedProxyCidr[] {
  * browser boundary.
  */
 export function localAllowedOriginEntries(raw: string | undefined): string[] {
+  return exactOriginEntries(raw, "OPENGENI_LOCAL_ALLOWED_ORIGINS", "http://127.0.0.1:5173");
+}
+
+/**
+ * Parse `OPENGENI_LANDING_ORIGINS`: comma-separated exact marketing-site origins
+ * allowed to read `GET /v1/auth/display-identity` with cookies. Same strict
+ * exact-origin rules as {@link localAllowedOriginEntries}.
+ */
+export function landingOriginEntries(raw: string | undefined): string[] {
+  return exactOriginEntries(raw, "OPENGENI_LANDING_ORIGINS", "https://www.example.com");
+}
+
+function exactOriginEntries(raw: string | undefined, variable: string, example: string): string[] {
   const origins: string[] = [];
   for (const entry of (raw ?? "").split(",")) {
     const value = entry.trim();
@@ -12376,7 +12423,7 @@ export function localAllowedOriginEntries(raw: string | undefined): string[] {
       value.endsWith("#")
     ) {
       throw new Error(
-        `OPENGENI_LOCAL_ALLOWED_ORIGINS entry "${value.slice(0, 64)}" is not an exact http(s) origin such as http://127.0.0.1:5173`,
+        `${variable} entry "${value.slice(0, 64)}" is not an exact http(s) origin such as ${example}`,
       );
     }
     origins.push(url.origin);
@@ -12471,6 +12518,7 @@ function validateRecordingTranscriptionSettings(settings: Settings): void {
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
+  landingOriginEntries(settings.landingOrigins);
   validateSitesDomain(settings);
   if (
     settings.organizationUserSetupEmailTokenTransport === "query" &&
@@ -13695,6 +13743,7 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
   >
 > = Object.fromEntries([
   ...[
+    ["claude-fable-5-2", "high"],
     ["claude-opus-5-5", "medium"],
     ["claude-sonnet-5-5", "medium"],
     ["claude-haiku-5-5", "medium"],
@@ -13709,12 +13758,20 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       defaultEffort,
       contextWindowTokens: 1_000_000,
       maxOutputTokens: 128_000,
+      // Fable 5.2 binds its thinking to the exact earlier prefix on every
+      // account and writes progress updates between tool calls.
+      // https://platform.claude.com/docs/en/models/fable-5-2/migration-guide
       prefixBoundThinking:
-        id === "claude-opus-5-5" || id === "claude-sonnet-5-5" || id === "claude-haiku-5-5",
-      ...(id === "claude-opus-5-5" || id === "claude-sonnet-5-5" ? { progressUpdates: true } : {}),
+        id === "claude-fable-5-2" ||
+        id === "claude-opus-5-5" ||
+        id === "claude-sonnet-5-5" ||
+        id === "claude-haiku-5-5",
+      ...(id === "claude-fable-5-2" || id === "claude-opus-5-5" || id === "claude-sonnet-5-5"
+        ? { progressUpdates: true }
+        : {}),
       ...(id === "claude-haiku-5-5"
         ? { autoCompactTokenLimit: 95_000 }
-        : id === "claude-opus-5-5"
+        : id === "claude-opus-5-5" || id === "claude-fable-5-2"
           ? { autoCompactTokenLimit: OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT }
           : {}),
     },
@@ -13814,13 +13871,15 @@ export function withClaudeConnectionCatalog(
           upstreamModelId: model.upstreamModelId,
           label:
             model.label ??
-            (model.upstreamModelId === "claude-opus-5-5"
-              ? "Claude Opus 5.5"
-              : model.upstreamModelId === "claude-sonnet-5-5"
-                ? "Claude Sonnet 5.5"
-                : model.upstreamModelId === "claude-haiku-5-5"
-                  ? "Claude Haiku 5.5"
-                  : model.upstreamModelId),
+            (model.upstreamModelId === "claude-fable-5-2"
+              ? "Claude Fable 5.2"
+              : model.upstreamModelId === "claude-opus-5-5"
+                ? "Claude Opus 5.5"
+                : model.upstreamModelId === "claude-sonnet-5-5"
+                  ? "Claude Sonnet 5.5"
+                  : model.upstreamModelId === "claude-haiku-5-5"
+                    ? "Claude Haiku 5.5"
+                    : model.upstreamModelId),
           reasoningEffort: adaptiveThinking,
           // Claude's server-side web search runs on every Claude route (API
           // key and subscription) under the deployment's web search switch.

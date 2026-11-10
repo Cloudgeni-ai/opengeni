@@ -171,6 +171,7 @@ export * from "./domain/file-audience";
 export * from "./domain/sessions";
 export { UNATTENDED_REQUEST_GOAL } from "./domain/unattended-request-goal";
 export * from "./domain/session-resource-removal";
+export * from "./domain/session-repository-attach";
 export * from "./domain/insights";
 export * from "./domain/insights-usage";
 export * from "./domain/memory-slack-publication";
@@ -197,6 +198,7 @@ export * from "./application/organization-privacy";
 export * from "./application/session-share-links";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
+export * from "./application/admission-release";
 export * from "./application/api-integration-servers";
 
 // Durable editable-artifact live broker, ticket, ports, and projection types.

@@ -346,9 +346,6 @@ export function AgentPage({
         <DetailSection title="Instructions">
           <Prose text={agent.instructions} empty="None. It works like an ordinary chat." />
         </DetailSection>
-        <DetailSection title="First message">
-          <Prose text={agent.firstMessage} empty="None." />
-        </DetailSection>
         <DetailSection title="Memory">
           <MemoryRow agent={agent} workspaceId={workspaceId} onSaved={saved} />
         </DetailSection>

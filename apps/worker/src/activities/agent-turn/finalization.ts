@@ -9,6 +9,7 @@ import { clearRunCredentialsForAttempt } from "@opengeni/runtime";
 import type { Settings } from "@opengeni/config";
 
 import { startActivityHeartbeat, type currentActivityContext } from "../streaming";
+import { turnFailureOriginMetricFields } from "./failure-attribution";
 import { startTurnFinalizationMonitor } from "./finalization-monitor";
 import type { CodemodeTokenRenewalController } from "../codemode-token-renewal";
 import type { RunCredentialRenewalController } from "../run-credential-renewal";
@@ -850,6 +851,8 @@ async function finalizeTurnAttemptSteps(
       turnLifecycleMetricsFor(observability).finish({
         attemptId: input.attemptId,
         outcome: control.turnMetricOutcome,
+        recoveryCause: control.turnRecoveryCause,
+        ...turnFailureOriginMetricFields(control),
         durationSeconds,
       });
     }

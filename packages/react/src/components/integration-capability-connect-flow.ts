@@ -11,9 +11,19 @@ import {
 } from "@opengeni/connect";
 import type { ChatClient } from "@opengeni/sdk";
 import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
+import { organizationAppApproval, type OrganizationAppApproval } from "@opengeni/contracts/connect";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import { useEffect, useRef, useState } from "react";
 import { attemptHint, type ConnectWindowHost } from "../connect-window-host";
+import {
+  browserSignInMemory,
+  forgetSignIn,
+  forgetSignInsTo,
+  rememberSignIn,
+  signInNeverReturned,
+  unreturnedSignIn,
+} from "../connect-sign-in-memory";
+import type { OrganizationApproval } from "../connect-setup-model";
 import { useConnect } from "../hooks/use-connect";
 import { useOpenGeniText } from "../messages/runtime";
 import { attachSessionCapability } from "../session-capability-policy";
@@ -93,6 +103,13 @@ export type IntegrationCapabilityConnect = {
   notRequester: boolean;
   /** The last attempt ended (failed, cancelled, expired) and a new one can start. */
   restartable: boolean;
+  /**
+   * The person was sent to sign in and never came back, in this card or on an
+   * earlier visit to this connection: offer the help for an organization that
+   * must approve the app first. Null while signing in, and when the provider
+   * answered (its own outcome then says what happened).
+   */
+  organizationApproval: OrganizationApproval | null;
   start: () => void;
   /**
    * Sign in for an attempt that already waits for authorization. It never
@@ -181,6 +198,13 @@ export function useIntegrationCapabilityConnect({
   const [messageStep, setMessageStep] = useState("none");
   const [chatAccessFailed, setChatAccessFailed] = useState(false);
   const [notRequester, setNotRequester] = useState(false);
+  // A sign-in to this connection the person never came back from: an earlier
+  // one (remembered across chats), or one they just left in this card.
+  const [unreturned, setUnreturned] = useState<OrganizationAppApproval | null>(null);
+  const [leftSignIn, setLeftSignIn] = useState<OrganizationAppApproval | null>(null);
+  const [memory] = useState(() =>
+    windows.signInMemory !== undefined ? windows.signInMemory : browserSignInMemory,
+  );
   const lifetime = useRef<AbortController | null>(null);
   const authorization = useRef<AbortController | null>(null);
   const signInWindow = useRef<ConnectPopup | null>(null);
@@ -283,6 +307,16 @@ export function useIntegrationCapabilityConnect({
       }
       // A leftover finished meanwhile may already have connected the card.
       setAvailability((shown) => (shown.kind === "connected" ? shown : { kind: "ready" }));
+      // The last time the person was sent to sign in here, they never came
+      // back: often a provider page saying an administrator must approve.
+      const approval = await unreturnedSignIn(
+        memory,
+        controller.transport,
+        workspaceId,
+        definitionId,
+        { signal: abort.signal },
+      ).catch(() => null);
+      if (live()) setUnreturned(approval);
     })().catch(() => {
       if (live()) setAvailability({ kind: "error" });
     });
@@ -300,6 +334,17 @@ export function useIntegrationCapabilityConnect({
   useEffect(() => {
     if (attemptState && RESTARTABLE.has(attemptState)) hints.forget(storageKey);
   }, [attemptState, hints, storageKey]);
+
+  // The provider answered (or setup moved on): no sign-in left to explain.
+  useEffect(() => {
+    if (!attempt || signInNeverReturned(attempt)) return;
+    forgetSignIn(memory, attempt);
+    setUnreturned(null);
+    setLeftSignIn(null);
+  }, [attempt, memory]);
+  useEffect(() => {
+    if (availability.kind === "connected") forgetSignInsTo(memory, workspaceId, definitionId);
+  }, [availability.kind, memory, workspaceId, definitionId]);
 
   // Setup installs the reviewed tools by itself; once it is complete, select
   // them for this chat (default-mode chats pick them up on their own).
@@ -357,6 +402,8 @@ export function useIntegrationCapabilityConnect({
     const pending = new AbortController();
     authorization.current = pending;
     clearMessages();
+    rememberSignIn(memory, next);
+    setLeftSignIn(null);
     setWaiting(true);
     let blocked = false;
     const watched: ConnectNavigation = {
@@ -397,6 +444,10 @@ export function useIntegrationCapabilityConnect({
         }
         if (reason instanceof SignInReopened) return;
         if (reason instanceof SetupCancelled) {
+          // Stopping while the provider's page is still open is how a person
+          // gives up on a "needs admin approval" page.
+          if (next.nextAction.type === "authorize")
+            setLeftSignIn(organizationAppApproval(next.nextAction.url));
           // End the attempt itself, so finishing in a window left open can't
           // still connect. If it finished just before, show what really
           // happened instead.
@@ -427,8 +478,12 @@ export function useIntegrationCapabilityConnect({
     if (!lifetime.current || lifetime.current.signal.aborted) return;
     // Closing the sign-in window is the person's choice: say so and offer to
     // try again.
-    if (failure instanceof ConnectPopupClosedError) setSignInClosed(true);
-    else if (failure instanceof SignInBlocked) setError(t("connectWindowHost.allowPopups"));
+    if (failure instanceof ConnectPopupClosedError) {
+      setSignInClosed(true);
+      const left = controller.getSnapshot().attempt;
+      if (left?.nextAction.type === "authorize")
+        setLeftSignIn(organizationAppApproval(left.nextAction.url));
+    } else if (failure instanceof SignInBlocked) setError(t("connectWindowHost.allowPopups"));
     else setError(t("sessionIntegrationCapabilityCard.signInFailed"));
     pin();
   }
@@ -494,6 +549,13 @@ export function useIntegrationCapabilityConnect({
   }
 
   const current = messageStep === stepOf(attempt);
+  const leftBehind = leftSignIn ?? unreturned;
+  const approval =
+    !leftBehind || waiting || busy || availability.kind !== "ready" || attempt?.error
+      ? null
+      : attempt?.nextAction.type === "authorize"
+        ? (organizationAppApproval(attempt.nextAction.url) ?? leftBehind)
+        : leftBehind;
   return {
     controller,
     attempt,
@@ -513,6 +575,9 @@ export function useIntegrationCapabilityConnect({
     chatAccessFailed,
     notRequester,
     restartable: !!attempt && RESTARTABLE.has(attempt.state),
+    organizationApproval: approval
+      ? { reason: "unfinished", url: approval.approvalUrl, appId: approval.appId }
+      : null,
     start,
     authorizeAttempt: (next: ConnectAttempt) =>
       authorize(next, windowHost.current.open()).catch(reportFailure),

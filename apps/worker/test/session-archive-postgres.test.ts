@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 import {
+  SESSION_ARCHIVE_FORMAT_VERSION,
   SESSION_ARCHIVE_RESTORE_TABLES,
+  SESSION_ARCHIVE_TRANSCRIPT_FORMAT,
   applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -12,10 +14,13 @@ import {
   createSession,
   getSession,
   persistModelContextSnapshot,
+  readSessionArchiveTranscriptEvents,
   submitHumanPromptInTransaction,
+  toPostgresLosslessJson,
   unarchiveSession,
   withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
+import { writeCompressedJsonLines } from "@opengeni/storage";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createSessionArchiveActivities } from "../src/activities/session-archive";
@@ -216,6 +221,75 @@ async function contentState(sessionId: string) {
 }
 
 describe("idle-session archive worker", () => {
+  /**
+   * The transcript as the archive wrote it before making it from the bundle's
+   * rows (a second read of every kept event, 500 at a time), decompressed.
+   */
+  async function rereadTranscript(scope: Awaited<ReturnType<typeof idleSession>>) {
+    const directory = await mkdtemp(join(tmpdir(), "session-archive-transcript-"));
+    try {
+      let events = 0;
+      const spool = await writeCompressedJsonLines(
+        join(directory, "transcript.jsonl.zst"),
+        async (write) => {
+          await write(
+            JSON.stringify({
+              format: SESSION_ARCHIVE_TRANSCRIPT_FORMAT,
+              version: SESSION_ARCHIVE_FORMAT_VERSION,
+              workspaceId: scope.workspaceId,
+              sessionId: scope.sessionId,
+            }),
+          );
+          for (let afterSequence = 0; ;) {
+            const page = await readSessionArchiveTranscriptEvents(client.db, scope, {
+              afterSequence,
+              limit: 500,
+            });
+            for (const event of page) await write(JSON.stringify({ event }));
+            events += page.length;
+            if (page.length < 500) break;
+            afterSequence = page.at(-1)!.sequence;
+          }
+          await write(JSON.stringify({ end: true, events }));
+        },
+      );
+      const text = new TextDecoder().decode(zstdDecompressSync(await readFile(spool.path)));
+      return { text, events };
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Archive the session and check its stored transcript against a second read
+   * of its kept events: the same text, the same event count in the footer and
+   * manifest, and a manifest size and digest that match the stored object.
+   */
+  async function archiveMatchesReread(scope: Awaited<ReturnType<typeof idleSession>>) {
+    const expected = await rereadTranscript(scope);
+    const objects = new Map<string, Uint8Array>();
+    const result = await inMemoryArchive(objects).archiveIdleSessions();
+    expect(result.failed).toBe(0);
+    const [row] =
+      await shared.admin`select content_archive from sessions where id = ${scope.sessionId}`;
+    const manifest = row!.content_archive as {
+      transcript: { key: string; bytes: number; sha256: string; events: number };
+    };
+    const stored = objects.get(manifest.transcript.key)!;
+    const text = new TextDecoder().decode(zstdDecompressSync(stored));
+    expect(text).toBe(expected.text);
+    expect(JSON.parse(text.trimEnd().split("\n").at(-1)!)).toEqual({
+      end: true,
+      events: expected.events,
+    });
+    expect(manifest.transcript).toMatchObject({
+      bytes: stored.length,
+      sha256: new Bun.CryptoHasher("sha256").update(stored).digest("hex"),
+      events: expected.events,
+    });
+    return expected;
+  }
+
   test("does nothing but recovery while the deployment leaves archiving off", async () => {
     await idleSession();
     const upload = mock(async () => undefined);
@@ -291,6 +365,67 @@ describe("idle-session archive worker", () => {
     const [deltas] = await shared.admin`select count(*)::int as count from session_events
       where session_id = ${scope.sessionId} and type = 'agent.message.delta'`;
     expect((deltas as { count: number }).count).toBe(0);
+  }, 120_000);
+
+  test("the stored transcript reads exactly like a second read of the kept events", async () => {
+    const scope = await idleSession();
+    const types = [
+      "agent.message.delta",
+      "agent.message.completed",
+      "agent.model.request",
+      "user.message",
+      "system.update.pending",
+      "turn.completed",
+    ];
+    const encoded = toPostgresLosslessJson({
+      text: "nul \u0000, lone \ud800, \u2028 and \u2029 separators, \r return",
+      big: 2 ** 60,
+    });
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      // More events than one bundle page (200) or one old transcript page (500).
+      await sql`insert into session_events (account_id, workspace_id, session_id, sequence, type,
+          payload, payload_codec_version, occurred_at, client_event_id)
+        select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
+          (${types}::text[])[1 + n % ${types.length}],
+          case when n % 5 = 0 then ${sql.json(encoded as never)}::jsonb
+            -- One kept event far larger than a file read chunk.
+            when n = 9 then jsonb_build_object('text', repeat('long line ', 400000))
+            else jsonb_build_object('text', 'event ' || n, 'n', n) end,
+          case when n % 5 = 0 then 1 end,
+          now() - interval '40 days' + n * interval '1.0004567 seconds',
+          case when n % 3 = 0 then 'client-' || n end
+        from (select max(sequence) as last from session_events
+          where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
+          generate_series(1, 2100) n`;
+    });
+    const expected = await archiveMatchesReread(scope);
+    expect(expected.events).toBeGreaterThan(1000);
+    expect(Math.max(...expected.text.split("\n").map((line) => line.length))).toBeGreaterThan(
+      1 << 20,
+    );
+  }, 120_000);
+
+  test("a transcript of exactly one or two full pages of kept events reads the same", async () => {
+    for (const kept of [500, 1000]) {
+      const scope = await idleSession();
+      const already = (await rereadTranscript(scope)).events;
+      await shared.admin.begin(async (sql) => {
+        await sql`set local session_replication_role = replica`;
+        // Every other event is one the transcript drops.
+        await sql`insert into session_events (account_id, workspace_id, session_id, sequence, type,
+            payload, occurred_at)
+          select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
+            case when n % 2 = 1 then 'agent.message.delta'
+              when n % 4 = 0 then 'user.message' else 'agent.message.completed' end,
+            jsonb_build_object('text', 'event ' || n),
+            now() - interval '40 days' + n * interval '1 second'
+          from (select max(sequence) as last from session_events
+            where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
+            generate_series(1, ${2 * (kept - already)}) n`;
+      });
+      expect((await archiveMatchesReread(scope)).events).toBe(kept);
+    }
   }, 120_000);
 
   test("one pass keeps taking batches until no idle session is left", async () => {

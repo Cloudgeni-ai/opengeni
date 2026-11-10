@@ -266,10 +266,14 @@ list withheld, with the same caller check, and 1272 granted both and removed
 the check. 1211 created the names-only organization member list
 withheld, with the same caller check; until it is granted the API reports the
 list as unavailable. 1240 created the inventory of meeting tracks not yet
-kept compact withheld, with the same caller check; 1282 grants it and removes
-the check, so the retention sweep then converts existing meetings' audio as
-well. 1282 follows the production baseline pin that contains 1240
-(`2a02889ffe` or later).
+kept compact withheld, with the same caller check. 1282 granted it and removed
+the check, citing a baseline pin (`2a02889ffe`) that production never ran:
+production still ran `6327db2c`, which predates 1240 and rejects the grant.
+1283 withholds it again and the caller check is back; 1283 takes the free
+ordinal after 1282 so a database that has not applied 1282 runs the two back
+to back. A later migration grants it once a release containing 1283 is the
+pinned previous production binary. Pin only the binary production really runs
+(its healthz `deploymentRevision`), never one that merely reached staging.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

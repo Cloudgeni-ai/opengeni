@@ -34,7 +34,7 @@ const FILTER_OPTIONS = [
 export const AGENTS_SUBTITLE = "Named agents you can chat with here and in Slack.";
 
 export const BOT_TEMPLATES_MOVED =
-  "Bot templates are now agents. Each kept its name, icon and who can use it. Its setup text is now its first message.";
+  "Bot templates are now agents. Each kept its name, icon and who can use it. Its setup text is now its Instructions.";
 
 export const SLACK_AGENTS_MOVED =
   "Slack agents are now agents. Manage them here. Nothing changes in Slack.";

@@ -1,7 +1,8 @@
 {{- if and ((.Values.observability).prometheusRule).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
 {{- $environment := default "production" (index .Values.config "OPENGENI_ENVIRONMENT") }}
 {{- $inventoryFreshnessSeconds := int (default 300 ((.Values.observability).prometheusRule).inventoryFreshnessSeconds) }}
-{{- $turnStartupQueueP95Seconds := int (default 5 ((.Values.observability).prometheusRule).turnStartupQueueP95Seconds) }}
+{{- $turnReadyPromptAgeSeconds := int (default 60 ((.Values.observability).prometheusRule).turnReadyPromptAgeSeconds) }}
+{{- $turnReadyPromptAgeCriticalSeconds := int (default 300 ((.Values.observability).prometheusRule).turnReadyPromptAgeCriticalSeconds) }}
 {{- $turnStartupProviderDispatchP95Seconds := int (default 20 ((.Values.observability).prometheusRule).turnStartupProviderDispatchP95Seconds) }}
 {{- $turnStartupFirstByteP95Seconds := int (default 120 ((.Values.observability).prometheusRule).turnStartupFirstByteP95Seconds) }}
 {{- $turnStartupFirstByteAvailabilityRatio := float64 ((.Values.observability).prometheusRule).turnStartupFirstByteAvailabilityRatio }}
@@ -21,8 +22,8 @@
 {{- if le $inventoryFreshnessSeconds 0 }}
 {{- fail "observability.prometheusRule.inventoryFreshnessSeconds must be positive" }}
 {{- end }}
-{{- if or (le $turnStartupQueueP95Seconds 0) (le $turnStartupProviderDispatchP95Seconds 0) (le $turnStartupFirstByteP95Seconds 0) (le $turnStartupFirstByteAvailabilityRatio 0.0) (gt $turnStartupFirstByteAvailabilityRatio 1.0) (le $turnStartupMinSamples 0) }}
-{{- fail "observability.prometheusRule turn-startup latency thresholds/minimum samples must be positive and first-byte availability ratio must be in (0, 1]" }}
+{{- if or (le $turnReadyPromptAgeSeconds 0) (le $turnReadyPromptAgeCriticalSeconds $turnReadyPromptAgeSeconds) (le $turnStartupProviderDispatchP95Seconds 0) (le $turnStartupFirstByteP95Seconds 0) (le $turnStartupFirstByteAvailabilityRatio 0.0) (gt $turnStartupFirstByteAvailabilityRatio 1.0) (le $turnStartupMinSamples 0) }}
+{{- fail "observability.prometheusRule turn-startup latency thresholds/minimum samples must be positive, the critical ready-prompt age must exceed the warning age, and first-byte availability ratio must be in (0, 1]" }}
 {{- end }}
 {{- if or (le $turnStartupProviderDispatchCriticalP95Seconds $turnStartupProviderDispatchP95Seconds) (le $modelRequestPreDispatchP95Seconds 0.0) (le $modelRequestMinSamples 0) (le $providerTtftRegressionRatio 1.0) (le $providerTtftRegressionFloorSeconds 0.0) (le $providerTtftRecentMinSamples 0) (le $providerTtftBaselineMinSamples 0) }}
 {{- fail "observability.prometheusRule latency alerts: the critical provider-dispatch p95 must exceed the warning p95, the pre-dispatch threshold, floor and minimum samples must be positive, and the provider TTFT regression ratio must exceed 1" }}
@@ -279,74 +280,91 @@ spec:
             headline: 'Session-recovery monitor not reporting'
             user_impact: 'No user-visible impact by itself; we just cannot see stuck sessions until it recovers.'
             next_step: 'Check that the worker-control pods are running and being scraped; restore the monitor before trusting session-recovery alerts.'
-        - alert: OpenGeniTurnStartupQueueP95High
+        # Runnable prompts, not prompts held behind a running turn, a Pause,
+        # a capacity wait or a required human action. Time queued behind an
+        # active turn in the same chat is normal serialization and never pages.
+        - alert: OpenGeniTurnReadyPromptWaiting
           expr: |
-            histogram_quantile(
-              0.95,
-              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="queue",outcome="completed"}[15m]))
-            ) > {{ $turnStartupQueueP95Seconds }}
-            and on()
-            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="queue",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
-          for: 15m
+            max(opengeni_turns_queued_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},hold="ready"}) > {{ $turnReadyPromptAgeSeconds }}
+            unless on()
+            max(opengeni_turns_queued_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},hold="ready"}) > {{ $turnReadyPromptAgeCriticalSeconds }}
+          for: 5m
           labels:
             severity: warning
+            notification_policy: investigate
           annotations:
-            summary: 'Accepted agent turns take more than {{ $turnStartupQueueP95Seconds }} seconds (p95) to start, including time queued behind an active turn.'
-            headline: 'Agent turns waiting too long to start'
-            value: 'p95 wait {{ "{{ $value | humanizeDuration }}" }}'
-            user_impact: 'Queued messages take longer to start; the chat may still be working on its preceding turn.'
-            next_step: 'First distinguish time behind an active turn from dispatch delay. Compare opengeni_turns_queued_by_hold and opengeni_turns_queued_oldest_age_seconds{hold="ready"} with the eligible turn backlog; correlate historical slow turns with preceding-turn completion.'
-            description: This cumulative clock starts at acceptance, not when the turn becomes runnable. It includes time behind an active turn and session holds, so it does not by itself prove worker saturation. An old ready prompt with no eligible backlog waits before turn dispatch; a backlog warrants checking worker capacity and admission. Current gauges cannot explain historical samples alone.
+            summary: 'A prompt that is ready to run has waited more than {{ $turnReadyPromptAgeSeconds }} seconds to start.'
+            headline: 'Ready prompts not starting'
+            value: 'oldest ready prompt {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Messages that nothing else is holding back wait before the agent starts on them.'
+            next_step: 'Compare opengeni_turn_eligible_backlog with turn-worker slots: a backlog means worker capacity or admission; no backlog means the prompt is stuck before turn dispatch in session control.'
+            description: The oldest durable queued turn that is not held behind an active turn, a Pause, a failed turn, a capacity wait or a required human action. Prompts held behind an active turn in their own chat are excluded by design.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
-        # Accepted turn -> first provider dispatch includes session queue holds
-        # and work in preceding turns. Only this turn's provider think time is
+        - alert: OpenGeniTurnReadyPromptWaitingCritical
+          expr: |
+            max(opengeni_turns_queued_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},hold="ready"}) > {{ $turnReadyPromptAgeCriticalSeconds }}
+          for: 5m
+          labels:
+            severity: critical
+            notification_policy: page
+          annotations:
+            summary: 'A prompt that is ready to run has waited more than {{ $turnReadyPromptAgeCriticalSeconds }} seconds to start.'
+            headline: 'Ready prompts stuck'
+            value: 'oldest ready prompt {{ "{{ $value | humanizeDuration }}" }}'
+            user_impact: 'Agents are not starting on new messages; users see no reply.'
+            next_step: 'Check turn-worker pods and opengeni_turn_eligible_backlog. With a backlog, workers are down or saturated; without one, session control is not dispatching ready prompts.'
+            description: The oldest runnable queued turn has waited longer than {{ $turnReadyPromptAgeCriticalSeconds }} seconds. Holds behind an active turn, Pause, capacity waits and required human actions are excluded.
+            runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
+        # Attempt start -> first provider dispatch: claim, policy, credentials,
+        # sandbox, tools and history preparation of the attempt that dispatched.
+        # Time behind an earlier turn, capacity waits and recovery gaps are
         # excluded. The warning yields to the critical tier to avoid duplicates.
         - alert: OpenGeniTurnStartupProviderDispatchP95High
           expr: |
             histogram_quantile(
               0.95,
-              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
+              sum by (le) (rate(opengeni_turn_startup_since_attempt_start_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
             ) > {{ $turnStartupProviderDispatchP95Seconds }}
             and on()
-            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
+            sum(increase(opengeni_turn_startup_since_attempt_start_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
             unless on()
             histogram_quantile(
               0.95,
-              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
+              sum by (le) (rate(opengeni_turn_startup_since_attempt_start_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
             ) > {{ $turnStartupProviderDispatchCriticalP95Seconds }}
           for: 15m
           labels:
             severity: warning
             notification_policy: investigate
           annotations:
-            summary: 'Prompts take more than {{ $turnStartupProviderDispatchP95Seconds }} seconds (p95) to reach the model after a user sends them.'
+            summary: 'Started turns take more than {{ $turnStartupProviderDispatchP95Seconds }} seconds (p95) of preparation before their first model request.'
             headline: 'Agent turns slow to reach the model'
-            value: 'p95 {{ "{{ $value | humanizeDuration }}" }} to reach the model'
-            user_impact: 'Accepted messages take longer to reach their first model request; they may be queued behind work already running in the same chat.'
-            next_step: 'Compare the queue milestone first. Time behind an active turn is included; inspect historical preceding-turn completion and current queue holds before attributing the delay to platform preparation.'
-            description: Acceptance-to-dispatch includes session holds and preceding-turn work, including that earlier turn's provider and tool time. Only this turn's own provider think time is excluded. This is not the per-request pre-dispatch overhead metric. The critical tier above {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds replaces this warning.
-            action: Separate intentional session serialization from runnable delay using queued-by-hold and eligible-backlog evidence. Then inspect claim_and_policy, worker preparation, sandbox_establish and opengeni_model_request_pre_dispatch_stage_seconds. Do not subtract histogram quantiles to estimate preparation time.
+            value: 'p95 {{ "{{ $value | humanizeDuration }}" }} of preparation'
+            user_impact: 'After an agent starts on a message, it takes longer than usual to begin thinking.'
+            next_step: 'Find the slow phase in opengeni_turn_startup_phase_duration_seconds (claim_and_policy, credential, sandbox_establish, tool and history preparation) and opengeni_model_request_pre_dispatch_stage_seconds.'
+            description: Measured from the start of the turn attempt that dispatched to its first provider request. It excludes time behind an earlier turn, subscription capacity waits and recovery gaps, so it is Opengeni preparation time. The critical tier above {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds replaces this warning.
+            action: Split by phase with opengeni_turn_startup_phase_duration_seconds and per request with opengeni_model_request_pre_dispatch_stage_seconds. Do not subtract histogram quantiles to estimate preparation time.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnStartupProviderDispatchP95Critical
           expr: |
             histogram_quantile(
               0.95,
-              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
+              sum by (le) (rate(opengeni_turn_startup_since_attempt_start_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m]))
             ) > {{ $turnStartupProviderDispatchCriticalP95Seconds }}
             and on()
-            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
+            sum(increase(opengeni_turn_startup_since_attempt_start_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="provider_dispatch",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
           for: 15m
           labels:
             severity: critical
             notification_policy: page
           annotations:
-            summary: 'Prompts take more than {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds (p95) to reach the model after a user sends them.'
+            summary: 'Started turns take more than {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds (p95) of preparation before their first model request.'
             headline: 'Agent turns very slow to reach the model'
-            value: 'p95 {{ "{{ $value | humanizeDuration }}" }} to reach the model'
-            user_impact: 'Accepted messages take over {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds at p95 to reach their first model request; the same chat may still be processing an earlier turn.'
-            next_step: 'Check whether slow samples waited behind an active turn. Correlate their start with preceding-turn completion, then inspect ready queue age, eligible backlog and startup phases before changing capacity.'
-            description: Acceptance-to-dispatch includes session holds and preceding-turn work, including that earlier turn's provider and tool time. Only this turn's own provider think time is excluded. A high cumulative p95 alone does not establish platform saturation or slow per-request dispatch.
-            action: Compare historical queue holds and startup phases with worker slots and opengeni_model_request_pre_dispatch_stage_seconds. A prompt starting promptly after its predecessor finishes is session serialization, not a worker-capacity incident. Do not subtract histogram quantiles to estimate preparation time.
+            value: 'p95 {{ "{{ $value | humanizeDuration }}" }} of preparation'
+            user_impact: 'After an agent starts on a message, it takes over {{ $turnStartupProviderDispatchCriticalP95Seconds }} seconds at p95 before it begins thinking.'
+            next_step: 'Find the slow phase in opengeni_turn_startup_phase_duration_seconds; sandbox_establish and tool connects are the usual suspects. Check Postgres and turn-worker CPU when claim phases are slow.'
+            description: Measured from the start of the turn attempt that dispatched to its first provider request, excluding time behind an earlier turn, capacity waits and recovery gaps. This is Opengeni preparation time, not provider think time.
+            action: Split by phase with opengeni_turn_startup_phase_duration_seconds and per request with opengeni_model_request_pre_dispatch_stage_seconds. Do not subtract histogram quantiles to estimate preparation time.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # Per model request (every tool-loop step, not only the first): SDK
         # model entry -> literal provider dispatch. Admission, the durable
@@ -379,35 +397,35 @@ spec:
           expr: |
             histogram_quantile(
               0.95,
-              sum by (le) (rate(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m]))
+              sum by (le) (rate(opengeni_turn_startup_since_attempt_start_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m]))
             ) > {{ $turnStartupFirstByteP95Seconds }}
             and on()
-            sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
+            sum(increase(opengeni_turn_startup_since_attempt_start_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m])) >= {{ $turnStartupMinSamples }}
           for: 15m
           labels:
             severity: warning
           annotations:
-            summary: 'The first part of an agent reply takes more than {{ $turnStartupFirstByteP95Seconds }} seconds (p95) to appear.'
+            summary: 'The first part of an agent reply takes more than {{ $turnStartupFirstByteP95Seconds }} seconds (p95) to appear after the agent starts.'
             headline: 'Agents slow to start replying'
             value: 'p95 {{ "{{ $value | humanizeDuration }}" }} to first reply'
             user_impact: 'Users wait longer than usual to see the first words of a reply.'
-            next_step: 'Compare provider-dispatch latency with provider time-to-first-token in Grafana to see whether we or the provider are slow; provider slowness usually recovers on its own.'
-            description: End-to-end first response latency is above target. Compare the cumulative provider-dispatch milestone with provider first-byte duration to separate platform delay from provider think time.
+            next_step: 'Compare the provider-dispatch preparation p95 with provider time-to-first-token in Grafana to see whether we or the provider are slow; provider slowness usually recovers on its own.'
+            description: Measured from the start of the turn attempt that produced the first byte, excluding time behind an earlier turn, capacity waits and recovery gaps. It covers Opengeni preparation plus provider time to first token.
         - alert: OpenGeniTurnStartupFirstByteAvailabilityLow
           expr: |
             (
               (
-                sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m]))
+                sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="completed"}[15m]))
                 or on(provider)
-                0 * sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="failed"}[15m]))
+                0 * sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="failed"}[15m]))
               )
               /
-              clamp_min(sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome=~"completed|failed"}[15m])), 1)
+              clamp_min(sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome=~"completed|failed"}[15m])), 1)
             ) < {{ $turnStartupFirstByteAvailabilityRatio }}
             and on(provider)
-            sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome=~"completed|failed"}[15m])) >= {{ $turnStartupMinSamples }}
+            sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome=~"completed|failed"}[15m])) >= {{ $turnStartupMinSamples }}
             and on(provider)
-            sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="failed"}[15m])) > 0
+            sum by (provider) (increase(opengeni_turn_startup_milestone_duration_seconds_count{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},milestone="first_byte",outcome="failed"}[15m])) > 0
           for: 15m
           labels:
             severity: warning
@@ -435,12 +453,12 @@ spec:
         - alert: OpenGeniTurnFailureRatioHigh
           expr: |
             (
-              sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
+              sum(increase(opengeni_turns_total{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
               /
-              clamp_min(sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
+              clamp_min(sum(increase(opengeni_turns_total{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.2
             and on()
-            sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
+            sum(increase(opengeni_turns_total{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
           for: 5m
           labels:
             severity: warning
@@ -455,7 +473,7 @@ spec:
         - alert: OpenGeniTurnRecoveryRatioHigh
           expr: |
             (
-              sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="recovering"}[10m]))
+              sum(increase(opengeni_turn_recoveries_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},cause!="provider"}[10m]))
               /
               clamp_min(sum(increase(opengeni_turns_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.2
@@ -465,12 +483,12 @@ spec:
           labels:
             severity: warning
           annotations:
-            summary: 'More than 20% of agent turns needed an automatic retry over the last 10 minutes.'
+            summary: 'More than 20% of agent turns needed an automatic retry for a reason other than the model provider over the last 10 minutes.'
             headline: 'Many agent turns needing automatic retries'
             value: '{{ "{{ $value | humanizePercentage }}" }} of turns retried (10 min)'
             user_impact: 'Replies are slower and may pause briefly while turns retry automatically; no work is lost.'
-            next_step: 'Usually self-heals once the underlying provider, tool or worker issue clears; if it lasts over 30 min, find the dominant retry cause in Runtime Failures.'
-            description: Recovery is preserving logical turns but consuming capacity and adding latency. Inspect typed MCP transport, sandbox, provider, and worker-shutdown evidence for the dominant retryable boundary.
+            next_step: 'Split opengeni_turn_recoveries_total by cause (sandbox, tool, worker, database, control, other) and follow the matching sandbox, MCP, worker or Postgres evidence.'
+            description: Recovery is preserving logical turns but consuming capacity and adding latency. Provider-caused retries (outages, rate limits, subscription capacity and lease changes) are excluded; OpenGeniModelCallFailureRatioHigh covers the provider per model route. Inspect the dominant non-provider cause.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerRestarted
           expr: |
@@ -543,12 +561,12 @@ spec:
         - alert: OpenGeniModelCallFailureRatioHigh
           expr: |
             (
-              sum by (provider) (increase(opengeni_model_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
+              sum by (provider) (increase(opengeni_model_calls_total{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome="failed"}[10m]))
               /
-              clamp_min(sum by (provider) (increase(opengeni_model_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
+              clamp_min(sum by (provider) (increase(opengeni_model_calls_total{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])), 1)
             ) > 0.2
             and on(provider)
-            sum by (provider) (increase(opengeni_model_calls_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
+            sum by (provider) (increase(opengeni_model_calls_total{failure_origin!="customer_provider",namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
           for: 5m
           labels:
             severity: warning

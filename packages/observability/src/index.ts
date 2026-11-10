@@ -1,3 +1,11 @@
+export {
+  failureOrigin,
+  isCustomerManagedMetricProvider,
+  isProviderAccountRefusal,
+  PROVIDER_ACCOUNT_REFUSALS,
+  type FailureOrigin,
+  type ProviderAccountRefusal,
+} from "./failure-attribution";
 import { createHash, randomUUID } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
@@ -776,7 +784,7 @@ const PUBLIC_TELEMETRY_ERROR_ORIGINS = new Set([
 export type SandboxOperationMetricObservation = {
   backend: string;
   op: string;
-  outcome: "ok" | "not_found" | "failed";
+  outcome: "ok" | "not_found" | "rejected" | "failed";
   durationMs: number;
   materializationFailureReason?: string;
 };

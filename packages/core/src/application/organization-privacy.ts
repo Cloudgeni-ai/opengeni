@@ -177,15 +177,15 @@ export async function updateOrganizationPrivacySettings(
       "Admins always see that Only me schedules exist here.",
     );
   }
-  // Like a workspace budget, a limit takes every API and worker that enforces
-  // it. Removing one is always allowed.
+  // Like a workspace budget, an operator can opt out of new limits with
+  // OPENGENI_USAGE_ALLOWANCES_ENABLED=false. Removing one is always allowed.
   if (
     input.request.personalWorkspaceMonthlyCredits !== undefined &&
     input.request.personalWorkspaceMonthlyCredits !== null &&
-    deps.settings.usageAllowancesEnabled !== true
+    deps.settings.usageAllowancesEnabled === false
   ) {
     throw new OrganizationPrivacyLockedError(
-      "Usage allowance changes are not enabled. Upgrade every API and worker before enabling usage allowances.",
+      "Usage allowance changes are not enabled on this deployment (OPENGENI_USAGE_ALLOWANCES_ENABLED=false).",
     );
   }
   const preferences = await updateOrganizationPrivacyPreferences(deps.db, {

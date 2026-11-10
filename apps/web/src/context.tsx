@@ -35,6 +35,7 @@ import {
   signUpEmail,
   signUpPasskey,
   startManagedSocialSignIn,
+  subscribeSignInLost,
 } from "@/api";
 import { LoadingPanel, ProblemPanel, WaitingPanel } from "@opengeni/react/app/components/common";
 import { DesktopSignedOutRecovery } from "@/components/desktop/desktop-signed-out";
@@ -162,6 +163,7 @@ const webAppStateHost: AppStateHost = {
   startManagedSocialSignIn,
   signInPasskey,
   signUpPasskey,
+  subscribeSignInLost,
   configureManagedActorEpoch,
   getStoredAccessKey,
   setStoredAccessKey,
@@ -196,6 +198,7 @@ export function RootRouteComponent() {
     (pathname === "/dev/composer-chrome" ||
       pathname === "/dev/composer-stack" ||
       pathname === "/dev/onboarding" ||
+      pathname === "/dev/own-subscription-plan" ||
       pathname === "/dev/session-timeline" ||
       pathname === "/dev/ui-kit");
   const isPublicAuthRoute =

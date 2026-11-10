@@ -1,5 +1,32 @@
 # @opengeni/browserd
 
+## 0.4.25
+
+### Patch Changes
+
+- Updated dependencies [1c7aa2a]
+  - @opengeni/contracts@6.13.0
+  - @opengeni/interaction@6.13.0
+
+## 0.4.24
+
+### Patch Changes
+
+- 8c1e874: A managed browser's preserved profile can be relaunched again after its Linux machine reboots. Linux can give the disk a new device number at boot, and recovery took that for a moved or copied profile and refused it, so the browser was recorded as lost. After a reboot, a profile with the same inode at the exact recorded path now counts as the same directory. Within one boot the device number must still match, and a copied or moved profile is still refused.
+- Updated dependencies [64fd53f]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+  - @opengeni/interaction@6.12.0
+
 ## 0.4.23
 
 ### Patch Changes

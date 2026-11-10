@@ -10,3 +10,57 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  # JavaScript dependencies (Bun workspaces and the separately locked Expo app).
+  # Minor and patch releases arrive as one weekly PR per lockfile; security fixes
+  # are grouped the same way. Majors stay separate so each can be reviewed on its own.
+  # Transitive pins live in each package.json `overrides`; keep them at or above
+  # the fixed versions when a group updates their parents.
+  - package-ecosystem: bun
+    directories:
+      - "/"
+      - "/apps/mobile"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      bun-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      bun-minor-and-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Rust workspaces. agent/vendor/async-nats is a patched vendored crate
+  # (agent/vendor/async-nats/OPENGENI-PATCH.md) and is updated by hand.
+  - package-ecosystem: cargo
+    directories:
+      - "/agent"
+      - "/compute"
+      - "/apps/desktop/audio-capture"
+      - "/apps/worker/speakers"
+      - "/packages/artifact-tool/kernel"
+      - "/packages/artifact-tool/kernel/bindings/napi"
+      - "/packages/artifact-tool/kernel/bindings/protocol"
+      - "/packages/artifact-tool/kernel/bindings/wasm"
+      - "/packages/artifact-tool/kernel/fuzz"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      cargo-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      cargo-minor-and-patch:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

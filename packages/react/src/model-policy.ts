@@ -389,6 +389,16 @@ function withoutTrailingQualifiers(name: string): string {
 }
 
 /**
+ * "Needs Pro": the plan an own-subscription model waits for, named from the
+ * catalog's `requiredPlan`; null when the model can run or the list has no
+ * plan facts (older servers, client-config lists).
+ */
+export function requiredPlanHint(t: OpenGeniText, model: ClientModel): string | null {
+  const plan = (model as Partial<Pick<WorkspaceModelCatalogModel, "requiredPlan">>).requiredPlan;
+  return plan ? t("modelPolicy.needsPlan", { plan: plan.label }) : null;
+}
+
+/**
  * Older published Site hosts list bare `{ id }` rows. A row without readiness
  * or availability is one the server offers, so it is ready and selectable.
  */
@@ -408,14 +418,17 @@ export function projectPickerRows(
         billingClass,
         billingClassLabel: billingClassLabel(t, billingClass),
         selectable,
+        // An own subscription the organization's plan doesn't include stays
+        // selectable; the row names the plan it needs ("Needs Pro").
         fundingHint:
-          catalog.creditFunding === "promotional"
+          requiredPlanHint(t, catalog) ??
+          (catalog.creditFunding === "promotional"
             ? t("modelPolicy.freeCredits")
             : catalog.creditFunding === "general"
               ? t("modelPolicy.usesCredits")
               : catalog.creditFunding === "unavailable"
                 ? t("modelPolicy.needsCredits")
-                : undefined,
+                : undefined),
         unavailableReason: selectable
           ? null
           : availabilityReasonLabel(t, catalog.availability?.reason ?? null),

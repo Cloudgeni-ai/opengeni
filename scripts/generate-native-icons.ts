@@ -100,6 +100,7 @@ const ICONS: Record<string, string> = {
   "phone-off": "PhoneOffIcon",
   "mic-off": "MicOffIcon",
   "volume-2": "Volume2Icon",
+  "volume-x": "VolumeXIcon",
   "maximize-2": "Maximize2Icon",
   "rotate-ccw": "RotateCcwIcon",
   "shield-check": "ShieldCheckIcon",

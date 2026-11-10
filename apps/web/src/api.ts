@@ -9,7 +9,7 @@ import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
 } from "@opengeni/sdk/browser";
-import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
+import { isSignInLostRejection, type OrganizationUserSetupPreview } from "@opengeni/contracts";
 import { desktopAppHeaders } from "@opengeni/react/app/lib/desktop";
 import { userActivityHeaders } from "./lib/user-activity";
 
@@ -77,6 +77,7 @@ let managedActorForegroundIdle: Promise<void> | null = null;
 let resolveManagedActorForegroundIdle: (() => void) | null = null;
 const managedActorMutationListeners = new Set<() => void>();
 const managedActorInvalidationListeners = new Set<() => void>();
+const signInLostListeners = new Set<() => void>();
 let managedActorMutationCount = 0;
 const MANAGED_ACTOR_EPOCH_HEADER = "x-opengeni-actor-epoch";
 const MANAGED_ACTOR_STATE_HEADER = "x-opengeni-actor-state";
@@ -183,11 +184,34 @@ export function createOpenGeniClient(
             signal: init?.signal,
           });
           handleApiContractResponse(response);
+          noteSignInLost(response);
           return response;
         },
         { input, init },
       ),
   }).withSessionResponse("chat");
+}
+
+/**
+ * Hear when an API request is refused because this page's sign-in is gone
+ * (the server's 401 says the sign-in was missing or expired), so the app can
+ * stop its background reads and sign in again instead of polling on.
+ */
+export function subscribeSignInLost(listener: () => void): () => void {
+  signInLostListeners.add(listener);
+  return () => signInLostListeners.delete(listener);
+}
+
+function noteSignInLost(response: Response): void {
+  if (response.status !== 401 || signInLostListeners.size === 0) return;
+  void response
+    .clone()
+    .json()
+    .then((envelope: unknown) => {
+      if (!isSignInLostRejection(envelope)) return;
+      for (const listener of [...signInLostListeners]) listener();
+    })
+    .catch(() => undefined);
 }
 
 /**

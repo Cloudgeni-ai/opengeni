@@ -7,7 +7,7 @@ import {
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
-import { createDb, createRecording, ensureManagedAccessForUser, type DbClient } from "../src";
+import { createDb, ensureManagedAccessForUser, type DbClient } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
@@ -83,11 +83,13 @@ beforeAll(async () => {
     subjectId: grant.subjectId,
   };
   currentRecordingId = crypto.randomUUID();
-  await createRecording(client.db, {
-    ...scope,
-    recordingId: currentRecordingId,
-    tracks: [{ trackNumber: 0, source: "microphone", mimeType: "audio/webm" }],
-  });
+  // Plain SQL against the schema as it stood before this migration: today's
+  // table definitions may name columns that later migrations add.
+  await owned.admin`insert into recordings (id, account_id, workspace_id, owner_subject_id, title)
+    values (${currentRecordingId}, ${scope.accountId}, ${scope.workspaceId}, ${scope.subjectId}, 'Current recording')`;
+  await owned.admin`insert into recording_tracks
+    (account_id, workspace_id, recording_id, track_number, source, mime_type)
+    values (${scope.accountId}, ${scope.workspaceId}, ${currentRecordingId}, 0, 'microphone', 'audio/webm')`;
   legacyRecordingId = crypto.randomUUID();
   await owned.admin`insert into transcription_recordings
     (id, account_id, workspace_id, subject_id, mime_type, state, expires_at)
