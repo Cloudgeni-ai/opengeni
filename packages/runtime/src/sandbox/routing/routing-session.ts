@@ -3832,35 +3832,45 @@ async function streamPlacementPrivateFile(
     `chmod 0600 -- ${shellSingleQuote(input.path)}`,
     `printf %s ${shellSingleQuote(marker)}`,
   ].join("; ");
-  const started = await exec({
-    cmd: command,
-    ...(input.runAs ? { runAs: input.runAs } : {}),
-    yieldTimeMs: 250,
-    maxOutputTokens: 1_000,
-  });
-  const sessionId = providerSessionIdFromResult(started);
-  if (sessionId === null) {
-    throw new Error("placement-private transfer did not yield an input session");
-  }
-  const first = await session.writeStdin({
-    sessionId,
-    chars: payload,
-    yieldTimeMs: 30_000,
-    maxOutputTokens: 1_000,
-  });
-  const settled = await observeSynchronousCommand(
-    synchronousCommandPage(session as ChannelASession, first, sessionId),
-    async () =>
-      synchronousCommandPage(
-        session as ChannelASession,
-        await session.writeStdin!({
-          sessionId,
-          chars: "",
-          yieldTimeMs: 1_000,
-          maxOutputTokens: 1_000,
-        }),
+  // The transfer is one synchronous command whose completion is proved from
+  // its separate output streams. Like executeSynchronousCommand, it must opt
+  // into the provider's native collection before its one Start; otherwise a
+  // provider whose receipts are presentation banners (Modal's SDK) can never
+  // prove the exit, and every staging write reports an unknown outcome.
+  const settled = await withNativeSynchronousCommandCollection(
+    session as ChannelASession,
+    async () => {
+      const started = await exec({
+        cmd: command,
+        ...(input.runAs ? { runAs: input.runAs } : {}),
+        yieldTimeMs: 250,
+        maxOutputTokens: 1_000,
+      });
+      const sessionId = providerSessionIdFromResult(started);
+      if (sessionId === null) {
+        throw new Error("placement-private transfer did not yield an input session");
+      }
+      const first = await session.writeStdin!({
         sessionId,
-      ),
+        chars: payload,
+        yieldTimeMs: 30_000,
+        maxOutputTokens: 1_000,
+      });
+      return await observeSynchronousCommand(
+        synchronousCommandPage(session as ChannelASession, first, sessionId),
+        async () =>
+          synchronousCommandPage(
+            session as ChannelASession,
+            await session.writeStdin!({
+              sessionId,
+              chars: "",
+              yieldTimeMs: 1_000,
+              maxOutputTokens: 1_000,
+            }),
+            sessionId,
+          ),
+      );
+    },
   );
   if (settled.exitCode !== 0 || !settled.stdout.includes(marker)) {
     throw new Error("placement-private transfer exited unsuccessfully");
