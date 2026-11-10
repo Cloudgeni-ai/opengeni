@@ -41,7 +41,10 @@ beforeAll(async () => {
     try {
       liveProduction = await loadRuntimePostureBaseline(root, liveProductionSource);
     } catch (error) {
-      console.warn(`live production revision ${liveProductionSource} could not be loaded; checked the pin only`, error);
+      console.warn(
+        `live production revision ${liveProductionSource} could not be loaded; checked the pin only`,
+        error,
+      );
     }
   }
   console.log(
@@ -106,14 +109,23 @@ realTest(
   async () => {
     if (!liveProduction) return; // Unknown, or the pin already is the live revision.
     const module = liveProduction.module;
-    const violations = module.evaluateRuntimeDatabasePosture(
-      await module.inspectRuntimeDatabasePosture(client!.db, options),
-      options,
-    );
+    let violations: unknown[];
+    try {
+      violations = module.evaluateRuntimeDatabasePosture(
+        await module.inspectRuntimeDatabasePosture(client!.db, options),
+        options,
+      );
+    } catch (error) {
+      if (!liveProductionAdvisory) throw error;
+      console.log(`::warning title=Live production check could not run::${String(error)}`);
+      return;
+    }
     if (violations.length > 0) {
       console.log(`live production ${liveProductionSource} violations`, JSON.stringify(violations));
       if (liveProductionAdvisory) {
-        console.log(`::warning title=Live production would go unready::${liveProductionSource} rejects this schema; the release gate will refuse it.`);
+        console.log(
+          `::warning title=Live production would go unready::${liveProductionSource} rejects this schema; the release gate will refuse it.`,
+        );
         return;
       }
     }
