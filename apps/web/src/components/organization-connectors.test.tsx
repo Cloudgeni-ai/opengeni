@@ -24,6 +24,7 @@ const LINEAR_ID = "44444444-4444-4444-8444-444444444444";
 
 function connector(overrides: Partial<OrganizationConnector> = {}): OrganizationConnector {
   return {
+    autoConnect: null,
     id: LINEAR_ID,
     organizationId: ORG,
     kind: "mcp",
@@ -106,10 +107,48 @@ function tool(id: string, name: string): ApiIntegrationPreview["tools"][number] 
   };
 }
 
-function fakeClient(initial: OrganizationConnector[]) {
+const AUTO_CONNECT = {
+  issuer: `https://opengeni.test/v1/organizations/${ORG}/identity`,
+  authorizationServer: "https://auth.notion.test",
+  clientId: "https://opengeni.test/oauth/client-metadata.json",
+  verifiedAt: null,
+  lastError: null,
+};
+
+function fakeClient(
+  initial: OrganizationConnector[],
+  autoConnect: { supported: boolean; documents?: boolean; test?: "connected" | "refused" } = {
+    supported: false,
+  },
+) {
   const calls: Array<{ method: string; args: unknown[] }> = [];
   let rows = [...initial];
   const client = {
+    checkOrganizationConnectorAutoConnect: async (...args: unknown[]) => {
+      calls.push({ method: "checkAutoConnect", args });
+      return {
+        supported: autoConnect.supported,
+        authorizationServer: autoConnect.supported ? AUTO_CONNECT.authorizationServer : null,
+        reason: autoConnect.supported ? null : "This app doesn't support auto-connect yet",
+        clientIdMetadataDocumentSupported: autoConnect.documents ?? true,
+        opengeniClientId: AUTO_CONNECT.clientId,
+      };
+    },
+    testOrganizationConnectorAutoConnect: async (...args: unknown[]) => {
+      calls.push({ method: "testAutoConnect", args });
+      const at = "2026-11-03T12:00:00Z";
+      return autoConnect.test === "refused"
+        ? {
+            status: "refused",
+            message: "Notion doesn't trust this issuer",
+            autoConnect: {
+              ...AUTO_CONNECT,
+              lastError: { message: "Notion doesn't trust this issuer", at },
+            },
+            generation: 4,
+          }
+        : { status: "connected", autoConnect: { ...AUTO_CONNECT, verifiedAt: at }, generation: 4 };
+    },
     listOrganizationConnectors: async (...args: unknown[]) => {
       calls.push({ method: "list", args });
       return rows;
@@ -126,6 +165,7 @@ function fakeClient(initial: OrganizationConnector[]) {
         capabilityId: "registry:notion",
         name: "Notion",
         login: request.login,
+        autoConnect: request.login === "auto_connect" ? AUTO_CONNECT : null,
       });
       rows = [...rows, created];
       return created;
@@ -264,6 +304,7 @@ describe("organization connector helpers", () => {
   test("sign-in choices follow what the catalog says the server uses", () => {
     expect(connectors.catalogLoginChoices({ name: "Linear", authKind: "oauth2" })).toEqual({
       allowed: {
+        auto_connect: null,
         each_person: null,
         organization_key: null,
         none: "Linear needs people to sign in.",
@@ -292,7 +333,12 @@ describe("organization connector helpers", () => {
       auth: { kind: "api_key", providerDomain: "billing.example.com", carrier: "query", name: "k" },
     });
     expect(keyed).toEqual({
-      allowed: { each_person: null, organization_key: null, none: "Billing needs a key." },
+      allowed: {
+        auto_connect: "Auto-connect is for MCP servers.",
+        each_person: null,
+        organization_key: null,
+        none: "Billing needs a key.",
+      },
       initial: "organization_key",
     });
     expect(connectors.apiPreviewSummary(apiPreview())).toBe("OpenAPI · 2 tools · api.example.com");
@@ -382,6 +428,141 @@ describe("organization connectors in settings", () => {
         kind: "connector",
         connectorId: "66666666-6666-4666-8666-666666666666",
         view: "page",
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("auto-connect is offered once the app accepts it, and its page says what to paste", async () => {
+    const { client, calls } = fakeClient([], { supported: true, test: "refused" });
+    const view = await mount(client, { kind: "new" });
+    try {
+      await click(button(view.container, "Notion"));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await settle();
+      expect(calls.find((call) => call.method === "checkAutoConnect")!.args).toEqual([
+        ORG,
+        { capabilityId: "registry:notion" },
+      ]);
+      const automatic = radio(view.container, "Connect everyone automatically");
+      expect(automatic.getAttribute("data-disabled")).toBeNull();
+      await click(automatic);
+      // The app reads Opengeni's client document: no client ID to enter.
+      expect(view.container.textContent).not.toContain("Enter the client ID");
+      await submit(view.container);
+      expect(calls.find((call) => call.method === "create")!.args[1]).toEqual({
+        capabilityId: "registry:notion",
+        login: "auto_connect",
+        availability: { allowedWorkspaceIds: null, allowPersonalWorkspaces: true },
+      });
+      expect(view.location()).toEqual({
+        kind: "connector",
+        connectorId: "55555555-5555-4555-8555-555555555555",
+        view: "page",
+      });
+      expect(view.container.textContent).toContain("Waiting for Notion");
+      expect(
+        [...view.container.querySelectorAll<HTMLInputElement>("input")].map((input) => input.value),
+      ).toEqual(expect.arrayContaining([AUTO_CONNECT.issuer, AUTO_CONNECT.clientId]));
+      await click(button(view.container, "Test as you"));
+      expect(calls.some((call) => call.method === "testAutoConnect")).toBe(true);
+      expect(view.container.textContent).toContain("Notion refused");
+      expect(view.container.textContent).toContain("Notion doesn't trust this issuer");
+      // The test saved its outcome; turning it off right after sends the new generation.
+      await click(
+        view.container.querySelector<HTMLButtonElement>('[aria-label="Notion turned on"]')!,
+      );
+      expect(calls.find((call) => call.method === "update")!.args[2]).toMatchObject({
+        expectedGeneration: 4,
+        status: "disabled",
+      });
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("auto-connect says why it can't be chosen, and asks for a client ID when the app needs one", async () => {
+    const unsupported = fakeClient([]);
+    const view = await mount(unsupported.client, { kind: "new" });
+    try {
+      await click(button(view.container, "Notion"));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await settle();
+      const automatic = radio(view.container, "Connect everyone automatically");
+      expect(automatic.getAttribute("data-disabled")).not.toBeNull();
+      expect(automatic.textContent).toContain("This app doesn't support auto-connect yet.");
+    } finally {
+      await view.unmount();
+    }
+
+    const registered = fakeClient([], { supported: true, documents: false });
+    const second = await mount(registered.client, { kind: "new" });
+    try {
+      await click(button(second.container, "Notion"));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await settle();
+      await click(radio(second.container, "Connect everyone automatically"));
+      expect(second.container.textContent).toContain("Client ID");
+      await submit(second.container);
+      expect(second.container.textContent).toContain("Enter the client ID Notion gave Opengeni.");
+      expect(registered.calls.some((call) => call.method === "create")).toBe(false);
+      const input = [...second.container.querySelectorAll<HTMLInputElement>("input")].find(
+        (each) => each.maxLength === 256,
+      )!;
+      await type(input, "opengeni-client");
+      await submit(second.container);
+      expect(
+        (
+          registered.calls.find((call) => call.method === "create")!.args[1] as {
+            autoConnectClientId?: string;
+          }
+        ).autoConnectClientId,
+      ).toBe("opengeni-client");
+    } finally {
+      await second.unmount();
+    }
+  });
+
+  test("an admin changes the client ID an app gave Opengeni, or goes back to Opengeni's own", async () => {
+    const notion = connector({
+      id: "55555555-5555-4555-8555-555555555555",
+      capabilityId: "registry:notion",
+      name: "Notion",
+      login: "auto_connect",
+      autoConnect: AUTO_CONNECT,
+    });
+    const { client, calls } = fakeClient([notion], { supported: true });
+    const view = await mount(client, { kind: "connector", connectorId: notion.id, view: "page" });
+    // The Change in the client ID's hint, not the one for where it works.
+    const changeClientId = () =>
+      [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (each) =>
+          each.textContent?.trim() === "Change" &&
+          each.parentElement?.textContent?.includes("Opengeni's client ID at Notion"),
+      )!;
+    try {
+      await click(changeClientId());
+      const input = [...view.container.querySelectorAll<HTMLInputElement>("input")].find(
+        (each) => each.value === AUTO_CONNECT.clientId && !each.readOnly,
+      )!;
+      await type(input, "  notion-gave-this  ");
+      await click(button(view.container, "Save"));
+      expect(calls.find((call) => call.method === "update")!.args[2]).toEqual({
+        autoConnectClientId: "notion-gave-this",
+        expectedGeneration: 3,
+      });
+      expect(() => button(view.container, "Save")).toThrow();
+
+      await click(changeClientId());
+      const again = [...view.container.querySelectorAll<HTMLInputElement>("input")].find(
+        (each) => !each.readOnly && each.value === AUTO_CONNECT.clientId,
+      )!;
+      await type(again, "");
+      await click(button(view.container, "Save"));
+      expect(calls.filter((call) => call.method === "update").at(-1)!.args[2]).toEqual({
+        autoConnectClientId: null,
+        expectedGeneration: 4,
       });
     } finally {
       await view.unmount();

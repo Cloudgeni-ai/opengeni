@@ -1,10 +1,10 @@
 /**
- * The avatar picker used by a chat's profile, bot templates and Slack agents:
+ * The avatar picker used by a chat's profile and agents:
  * an emoji, an icon or letters on one of twelve colours, or an image the agent
  * set. The caller owns the draft; `sessionAvatarFromDraft` turns it into the
  * saved avatar (null while the draft is incomplete or "none").
  */
-import { useId } from "react";
+import { useId, useState } from "react";
 import { PencilIcon, XIcon } from "lucide-react";
 import { Popover as PopoverPrimitive } from "radix-ui";
 import { SESSION_AVATAR_ICONS, isSingleSessionAvatarEmoji } from "@opengeni/contracts";
@@ -171,6 +171,15 @@ export function SessionAvatarPicker({
 }) {
   const set = (patch: Partial<SessionAvatarDraft>) => onChange({ ...draft, ...patch });
   const { kind, hue, emoji, icon, letters } = draft;
+  // With no avatar yet, show the emoji choices instead of an empty picker.
+  // Browsing tabs or colours chooses nothing; picking an emoji, icon or
+  // letters makes it the avatar, in the colour browsed so far.
+  const [browsed, setBrowsed] = useState<Exclude<SessionAvatarKind, "none">>("emoji");
+  const [browsedHue, setBrowsedHue] = useState<boolean>(false);
+  const chosen = kind !== "none";
+  const shown: Exclude<SessionAvatarKind, "none"> = chosen ? kind : browsed;
+  const pick = (patch: Partial<SessionAvatarDraft>) => set({ kind: shown, ...patch });
+  const hueShown = chosen || browsedHue;
   const kinds: { value: SessionAvatarKind; label: string }[] = [
     { value: "emoji", label: "Emoji" },
     { value: "icon", label: "Icon" },
@@ -202,10 +211,14 @@ export function SessionAvatarPicker({
           size="sm"
           className="self-start"
           options={kinds}
-          value={kind === "none" ? undefined : kind}
-          onValueChange={(next) => set({ kind: next })}
+          value={shown}
+          onValueChange={(next) => {
+            if (next === "none") return;
+            if (chosen) set({ kind: next });
+            else setBrowsed(next);
+          }}
         />
-        {kind === "emoji" ? (
+        {shown === "emoji" ? (
           <div className="flex flex-col gap-2">
             <div className="flex flex-wrap gap-1" role="group" aria-label="Suggested emoji">
               {QUICK_EMOJI.map((candidate) => (
@@ -213,11 +226,11 @@ export function SessionAvatarPicker({
                   key={candidate}
                   type="button"
                   aria-label={candidate}
-                  aria-pressed={emoji === candidate}
-                  onClick={() => set({ emoji: candidate })}
+                  aria-pressed={chosen && emoji === candidate}
+                  onClick={() => pick({ emoji: candidate })}
                   className={cn(
                     "flex size-8 items-center justify-center rounded-md text-base outline-hidden transition-colors hover:bg-hover focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-11",
-                    emoji === candidate && "bg-selection ring-1 ring-brand/30",
+                    chosen && emoji === candidate && "bg-selection ring-1 ring-brand/30",
                   )}
                 >
                   {candidate}
@@ -226,16 +239,16 @@ export function SessionAvatarPicker({
             </div>
             <Field label="Or type one" error={errors.emoji ?? undefined}>
               <TextInput
-                value={emoji}
+                value={chosen ? emoji : ""}
                 maxLength={16}
                 autoComplete="off"
                 className="w-24"
-                onChange={(event) => set({ emoji: event.target.value })}
+                onChange={(event) => pick({ emoji: event.target.value })}
               />
             </Field>
           </div>
         ) : null}
-        {kind === "icon" ? (
+        {shown === "icon" ? (
           <div
             className="grid w-fit grid-cols-8 gap-1 max-sm:grid-cols-6 pointer-coarse:grid-cols-6 max-[22rem]:pointer-coarse:grid-cols-5"
             role="group"
@@ -249,11 +262,11 @@ export function SessionAvatarPicker({
                   type="button"
                   aria-label={ICON_LABELS[candidate]}
                   title={ICON_LABELS[candidate]}
-                  aria-pressed={icon === candidate}
-                  onClick={() => set({ icon: candidate })}
+                  aria-pressed={chosen && icon === candidate}
+                  onClick={() => pick({ icon: candidate })}
                   className={cn(
                     "flex size-9 items-center justify-center rounded-md text-fg-label outline-hidden transition-colors hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/40 pointer-coarse:size-11",
-                    icon === candidate && "bg-selection text-fg ring-1 ring-brand/30",
+                    chosen && icon === candidate && "bg-selection text-fg ring-1 ring-brand/30",
                   )}
                 >
                   <Icon className="size-4" />
@@ -262,41 +275,45 @@ export function SessionAvatarPicker({
             })}
           </div>
         ) : null}
-        {kind === "letters" ? (
+        {shown === "letters" ? (
           <Field
             label="Letters"
             hint="One or two letters or digits."
             error={errors.letters ?? undefined}
           >
             <TextInput
-              value={letters}
+              value={chosen ? letters : ""}
               placeholder={sessionAvatarInitials(name || "Bot").slice(0, 2)}
               maxLength={2}
               autoComplete="off"
               className="w-24 uppercase"
-              onChange={(event) => set({ letters: event.target.value })}
+              onChange={(event) => pick({ letters: event.target.value })}
             />
           </Field>
         ) : null}
-        {kind === "image" ? (
+        {shown === "image" ? (
           <p className="m-0 text-sm leading-5 text-fg-muted">
             An image the agent set. To change it, ask the agent for a new one, or pick an emoji,
             icon or letters instead.
           </p>
         ) : null}
-        {kind === "emoji" || kind === "icon" || kind === "letters" ? (
+        {shown === "emoji" || shown === "icon" || shown === "letters" ? (
           <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="Colour">
             {SESSION_AVATAR_HUES.map((candidate) => (
               <button
                 key={candidate}
                 type="button"
                 role="radio"
-                aria-checked={hue === candidate}
+                aria-checked={hueShown && hue === candidate}
                 aria-label={`Colour ${SESSION_AVATAR_HUES.indexOf(candidate) + 1}`}
-                onClick={() => set({ hue: candidate })}
+                onClick={() => {
+                  // A colour alone isn't an avatar yet: it's kept for the next pick.
+                  if (!chosen) setBrowsedHue(true);
+                  set({ hue: candidate });
+                }}
                 className={cn(
                   "size-6 rounded-full outline-hidden ring-offset-2 ring-offset-surface transition-shadow focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:size-9",
-                  hue === candidate && "ring-2 ring-fg/70",
+                  hueShown && hue === candidate && "ring-2 ring-fg/70",
                 )}
                 style={{ background: `oklch(0.56 0.11 ${candidate})` }}
               />

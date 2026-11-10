@@ -10,7 +10,6 @@ import {
   getConnectAttempt,
   listConnectionsMetadata,
   type DbClient,
-  getConnectionMetadata,
 } from "@opengeni/db";
 import { updateOrganizationIntegrationPolicy } from "@opengeni/db/organization-integration-policy";
 import { FIKEN_CREDENTIAL_ROLE, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
@@ -23,23 +22,6 @@ import {
   finishOAuthAcquisition,
   startMcpOAuth,
 } from "../src/integrations/oauth-client";
-import { startAtlassianOAuth, transitionAtlassianLifecycle } from "../src/integrations/atlassian";
-import {
-  startGoogleDriveOAuth,
-  transitionGoogleDriveLifecycle,
-} from "../src/integrations/google-drive";
-import {
-  ATLASSIAN_CREDENTIAL_LABEL,
-  ATLASSIAN_CREDENTIAL_ROLE,
-  ATLASSIAN_PROVIDER_DOMAIN,
-  ATLASSIAN_REQUIRED_SCOPES,
-} from "@opengeni/contracts/atlassian";
-import {
-  GOOGLE_DRIVE_CREDENTIAL_LABEL,
-  GOOGLE_DRIVE_CREDENTIAL_ROLE,
-  GOOGLE_DRIVE_PROVIDER_DOMAIN,
-  GOOGLE_DRIVE_READONLY_SCOPE,
-} from "@opengeni/contracts/google-drive";
 import {
   completeFikenOAuthCallback,
   prepareFikenTokenInstall,
@@ -123,8 +105,6 @@ function deps(): ApiRouteDeps {
       githubPersonalOauthEnabled: true,
       githubPersonalOauthClientId: "fixture-client",
       githubPersonalOauthClientSecret: "fixture-secret",
-      atlassianClientId: "fixture-client",
-      atlassianClientSecret: "fixture-secret",
       fikenClientId: "fixture-client",
       fikenClientSecret: "fixture-secret",
     }),
@@ -178,32 +158,6 @@ test("active OAuth starts and Fiken token preparation deny before provider disco
     await expect(start()).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
 });
 
-test("retired native Drive OAuth refuses both read and publishing acquisition under every organization policy", async () => {
-  const api = deps();
-  let providerCalls = 0;
-  api.googleDriveFetch = async () => {
-    providerCalls++;
-    throw new Error("Unexpected retired provider request");
-  };
-  const before = await listConnectionsMetadata(client.db, scope.workspaceId, scope.subjectId);
-  for (const keys of [[], ["google-drive"]]) {
-    await allow(keys);
-    for (const capability of ["source_read", "publish"] as const) {
-      await expect(
-        startGoogleDriveOAuth(api, {
-          ...scope,
-          requestUrl: "https://api.example.test/start",
-          payload: { capability },
-        }),
-      ).rejects.toMatchObject({ status: 410 });
-    }
-  }
-  expect(providerCalls).toBe(0);
-  expect(await listConnectionsMetadata(client.db, scope.workspaceId, scope.subjectId)).toEqual(
-    before,
-  );
-});
-
 test("curated-looking MCP URLs are still custom without a trusted adapter identity", async () => {
   await allow(["gmail", "slack-personal", "google-drive"]);
   for (const mcpUrl of [OFFICIAL_GMAIL_MCP_URL, OFFICIAL_SLACK_MCP_URL, OFFICIAL_DRIVE_MCP_URL]) {
@@ -215,16 +169,6 @@ test("curated-looking MCP URLs are still custom without a trusted adapter identi
         payload: { mcpUrl, requestedScopes: [] },
       }),
     ).rejects.toBeInstanceOf(OrganizationIntegrationDeniedError);
-  }
-  for (const keys of [[], ["atlassian"]]) {
-    await allow(keys);
-    await expect(
-      startAtlassianOAuth(deps(), {
-        ...scope,
-        requestUrl: "https://api.example.test/start",
-        payload: {},
-      }),
-    ).rejects.toMatchObject({ status: 410 });
   }
 });
 
@@ -527,103 +471,4 @@ test("linked Fiken completed receipt and provider denial remain readable under r
     "cancelled",
   );
   expect(exchanges).toBe(1);
-});
-
-async function sourceConnection(
-  provider: "google-drive" | "atlassian",
-  state: "paused" | "active",
-  credentialEncrypted = "fixture-ciphertext",
-) {
-  const lifecycle = { state, recoverable: true, observedAt: new Date().toISOString() };
-  const metadata =
-    provider === "google-drive"
-      ? {
-          credentialRole: GOOGLE_DRIVE_CREDENTIAL_ROLE,
-          credentialLabel: GOOGLE_DRIVE_CREDENTIAL_LABEL,
-          googlePermissionId: "fixture-permission",
-          googleEmail: "fixture@example.test",
-          googleDisplayName: "Fixture",
-          accessMode: "readonly",
-          verifiedAt: new Date().toISOString(),
-          lifecycle,
-          selectedSources: [],
-        }
-      : {
-          credentialRole: ATLASSIAN_CREDENTIAL_ROLE,
-          credentialLabel: ATLASSIAN_CREDENTIAL_LABEL,
-          atlassianAccountId: "fixture-account",
-          displayName: "Fixture",
-          accessMode: "readonly",
-          verifiedAt: new Date().toISOString(),
-          lifecycle,
-          selectedSources: [],
-          sites: [
-            {
-              cloudId: "fixture-cloud",
-              name: "Fixture",
-              url: "https://fixture.atlassian.net",
-              products: [],
-            },
-          ],
-        };
-  return createConnection(client.db, {
-    ...scope,
-    providerDomain:
-      provider === "google-drive" ? GOOGLE_DRIVE_PROVIDER_DOMAIN : ATLASSIAN_PROVIDER_DOMAIN,
-    kind: "oauth2",
-    credentialEncrypted,
-    metadata,
-    grantedScopes:
-      provider === "google-drive" ? [GOOGLE_DRIVE_READONLY_SCOPE] : [...ATLASSIAN_REQUIRED_SCOPES],
-    createdBySubjectId: scope.subjectId,
-  });
-}
-
-test("retired provider resume cannot acquire authority, while pause remains available under restriction", async () => {
-  for (const provider of ["google-drive", "atlassian"] as const) {
-    const api = deps();
-    const transition =
-      provider === "google-drive" ? transitionGoogleDriveLifecycle : transitionAtlassianLifecycle;
-    for (const state of ["paused", "active"] as const) {
-      const connection = await sourceConnection(provider, state);
-      const input = {
-        workspaceId: scope.workspaceId,
-        subjectId: scope.subjectId,
-        connectionId: connection.id,
-        payload: { action: "resume" as const, expectedVersion: connection.version },
-      };
-      for (const keys of [[], [provider]]) {
-        await allow(keys);
-        await expect(transition(api, input)).rejects.toMatchObject({ status: 410 });
-        const retained = await getConnectionMetadata(
-          client.db,
-          scope.workspaceId,
-          connection.id,
-          scope.subjectId,
-        );
-        expect(retained?.version).toBe(connection.version);
-        expect(retained?.metadata.lifecycle).toMatchObject({ state });
-      }
-      await allow([]);
-      const paused = await transition(api, {
-        ...input,
-        payload: { action: "pause", expectedVersion: connection.version },
-      });
-      expect(paused.metadata.lifecycle).toMatchObject({ state: "paused" });
-      if (provider === "google-drive") {
-        const repeated = await transition(api, {
-          ...input,
-          payload: { action: "pause", expectedVersion: connection.version },
-        });
-        expect(repeated.version).toBe(paused.version);
-      } else {
-        await expect(
-          transition(api, {
-            ...input,
-            payload: { action: "pause", expectedVersion: connection.version },
-          }),
-        ).rejects.toMatchObject({ status: 409 });
-      }
-    }
-  }
 });

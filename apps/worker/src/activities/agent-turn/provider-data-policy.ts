@@ -71,8 +71,7 @@ export const PROVIDER_DATA_POLICIES: Readonly<
       "https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/abuse-monitoring",
       "https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/responses",
     ],
-    opengeni:
-      "Opengeni asks Azure not to store Responses API response data for chat turns (store: false).",
+    opengeni: "Chat turns ask Azure not to store Responses API response data (store: false).",
     checkedOn: CHECKED_2026_10_30,
   },
   azure_foundry_fireworks: {
@@ -117,8 +116,7 @@ export const PROVIDER_DATA_POLICIES: Readonly<
       "https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data",
       "https://platform.claude.com/docs/en/build-with-claude/data-residency",
     ],
-    opengeni:
-      "Opengeni does not set an inference region, so the Anthropic workspace's own default applies.",
+    opengeni: "No inference region is set, so the Anthropic workspace's own default applies.",
     checkedOn: CHECKED_2026_10_30,
   },
   claude_subscription: {
@@ -147,7 +145,7 @@ export const PROVIDER_DATA_POLICIES: Readonly<
       "Not stated for default projects (unknown). Data residency projects and the regional endpoints pin processing to that region.",
     sources: ["https://developers.openai.com/api/docs/guides/your-data"],
     opengeni:
-      "Opengeni asks OpenAI not to store Responses API response data for chat turns (store: false); abuse-monitoring logs still apply.",
+      "Chat turns ask OpenAI not to store Responses API response data (store: false); abuse-monitoring logs still apply.",
     checkedOn: CHECKED_2026_10_30,
   },
   codex_subscription: {
@@ -162,7 +160,7 @@ export const PROVIDER_DATA_POLICIES: Readonly<
       "https://help.openai.com/en/articles/7730893-data-controls-faq",
       "https://help.openai.com/en/articles/5722486-how-your-data-is-used-to-improve-model-performance",
     ],
-    opengeni: "Opengeni asks OpenAI not to store responses on this route.",
+    opengeni: "Requests ask OpenAI not to store responses on this route.",
     checkedOn: CHECKED_2026_10_30,
   },
   xai_api: {
@@ -190,7 +188,7 @@ export const PROVIDER_DATA_POLICIES: Readonly<
     family: "vercel_ai_gateway",
     provider: "Vercel AI Gateway, which forwards to an upstream model provider",
     training:
-      "Vercel does not train on it. The upstream provider's policy applies; it can be that provider's default or a stricter agreement Vercel has with it. Opengeni's requests do not ask for Vercel's no-training or zero-retention routing; Vercel team or virtual-model settings could still apply it (not checked).",
+      "Vercel does not train on it. The upstream provider's policy applies; it can be that provider's default or a stricter agreement Vercel has with it. Requests on this route do not ask for Vercel's no-training or zero-retention routing; Vercel team or virtual-model settings could still apply it (not checked).",
     retention:
       "Vercel keeps no prompts or outputs after the request. The upstream provider's retention applies.",
     location:

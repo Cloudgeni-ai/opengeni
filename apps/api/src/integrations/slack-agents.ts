@@ -11,7 +11,7 @@ import {
   slackAgentDescriptionSentence,
 } from "@opengeni/contracts";
 import { getWorkspace, listSlackAgentsForConnection, type SlackAgentRecord } from "@opengeni/db";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { agentMemoryAccess, agentMemoryGuidance, type ApiRouteDeps } from "@opengeni/core";
 
 import type { SlackRoutingAgent } from "./slack-agent-address";
 import { escapeSlackMrkdwn } from "./slack-app-home";
@@ -78,8 +78,9 @@ export function slackAgentCallText(
   return slackAgentCallFor(escapeSlackMrkdwn(agent.name), mention);
 }
 
-/** Agents listed by name in a chat's instructions. */
+/** Agents listed by name in a chat's instructions; the first ones with what they do. */
 const MAX_LISTED_AGENTS = 50;
+const MAX_DESCRIBED_AGENTS = 20;
 
 function workspaceName(loaded: LoadedSlackAgents, workspaceId: string): string {
   return loaded.labels.get(workspaceId) ?? "its workspace";
@@ -100,7 +101,7 @@ export type SlackAgentChatSource =
 /**
  * The hand-off rule every chat in an installation with agents gets. The
  * server enforces its core too: a hand-off needs the message to name the
- * agent (see `handOffSlackAgentChat`).
+ * agent, at most once, never to itself or back (see `handOffSlackAgentChat`).
  */
 function slackAgentHandoffRule(input: {
   self: string;
@@ -108,16 +109,16 @@ function slackAgentHandoffRule(input: {
 }): string {
   const how =
     input.source === "channel"
-      ? `This channel's settings sent the message to ${input.self}; the person did not name an agent.`
+      ? `This channel's settings sent the message to ${input.self}; the person named no agent.`
       : input.source === null || input.source === "agent_name" || input.source === "handoff"
         ? null
-        : `The person asked ${input.self} without naming an agent.`;
+        : "The person named no agent.";
   return [
     ...(how ? [how] : []),
     "Answer yourself by default.",
-    'Call slack_agent_handoff only when the person asks for one of the Slack agents below by its name, even misspelled or without a word like "team" (for example "ask the data team"); then make your entire final response exactly NO_REPLY.',
-    "Never hand off greetings, tests, small talk, questions about Opengeni or its agents, or messages that merely contain a word that is also an agent's name.",
-    "When a request fits an agent the person did not ask for, answer it yourself, then call slack_agent_suggest with that agent's name: Opengeni shows the person a button to ask it. Do not write that suggestion in your answer.",
+    'Call slack_agent_handoff only when the person asks for one of the agents below by name, even misspelled or without a word like "team"; if it returns passed_on, make your entire final response exactly NO_REPLY.',
+    "Never hand off greetings, tests, small talk, questions about Opengeni or its agents, or words that merely match an agent's name.",
+    "When a request fits an agent the person did not ask for, answer it yourself and call slack_agent_suggest with that agent's name.",
   ].join(" ");
 }
 
@@ -132,50 +133,71 @@ export function slackAgentSessionInstructions(input: {
   handedOffBy: SlackAgentRecord | null;
   /** How the chat was reached; null when unknown. */
   source?: SlackAgentChatSource | null;
+  /** A private chat (a DM): it reads the agent's Memory but never writes to it. */
+  privateChat?: boolean;
 }): string {
   const { loaded, agent } = input;
   const lines: string[] = [];
   if (agent) {
     const description = slackAgentDescriptionSentence(agent.description);
     lines.push(
-      `You are ${agent.name}, a Slack agent.${description ? ` ${description}` : ""} People ask you in Slack with "${slackAgentCallFor(agent.name)}", and your Slack messages are posted under the name ${agent.name}. Several people may talk to you at once in separate chats; together they are one teammate, so keep your answers consistent with your other chats.`,
+      `You are ${agent.name}, a Slack agent.${description ? ` ${description}` : ""} People ask you with "${slackAgentCallFor(agent.name)}"; your messages post as ${agent.name}.`,
     );
-    const adminInstructions = agent.instructions.trim();
-    if (adminInstructions.length > 0) {
-      lines.push(`Instructions for ${agent.name}:\n${adminInstructions}`);
-    }
-    const memory = agent.knowledgeCollectionId;
-    lines.push(
-      memory
-        ? `Your Memory is the Knowledge collection ${memory} in this workspace. When context is missing (for example someone continues a topic outside a thread, or refers to something said before), search your Memory with knowledge_search (groupId ${memory}) and list your recent chats with slack_agent_chats, then read the relevant chat. Save lasting facts, decisions and preferences people share with you with knowledge_save, with groupIds [${memory}] and scope "workspace", so your other chats know them too. Do not save passing chatter.`
-        : "When context is missing (for example someone continues a topic outside a thread), list your recent chats with slack_agent_chats and read the relevant one.",
+    // The agent's own Instructions are a prompt layer of their own (the chat
+    // is bound to the agent), never copied here.
+    // A Slack agent is always shared with its workspace, so a private chat
+    // (a DM) only reads its Memory and saves no Knowledge; the knowledge tools
+    // enforce that too.
+    const memory = agentMemoryGuidance(
+      agentMemoryAccess(
+        {
+          memoryEnabled: agent.memoryEnabled,
+          memoryCollectionId: agent.knowledgeCollectionId,
+          visibility: "workspace",
+          ownerSubjectId: null,
+        },
+        {
+          private: input.privateChat === true,
+          ownerSubjectId: null,
+          memoryOff: false,
+          // A Slack DM's session row is shared, so its saves would be workspace scope.
+          slackDm: input.privateChat === true,
+        },
+      ),
     );
+    if (memory) lines.push(memory);
+    // The server refuses a hand-back, so the line only says who passed it on.
     if (input.handedOffBy) {
-      lines.push(
-        `${input.handedOffBy.name} passed this request on to you. Do not hand it back to ${input.handedOffBy.name}.`,
-      );
+      lines.push(`${input.handedOffBy.name} passed this request on to you.`);
     }
   }
   const others = loaded.records.filter((candidate) => candidate.id !== agent?.id);
   if (others.length > 0) {
     // The rule comes before the list, and the list is bounded, so cutting the
-    // instructions to their limit never drops the rule.
+    // instructions to their limit never drops the rule. Past the first agents
+    // only names are listed: a hand-off needs the name, which the server checks.
     const listed = others.slice(0, MAX_LISTED_AGENTS);
+    const described = listed.slice(0, MAX_DESCRIBED_AGENTS);
+    const namedOnly = listed.slice(MAX_DESCRIBED_AGENTS);
+    const unlisted = others.length - listed.length;
     lines.push(
       [
         slackAgentHandoffRule({ self: agent?.name ?? "Opengeni", source: input.source ?? null }),
-        "Slack agents people can ask in this Slack workspace (name, what it does, where it works):",
-        ...listed.map((other) => {
+        "Slack agents people can ask (name, workspace: what it does):",
+        ...described.map((other) => {
           const description = slackAgentDescriptionSentence(other.description);
-          return `- ${other.name}:${description ? ` ${description}` : ""} Works in ${workspaceName(loaded, other.targetWorkspaceId)}.`;
+          return `- ${other.name} (${workspaceName(loaded, other.targetWorkspaceId)}):${description ? ` ${description}` : ""}`;
         }),
-        ...(others.length > listed.length ? [`- and ${others.length - listed.length} more.`] : []),
+        ...(namedOnly.length > 0
+          ? [
+              `Also: ${namedOnly.map((other) => other.name).join(", ")}${unlisted > 0 ? `, and ${unlisted} more` : ""}.`,
+            ]
+          : []),
       ].join("\n"),
     );
   }
-  lines.push(
-    "When someone asks to create a new agent, call slack_agent_propose; it posts a card that an admin of the agent's workspace confirms. It needs an icon: generate one if you can generate images, otherwise ask the person for an emoji.",
-  );
+  // How to propose, including the icon, is in the tool's description.
+  lines.push("To create a new agent when someone asks, use slack_agent_propose.");
   return lines.join("\n\n");
 }
 

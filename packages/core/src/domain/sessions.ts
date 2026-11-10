@@ -1,7 +1,7 @@
 import { assertMcpCredentialContentFlowAllowed } from "./mcp-credential-content-flow";
 import { authorizeTeamsConversationAdmission } from "../application/teams-private-session";
 import type { TeamsConversationProof } from "@opengeni/db";
-import type { BillingOrigin } from "@opengeni/contracts";
+import type { BillingOrigin, SessionPromptDelivery } from "@opengeni/contracts";
 import {
   isDirectModelId,
   MESSAGE_TIME_ZONE_METADATA_KEY,
@@ -45,7 +45,11 @@ import {
 } from "../product-usage-metrics";
 import { saveAgentLearningSettings } from "@opengeni/db";
 import { withSessionRlsActorContext } from "@opengeni/db";
-import { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./file-owner";
+import {
+  fileOwnerContextForAccess,
+  fileOwnerContextForAgent,
+  inProcessFileOwnerContext,
+} from "./file-owner";
 import { assertSessionIsNotImported } from "@opengeni/db";
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
 import {
@@ -58,6 +62,8 @@ import { currentHostSessionUsageLimit } from "../host-session-usage-limit";
 import { measureSessionStartPhase, type SessionStartObservability } from "./session-start-timing";
 import {
   requireDeveloperSetupDelegatedPermissions,
+  requireDeveloperSetupDelegatablePermissions,
+  developerSetupCredentialRestricted,
   withDeveloperSetupCredentialRestriction,
 } from "../developer-setup-credential-ceiling";
 
@@ -73,6 +79,7 @@ import {
   ORGANIZATION_AZURE_OPENAI_PROVIDER_ID,
   ORGANIZATION_OPENAI_PROVIDER_ID,
   organizationDirectModelProviderOf,
+  organizationCompatibleConnectionIdOf,
   WORKSPACE_OPPER_MODEL_ID_PREFIX,
   allowedFirstPartyMcpToolsForSession,
   resolveSessionFirstPartyMcpTools,
@@ -170,7 +177,6 @@ import {
   type ClaudeProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import {
-  assertExactNewSessionDraftInTransaction,
   createSession,
   createSessionWithIdempotencyKeyResult,
   canonicalSessionCommandHash,
@@ -212,7 +218,6 @@ import {
   listSessionMcpServersForChildInheritance,
   requireSession,
   setActiveSandbox,
-  setSubjectRlsContext,
   replaySubmittedHumanPromptFromBoundaryReceipt,
   submitHumanPromptInTransaction,
   appendSessionEventsWithLockedSessionUpdate,
@@ -241,6 +246,7 @@ import {
   WorkspaceControlBusyError,
   type SessionCommandActor,
   type NewSessionDraftSnapshot,
+  comparableNewSessionDraftOptions,
 } from "@opengeni/db";
 import {
   publishDurableSessionEvents,
@@ -330,6 +336,7 @@ import {
 import {
   assertToolRefsSubset,
   availableToolRefs,
+  isOptionalGitHubAppRepositoryResource,
   mergeToolRefs,
   mergeToolRefEager,
   normalizeResources,
@@ -376,6 +383,7 @@ function isCatalogOverlayModel(modelId: string | null | undefined): boolean {
     modelId?.startsWith(WORKSPACE_OPPER_MODEL_ID_PREFIX) === true ||
     modelId?.startsWith(ORGANIZATION_OPPER_MODEL_ID_PREFIX) === true ||
     organizationDirectModelProviderOf(modelId) !== null ||
+    organizationCompatibleConnectionIdOf(modelId) !== null ||
     (modelId != null && isClaudeSubscriptionModelId(modelId)) ||
     CLAUDE_CONNECTION_KINDS.some((kind) =>
       ["workspace", "organization"].some((scope) =>
@@ -1081,6 +1089,8 @@ export async function createAndStartSessionWithOutcome(input: {
   latencyMode?: "standard" | "priority" | "fast" | "ultrafast";
   /** No person answers during the task; frozen in the session metadata. */
   unattended?: boolean;
+  /** The agent (agents.id) the chat starts with, at its current revision. */
+  boundAgentId?: string;
   turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
@@ -1251,7 +1261,6 @@ export async function createAndStartSessionWithOutcome(input: {
   let targetSeededBeforeCreateCommit = false;
   const beforeCreateCommit =
     requiresActiveWorkspaceCustomModel ||
-    input.consumeNewSessionDraft ||
     input.beforeCreateCommit ||
     preflightTarget ||
     targetPreflightFailureMessage
@@ -1310,18 +1319,6 @@ export async function createAndStartSessionWithOutcome(input: {
             if (!active) {
               throw modelUnavailableHttpException(input.model);
             }
-          }
-          // Reject an already-stale browser draft before the newly inserted
-          // shell can commit. The initializer repeats this exact check while
-          // consuming the draft after it installs the first runnable unit.
-          if (input.consumeNewSessionDraft && context?.created !== false) {
-            await setSubjectRlsContext(tx, input.consumeNewSessionDraft.subjectId);
-            await assertExactNewSessionDraftInTransaction(tx, {
-              workspaceId: input.workspaceId,
-              subjectId: input.consumeNewSessionDraft.subjectId,
-              expectedRevision: input.consumeNewSessionDraft.expectedRevision,
-              expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot,
-            });
           }
           if (preflightTarget?.ok && context?.created !== false) {
             const seeded = await setActiveSandbox(tx, {
@@ -1384,6 +1381,7 @@ export async function createAndStartSessionWithOutcome(input: {
           firstPartyMcpTools: input.firstPartyMcpTools,
           ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
           instructions: input.instructions ?? null,
+          ...(input.boundAgentId ? { agent: { id: input.boundAgentId } } : {}),
           ...(input.unattended ? { unattended: true } : {}),
           ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
           policyRole: input.policyRole ?? null,
@@ -1499,6 +1497,7 @@ export async function createAndStartSessionWithOutcome(input: {
         firstPartyMcpTools: input.firstPartyMcpTools,
         ...(input.agentConfig !== undefined ? { agentConfig: input.agentConfig } : {}),
         instructions: input.instructions ?? null,
+        ...(input.boundAgentId ? { agent: { id: input.boundAgentId } } : {}),
         ...(input.unattended ? { unattended: true } : {}),
         ...(input.vaultPolicy ? { vaultPolicy: input.vaultPolicy } : {}),
         policyRole: input.policyRole ?? null,
@@ -2010,7 +2009,7 @@ type PostUserMessageTurnInput = {
 
   captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
-  delivery?: "send" | "steer";
+  delivery?: SessionPromptDelivery;
   origin?: "human" | "operator";
   /** Content-free product surface the request entered through. */
   surface?: SessionTurnSurface | null;
@@ -2077,7 +2076,11 @@ function finalizePostUserMessageTurn(
             sessionId,
             workflowId: result.turn.temporalWorkflowId,
             wakeRevision: result.wakeRevision,
-            ...((input.delivery ?? "send") === "steer" || result.interruptionCount > 0
+            // `steer_or_send` asks for the interruption only when the server
+            // resolved it to a Steer.
+            ...((input.delivery ?? "send") === "steer" ||
+            (input.delivery === "steer_or_send" && result.routing === "accepted_for_steering") ||
+            result.interruptionCount > 0
               ? { interruptionRequested: true }
               : {}),
           });
@@ -3163,6 +3166,7 @@ async function createSessionForRequestInFileScope(
               workspaceId,
               subjectId: grant.subjectId,
               workspaceSettings: workspace.settings,
+              billingOrigin,
             }),
           );
   const inheritedModel =
@@ -3509,7 +3513,7 @@ async function createSessionForRequestInFileScope(
           ? await fileOwnerContextForAccess({ db }, authorization, "sessions:create")
           : grant.principalKind === "agent_attempt"
             ? await fileOwnerContextForAgent({ db }, grant, "sessions:create")
-            : undefined;
+            : await inProcessFileOwnerContext({ db }, grant, payload.requestedSessionId, resources);
       await validateFileResources(
         db,
         grant.accountId,
@@ -3630,11 +3634,6 @@ async function createSessionForRequestInFileScope(
   // This is a fresh-creation default only: replay/repair preserves persisted
   // policy, and follow-ups use the recipient session's own frozen settings.
   const latencyMode = payload.latencyMode ?? "standard";
-  if (payload.expectedNewSessionDraftRevision !== undefined && payload.rigId === null) {
-    throw new HTTPException(409, {
-      message: "The submitted session options are not represented by the new-session draft",
-    });
-  }
   const expectedNewSessionDraftSnapshot: NewSessionDraftSnapshot | null =
     payload.expectedNewSessionDraftRevision !== undefined
       ? {
@@ -3645,24 +3644,15 @@ async function createSessionForRequestInFileScope(
           model,
           reasoningEffort,
           latencyMode,
-          options: {
-            ...(payload.excludedMcpServerIds !== undefined
-              ? { excludedMcpServerIds: payload.excludedMcpServerIds }
-              : {}),
-            ...(visibilityProvided ? { visibility: payload.visibility } : {}),
-            ...(payload.sandboxBackend ? { sandboxBackend: payload.sandboxBackend } : {}),
-            ...(payload.targetSandboxId ? { targetSandboxId: payload.targetSandboxId } : {}),
-            ...(payload.workingDir ? { workingDir: payload.workingDir } : {}),
-            ...(payload.rigId ? { rigId: payload.rigId } : {}),
-            ...(payload.goal ? { goal: payload.goal } : {}),
-            ...(payload.firstPartyMcpPermissions
-              ? { firstPartyMcpPermissions: payload.firstPartyMcpPermissions }
-              : {}),
-            ...(payload.firstPartyMcpTools
-              ? { firstPartyMcpTools: payload.firstPartyMcpTools }
-              : {}),
-            ...(payload.agent ? { agent: payload.agent } : {}),
-          },
+          // What this Send carried. After the create is accepted, the draft is
+          // cleared only while it still holds this (or is still at the
+          // revision the sender saw). Every draft option is also a create
+          // field with the same name, so the request supplies the whole
+          // comparable set without a hand-written entry per option.
+          options: comparableNewSessionDraftOptions({
+            ...payload,
+            visibility: visibilityProvided ? payload.visibility : undefined,
+          }),
         }
       : null;
   const inheritedFromParent = parentSession !== null;
@@ -3851,6 +3841,7 @@ async function createSessionForRequestInFileScope(
         resources,
         source: connectionDelegationSource,
         authoritySelections: payload.connectionAccounts,
+        autoConnect: { settings: unresolvedDeps.settings },
       }),
     );
   if (effectiveGoal) {
@@ -4321,6 +4312,9 @@ async function createSessionForRequestInFileScope(
       // contracts schema). Persisted on the row; composed system-level at turn
       // time. Not surfaced as an event.
       instructions: payload.instructions ?? null,
+      // The agent the chat starts with: its Instructions are a prompt layer
+      // of their own, never copied into `instructions`.
+      ...(payload.agentId ? { boundAgentId: payload.agentId } : {}),
       // No person answers during the task. Never inherited by a child.
       ...(payload.unattended === true ? { unattended: true } : {}),
       // Session and agent-config vault narrowing, intersected (AX-2). Ancestor
@@ -4463,7 +4457,7 @@ export async function createSessionForRequest(
 }
 
 function sessionPromptBoundaryRequestHash(input: {
-  delivery: "send" | "steer";
+  delivery: SessionPromptDelivery;
   controlEtag: string | null;
   expectedDraftRevision: number | null;
   text: string;
@@ -4534,7 +4528,7 @@ async function acceptSessionUserMessageInFileScope(
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
     connectionAccounts?: McpConnectionAccountSelection[];
-    delivery?: "send" | "steer";
+    delivery?: SessionPromptDelivery;
     /** The sender's IANA zone as the client reported it; unresolvable names are ignored. */
     timeZone?: string | null;
     origin?: "human" | "operator";
@@ -4597,9 +4591,10 @@ async function acceptSessionUserMessageInFileScope(
         context: delegatedServiceInitiator.context,
       }
     : (promptInitiator.actor ?? { type: "human", subjectId: grant.subjectId });
+  // `steer_or_send` may steer, so it needs Steer authority.
   await requireSessionAuthorization(deps, grant, {
     sessionId,
-    operation: delivery === "steer" ? "session.steer" : "session.append",
+    operation: delivery === "send" ? "session.append" : "session.steer",
     surface: "core",
   });
   const requestedResources = normalizeResources(input.resources ?? []);
@@ -4684,7 +4679,7 @@ async function acceptSessionUserMessageInFileScope(
     await requireSessionUsageLimitAllows(
       db,
       { accountId: grant.accountId, workspaceId, sessionId, runtime: true },
-      { sink: deps.observability, boundary: delivery === "steer" ? "steer" : "send" },
+      { sink: deps.observability, boundary: delivery === "send" ? "send" : "steer" },
     );
     const settings = await resolveWorkspaceModelBoundarySettings(
       deps,
@@ -4750,7 +4745,8 @@ async function acceptSessionUserMessageInFileScope(
     // Re-submitting a checked-out queue edit retains the original turn's
     // causal human when its own sender resubmits it, just as the locked
     // prompt transaction does. Anyone else's edit is their own message.
-    if (delivery === "send" && input.expectedDraftRevision != null) {
+    // A queue edit resubmitted with `steer_or_send` is always a Send.
+    if (delivery !== "steer" && input.expectedDraftRevision != null) {
       const draft = await withWorkspaceSubjectSessionActivityRls(
         db,
         workspaceId,
@@ -4800,7 +4796,7 @@ async function acceptSessionUserMessageInFileScope(
       ? await fileOwnerContextForAccess({ db }, input.authorization, "sessions:control")
       : grant.principalKind === "agent_attempt"
         ? await fileOwnerContextForAgent({ db }, grant, "sessions:control")
-        : undefined;
+        : await inProcessFileOwnerContext({ db }, grant, sessionId, requestedResources);
     await validateFileResources(
       db,
       grant.accountId,
@@ -4809,8 +4805,15 @@ async function acceptSessionUserMessageInFileScope(
       requestedResources,
       attachmentOwnerContext,
     );
+    // The chat's automatically attached repositories that later lose access
+    // (the installation is removed, or the repository is taken out of it)
+    // must not refuse every later message: the worker drops each one for
+    // the turn and reports it as skipped. Repositories this message adds and
+    // ones the person attached explicitly are still checked here.
     await validateGitHubRepositorySelection(db, workspaceId, [
-      ...existingSession.resources,
+      ...existingSession.resources.filter(
+        (resource) => !isOptionalGitHubAppRepositoryResource(resource),
+      ),
       ...requestedResources,
     ]);
     const mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
@@ -4868,6 +4871,7 @@ async function acceptSessionUserMessageInFileScope(
         source: connectionDelegationSource,
         targetSessionId: sessionId,
         ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
+        autoConnect: { settings: deps.settings },
       });
 
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
@@ -5235,12 +5239,17 @@ export async function setSessionUnattended(
   return { result, relatedSessionAccess: authorization?.relatedSessionAccess ?? "root" };
 }
 
-/** Change future defaults without accepting a prompt or touching accepted work. */
+/**
+ * Change the chat's model for future turns. A turn that is waiting for
+ * subscription capacity moves onto the new model too and continues, because
+ * switching away from a model without capacity is how the wait ends sooner.
+ */
 export async function setSessionModel(
   deps: Pick<
     ApiRouteDeps,
     "db" | "bus" | "settings" | "catalogSourceSettings" | "sessionAuthorization"
-  >,
+  > &
+    Partial<Pick<ApiRouteDeps, "workflowClient">>,
   grant: AccessGrant,
   sessionId: string,
   request: SetSessionModelRequest,
@@ -5272,10 +5281,20 @@ export async function setSessionModel(
       : service
         ? { type: "service", subjectId: service.initiator.subjectId, context: service.context }
         : { type: "human", subjectId: grant.subjectId };
+  const capacityRelease = await capacityWaitReleaseForModelSwitch(deps, grant, settings, {
+    sessionId,
+    model,
+    requestedModel: input.model,
+    reasoningEffort: input.reasoningEffort,
+  });
   const result = await runIdempotentPersistenceTransaction(
     {
       stage: "session.model_settings",
-      eventTypes: ["session.model_settings.updated"],
+      eventTypes: [
+        "session.model_settings.updated",
+        "turn.recovery.requested",
+        "session.status.changed",
+      ],
       maxAttempts: 3,
     },
     async () => {
@@ -5288,6 +5307,7 @@ export async function setSessionModel(
           operationKey: input.idempotencyKey,
           model,
           reasoningEffort: input.reasoningEffort,
+          ...(capacityRelease ? { capacityRelease } : {}),
           validate: (session) => {
             try {
               // Validate fresh selection/provider and preserved latency exactly as
@@ -5319,9 +5339,98 @@ export async function setSessionModel(
           );
     },
   );
-  const event = await getSessionEvent(deps.db, grant.workspaceId, result.eventId);
-  if (event) await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, [event]);
+  const events = (
+    await Promise.all(
+      [result.eventId, ...result.releaseEventIds].map((id) =>
+        getSessionEvent(deps.db, grant.workspaceId, id),
+      ),
+    )
+  ).filter((event): event is SessionEvent => event !== null);
+  if (events.length > 0) {
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+  }
+  if (result.releaseEventIds.length > 0) {
+    // The durable wake is committed; this only skips the dispatcher's tick.
+    void deps.workflowClient?.requestSessionWorkflowWakeDispatch?.()?.catch(() => {
+      console.warn("[sessions] capacity release wake dispatch failed; durable wake remains", {
+        errorCode: "session_capacity_release_wake_dispatch_failed",
+      });
+    });
+  }
   return { sessionId, ...result, effectiveFrom: "future_turns" as const };
+}
+
+/**
+ * The policy a capacity-waiting turn would run with on the new model, or null
+ * when there is no such turn, the model is unchanged, or the new model is not
+ * admissible for it now (then only future turns change).
+ */
+async function capacityWaitReleaseForModelSwitch(
+  deps: Pick<ApiRouteDeps, "db" | "settings">,
+  grant: AccessGrant,
+  settings: Settings,
+  input: {
+    sessionId: string;
+    model: string;
+    requestedModel: string;
+    reasoningEffort: SetSessionModelRequest["reasoningEffort"];
+  },
+): Promise<{ turnId: string; executionPolicy: TurnExecutionPolicyV1 } | null> {
+  const session = await requireSession(deps.db, grant.workspaceId, input.sessionId);
+  if (!session.activeTurnId) return null;
+  const turn = await getSessionTurn(deps.db, grant.workspaceId, session.activeTurnId);
+  if (
+    !turn ||
+    turn.activeAttemptId !== null ||
+    (turn.status !== "waiting_capacity" && turn.status !== "recovering") ||
+    turn.model === input.model
+  ) {
+    return null;
+  }
+  try {
+    const executionPolicy = withDeveloperSetupCredentialRestriction(
+      resolveTurnExecutionPolicyV1(settings, {
+        modelId: input.model,
+        requestedModelId: input.requestedModel,
+        modelSource: "explicit",
+        reasoningEffort: input.reasoningEffort,
+        reasoningSource: "explicit",
+        latencyMode: turn.latencyMode,
+        latencyModeSource: "session",
+      }),
+      { grant, trustedMetadata: [session.metadata, turn.metadata] },
+    );
+    // Moving the turn is a new model request, billed as that turn was.
+    await requireLimit(
+      { ...deps, settings },
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        initiatingHumanSubjectId: initiatingHumanForAllowance({
+          initiator: turn.initiator,
+          initiatingHumanSubjectId: await getSessionTurnInitiatingHumanSubjectId(
+            deps.db,
+            grant.workspaceId,
+            turn.id,
+          ),
+        }),
+        action: "agent_run:create",
+        quantity: 1,
+        model: input.model,
+        acceptedTurn: { sessionId: session.id, turnId: turn.id },
+        billingOrigin:
+          (await readTurnBillingOrigin(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            turnId: turn.id,
+          })) ?? "app",
+      },
+    );
+    return { turnId: turn.id, executionPolicy };
+  } catch (error) {
+    if (error instanceof HTTPException) return null;
+    throw error;
+  }
 }
 
 /**
@@ -5394,6 +5503,7 @@ function toolPolicyAuditSnapshot(
   tools: ToolRef[],
   firstPartyMcpTools: FirstPartyMcpToolName[],
   policy = session.toolPolicy,
+  firstPartyMcpPermissions?: readonly Permission[],
 ) {
   // Tool policy refs contain only public server ids and the optional/strict
   // execution mode; they never carry URLs, names, headers, credentials,
@@ -5438,6 +5548,9 @@ function toolPolicyAuditSnapshot(
     toolCount: allToolRefs.length,
     firstPartyMcpTools: [...firstPartyMcpTools].sort(),
     firstPartyMcpToolCount: firstPartyMcpTools.length,
+    ...(firstPartyMcpPermissions
+      ? { firstPartyMcpPermissions: [...firstPartyMcpPermissions].sort() }
+      : {}),
     truncated:
       allToolRefs.length > toolRefs.length ||
       (policy.excludedMcpServerIds?.length ?? 0) > maxToolPolicyAuditRefs,
@@ -5516,6 +5629,43 @@ export async function updateSessionToolPolicy(
   const agentAttemptCaller = grantHasAgentAttemptAuthority(grant);
 
   const existingSession = await requireSession(deps.db, grant.workspaceId, sessionId);
+  // A new permission set never out-ranks the caller: the same delegation
+  // rules as creating a session with that set. Parent, agent-narrowing and
+  // goal checks run under the session lock below.
+  const requestedFirstPartyMcpPermissions = request.firstPartyMcpPermissions
+    ? [...new Set(request.firstPartyMcpPermissions)]
+    : null;
+  if (requestedFirstPartyMcpPermissions) {
+    requireDeveloperSetupDelegatablePermissions(
+      developerSetupCredentialRestricted({
+        grant,
+        trustedMetadata: [existingSession.metadata],
+      }),
+      requestedFirstPartyMcpPermissions,
+    );
+    requireExplicitPermissionDelegation(grant, requestedFirstPartyMcpPermissions);
+    for (const permission of requestedFirstPartyMcpPermissions) {
+      if (!hasPermission(grant.permissions, permission)) {
+        throw new HTTPException(403, {
+          message: `cannot grant first-party MCP permission beyond the calling grant: ${permission}`,
+        });
+      }
+    }
+  }
+  const sessionGoal = requestedFirstPartyMcpPermissions
+    ? await getSessionGoal(deps.db, grant.workspaceId, sessionId)
+    : null;
+  if (
+    requestedFirstPartyMcpPermissions &&
+    sessionGoal !== null &&
+    sessionGoal.status !== "completed" &&
+    !hasPermission(requestedFirstPartyMcpPermissions, "goals:manage")
+  ) {
+    throw new HTTPException(422, {
+      message:
+        "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
+    });
+  }
   const workspace = await requireWorkspace(deps.db, grant.workspaceId);
   const workspaceSessionToolDefaults = resolveWorkspaceSessionToolDefaults(workspace.settings);
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
@@ -5816,6 +5966,45 @@ export async function updateSessionToolPolicy(
         }
       }
 
+      const currentFirstPartyMcpPermissions = [
+        ...(session.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS),
+      ];
+      if (requestedFirstPartyMcpPermissions && session.parentSessionId) {
+        const parent = await context.getLockedSession(session.parentSessionId);
+        if (!parent) {
+          throw new HTTPException(409, { message: "parent session is no longer available" });
+        }
+        const parentPermissions =
+          parent.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
+        const widened = requestedFirstPartyMcpPermissions.find(
+          (permission) => !hasPermission(parentPermissions, permission),
+        );
+        if (widened) {
+          throw new HTTPException(403, {
+            message: `child first-party MCP permissions may only narrow the parent session grant: ${widened}`,
+          });
+        }
+      }
+      if (requestedFirstPartyMcpPermissions && agentAttemptCaller) {
+        const widened = requestedFirstPartyMcpPermissions.find(
+          (permission) => !hasPermission(currentFirstPartyMcpPermissions, permission),
+        );
+        if (widened) {
+          throw new HTTPException(403, {
+            message: `an agent may only narrow its session first-party permissions: ${widened}`,
+          });
+        }
+      }
+      // An equal set (in any order) keeps the stored value, so restating the
+      // default never pins it.
+      const permissionsChanged =
+        requestedFirstPartyMcpPermissions !== null &&
+        stableJson([...requestedFirstPartyMcpPermissions].sort()) !==
+          stableJson([...currentFirstPartyMcpPermissions].sort());
+      const nextFirstPartyMcpPermissions = permissionsChanged
+        ? requestedFirstPartyMcpPermissions!
+        : currentFirstPartyMcpPermissions;
+
       const currentPolicy = session.toolPolicy;
       // JSONB normalizes object-key order on the round trip, so plain
       // JSON.stringify would turn an identical retry into a second mutation
@@ -5833,7 +6022,7 @@ export async function updateSessionToolPolicy(
           firstPartyMcpTools: nextFirstPartyMcpTools,
           policy: nextPolicy,
         });
-      if (unchanged) {
+      if (unchanged && !permissionsChanged) {
         return { events: [] };
       }
 
@@ -5848,12 +6037,14 @@ export async function updateSessionToolPolicy(
                 session.tools,
                 [...(session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default)],
                 currentPolicy,
+                currentFirstPartyMcpPermissions,
               ),
               after: toolPolicyAuditSnapshot(
                 session,
                 nextTools,
                 nextFirstPartyMcpTools,
                 nextPolicy,
+                nextFirstPartyMcpPermissions,
               ),
               version: nextVersion,
               effectiveFrom: "next_attempt",
@@ -5866,6 +6057,7 @@ export async function updateSessionToolPolicy(
           toolPolicy: nextPolicy,
           toolPolicyVersion: nextVersion,
           expectedToolPolicyVersion: request.expectedVersion,
+          ...(permissionsChanged ? { firstPartyMcpPermissions: nextFirstPartyMcpPermissions } : {}),
         },
       };
     },
@@ -6340,23 +6532,49 @@ function hasOwnProperty(value: unknown, key: string): boolean {
 export async function createSessionForRequestWithOutcome(
   ...args: Parameters<typeof createSessionForRequestInFileScope>
 ): Promise<CreateSessionRequestOutcome> {
-  const [deps, grant, , , authorization] = args;
+  const [deps, grant, , rawPayload, authorization] = args;
   const actor = authorization
     ? await fileOwnerContextForAccess(deps, authorization, "sessions:create")
     : grant.principalKind === "agent_attempt"
       ? await fileOwnerContextForAgent(deps, grant, "sessions:create")
-      : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+      : ((await inProcessFileOwnerContext(
+          deps,
+          grant,
+          requestedSessionIdOf(rawPayload),
+          rawPayloadField(rawPayload, "resources"),
+        )) ?? {
+          subjectId: grant.subjectId,
+          privateFileOwnerSubjectId: null,
+        });
   return withSessionRlsActorContext(actor, () => createSessionForRequestInFileScope(...args));
+}
+
+function rawPayloadField(rawPayload: unknown, field: string): unknown {
+  return typeof rawPayload === "object" && rawPayload !== null
+    ? (rawPayload as Record<string, unknown>)[field]
+    : undefined;
+}
+
+/** The requested session id of a not-yet-parsed create payload, when it is a UUID. */
+function requestedSessionIdOf(rawPayload: unknown): string | null {
+  const requested = rawPayloadField(rawPayload, "requestedSessionId");
+  return typeof requested === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(requested)
+    ? requested
+    : null;
 }
 
 export async function acceptSessionUserMessageWithOutcome(
   ...args: Parameters<typeof acceptSessionUserMessageInFileScope>
 ): ReturnType<typeof acceptSessionUserMessageInFileScope> {
-  const [deps, grant, , , input] = args;
+  const [deps, grant, , sessionId, input] = args;
   const actor = input.authorization
     ? await fileOwnerContextForAccess(deps, input.authorization, "sessions:control")
     : grant.principalKind === "agent_attempt"
       ? await fileOwnerContextForAgent(deps, grant, "sessions:control")
-      : { subjectId: grant.subjectId, privateFileOwnerSubjectId: null };
+      : ((await inProcessFileOwnerContext(deps, grant, sessionId, input.resources)) ?? {
+          subjectId: grant.subjectId,
+          privateFileOwnerSubjectId: null,
+        });
   return withSessionRlsActorContext(actor, () => acceptSessionUserMessageInFileScope(...args));
 }

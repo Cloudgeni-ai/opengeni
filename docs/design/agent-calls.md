@@ -31,9 +31,26 @@ saying why the agent called, and the conversation lands in that chat.
      expiring at the deadline) to the phone's PushKit token. The ring screen
      shows the reason as the caller; the call handle is the chat, so calling
      back from the Phone app's recents opens that chat.
-   - Android: not offered in this version; the setting shows on iOS only. The
-     dispatcher already sends a high-priority "… is calling" notification for
-     an Android device with the rule, as the base for a full-screen ring later.
+   - Android: a high-priority FCM data message, expiring at the deadline. It
+     carries the call as `opengeniCall` (`type: "ring"`, the same fields as the
+     PushKit payload) next to the ordinary "… is calling" notification fields.
+     An app built with the config plugin's `call.androidSystemCall` reports
+     the ring as a self-managed Telecom call (androidx core-telecom) and shows
+     the incoming-call notification (`CallStyle`) with a full-screen ring
+     screen over the lock screen; answering opens the app and hands the call
+     to the same `incoming` adapter as on iOS. An older app, or one without
+     system calls, shows the plain notification instead. The setting shows on
+     Android only in an app with system calls and push. While the app runs it
+     follows the call's state, as on iOS. When the call is answered or
+     declined on another phone, or the agent cancels it, each Android phone
+     that rang gets one more data message, `opengeniCall` with
+     `type: "ended"` and the reason (`answeredElsewhere`,
+     `declinedElsewhere`, `remoteEnded`), with nothing to show; it stops the
+     ring even when the app is not running. It shares the ring's collapse key,
+     so FCM swaps a ring it has not delivered yet, and it expires with the
+     ring. A ring the server has not sent yet is withdrawn instead
+     (`end_agent_call_rings_v1`, migration 1344, which stays inactive until a
+     later migration grants it to the runtime).
 3. The tool waits while the phone rings, like `session_wait`, and returns the
    outcome directly: `answered`, `declined`, `missed`, or `cancelled` when the
    turn stopped. There is no background sweeper: the waiting tool, or the next
@@ -58,8 +75,11 @@ saying why the agent called, and the conversation lands in that chat.
 - One ringing call per person at a time.
 - At most 3 calls per chat per hour. After a decline, that chat cannot ring the
   same person again for 15 minutes.
-- Refusals tell the agent what to do instead (notify the person), never to
-  retry.
+- Results state facts only: what happened, what the person now sees (such as
+  the missed-call notice), and when a refused call can ring again. Whether to
+  call again or notify instead is the agent's judgment; the tool description
+  only reminds it that every call interrupts the person, so it weighs urgency
+  and whether they asked to be called.
 
 ## Storage
 
@@ -69,11 +89,19 @@ saying why the agent called, and the conversation lands in that chat.
 - `agent_calls`: id, workspace, session, callee and caller, caller label,
   reason, state, phones rung, deadline, answering phone, voice call id,
   timestamps. Workspace row-level security, owner-run functions for push.
-- Rollout: migration 1107 withholds the runtime's EXECUTE on its owner-run
+- Rollout: migration 1107 withheld the runtime's EXECUTE on its owner-run
   functions for one release (runtime posture `DEFERRED_RUNTIME_PRIVATE_ROUTINES`),
   because the previous release rejects a grant on a definer it does not know.
-  Until a later migration grants them, native push keeps its v1 functions,
-  call rules are dropped when a phone registers, and agents get `no_phone`.
+  Migration 1239 grants all six routines to every configured application
+  role; readiness now requires them. The current binary uses native push v2
+  directly and no longer drops call rules or returns `no_phone` just because
+  grants are withheld. The v1 SQL routines and their grants remain intact for
+  older binaries during a rolling deploy.
+  **Ordering:** 1239 ships after a production release containing 1107
+  (commit `d91058a8b8` or later) was pinned in
+  `scripts/runtime-posture-baseline.json` by a separate PR (production
+  `0f85b681`); a local compatibility run against 1107 is not a production
+  release receipt.
 
 ## Products embedding Opengeni
 
@@ -101,6 +129,8 @@ A product that embeds Opengeni rings its own app with its own push credentials:
 
 ## Testing
 
-CallKit and PushKit do not ring in the iOS Simulator. The server state machine,
+CallKit and PushKit do not ring in the iOS Simulator. On Android, the
+emulator runs the self-managed call, the ring screen and the call
+notification; the FCM ring needs a real Firebase project. The server state machine,
 the push dispatch and the app's handling are unit tested; the full ring is
 verified on a real phone through TestFlight.

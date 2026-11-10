@@ -20,7 +20,11 @@ import {
   nestedPostgresSqlState,
   type Database,
 } from "@opengeni/db";
-import { resolveModalCheckpointProviderBinding } from "@opengeni/runtime/sandbox";
+import {
+  computeSourceImage,
+  resolveComputeProviderBinding,
+  resolveModalCheckpointProviderBinding,
+} from "@opengeni/runtime/sandbox";
 import { HTTPException } from "hono/http-exception";
 import {
   grantHasAgentAttemptAuthority,
@@ -125,9 +129,72 @@ export function rigProviderImageSourceImage(
   return null;
 }
 
+/**
+ * The base image a prebuilt Sandbox Environment is defined over, for its
+ * content identity. It equals the lease's logical image except on compute,
+ * whose lease keeps no image: there a template is captured over the image new
+ * sandboxes boot, and keeps that image's guest when the image moves on, so a
+ * change of that image must make the template stale. A digest-pinned image
+ * names its content. A plain image name (such as one the control service
+ * points at each release's sandbox image) does not, so it is identified with
+ * the deployment revision that chose it: each release rebuilds over its own
+ * image. Without either, compute has no content identity and cannot prebuild.
+ */
+export function rigProviderImageContentSourceImage(
+  settings: Settings,
+  backend: SandboxBackend,
+): string | null {
+  if (backend === "compute") return computeImageContentIdentity(settings);
+  return rigProviderImageSourceImage(settings, backend);
+}
+
+function computeImageContentIdentity(settings: Settings): string | null {
+  const image = computeSourceImage(settings);
+  if (!image) return null;
+  const revision = settings.deploymentRevision?.trim();
+  if (!revision || revision === "dev") return null;
+  return `${image} release ${revision}`;
+}
+
+/**
+ * Whether this deployment can prebuild a verified Sandbox Environment for
+ * `backend`. A compute template keeps the guest it was captured on and does
+ * not follow image releases, so compute needs an explicitly configured image
+ * with a content identity whose change is noticed and rebuilt over.
+ */
+export function rigProviderImageBuildSupported(
+  settings: Settings,
+  backend: SandboxBackend,
+): boolean {
+  if (backend === "modal") return true;
+  if (backend === "compute") return computeImageContentIdentity(settings) !== null;
+  return false;
+}
+
+/** Settings that boot fresh sandboxes from one verified prebuilt image. */
+export function settingsWithProviderImageId(
+  settings: Settings,
+  backend: SandboxBackend,
+  imageId: string,
+): Settings {
+  if (backend === "compute") return { ...settings, computeTemplate: imageId };
+  return { ...settings, modalImageId: imageId };
+}
+
+/** The provider namespace a prebuilt image lives in, for the backend. */
+export async function resolveRigProviderImageBinding(
+  settings: Settings,
+  backend: SandboxBackend,
+): Promise<{ key: string }> {
+  if (backend === "compute") return await resolveComputeProviderBinding(settings);
+  return await resolveModalCheckpointProviderBinding(settings);
+}
+
 export type RigProviderImageSelectionReason =
   | "selected"
   | "missing"
+  | "unbuilt"
+  | "build_abandoned"
   | "provider_unsupported"
   | "not_ready"
   | "not_cold_boot_validated"
@@ -135,11 +202,17 @@ export type RigProviderImageSelectionReason =
   | "provider_binding_unavailable"
   | "provider_binding_mismatch";
 
+/** A build record still `building` after this long was abandoned (its worker
+ * stopped); a new build may take it over. Matches the build claim's
+ * staleness window in the worker. */
+export const RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS = 20 * 60_000;
+
 export function resolveRigProviderImageSelection(
   settings: Settings,
   version: RigVersion | null,
   backend: SandboxBackend,
   currentProviderBindingKeyHash: string | null,
+  nowMs: number = Date.now(),
 ): {
   settings: Settings;
   reason: RigProviderImageSelectionReason;
@@ -147,10 +220,27 @@ export function resolveRigProviderImageSelection(
   imageId: string | null;
 } {
   if (!version) return { settings, reason: "missing", contentHash: null, imageId: null };
-  if (backend !== "modal") {
+  if (!rigProviderImageBuildSupported(settings, backend)) {
     return { settings, reason: "provider_unsupported", contentHash: null, imageId: null };
   }
+  const sourceImage = rigProviderImageContentSourceImage(settings, backend);
+  const expectedContentHash = rigProviderImageContentHash({
+    backend,
+    sourceImage,
+    definition: version,
+  });
   const image = version.providerImages[backend];
+  if (backend === "compute") {
+    // A compute template is captured over one release's image, so each
+    // release builds again; every way a build can end up missing asks for one
+    // (see requestStaleRigProviderImageRefresh), except a failed build of
+    // this exact content, which waits for the content to change.
+    const rebuild = computeRebuildReason(version, image, expectedContentHash, nowMs);
+    if (rebuild === "missing")
+      return { settings, reason: "missing", contentHash: null, imageId: null };
+    if (rebuild)
+      return { settings, reason: rebuild, contentHash: expectedContentHash, imageId: null };
+  }
   if (!image) return { settings, reason: "missing", contentHash: null, imageId: null };
   if (image.status !== "ready" || !image.imageId) {
     return {
@@ -168,12 +258,6 @@ export function resolveRigProviderImageSelection(
       imageId: null,
     };
   }
-  const sourceImage = rigProviderImageSourceImage(settings, backend);
-  const expectedContentHash = rigProviderImageContentHash({
-    backend,
-    sourceImage,
-    definition: version,
-  });
   if (
     image.sourceImage !== sourceImage ||
     image.contentHash !== expectedContentHash ||
@@ -203,20 +287,51 @@ export function resolveRigProviderImageSelection(
     };
   }
   return {
-    settings: { ...settings, modalImageId: image.imageId },
+    settings: settingsWithProviderImageId(settings, backend, image.imageId),
     reason: "selected",
     contentHash: expectedContentHash,
     imageId: image.imageId,
   };
 }
 
+/** Why a compute Sandbox Environment without a usable template should be
+ * built again, "missing" when there is nothing to build, or null when the
+ * record is for the current content and needs no rebuild. */
+function computeRebuildReason(
+  version: RigVersion,
+  image: RigVersion["providerImages"][SandboxBackend],
+  expectedContentHash: string,
+  nowMs: number,
+): "unbuilt" | "build_abandoned" | "content_mismatch" | "missing" | null {
+  // Without setup a template saves nothing, and its sandboxes boot cold:
+  // the plain image is used and nothing is built.
+  if (!(version.setupScript ?? "").trim()) return "missing";
+  // Never built for compute, or recorded before compute could build.
+  if (!image || image.status === "unsupported") return "unbuilt";
+  if (image.status === "ready") return null;
+  // A record for other content: an earlier release's build that failed or
+  // stopped. It must not hold back this release's build.
+  if (image.contentHash !== expectedContentHash) return "content_mismatch";
+  if (image.status === "building") {
+    const startedAtMs = Date.parse(image.startedAt);
+    if (
+      !Number.isFinite(startedAtMs) ||
+      nowMs - startedAtMs >= RIG_PROVIDER_IMAGE_BUILD_STALE_AFTER_MS
+    )
+      return "build_abandoned";
+  }
+  return null;
+}
+
 export async function resolveRigProviderImageForRun(
   settings: Settings,
   version: RigVersion | null,
   backend: SandboxBackend,
-  resolveBinding: typeof resolveModalCheckpointProviderBinding = resolveModalCheckpointProviderBinding,
+  resolveBinding: RigProviderImageBindingResolver = resolveRigProviderImageBinding,
 ): Promise<ReturnType<typeof resolveRigProviderImageSelection>> {
-  const image = backend === "modal" ? version?.providerImages.modal : null;
+  const image = rigProviderImageBuildSupported(settings, backend)
+    ? version?.providerImages[backend]
+    : null;
   if (image?.status !== "ready" || !image.providerBindingKeyHash) {
     return resolveRigProviderImageSelection(settings, version, backend, null);
   }
@@ -229,7 +344,7 @@ export async function resolveRigProviderImageForRun(
   if (structural.reason !== "selected") return structural;
   let currentProviderBindingKeyHash: string | null = null;
   try {
-    const binding = await resolveBinding(settings);
+    const binding = await resolveBinding(settings, backend);
     currentProviderBindingKeyHash = rigProviderImageProviderBindingKeyHash(binding.key);
   } catch {
     // A provider-native image is an optimization. The exact logical image is
@@ -247,10 +362,15 @@ export async function settingsWithRigProviderImage(
   settings: Settings,
   version: RigVersion | null,
   backend: SandboxBackend,
-  resolveBinding: typeof resolveModalCheckpointProviderBinding = resolveModalCheckpointProviderBinding,
+  resolveBinding: RigProviderImageBindingResolver = resolveRigProviderImageBinding,
 ): Promise<Settings> {
   return (await resolveRigProviderImageForRun(settings, version, backend, resolveBinding)).settings;
 }
+
+export type RigProviderImageBindingResolver = (
+  settings: Settings,
+  backend: SandboxBackend,
+) => Promise<{ key: string }>;
 
 export type SessionSandboxRuntime = {
   /** Exact logical image/rig settings used to fence the durable group lease. */

@@ -3,6 +3,7 @@ import {
   listSelfUserResourceAuthorities,
   type Database,
 } from "@opengeni/db";
+import { releaseAdmissionBlocksAfterAccessChange } from "@opengeni/core";
 
 /**
  * A person's own Codex, Claude or SuperGrok subscription added from a shared
@@ -44,6 +45,15 @@ export async function turnOnOwnSubscriptionWhereAdded(
           context: "workspace_shared",
           workspaceSharedAcknowledged: true,
         });
+        // A saved message may have been waiting for this subscription.
+        await releaseAdmissionBlocksAfterAccessChange(
+          { db },
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            change: "personal_resource",
+          },
+        );
         return;
       }
       if (!listed.nextCursor) break;

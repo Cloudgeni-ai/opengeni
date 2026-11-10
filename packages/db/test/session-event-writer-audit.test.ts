@@ -269,6 +269,13 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // Releases an admission block after access changed: the start signal is
+  // written only while effective control is still active.
+  "packages/db/src/index.ts#releaseSessionAdmissionBlocksAfterAccessChange": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#recoverSessionOwner": {
     inserts: 3,
     contract: "canonical",
@@ -319,9 +326,22 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  // Unarchive reopens a chat its Archive cancelled (session.status.changed to
+  // idle) under the canonical event-row locks; the chat stays paused until the
+  // separate Resume, which takes the control locks itself.
+  "packages/db/src/session-archive.ts#reopenArchiveStoppedSessions": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-model-settings.ts#setSessionModelInTransaction": {
     inserts: 1,
     contract: "canonical",
+  },
+  // Moving a capacity-waiting turn onto a new model, or stopping it for a
+  // chat's or the workspace's Pause, under that command's own canonical locks.
+  "packages/db/src/capacity-wait-release.ts#releaseCapacityWaitingTurnInTransaction": {
+    inserts: 1,
+    contract: "owned_suffix",
   },
   "packages/db/src/session-retry.ts#retryFailedSessionInTransaction": {
     inserts: 1,
@@ -402,6 +422,9 @@ const genericControlWriters = new Set([
   "packages/db/src/index.ts#appendSessionEventToSandboxGroup",
   "packages/db/src/index.ts#updateSessionTitleWithEvent",
   "packages/db/src/index.ts#updateSessionProfileWithEvent",
+  // Reopening an archive-cancelled chat does not admit inference: it stays
+  // paused until a Resume through the control path.
+  "packages/db/src/session-archive.ts#reopenArchiveStoppedSessions",
 ]);
 
 const callerOwnedControlWriters = new Set([
@@ -411,6 +434,11 @@ const callerOwnedControlWriters = new Set([
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
   appendTimeline: ["importArchivedSession", "appendArchivedSessionEvents"],
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
+  releaseCapacityWaitingTurnInTransaction: [
+    "mutateSessionControlInTransaction",
+    "mutateWorkspaceControlInTransaction",
+    "setSessionModelInTransaction",
+  ],
   supersedeSubscriptionCoreCodexCapacityWaitInTransaction: [
     "reconcileSubscriptionCoreCapacityWait",
   ],

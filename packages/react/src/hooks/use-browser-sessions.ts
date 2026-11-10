@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   BrowserSession,
   BrowserSessionMutationResponse,
@@ -11,7 +12,7 @@ import {
 } from "../session-context";
 import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
-export type UseBrowserSessionsOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseBrowserSessionsOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   /** Current agent/session relevance. Workspace peers remain in `sessions`. */
   sessionId?: string | undefined;
   enabled?: boolean | undefined;
@@ -320,4 +321,4 @@ function mergeSession(
 }
 
 /** Exported for narrow proxy implementations and tests. */
-export type BrowserSessionsClient = EmbeddedBrowserInteractionClientLike;
+export type BrowserSessionsClient = EmbeddedBrowserInteractionClientLike<ChatClient>;

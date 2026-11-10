@@ -352,6 +352,12 @@ export function summarizeRailNodes(
  * arrives when that turn ends; its own paused turn likewise stays paused.
  * Anything that needs you, a failure and an unsent message still come first. Section headers and Site rows summarize
  * many chats and keep the plain order.
+ *
+ * Paused is the one state a row does not take from its workers: the pause mark
+ * reads as "this chat is paused", so it shows only when the chat itself is
+ * paused (its own parked turn, or its pause holding its workers' work). Paused
+ * workers under a chat that is not paused stay in its hover card and on their
+ * own rows.
  */
 export function summarizeRailRow(
   node: SessionTreeNode,
@@ -359,6 +365,7 @@ export function summarizeRailRow(
   now: Date = new Date(),
 ): RailAggregateStatus {
   const counts = railStatusCounts(node, localDeliveryAttention);
+  if (!node.siteGroup && hasActiveEffectiveControl(node.session)) counts.paused = 0;
   const summary = summarizeRailStatusCounts(counts, now);
   if (node.siteGroup || !node.session.unread) return summary;
   if (

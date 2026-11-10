@@ -28,6 +28,7 @@ import {
   requestSessionTurnRecovery,
   getActiveSessionHistoryItems,
   appendSessionHistoryItems,
+  appendSessionHistoryItemsInTransaction,
   type PendingSessionToolCallInput,
 } from "../src/index";
 
@@ -233,6 +234,69 @@ async function checkpoint(
 }
 
 describe("atomic tool receipt and timeline checkpoints", () => {
+  test("final tool result, event, history and receipt retirement commit or roll back together", async () => {
+    const { input } = await fixture();
+    await checkpoint(input);
+    const resultItem = { type: "function_call_result", callId: input.callId, output: "done" };
+    const commit = (fail: boolean) =>
+      mutateAndAppendSessionEventsForTurnAttempt(
+        client.db,
+        input.workspaceId,
+        input.sessionId,
+        input.turnId,
+        input.executionGeneration,
+        input.attemptId,
+        [{ type: "agent.toolCall.output", payload: { id: input.callId, output: "done" } }],
+        {
+          rowProjection: "event",
+          mutate: async (tx, fence) => {
+            if (!fence.allowed) return false;
+            await recordPendingSessionToolCallResultInTransaction(
+              tx,
+              { ...input, resultItem, eventOutput: "done" },
+              fence,
+            );
+            await appendSessionHistoryItemsInTransaction(
+              tx,
+              {
+                ...input,
+                expectedAttemptId: input.attemptId,
+                expectedExecutionGeneration: input.executionGeneration,
+                items: [
+                  { position: 100, item: input.callItem },
+                  { position: 101, item: resultItem },
+                ],
+                completedToolCallIds: [input.callId],
+              },
+              fence,
+            );
+            return true;
+          },
+          project: async () => {
+            if (fail) throw new Error("after checkpoint insert");
+          },
+        },
+      );
+    await expect(commit(true)).rejects.toThrow("after checkpoint insert");
+    const pending = await receipts(input);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.result_item_ordered).toBeNull();
+    expect(
+      await shared.admin`select id from session_history_items where session_id = ${input.sessionId} and position >= 100`,
+    ).toHaveLength(0);
+    expect(
+      await shared.admin`select id from session_events where session_id = ${input.sessionId} and type = 'agent.toolCall.output'`,
+    ).toHaveLength(0);
+    expect((await commit(false)).accepted).toBe(true);
+    expect(await receipts(input)).toHaveLength(0);
+    expect(
+      await shared.admin`select id from session_history_items where session_id = ${input.sessionId} and position >= 100`,
+    ).toHaveLength(2);
+    expect(
+      await shared.admin`select id from session_events where session_id = ${input.sessionId} and type = 'agent.toolCall.output'`,
+    ).toHaveLength(1);
+  });
+
   test("transaction-local receipt helpers reject an identity different from the held fence", async () => {
     const { input } = await fixture();
     await expect(

@@ -24,6 +24,7 @@ import {
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
+  countWebhookDeliveriesForEvent,
   dismissInboxNotification,
   getInboxTidyPolicy,
   getManagedUserByEmail,
@@ -65,15 +66,6 @@ export type RegisterNotificationToolsInput = {
 /** Questions, approvals and paused goals wait on the person; replies and notes don't. */
 function needsPerson(item: InboxItemRow): boolean {
   return item.kind === "question" || item.kind === "approval" || item.kind === "goal_paused";
-}
-
-/** The person a session works for (its owner, else who started it), or null when no person does. */
-async function sessionOwner(
-  deps: ApiRouteDeps,
-  workspaceId: string,
-  sessionId: string,
-): Promise<{ subjectId: string; parentSessionId: string | null } | null> {
-  return await getSessionInboxRecipient(deps.db, workspaceId, sessionId);
 }
 
 /** Whether `ancestorId` is `sessionId` or one of the sessions above it (bounded). */
@@ -147,7 +139,9 @@ export async function personLabel(
 export function registerNotificationTools(input: RegisterNotificationToolsInput): void {
   const { server, deps, grant, sessionId, authorize, attempt, json } = input;
 
-  const appendOwn = async (events: Array<{ type: string; payload: unknown }>) => {
+  const appendOwn = async (
+    events: Array<{ type: string; payload: unknown }>,
+  ): Promise<Array<{ id: string }>> => {
     const claims = attempt();
     const appended = await appendAndPublishTurnEventsFenced(
       deps.db,
@@ -162,6 +156,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
     if (!appended.accepted) {
       throw new Error("The calling turn was replaced before the notification committed.");
     }
+    return appended.events;
   };
 
   server.registerTool(
@@ -288,13 +283,32 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
         );
       }
       const payload = parsed.data;
-      await appendOwn([{ type: "session.notification.posted", payload }]);
+      const [posted] = await appendOwn([{ type: "session.notification.posted", payload }]);
+      // No person owns this session (a key or service started it): Opengeni
+      // notifies nobody itself, but an integration subscribed to notifications
+      // through a webhook receives it and delivers it. Runs of an ownerless
+      // scheduled task are not offered this tool at all.
+      const handedToIntegration =
+        target === null && posted
+          ? (await countWebhookDeliveriesForEvent(deps.db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              eventId: posted.id,
+            })) > 0
+          : false;
       return json({
         ok: true,
         key: resolvedKey,
-        // No person owns this session (a key or service started it): nobody is notified.
-        delivered: target !== null,
-        ...(target === null ? { undeliveredReason: "no_human_recipient" } : {}),
+        // Handed off is not proof a person got it, and not a failure either.
+        ...(handedToIntegration
+          ? {
+              handedToIntegration: true,
+              note: "No person owns this session, so no one was notified directly. The notification was handed to the integration that delivers this workspace's notifications; don't retry it or report it as failed.",
+            }
+          : {
+              delivered: target !== null,
+              ...(target === null ? { undeliveredReason: "no_human_recipient" } : {}),
+            }),
         ...(member ? { recipient: member.label } : {}),
         updatedInPlace: Boolean(existing),
       });
@@ -352,7 +366,14 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
     },
     async ({ dismissItemIds, snooze, unsnoozeItemIds }) => {
       await authorize();
-      const owner = await sessionOwner(deps, grant.workspaceId, sessionId);
+      // The person whose message started this turn, as for notify_user: a
+      // shared chat's other members never reach its owner's inbox.
+      const owner = await getSessionInboxRecipient(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        attempt().callerTurnId,
+      );
       if (!owner) {
         return json({ ok: true, items: [], dismissed: [], snoozed: [], unsnoozed: [] });
       }

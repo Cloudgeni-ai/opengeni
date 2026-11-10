@@ -414,6 +414,46 @@ describe("readiness", () => {
     expect(page.workspaceTools).toBe(true);
   });
 
+  test("maps writes through every variable assigned to a collection", () => {
+    const usage = scanSitePageUsage(`
+      let items = site.data.collection("items");
+      const $log = site.data.collection("log");
+      const other = site.data.collection("other");
+      await items.increment("1", "count");
+      items = site.data.collection("archive");
+      await $log.insert({});
+      await my_items.delete("1");
+      await x.items.delete("1");
+    `);
+    expect(Object.fromEntries(usage.collections)).toEqual({
+      items: { writes: true, changes: true },
+      log: { writes: true, changes: false },
+      other: { writes: false, changes: false },
+      archive: { writes: true, changes: true },
+    });
+  });
+
+  test("scans a large page of assignments in linear time", () => {
+    // A page made of many collection assignments, or of a long identifier
+    // broken by `$`, used to make the scan reread the page per assignment or
+    // per identifier position.
+    const pages = [
+      'x=collection("a")\n'.repeat(116_508),
+      Array.from({ length: 40_000 }, (_, i) => `v${i}=collection("c${i}")\n`).join("") +
+        Array.from({ length: 40_000 }, (_, i) => `v${i}.put(1)\n`).join(""),
+      "a$".repeat(1_048_576),
+    ];
+    for (const source of pages) {
+      const started = performance.now();
+      const usage = scanSitePageUsage(source);
+      expect(performance.now() - started).toBeLessThan(1_000);
+      expect(usage.workspaceTools).toBe(false);
+    }
+    const assignments = scanSitePageUsage(pages[1]!);
+    expect(assignments.collections.size).toBe(40_000);
+    expect(assignments.collections.get("c39999")).toEqual({ writes: true, changes: true });
+  });
+
   test("names what public visitors can't do, with safe fixes where they exist", () => {
     const warnings = siteReadinessWarnings(base);
     expect(warnings.map((warning) => [warning.code, warning.fix])).toEqual([
@@ -482,7 +522,7 @@ describe("readiness", () => {
     );
     // The sign-in line stays when there is also something to fix.
     expect(publicationAnswer(both as unknown as SitePublication).nextStep).toContain(
-      "\nVisitors sign in to Opengeni before the Site opens",
+      "\nVisitors sign in before the Site opens",
     );
     expect(
       publicationAnswer({

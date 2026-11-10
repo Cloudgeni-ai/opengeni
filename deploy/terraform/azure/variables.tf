@@ -44,6 +44,21 @@ variable "deployment_phase" {
   }
 }
 
+variable "aks_outbound_ports_allocated" {
+  description = "Outbound SNAT ports per node, or 0 for Azure automatic allocation. Explicit allocations must fit all node-pool ceilings plus upgrade surge within 64000 ports on the existing egress IP."
+  type        = number
+  default     = 0
+
+  validation {
+    condition = (
+      var.aks_outbound_ports_allocated >= 0 &&
+      var.aks_outbound_ports_allocated <= 64000 &&
+      var.aks_outbound_ports_allocated % 8 == 0
+    )
+    error_message = "aks_outbound_ports_allocated must be 0 or a multiple of 8 no greater than 64000."
+  }
+}
+
 variable "aks_existing_pool" {
   description = "Whether this composition manages an already-existing AKS system pool. Existing pools must explicitly select a staged aks_rollout phase; new clusters retain the direct default."
   type        = bool

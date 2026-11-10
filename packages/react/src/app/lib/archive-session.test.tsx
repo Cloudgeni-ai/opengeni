@@ -91,7 +91,7 @@ function appContext(permissions: string[] = ["sessions:control"]) {
 
 const REFERENCE = "163bc913-264d-4d38-a0b5-2e4e955eecdb";
 const KEPT_ACTIVE_SENTENCE =
-  "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Agent tab first.";
+  "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Settings tab first.";
 function blocked(
   blockers: Array<{ kind: string; sessionId: string }>,
   message = KEPT_ACTIVE_SENTENCE,
@@ -142,7 +142,7 @@ test("Archive is offered only to people who can control a chat that is not archi
   expect(archiveActionLabel(appContext(["sessions:read"]), chat)).toBeNull();
 });
 
-test("archiving shows Undo for a few seconds, says it becomes final, and Undo is the caller's", async () => {
+test("archiving shows Undo for a few seconds, says where to restore it, and Undo is the caller's", async () => {
   let undone = 0;
   const updated = await requestSessionArchive(
     appContext(),
@@ -156,7 +156,8 @@ test("archiving shows Undo for a few seconds, says it becomes final, and Undo is
   expect(shown).toHaveLength(1);
   expect(shown[0]!.title).toBe("Archived “Quarterly plan”");
   expect(shown[0]!.options?.duration).toBe(ARCHIVE_UNDO_MS);
-  expect(shown[0]!.options?.description).toContain("can't be restored");
+  expect(shown[0]!.options?.description).not.toContain("can't be restored");
+  expect(shown[0]!.options?.description).toContain("restore it from there");
   expect(shown[0]!.options?.action?.label).toBe("Undo");
   shown[0]!.options!.action!.onClick();
   expect(undone).toBe(1);
@@ -168,6 +169,79 @@ test("undoing sends archived false and confirms it", async () => {
   expect(shown.map((notice) => [notice.kind, notice.title])).toEqual([
     ["success", "Archive undone."],
   ]);
+});
+
+test("restoring a stored chat says its content is coming back", async () => {
+  const context = appContext();
+  const client = (context as unknown as { client: Record<string, unknown> }).client;
+  client.updateSessionArchive = async (_workspaceId: string, sessionId: string, body: unknown) => {
+    requests.push({ sessionId, body });
+    return {
+      id: sessionId,
+      workspaceId: "ws",
+      archived: true,
+      retention: {
+        keepLive: false,
+        archive: { state: "archived", archivedAt: null, restoring: true },
+      },
+    };
+  };
+  await requestSessionArchive(context, { id: "chat", workspaceId: "ws" }, false, "Plan");
+  expect(requests).toEqual([{ sessionId: "chat", body: { archived: false } }]);
+  expect(shown.map((notice) => [notice.kind, notice.title])).toEqual([
+    ["success", "Restoring “Plan”"],
+  ]);
+  expect(shown[0]!.options?.description).toContain("coming back from long-term storage");
+});
+
+test("sub-chats in use are counted and named, and only Archive all archives them", async () => {
+  const { reruns, runs, archive } = caller();
+  archiveAnswers.push(
+    blocked(
+      [
+        {
+          kind: "active_sub_chat",
+          sessionId: "owner",
+          title: "Owner",
+          reason: "messaged",
+        } as never,
+        {
+          kind: "active_sub_chat",
+          sessionId: "worker",
+          title: "Worker",
+          reason: "running",
+        } as never,
+        { kind: "active_sub_chat", sessionId: "goal", title: "", reason: "goal" } as never,
+        { kind: "active_sub_chat", sessionId: "wait", title: "Waiter", reason: "waiting" } as never,
+      ],
+      "This chat can't be archived. 4 sub-chats are still in use.",
+    ),
+  );
+  expect(await archive(true)).toBeNull();
+  expect(requests).toHaveLength(1);
+  expect(shown).toHaveLength(1);
+  expect(shown[0]!.kind).toBe("warning");
+  expect(shown[0]!.title).toBe("4 sub-chats are still in use.");
+  expect(shown[0]!.options?.description).toBe(
+    "“Owner” (in use), “Worker” (running), An untitled chat (working on a goal) and 1 more. Archiving “Plan” stops them too.",
+  );
+  // It stays until the person decides.
+  expect(shown[0]!.options?.duration).toBe(Number.POSITIVE_INFINITY);
+  expect(shown[0]!.options?.action?.label).toBe("Archive all");
+
+  shown[0]!.options!.action!.onClick();
+  shown[0]!.options!.action!.onClick();
+  await Promise.all(runs);
+  expect(reruns).toEqual([true]);
+  expect(requests.map((request) => request.body)).toEqual([
+    { archived: true },
+    { archived: true, confirmActiveSubChats: ["owner", "worker", "goal", "wait"] },
+  ]);
+  expect(shown.at(-1)!.title).toBe("Archived “Plan”");
+
+  // A later Archive of the same chat confirms nothing on its own.
+  await archive(true);
+  expect(requests.at(-1)!.body).toEqual({ archived: true });
 });
 
 test("a long chat name is shortened without breaking a character", () => {
@@ -357,7 +431,7 @@ test("Undo says so when Keep this chat active can't be turned back on", async ()
     [
       "warning",
       "Archive undone, but “Keep this chat active” is still off.",
-      "Turn it on in the chat's Agent tab.",
+      "Turn it on in the chat's Settings tab.",
     ],
   ]);
 });

@@ -180,25 +180,33 @@ Rules:
    and `code_search` when the deployment and workspace offer it. Sandbox or
    Connected Machine attached to the turn ⇒ `command_read` and `command_wait`
    (owner `sandbox`; withheld for every session when no compute is attached).
-   Anything deferred ⇒ the search router. A product MCP server attached ⇒
-   selected (upfront by default). Runtime mechanics (`wait_for_input`,
-   titling) are always present.
+   Anything deferred ⇒ the search router and its guidance; nothing deferred ⇒
+   neither, and no `set_session_title` (Opengeni titles the session itself).
+   A product MCP server attached ⇒ selected (upfront by default).
+   `wait_for_input` and the waiting guidance need something that can resume
+   the agent: compute, `subagents`, `goals`, `schedules`, `browser`, `media`
+   or `workspaceAdmin` (a `run_on` command finishes later). A person needs no
+   wait: an answer to `request_human_input` resumes the paused turn and a new
+   message starts one. Legacy sessions keep both unconditionally. The Codemode
+   directive needs compute or `run_on` as well.
 2. **Selectable capabilities** (each owns its tools and, where it has one, its
    prompt module). The single source of truth is the registry in
    `packages/contracts/src/agent-config.ts`; a test maps every first-party tool.
 
 | Capability | Tools | In `"none"` |
 | --- | --- | --- |
-| `humanInput` | `request_human_input` | on |
+| `humanInput` | `request_human_input` (secret kind with `secrets`, Skill reviews with `skills: "manage"`; never in a session that started unattended) | on |
+| `notifications` | `notify_user`, `notification_withdraw`, `inbox_tidy`, `call_user` (also need `humanInput`) | off |
+| `privacyFacts` | `privacy_facts` and its prompt rule | off |
 | `webSearch` | hosted `web_search` (+ `x_search` on SuperGrok) | off |
 | `skills` | `"read"`: `skill_read` (with a nonempty catalog); `"manage"`: all seven Skill tools | `"read"` |
-| `goals` | `goal_*` | off |
+| `goals` | `goal_*` (`goal_resume` once the session has a goal) | off |
 | `subagents` | `session_*`, `sessions_list`, `set_other_session_title`, `list_models` | off |
 | `knowledge` | `knowledge_*`, `memory_*`, `task_note_*`, instruction-policy, preference and company-profile tools, docs server | off |
 | `schedules` | `scheduled_tasks_*`, `scheduled_task_runs_list` | off |
 | `artifacts` | `artifacts_*`, `editable_artifact_*`, `sandbox_file_publish`; Sites and visuals guidance | off |
 | `browser` | `interaction_*`, `browser_*`, `computer_*` | off |
-| `media` | `generate_image`, `generate_video`, hosted `image_generation` | off |
+| `media` | `generate_image`, `generate_video`, hosted `image_generation`; their guidance only when one is attached | off |
 | `workspaceFiles` | files server | off |
 | `workspaceConnectors` | workspace default connectors, API Integrations, Drive publishing, GitHub/Slack/social/X/Reddit/Fiken families; hosted Atlassian MCP | off |
 | `workspaceAdmin` | variable sets and environments, capability and connector setup, machines, sandboxes, rigs, projects | off |

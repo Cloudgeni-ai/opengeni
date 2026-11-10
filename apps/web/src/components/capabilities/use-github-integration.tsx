@@ -434,6 +434,9 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     : null;
   // Unknown until the selection loads: a failed read is not "0 repos".
   const personalRepositoryCount = context.personalGitHubSelection?.repositories.length ?? null;
+  const personalAllRepositories =
+    Boolean(context.personalGitHubSelection?.allRepositoriesAccess) &&
+    context.personalGitHubStatus?.allRepositoriesAvailable !== false;
   const startPersonalConnect = (reconnecting: boolean) => {
     // Return from GitHub straight into the repository chooser.
     markPersonalGitHubRepositoryChooser(workspaceId);
@@ -448,7 +451,9 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
           status:
             personalRepositoryCount === null
               ? `Connected as @${personalLogin}`
-              : `Connected as @${personalLogin} · ${personalRepositoryCount === 1 ? "1 repo" : `${personalRepositoryCount} repos`}`,
+              : personalAllRepositories
+                ? `Connected as @${personalLogin} · All repos`
+                : `Connected as @${personalLogin} · ${personalRepositoryCount === 1 ? "1 repo" : `${personalRepositoryCount} repos`}`,
         }
       : personalNeedsAttention
         ? { status: `@${personalLogin} needs to reconnect.` }
@@ -460,7 +465,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
             ? {
                 label: "Choose repos",
                 onClick: () => setPersonalOpen(true),
-                primary: personalRepositoryCount === 0,
+                primary: personalRepositoryCount === 0 && !personalAllRepositories,
                 disabled: context.personalGitHubBusy,
               }
             : {
@@ -664,9 +669,15 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
           onOpenChange={setPersonalOpen}
           login={String(personalConnection.metadata.githubLogin ?? "connected")}
           repositories={context.personalGitHubRepositories}
+          savedRepositories={context.personalGitHubSelection?.repositories}
+          allRepositoriesAccess={context.personalGitHubSelection?.allRepositoriesAccess ?? null}
+          allRepositoriesAvailable={context.personalGitHubStatus?.allRepositoriesAvailable === true}
           loading={!personalCatalogReady}
           busy={context.personalGitHubBusy}
-          onSave={(selections) => context.savePersonalGitHubRepositories(workspaceId, selections)}
+          onSave={(selections, allRepositoriesAccess) =>
+            context.savePersonalGitHubRepositories(workspaceId, selections, allRepositoriesAccess)
+          }
+          onSearch={(query) => context.searchPersonalGitHubRepositories(workspaceId, query)}
           onReconnect={() => void context.reconnectPersonalGitHub(workspaceId)}
           onDisconnect={() => setPersonalDisconnectOpen(true)}
         />

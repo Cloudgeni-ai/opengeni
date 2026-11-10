@@ -5,13 +5,15 @@
 import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent, WebContents } from "electron";
 
 import { DESKTOP_IPC, type DesktopDictationReport } from "../../contract";
+import { onPageLeft } from "../page-left";
 import type { Dictation } from "./index";
 import { parseDictationAudio } from "./settings";
 
 /**
  * Answer the dictation calls with this controller. `allow` throws for a sender
  * that may not dictate, such as a page on another origin or a subframe. A page
- * stops recording for the shortcuts when it navigates away or closes.
+ * stops recording for the shortcuts when it leaves its document (see
+ * `onPageLeft`) or closes; a cancelled navigation keeps it.
  */
 export function handleDictationIpc(input: {
   ipcMain: Pick<IpcMain, "handle" | "on">;
@@ -30,9 +32,7 @@ export function handleDictationIpc(input: {
       dictation.listen(page, false);
     };
     page.once("destroyed", gone);
-    page.on("did-start-navigation", (details) => {
-      if (details.isMainFrame && !details.isSameDocument) dictation.listen(page, false);
-    });
+    onPageLeft(page, () => dictation.listen(page, false));
   };
   dictation.onChange(() => {
     for (const page of pages) {
@@ -122,6 +122,7 @@ export function parseDictationReport(value: unknown): DesktopDictationReport | n
             ? report.message.slice(0, 300)
             : "Dictation failed.",
         retryable: report.retryable === true,
+        ...(report.fix === "settings" ? { fix: "settings" as const } : {}),
       };
     default:
       return null;

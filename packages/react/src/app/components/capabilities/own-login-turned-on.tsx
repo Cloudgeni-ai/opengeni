@@ -1,8 +1,9 @@
 import type { ConnectionMetadata } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 type OwnLoginClient = Pick<
-  OpenGeniBrowserClient,
+  ChatClient<OpenGeniBrowserClient>,
   "issueUserResourceGrant" | "revokeUserResourceGrant"
 >;
 

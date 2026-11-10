@@ -8,7 +8,9 @@ import {
 } from "./attach-session-capability";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SessionMcpCapabilityCard } from "../../../components/session-mcp-capability-card";
-import { showsMcpServerLabel } from "../../../components/mcp-server-label";
+import { capabilityReconnectConnectionId } from "../../../auth-needed-presentation";
+import { connectionCardSubtitle, showsMcpServerLabel } from "../../../components/mcp-server-label";
+import { capabilityPresentation } from "../../../integration-presentation";
 import { integrationDefinitionIdFromCapabilityId } from "@opengeni/contracts";
 import { SessionIntegrationCapabilityCard } from "../../../components/session-integration-capability-card";
 import "../../../../styles/connect.css";
@@ -211,6 +213,7 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
         capabilityId={capability.id}
         name={capability.name}
         rationale={capability.rationale}
+        reconnectConnectionId={capabilityReconnectConnectionId(item)}
         returnUrl={page.href()}
         onConfigured={props.onConfigured}
       />
@@ -257,6 +260,7 @@ function ScopedSessionCapabilityCard({
   const logo = catalogItem
     ? capabilityLogoSource(catalogItem, (path) => context.client.catalogAssetUrl(path))
     : null;
+  const presentation = catalogItem ? capabilityPresentation(catalogItem.metadata) : undefined;
   const close = () => {
     setExpanded(false);
   };
@@ -274,8 +278,9 @@ function ScopedSessionCapabilityCard({
   return (
     <SessionCapabilityFrame
       name={catalogItem?.name ?? recommendation.name}
-      subtitle={catalogItem ? (catalogItem.providerDomain ?? "") : item.providerDomain}
+      subtitle={catalogItem ? connectionCardSubtitle(catalogItem) : item.providerDomain}
       logo={logo}
+      icon={presentation?.icon}
       typeLabel={
         skill
           ? "Skill"
@@ -292,7 +297,9 @@ function ScopedSessionCapabilityCard({
           ? "MCP server"
           : undefined
       }
-      description={recommendation.rationale || catalogItem?.description || ""}
+      description={
+        recommendation.rationale || presentation?.introduction || catalogItem?.description || ""
+      }
       clampDescription={Boolean(recommendation.rationale)}
       skill={skill}
       expanded={expanded}

@@ -59,6 +59,11 @@ export function createTranscriptionService(input: {
   probeCodex?: SpeechToTextDeploymentOptions["probeCodex"];
   /** Test seam for exercising timeout and late-completion behavior quickly. */
   providerRequestTimeoutMilliseconds?: number;
+  /**
+   * The longest audio one request may carry. Defaults to the one-shot voice
+   * input limit; a dictation recording's pieces may be longer.
+   */
+  maxDurationSeconds?: number;
   /** Test seam for evaluating persisted absolute deadlines after delayed setup. */
   now?: () => Date;
   /** Credit admission/settlement for deployment-funded providers. */
@@ -82,7 +87,7 @@ export function createTranscriptionService(input: {
     );
   const providers = dictationProviders(deployment);
   const limits = {
-    maxDurationSeconds: input.settings.voiceInputMaxDurationSeconds,
+    maxDurationSeconds: input.maxDurationSeconds ?? input.settings.voiceInputMaxDurationSeconds,
     maxSizeBytes: input.settings.voiceInputMaxSizeBytes,
     acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
   };
@@ -196,6 +201,18 @@ export function createTranscriptionService(input: {
     }
     return null;
   };
+  const assertCandidateEligibility = async (
+    candidates: readonly DictationProvider[],
+    context: TranscriptionAvailabilityContext,
+  ) => {
+    if (!context.workspaceId) return;
+    for (const candidate of candidates) {
+      await deployment.assertEligible?.(candidate.id, {
+        workspaceId: context.workspaceId,
+        ...(context.accountId ? { accountId: context.accountId } : {}),
+      });
+    }
+  };
   const ordered = (context: TranscriptionAvailabilityContext) =>
     orderedProviders(
       providers,
@@ -216,6 +233,21 @@ export function createTranscriptionService(input: {
     );
     return available.filter((id): id is string => id !== null);
   };
+  const modelsForProviders = (ids: readonly string[]): DictationModelOption[] => {
+    const ready = new Set(ids);
+    return providers
+      .filter((provider) => ready.has(provider.id))
+      .flatMap((provider) =>
+        dictationModels(deployment, provider)
+          .filter((model) => !chargeable(provider) || model.creditPricing)
+          .map((model) => ({
+            providerId: provider.id as DictationModelOption["providerId"],
+            providerName: provider.provider.name,
+            model: model.model,
+            name: model.name,
+          })),
+      );
+  };
   return {
     limits: () => limits,
     billing,
@@ -223,26 +255,24 @@ export function createTranscriptionService(input: {
       return Boolean(await firstAvailable(ordered(context ?? {}), context ?? {}));
     },
     availableProviderIds: readyProviderIds,
+    async availability(context) {
+      const ready = await readyProviderIds(context);
+      return {
+        available: ordered(context).some((provider) => ready.includes(provider.id)),
+        providers: ready,
+        models: modelsForProviders(ready),
+      };
+    },
     async availableModels(context) {
       // Every model a dictation may name, of each ready provider, for the
       // desktop app's per-shortcut model picker.
-      const ready = new Set(await readyProviderIds(context));
-      return providers
-        .filter((provider) => ready.has(provider.id))
-        .flatMap((provider) =>
-          dictationModels(deployment, provider)
-            // A model the deployment pays for is never served without a price.
-            .filter((model) => !chargeable(provider) || model.creditPricing)
-            .map((model) => ({
-              providerId: provider.id as DictationModelOption["providerId"],
-              providerName: provider.provider.name,
-              model: model.model,
-              name: model.name,
-            })),
-        );
+      return modelsForProviders(await readyProviderIds(context));
     },
     async selectProvider(context) {
-      return (await firstAvailable(ordered(context), context))?.id ?? null;
+      const candidates = ordered(context);
+      const selected = await firstAvailable(candidates, context);
+      if (!selected) await assertCandidateEligibility(candidates, context);
+      return selected?.id ?? null;
     },
     async admit({ providerId, accountId, workspaceId, attribution }) {
       const provider = providers.find((candidate) => candidate.id === providerId);
@@ -282,6 +312,7 @@ export function createTranscriptionService(input: {
       const exactId = preferredProviderId(request.providerId);
       const pinnedAway = deployment.pinned && exactId && exactId !== deployment.pinned.providerId;
       const exact = exactId ? providers.find((candidate) => candidate.id === exactId) : undefined;
+      if (exact && !pinnedAway) await assertCandidateEligibility([exact], scopeContext);
       const selected = request.providerId
         ? !pinnedAway && exact && (await isAvailable(exact, scopeContext))
           ? exact
@@ -293,6 +324,7 @@ export function createTranscriptionService(input: {
           ? dictationModelOf(deployment, selected, request.model)
           : selected;
       if (!provider) {
+        await assertCandidateEligibility(exact ? [exact] : ordered(request), scopeContext);
         // EU-only: say so when the region is why nothing can serve the
         // workspace (fallback never leaves the EU; `available` excludes
         // every provider without an EU route).

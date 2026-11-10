@@ -1,7 +1,9 @@
 import { AZURE_LIVE_MODEL_ID } from "../azure-live";
+import { billingOriginForAccessGrant } from "../access-grant-rls";
 import { elevenLabsKeyAvailable, realtimeVoiceOptions } from "../realtime-websocket";
 import {
   createRealtimeVoiceBilling,
+  checkOwnSubscriptionPlan,
   deploymentRealtimeVoice,
   memberExecutionTargetUsable,
   realtimeVoiceRegionAllowed,
@@ -20,6 +22,7 @@ import {
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   listWorkspaceProviderCustomModelsByKind,
   getOrganizationModelProviderCatalogForWorkspace,
+  listOrganizationCompatibleEndpointsForWorkspace,
   loadWorkspaceModelCatalogInputs,
   type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
@@ -81,7 +84,10 @@ import {
   type WorkspaceMemberCandidate,
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
-import { loadWorkspaceCodexCatalogReadiness } from "@opengeni/core";
+import {
+  loadWorkspaceCodexCatalogReadiness,
+  releaseAdmissionBlocksAfterAccessChange,
+} from "@opengeni/core";
 import { REGION_RESTRICTED, REGION_RESTRICTED_MESSAGE } from "@opengeni/contracts";
 import {
   allWorkspacePermissions,
@@ -179,6 +185,7 @@ import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
 import { projectWorkspaceModelCatalog, withRegionAvailability } from "../model-catalog";
+import { ownSubscriptionPlanNeeded, withOwnSubscriptionPlan } from "../own-subscription-plan";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
 import { workspaceControlEventVisibility } from "../workspace-control-visibility";
 import {
@@ -733,6 +740,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
             organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
           })
         : undefined;
+    // Whether this organization's plan includes its own subscriptions, and if
+    // not, the plan that does. A failed read marks nothing: admission still
+    // refuses with Upgrade, so a hint is never worth failing the catalog.
+    const ownSubscriptionPlan = ownSubscriptionPlanNeeded(
+      deps.db,
+      resolvedCatalog.settings,
+      grant.accountId,
+    ).catch(() => null);
     const workspaceConnectionsRead = catalogInputs?.then((inputs) => inputs.workspaceConnections);
     // The original promise remains in the catalog batch. On failure the
     // restrictions keep their standalone read rather than mask its error.
@@ -749,6 +764,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspace,
       organizationDefaults,
       creditBalance,
+      organizationCompatibleEndpoints,
     ] = await Promise.all([
       claudeCore.then((core) =>
         getWorkspaceConnectionModelRestrictions(
@@ -808,6 +824,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       deps.settings.billingMode === "stripe"
         ? getBillingBalance(deps.db, grant.accountId)
         : Promise.resolve(undefined),
+      // The organization's own OpenAI-compatible endpoints this workspace can use.
+      catalogInputs?.then((inputs) => inputs.organizationCompatibleEndpoints) ??
+        listOrganizationCompatibleEndpointsForWorkspace(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+        }),
     ]);
     const xaiSubscriptionActive = xaiCatalog.active;
     const connectionModelRestrictions = xaiCatalog.core
@@ -869,6 +891,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           models: organizationProviders.azure_openai?.models ?? [],
         },
       },
+      organizationCompatibleEndpoints,
     });
     // The same precedence the server applies when a new chat, API create, or
     // scheduled occurrence names no model; published so pickers show it.
@@ -950,7 +973,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
     }
     c.header("cache-control", "private, no-store");
-    return c.json(WorkspaceModelCatalogResponse.parse(catalog));
+    return c.json(
+      WorkspaceModelCatalogResponse.parse(
+        withOwnSubscriptionPlan(catalog, selections, await ownSubscriptionPlan),
+      ),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
@@ -1367,6 +1394,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceSettings,
       organizationDefaults,
       residencySettings,
+      subscriptionAdmission,
     ] = await Promise.all([
       workspaceCodexRealtimeReady(deps, grant, workspaceId),
       workspaceXaiOperationAvailable(deps.db, deps.settings, {
@@ -1383,6 +1411,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         settings: deps.settings,
       }),
+      billingOriginForAccessGrant(deps, grant).then((origin) =>
+        checkOwnSubscriptionPlan(deps, grant.accountId, origin),
+      ),
     ]);
     const availability = (
       credentialReady: boolean,
@@ -1457,6 +1488,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         provider: "Connected Codex" as const,
         description: "Deep session integration",
         ...availability(codexConnected, "Connect Codex to use this voice model"),
+        ...(!subscriptionAdmission.allowed
+          ? {
+              available: false,
+              unavailableReason: subscriptionAdmission.message,
+              unavailableCode: subscriptionAdmission.code,
+            }
+          : {}),
         recommended: false,
       },
       {
@@ -1465,6 +1503,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         provider: "Connected SuperGrok" as const,
         description: "Direct SuperGrok speech-to-speech",
         ...availability(supergrokConnected, "Connect SuperGrok to use this voice model"),
+        ...(!subscriptionAdmission.allowed
+          ? {
+              available: false,
+              unavailableReason: subscriptionAdmission.message,
+              unavailableCode: subscriptionAdmission.code,
+            }
+          : {}),
         recommended: false,
       },
       ...Object.values(ELEVENLABS_REALTIME_MODELS).map((model) => ({
@@ -1507,6 +1552,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       const inherited = resolveRealtimeVoiceSettings(null, organizationDefaults, model.id);
       return {
         ...model,
+        incomingPreparation: model.id === "gpt-live-1-boulder-alpha",
         ...realtimeVoiceOptions(model.id),
         ...(saved ? { workspaceVoiceSettings: saved } : {}),
         ...(inherited ? { organizationVoiceSettings: inherited } : {}),
@@ -1792,6 +1838,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch (error) {
       rethrowWorkspaceMemberCandidateError(error);
     }
+    // Restored access lets that person's saved messages start by themselves.
+    await releaseAdmissionBlocksAfterAccessChange(
+      {
+        db: deps.db,
+        requestSessionWorkflowWakeDispatch: () =>
+          deps.workflowClient.requestSessionWorkflowWakeDispatch(),
+      },
+      { accountId: grant.accountId, workspaceId, change: "membership" },
+    );
     const members = await listWorkspacePeople(deps, workspaceId);
     const member = members.find((addedMember) => addedMember.subjectId === subjectId);
     if (!member) {
@@ -1837,6 +1892,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch (error) {
       rethrowWorkspaceMemberCandidateError(error);
     }
+    // Restored access lets that person's saved messages start by themselves.
+    await releaseAdmissionBlocksAfterAccessChange(
+      {
+        db: deps.db,
+        requestSessionWorkflowWakeDispatch: () =>
+          deps.workflowClient.requestSessionWorkflowWakeDispatch(),
+      },
+      { accountId: grant.accountId, workspaceId, change: "membership" },
+    );
     const members = await listWorkspacePeople(deps, workspaceId);
     const member = members.find((candidate) => candidate.subjectId === subjectId);
     if (!member) {

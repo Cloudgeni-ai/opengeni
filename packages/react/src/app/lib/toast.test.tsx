@@ -41,14 +41,14 @@ describe("error toasts", () => {
   test("an expected refusal shows only the human message", () => {
     // The toast Bendik saw: the raw API message as the description.
     toast.error("Couldn't archive the chat.", {
-      description: `API 409: This chat can't be archived. "Keep this chat active" is on. Turn it off in the chat's Agent tab first. Reference: ${REFERENCE}.`,
+      description: `API 409: This chat can't be archived. "Keep this chat active" is on. Turn it off in the chat's Settings tab first. Reference: ${REFERENCE}.`,
     });
     expect(shown).toEqual([
       {
         kind: "error",
         title: "Couldn't archive the chat.",
         options: {
-          description: `This chat can't be archived. "Keep this chat active" is on. Turn it off in the chat's Agent tab first.`,
+          description: `This chat can't be archived. "Keep this chat active" is on. Turn it off in the chat's Settings tab first.`,
         },
       },
     ]);

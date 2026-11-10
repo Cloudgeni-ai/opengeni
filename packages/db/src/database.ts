@@ -112,7 +112,9 @@ export function currentSessionRlsActorContext(): Readonly<SessionRlsActorContext
 /**
  * Runs `fn` with no session RLS actor, so its reads see the tenant as the
  * system does (private chats included). Only for narrow reads whose result is
- * never disclosed to the request; not re-exported from the package.
+ * never disclosed to the request, or whose disclosure a durable binding
+ * already authorizes (a chat's own agent, read for its system prompt); not
+ * re-exported from the package.
  */
 export async function withoutSessionRlsActor<T>(fn: () => Promise<T>): Promise<T> {
   return await sessionRlsActorContext.exit(() => siteViewerRlsContext.exit(fn));

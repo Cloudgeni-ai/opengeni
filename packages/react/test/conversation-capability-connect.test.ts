@@ -143,6 +143,23 @@ describe("inChatConnectDecision", () => {
     );
   });
 
+  test("a card for a connection this deployment cannot start offers no Connect", () => {
+    // An earlier card stays in the chat after the operator switches setup off
+    // (or when the provider needs an operator OAuth client that is missing).
+    const unconnectable = CapabilityCatalogItem.parse({
+      ...reviewed,
+      runtime: { available: true, notes: null, operatorOAuthClient: { configured: false } },
+    });
+    expect(inChatConnectDecision(request(), ready(CONNECT, [unconnectable]), true).kind).toBe(
+      "unavailable",
+    );
+    // An integration that is already on keeps its card.
+    expect(
+      inChatConnectDecision(request(), ready(CONNECT, [{ ...unconnectable, enabled: true }]), true)
+        .kind,
+    ).toBe("card");
+  });
+
   test("a member with connections:write can turn on an integration that is not on yet", () => {
     expect(
       inChatConnectDecision(

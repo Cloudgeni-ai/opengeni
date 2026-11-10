@@ -423,9 +423,6 @@ impl ObjectStore for Bucket {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        if options.range.is_some() {
-            return Err(object_store::Error::NotImplemented);
-        }
         *if options.head {
             &self.0.heads
         } else {
@@ -440,9 +437,22 @@ impl ObjectStore for Bucket {
             .object(location.as_ref())
             .ok_or_else(|| not_found(location))?;
         let meta = self.0.meta(location.as_ref(), &object);
-        let bytes = object.bytes;
+        let len = object.bytes.len() as u64;
+        let range = match &options.range {
+            None => 0..len,
+            Some(range) => range
+                .as_range(len)
+                .map_err(|error| object_store::Error::Generic {
+                    store: "fake",
+                    source: Box::new(error),
+                })?,
+        };
+        let bytes = object.bytes.slice(
+            usize::try_from(range.start).unwrap_or(usize::MAX)
+                ..usize::try_from(range.end).unwrap_or(usize::MAX),
+        );
         Ok(GetResult {
-            range: 0..bytes.len() as u64,
+            range,
             payload: GetResultPayload::Stream(Box::pin(stream::once(async move { Ok(bytes) }))),
             meta,
             attributes: Attributes::default(),

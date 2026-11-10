@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react",
-  "version": "6.8.0",
+  "version": "6.13.0",
   "description": "React hooks and styled components for Opengeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
@@ -245,6 +245,10 @@
       "types": "./src/session-list-model.ts",
       "default": "./src/session-list-model.ts"
     },
+    "./automation-model": {
+      "types": "./src/automation-model.ts",
+      "default": "./src/automation-model.ts"
+    },
     "./session-admin-access-model": {
       "types": "./src/session-admin-access-model.ts",
       "default": "./src/session-admin-access-model.ts"
@@ -260,6 +264,10 @@
     "./session-attention-model": {
       "types": "./src/session-attention-model.ts",
       "default": "./src/session-attention-model.ts"
+    },
+    "./session-avatar-model": {
+      "types": "./src/session-avatar-model.ts",
+      "default": "./src/session-avatar-model.ts"
     },
     "./in-chat-connect-model": {
       "types": "./src/in-chat-connect-model.ts",
@@ -302,7 +310,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dequal": "2.0.3",
-    "katex": "^0.16.47",
+    "katex": "^0.18.11",
     "lucide-react": "^1.8.0",
     "motion": "^12.0.0",
     "radix-ui": "^1.4.3",
@@ -325,7 +333,7 @@
     "@codemirror/lang-python": "^6.2.1",
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
-    "@happy-dom/global-registrator": "^20.10.2",
+    "@happy-dom/global-registrator": "^21.0.4",
     "@novnc/novnc": "^1.7.0",
     "@opengeni/agent-proto": "workspace:*",
     "@opengeni/artifact-kernel-wasm-document": "workspace:*",
@@ -343,7 +351,7 @@
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
     "postcss": "8.5.26",
-    "postcss-selector-parser": "7.1.0",
+    "postcss-selector-parser": "7.2.0",
     "react": "^19.2.5",
     "react-18": "npm:react@18.3.1",
     "react-dom": "^19.2.5",

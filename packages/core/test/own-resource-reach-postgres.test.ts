@@ -126,9 +126,6 @@ async function connectPlan(f: Fixture) {
       personal_connections_allowed, personal_fallback_allowed)
     values (${f.accountId}::uuid, ${shared.admin.json({ codex: { mode: "spread" } })}::jsonb,
       '{}'::jsonb, false, '{}'::jsonb, true, true)`;
-  await shared.admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${f.accountId}::uuid, 'codex', true)
-    on conflict (account_id, provider) do update set enabled = true`;
   const connected = await withSessionRlsActorContext({ subjectId: f.owner }, () =>
     connectSubscriptionCoreCodexConnection(client.db, {
       accountId: f.accountId,

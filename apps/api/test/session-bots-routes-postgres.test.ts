@@ -7,7 +7,7 @@ import {
   createSession,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getSession,
-  listBotTemplates,
+  getAgent,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -52,6 +52,20 @@ async function freshWorkspace(name: string): Promise<Workspace> {
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspace!.id}, ${account!.id})`;
   return { accountId: account!.id, workspaceId: workspace!.id };
+}
+
+/** Make a person a member of the workspace and its organization. */
+async function member(workspace: Workspace, subjectId: string): Promise<void> {
+  const admin = shared!.admin;
+  const [personal] = await admin<{ id: string }[]>`
+    insert into workspaces (account_id, name)
+    values (${workspace.accountId}, ${`Personal ${subjectId}`}) returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id)
+    values (${personal!.id}, ${workspace.accountId})`;
+  await admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+    values (${workspace.accountId}, ${subjectId}, 'active', ${personal!.id})`;
+  await admin`insert into workspace_memberships (account_id, workspace_id, subject_id)
+    values (${workspace.accountId}, ${workspace.workspaceId}, ${subjectId})`;
 }
 
 /** A person's token by default; a service caller manages every template. */
@@ -249,7 +263,7 @@ describe("bots through the API (real PostgreSQL)", () => {
     });
   }, 180_000);
 
-  test("templates: shared ones are everyone's to change, Only me ones stay with whoever saved them", async () => {
+  test("templates: whoever saved one or an admin changes it, Only me ones stay with whoever saved them", async () => {
     if (!shared) return;
     const workspace = await freshWorkspace("bots templates");
     const person = ["workspace:read", "sessions:create", "sessions:read"] as Permission[];
@@ -258,6 +272,8 @@ describe("bots through the API (real PostgreSQL)", () => {
     const reader = await bearer(workspace, "user:reader", ["workspace:read", "sessions:read"]);
     const admin = await bearer(workspace, "user:admin", ["workspace:admin"]);
     const service = await bearer(workspace, "svc:ops", person, "service");
+    // An Only me agent belongs to a member of the organization.
+    await member(workspace, "user:alice");
     const base = `/v1/workspaces/${workspace.workspaceId}/bot-templates`;
 
     const saved = await call(alice, "POST", base, {
@@ -281,12 +297,12 @@ describe("bots through the API (real PostgreSQL)", () => {
 
     const seenByBob = await call(bob, "GET", base);
     expect(seenByBob.json.templates).toHaveLength(1);
-    // A shared template is shared work: any member who starts chats changes it.
-    // ...but only whoever saved it (or an admin) may make it Only me, and the
-    // template says so, so the edit dialog offers only what the server allows.
+    // A template is an agent: whoever saved it, or an admin, changes it; other
+    // members use it. The template says so, so the edit dialog offers only
+    // what the server allows.
     expect(seenByBob.json.templates[0]).toMatchObject({
       id: template.id,
-      viewerAccess: "manage",
+      viewerAccess: "use",
       viewerCanMakePrivate: false,
     });
     expect((await call(reader, "GET", base)).json.templates[0]).toMatchObject({
@@ -306,17 +322,12 @@ describe("bots through the API (real PostgreSQL)", () => {
     );
     expect((await call(reader, "DELETE", `${base}/${template.id}`)).status).toBe(403);
     const renamedByBob = await call(bob, "PATCH", `${base}/${template.id}`, { name: "SRE bot" });
-    expect(renamedByBob.status).toBe(200);
-    expect(renamedByBob.json.template).toMatchObject({
-      createdBySubjectId: "user:alice",
-      viewerAccess: "manage",
-    });
-    // Only whoever saved it (or an admin) can take it away from everyone.
+    expect(renamedByBob.status).toBe(403);
+    // Nor can another member take it away from everyone.
     const hiddenByBob = await call(bob, "PATCH", `${base}/${template.id}`, {
       visibility: "private",
     });
     expect(hiddenByBob.status).toBe(403);
-    expect(hiddenByBob.json.error.message).toContain("can make it Only me");
 
     const changed = await call(alice, "PATCH", `${base}/${template.id}`, {
       setupInstructions: "Install the on-call Skill and create the morning check.",
@@ -388,8 +399,9 @@ describe("bots through the API (real PostgreSQL)", () => {
     expect((await call(bob, "GET", base)).json.templates.map((row: any) => row.id)).toEqual([
       mineId,
     ]);
-    // Once shared, any member who starts chats may also delete it.
-    expect((await call(bob, "DELETE", `${base}/${mineId}`)).status).toBe(200);
+    // Once shared, other members use it; whoever saved it may delete it.
+    expect((await call(bob, "DELETE", `${base}/${mineId}`)).status).toBe(403);
+    expect((await call(alice, "DELETE", `${base}/${mineId}`)).status).toBe(200);
     expect((await call(alice, "GET", base)).json.templates).toEqual([]);
   }, 180_000);
 
@@ -455,21 +467,42 @@ describe("bots through the API (real PostgreSQL)", () => {
       ).isError,
     ).toBe(true);
 
+    // "Make this an agent": standing Instructions. An older First message joins them.
     const saved = await callTool(server, "bot_template_save", {
       name: "Release owner",
       description: "Keeps the release checklist moving",
       avatar: { kind: "icon", icon: "rocket", hue: 30 },
-      setupInstructions: "You own releases. Install the release Skill and ask about their cadence.",
+      instructions: "You own releases. Keep the checklist current.",
+      firstMessage: "Install the release Skill and ask about their cadence.",
     });
     expect(saved.isError).toBe(false);
-    expect(saved.body.template).toMatchObject({
+    expect(saved.body.agent).toMatchObject({
       name: "Release owner",
+      visibility: "workspace",
+      revision: 1,
+    });
+    // The result says what happened to its Memory, so the agent can tell the person.
+    expect(["ready", "pending_review", "learning_off", "not_saved"]).toContain(
+      saved.body.memory.status,
+    );
+    expect(typeof saved.body.memory.note).toBe("string");
+    const stored = await getAgent(client.db, workspace, saved.body.agent.id);
+    expect(stored).toMatchObject({
+      origin: "app",
       sourceSessionId: sessionId,
       avatar: { kind: "icon", icon: "rocket", hue: 30 },
+      // New agents remember by default, wherever they are made.
+      memoryEnabled: true,
+      content: {
+        instructions:
+          "You own releases. Keep the checklist current.\n\nWhen a chat starts:\nInstall the release Skill and ask about their cadence.",
+        firstMessage: "",
+      },
     });
-    expect(saved.body.template.visibility).toBe("workspace");
-    const stored = await listBotTemplates(client.db, workspace.workspaceId, null);
-    expect(stored.map((template) => template.id)).toEqual([saved.body.template.id]);
+    // It needs something to say.
+    expect(
+      (await callTool(server, "bot_template_save", { name: "Empty", instructions: "  " })).isError,
+    ).toBe(true);
   }, 180_000);
 
   test("the agent in an Only me chat saves an Only me template", async () => {
@@ -505,19 +538,21 @@ describe("bots through the API (real PostgreSQL)", () => {
       visibility: "user_private",
     });
     const grant = { ...agentGrant({ accountId, workspaceId }, chat.id), subjectId };
+    // The older setupInstructions argument still works: it joins the Instructions.
     const saved = await callTool(buildOpenGeniMcpServer(deps, grant), "bot_template_save", {
       name: "My release owner",
       setupInstructions: "You own my releases.",
     });
     expect(saved.isError).toBe(false);
-    expect(saved.body.template).toMatchObject({
-      visibility: "private",
-      createdBySubjectId: subjectId,
-    });
-    expect(await listBotTemplates(client.db, workspaceId, "user:someone-else")).toEqual([]);
+    expect(saved.body.agent).toMatchObject({ visibility: "private" });
     expect(
-      (await listBotTemplates(client.db, workspaceId, subjectId)).map((row) => row.id),
-    ).toEqual([saved.body.template.id]);
+      await getAgent(client.db, { accountId, workspaceId }, saved.body.agent.id),
+    ).toMatchObject({
+      visibility: "private",
+      ownerSubjectId: subjectId,
+      createdBySubjectId: subjectId,
+      content: { instructions: "When a chat starts:\nYou own my releases.", firstMessage: "" },
+    });
   }, 180_000);
 
   test("a bot's avatar picture is public at its signed link and nowhere else", async () => {

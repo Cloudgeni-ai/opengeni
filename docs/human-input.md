@@ -11,6 +11,30 @@ workspace settings API. Disabled workspaces omit the tool from model-visible
 tools; a stale resume or forged interruption is rejected before the worker can
 install a `requires_action` boundary. The setting defaults to enabled.
 
+## Who gets the tool
+
+The tool is sent only where someone can answer it, so a session nobody answers
+does not pay for it on every model call:
+
+- A session that started unattended has no `request_human_input` and its
+  prompt offers no question: a create with `unattended: true`, a chat a
+  scheduled task or event trigger creates without its own `unattended: false`
+  (or an `approvalTimeoutSeconds`), and Slack open-agent runs. A run delivered
+  to an existing chat keeps that chat's attendance. This follows how the
+  chat started, so its tool list never changes under earlier requests; a chat
+  switched to **Work without me** later keeps the tool and gets an immediate
+  "no one will answer" result instead.
+- `humanInput: false` in the agent capabilities, or the workspace setting
+  above, removes it for any session.
+- Every other session keeps it, including one started over the API with no
+  person in the chat: the backend can answer through
+  `submitHumanInputResponse`, and Opengeni cannot tell whether it will. A
+  backend that never answers should create its sessions with
+  `unattended: true`.
+- A child session keeps it even under an unattended root, because its parent
+  agent can answer (`child_requires_action`, below); its description then
+  carries the parent-agent guidance.
+
 This is not tool approval. Approval asks whether an already-proposed tool may
 run and can approve or reject it. Structured human input is itself a tool call:
 when the workspace setting allows it, Opengeni authorizes that built-in call,
@@ -133,6 +157,9 @@ Settlement is first-writer-wins under a database lock and compare-and-set:
   worker restart or `continueAsNew`. A stale early timer caused by bounded
   workflow/database clock skew re-arms with an interruptible floor instead of
   spinning the workflow and database;
+- a decision that commits while the workflow's parking peek is in flight still
+  resumes the turn: the wait baselines its wakes from before that peek (see
+  [run-lifecycle.md](./run-lifecycle.md), `approval-wait`);
 
 `session_events` remains the exact audit/live projection for accepted payloads.
 The request table
@@ -173,7 +200,9 @@ answers, text-answer shape, and selection-bound violations. Every choice
 question accepts `Other`, including legacy rows whose compatibility field still
 says `allowOther: false`. The runtime normalizes new choice requests to `true`,
 while stock React and realtime surfaces expose the free-text path regardless of
-that legacy field. User-controlled
+that legacy field. The schema sent to the model leaves `allowOther` out for the
+same reason, so a call takes the contract default and the normalization above.
+User-controlled
 regular expressions are intentionally not part of the contract. Legacy
 persisted `minLength`/`maxLength` on question JSON is ignored.
 

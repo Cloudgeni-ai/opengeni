@@ -93,6 +93,26 @@ test("network return, lifecycle resume and a bfcache restore wake every subscrib
   expect(wakes).toHaveLength(6);
 });
 
+test("a pageshow handler called without an event, as a native host shim may, does not throw", () => {
+  const added = spyOn(window, "addEventListener");
+  let wakes = 0;
+  const unsubscribe = subscribePageWake(() => {
+    wakes += 1;
+  });
+  try {
+    const pageShow = added.mock.calls.find(([type]) => type === "pageshow")?.[1] as
+      | ((event?: unknown) => void)
+      | undefined;
+    expect(pageShow).toBeDefined();
+    expect(() => pageShow!()).not.toThrow();
+    expect(() => pageShow!({})).not.toThrow();
+    expect(wakes).toBe(0);
+  } finally {
+    unsubscribe();
+    added.mockRestore();
+  }
+});
+
 test("one wall-clock timer serves every subscriber and stops with the last", () => {
   const started = spyOn(globalThis, "setInterval");
   const stopped = spyOn(globalThis, "clearInterval");

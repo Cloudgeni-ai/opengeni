@@ -91,7 +91,6 @@ import {
   requireMachineScopeAuthority,
 } from "../sandbox/machine-authority";
 import {
-  organizationComputeHere,
   organizationComputeReachResponse,
   requireComputeReachCaller,
   requireOrganizationCompute,
@@ -379,34 +378,15 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
   // GET .../organization-machines: names and where each works, for the
   // organization owners and admins who decide that (Organization settings >
   // Shared). A workspace's machine list holds only the ones that work there.
-  // Until the list routine is granted (migration 1224), the organization
-  // machines that work in this workspace, with `complete: false`.
   app.get("/v1/workspaces/:workspaceId/organization-machines", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireMachineAccessGrant(c, deps, workspaceId, "enrollments:read");
     const grant = authorization.grant;
     assertSelfhostedEnabled();
     requireOrganizationComputeLister(authorization, "machine");
-    const everywhere = await listOrganizationCompute(db, grant, "machine");
-    if (everywhere) {
-      return c.json({
-        machines: everywhere,
-        complete: true,
-      } satisfies ListOrganizationMachinesResponse);
-    }
-    const here = await listEnrollments(db, grant, { status: "active" });
     return c.json({
-      machines: organizationComputeHere(
-        here.map((enrollment) => ({
-          id: enrollment.id,
-          // As the machine list names it.
-          name: enrollment.sandboxName ?? `${enrollment.os} machine`,
-          scope: enrollment.scope,
-          sandboxId: enrollment.sandboxId ?? null,
-          reach: enrollment.reach ?? null,
-        })),
-      ),
-      complete: false,
+      machines: await listOrganizationCompute(db, grant, "machine"),
+      complete: true,
     } satisfies ListOrganizationMachinesResponse);
   });
 
@@ -562,6 +542,8 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
         db,
         settings,
         bus,
+        requestSessionWorkflowWakeDispatch: () =>
+          deps.workflowClient.requestSessionWorkflowWakeDispatch(),
         ensureSessionGroupReady: async (fleetCtx) => {
           const session = await requireSession(db, fleetCtx.workspaceId, fleetCtx.sessionId);
           return await ensureViewerSessionGroupReady(

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   AuthRun,
   AuthRunMutationResponse,
@@ -13,7 +14,7 @@ import {
 } from "../session-context";
 import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
-export type UseAuthRunsOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseAuthRunsOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   enabled?: boolean | undefined;
   browserSessionId?: string | null | undefined;
   siteAuthConnectionId?: string | null | undefined;
@@ -248,4 +249,4 @@ function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
-export type AuthRunsClient = EmbeddedBrowserInteractionClientLike;
+export type AuthRunsClient = EmbeddedBrowserInteractionClientLike<ChatClient>;

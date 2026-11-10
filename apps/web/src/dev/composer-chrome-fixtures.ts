@@ -10,8 +10,8 @@ import type {
 import { projectPickerRows, type PickerModelRow } from "@opengeni/react";
 import type {
   EffectiveSessionControl,
-  LineageNode,
-  Session,
+  ChatLineageNode as LineageNode,
+  ChatSession as Session,
   SessionBackgroundCommand,
   SessionGoal,
   SessionPendingInputPreview,

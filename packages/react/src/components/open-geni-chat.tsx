@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { MenuIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import type {
@@ -44,7 +45,7 @@ const DEFAULT_LABELS = (t: OpenGeniText): Omit<OpenGeniChatLabels, keyof Session
 /** What the first message carries besides its text. */
 export type OpenGeniChatCreateOptions = NewConversationCreateOptions;
 
-export type OpenGeniChatProps = ClientOverride &
+export type OpenGeniChatProps = ClientOverride<ChatClient> &
   SessionProxyBaseUrl & {
     /** Controlled selection. `null` shows the new-chat composer. */
     sessionId?: string | null | undefined;

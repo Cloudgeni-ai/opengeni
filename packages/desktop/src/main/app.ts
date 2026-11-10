@@ -58,7 +58,13 @@ import {
   type ThisComputerPermissionId,
   type WelcomeState,
 } from "../contract";
-import { AccountStore, readInstalledFrom, type StoredAccount } from "./accounts";
+import {
+  AccountStore,
+  accountToReturnTo,
+  cameFromAfterShowing,
+  readInstalledFrom,
+  type StoredAccount,
+} from "./accounts";
 import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
 import type { Dictation } from "./dictation";
 import { createDesktopDictation } from "./dictation/electron";
@@ -200,6 +206,8 @@ export class DesktopShell {
   private unreachable: Unreachable | null = null;
   /** The welcome page is adding an account, so an unreachable one doesn't take it over. */
   private addingAccount = false;
+  /** The signed-in account the welcome page was opened from; its Cancel returns there. */
+  private cameFromId: string | null = null;
   private readonly redirectUri: string;
   private readonly paths: AppWebPaths;
 
@@ -409,6 +417,15 @@ export class DesktopShell {
           if (new URL(url).protocol === "https:") void shell.openExternal(url);
         },
       },
+      // A Stop the recording didn't take: show the account it records in.
+      revealPage: (page) => {
+        const accountId = this.window?.accountFor(page as WebContents);
+        app.focus({ steal: true });
+        if (accountId) this.showAccount(accountId);
+        else this.reveal();
+      },
+      describePage: (page) => this.recordingAccountLabel(page as WebContents),
+      recordingChanged: () => this.broadcast(DESKTOP_IPC.accountsChanged, this.accountsSnapshot()),
       log: (message, caught) => console.warn(message, caught ?? ""),
     });
     this.appShots = new AppShots({
@@ -797,6 +814,7 @@ export class DesktopShell {
     const account = this.store.get(accountId);
     if (!account) return;
     if (!this.window) this.openWindow();
+    this.cameFromId = cameFromAfterShowing(this.store.active(), account, this.cameFromId);
     this.store.setActive(accountId);
     this.addingAccount = false;
     if (account.signedOut) {
@@ -907,12 +925,16 @@ export class DesktopShell {
       if (this.connectingFromLink || this.pending) return;
       const account = computerLinkAccount(computerLink, this.store.snapshot().accounts);
       if (account) void this.connectFromLink(account, computerLink);
-      else void this.beginSignIn(computerLink.origin, computerLink);
+      else void this.signInFromLink(computerLink);
       return;
     }
+    // The window shows the whole web app, so a link to any of its pages opens
+    // there: a sign-in finished in the browser returns to the page it started
+    // on (plugins, settings…) with its outcome, not to whatever was showing.
     const link = parseAppLink(raw, {
       scheme: this.config.scheme,
       paths: this.paths,
+      anyPage: true,
     });
     if (!link) {
       this.reveal();
@@ -944,6 +966,47 @@ export class DesktopShell {
   }
 
   // --- Sign-in ------------------------------------------------------------------------------------
+
+  /**
+   * A link never adds a server by itself: signing in to a server this app has
+   * not used needs the person's approval, naming the server, before the
+   * browser opens.
+   */
+  private async signInFromLink(link: ComputerConnectLink): Promise<void> {
+    if (!this.knowsServer(link.origin)) {
+      this.connectingFromLink = true;
+      try {
+        this.reveal();
+        const server = serverLabel(link.origin);
+        const { response } = await dialog.showMessageBox({
+          type: "warning",
+          title: "Sign in to a new server",
+          message: `Sign in to ${server}?`,
+          detail: `A link asked ${this.config.productName} to sign in to ${server}, a server you haven't used in this app. Continue only if you trust ${server} and opened this link yourself.`,
+          buttons: ["Cancel", "Sign in"],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+        });
+        if (response !== 1) return;
+      } finally {
+        this.connectingFromLink = false;
+      }
+      if (this.pending) return;
+    }
+    await this.beginSignIn(link.origin, link);
+  }
+
+  /** The app's own servers and the servers of accounts already added here. */
+  private knowsServer(serverInput: string): boolean {
+    const baseUrl = normalizeServerUrl(serverInput);
+    if (!baseUrl) return false;
+    return [
+      this.defaultServerUrl(),
+      this.config.defaultServerUrl,
+      ...this.store.snapshot().accounts.map((account) => account.baseUrl),
+    ].some((server) => normalizeServerUrl(server) === baseUrl);
+  }
 
   private async beginSignIn(
     serverInput: string,
@@ -1163,11 +1226,21 @@ export class DesktopShell {
     return this.sdk;
   }
 
-  private clientOptions(baseUrl: string, token?: string) {
+  private clientOptions(baseUrl: string, token?: string, accountId?: string) {
+    // An account's own requests go with its window's cookies, so when one of
+    // them renews the device session the window's sign-in cookie is renewed
+    // too; otherwise the window would be signed out a week after its cookie
+    // was last set, although the app stays signed in.
+    const fetch = accountId
+      ? (input: string, init?: RequestInit) =>
+          session
+            .fromPartition(`persist:account-${accountId}`)
+            .fetch(input, { ...init, credentials: init?.credentials ?? "include" })
+      : (input: string, init?: RequestInit) => net.fetch(input, init);
     return {
       baseUrl,
       ...(token ? { apiKey: token } : {}),
-      fetch: ((input: string, init?: RequestInit) => net.fetch(input, init)) as never,
+      fetch: fetch as never,
       apiContract: "compatible" as const,
     };
   }
@@ -1179,7 +1252,8 @@ export class DesktopShell {
     const cached = this.clients.get(accountId);
     if (cached?.token === token) return await cached.client;
     const client = this.loadSdk().then(
-      ({ OpenGeniClient }) => new OpenGeniClient(this.clientOptions(account.baseUrl, token)),
+      ({ OpenGeniClient }) =>
+        new OpenGeniClient(this.clientOptions(account.baseUrl, token, accountId)),
     );
     this.clients.set(accountId, { token, client });
     return await client;
@@ -1214,15 +1288,37 @@ export class DesktopShell {
     const snapshot = this.store.snapshot();
     return {
       activeId: snapshot.activeId,
-      accounts: snapshot.accounts.map((account) => ({
-        id: account.id,
-        baseUrl: account.baseUrl,
-        serverLabel: serverLabel(account.baseUrl),
-        email: account.email,
-        workspaceId: account.workspaceId,
-        signedOut: Boolean(account.signedOut),
-      })),
+      accounts: snapshot.accounts.map((account) => {
+        const contents = this.window?.contentsFor(account.id) ?? null;
+        return {
+          id: account.id,
+          baseUrl: account.baseUrl,
+          serverLabel: serverLabel(account.baseUrl),
+          email: account.email,
+          workspaceId: account.workspaceId,
+          signedOut: Boolean(account.signedOut),
+          recording: Boolean(contents && this.meetings.isRecording(contents)),
+        };
+      }),
     };
+  }
+
+  /**
+   * The account a recording page belongs to, as the stop card names it: its
+   * server, or with the email too when two accounts share a server. Null
+   * with a single signed-in account, where there is nothing to tell apart.
+   */
+  private recordingAccountLabel(page: WebContents): string | null {
+    const accountId = this.window?.accountFor(page);
+    const account = accountId ? this.store.get(accountId) : null;
+    if (!account) return null;
+    const signedIn = this.store.snapshot().accounts.filter((other) => !other.signedOut);
+    if (signedIn.length < 2) return null;
+    const server = serverLabel(account.baseUrl);
+    const shared = signedIn.some(
+      (other) => other.id !== account.id && serverLabel(other.baseUrl) === server,
+    );
+    return shared ? `${account.email} · ${server}` : server;
   }
 
   private welcomeState(): WelcomeState {
@@ -1401,8 +1497,9 @@ export class DesktopShell {
       this.senderWelcome(event);
       this.pending = null;
       this.welcomeError = null;
-      const active = this.store.snapshot().accounts.find((account) => !account.signedOut);
-      if (active) this.showAccount(active.id);
+      const back = accountToReturnTo(this.store.snapshot(), this.cameFromId);
+      this.cameFromId = null;
+      if (back) this.showAccount(back.id);
       else this.pushWelcome();
     });
   }
@@ -1411,6 +1508,8 @@ export class DesktopShell {
     this.pending = null;
     this.welcomeError = null;
     this.addingAccount = true;
+    const from = this.store.active();
+    if (from && !from.signedOut) this.cameFromId = from.id;
     this.clearUnreachable();
     this.window?.showWelcome();
     this.pushWelcome();

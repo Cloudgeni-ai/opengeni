@@ -321,9 +321,55 @@ export async function recordConnectedCommandOutputRelease(
   });
 }
 
+/** When output that was never captured stops being retried: see
+ * `settleConnectedCommandOutputRetry`. */
+export type ConnectedCommandOutputExpiry = {
+  afterRunnerSeenMs: number;
+  runnerSeenMarginMs: number;
+  abandonAfterMs: number;
+};
+
 /** Publish success is only a retry milestone. Stop retrying only after an exact
  * native absence observation, or record pre-capture loss explicitly as missing
- * output. Neither outcome is a model-completion acknowledgement. */
+ * output. Neither outcome is a model-completion acknowledgement.
+ *
+ * A retry may carry an `uncapturedOutputExpiry`. Output that was never
+ * captured is then recorded unavailable, in the same update, instead of being
+ * retried again when either:
+ * - its command settled exited at least `afterRunnerSeenMs` ago, and its
+ *   runner's enrollment was seen alive at least `runnerSeenMarginMs` after
+ *   that. A live runner reports the completed operations it still retains,
+ *   and that report collects them, so this one is no longer retained; or
+ * - its command settled exited at least `abandonAfterMs` ago, whether or not
+ *   the runner was seen since.
+ * Such an obligation can no longer be met and would otherwise be swept
+ * forever. Returns the recorded outcome, or null when this claim no longer
+ * owns the row. */
+export async function settleConnectedCommandOutputRetry(
+  db: Database,
+  input: {
+    claim: ConnectedCommandOutputClaim;
+    retryAfterMs: number;
+    uncapturedOutputExpiry?: ConnectedCommandOutputExpiry;
+  },
+): Promise<"retry" | "unavailable" | null> {
+  const expiry = input.uncapturedOutputExpiry;
+  if (
+    expiry &&
+    [expiry.afterRunnerSeenMs, expiry.runnerSeenMarginMs, expiry.abandonAfterMs].some(
+      (value) => !Number.isSafeInteger(value) || value < 0,
+    )
+  )
+    throw new Error("Connected command output expiry is invalid");
+  const outcome = await settleConnectedCommandOutputClaim(db, {
+    claim: input.claim,
+    outcome: "retry",
+    retryAfterMs: input.retryAfterMs,
+    ...(expiry ? { uncapturedOutputExpiry: expiry } : {}),
+  });
+  return outcome === null ? null : outcome === "unavailable" ? "unavailable" : "retry";
+}
+
 export async function settleConnectedCommandOutputReleaseClaim(
   db: Database,
   input: {
@@ -332,6 +378,18 @@ export async function settleConnectedCommandOutputReleaseClaim(
     retryAfterMs: number;
   },
 ): Promise<boolean> {
+  return (await settleConnectedCommandOutputClaim(db, input)) !== null;
+}
+
+async function settleConnectedCommandOutputClaim(
+  db: Database,
+  input: {
+    claim: ConnectedCommandOutputClaim;
+    outcome: "published" | "not_retained" | "unavailable" | "retry";
+    retryAfterMs: number;
+    uncapturedOutputExpiry?: ConnectedCommandOutputExpiry;
+  },
+): Promise<"published" | "not_retained" | "unavailable" | "retry" | null> {
   if (!Number.isSafeInteger(input.retryAfterMs) || input.retryAfterMs < 0)
     throw new Error("Connected command output retry delay is invalid");
   const released = input.outcome === "not_retained";
@@ -342,21 +400,43 @@ export async function settleConnectedCommandOutputReleaseClaim(
       sessionIds: [input.claim.sessionId],
     });
     const command = schema.sessionBackgroundCommands;
+    const retryAt = new Date(Date.now() + input.retryAfterMs);
+    // Evaluated on the row being updated, against the database clock. The
+    // runner's enrollment is read without a lock; one this context cannot
+    // see only leaves the longer abandonment bound.
+    const expiry = input.outcome === "retry" ? input.uncapturedOutputExpiry : undefined;
+    const enrollment = schema.enrollments;
+    const expired = expiry
+      ? sql`(${command.outputConsumedAt} is null and ${command.settledAt} is not null and (
+          ${command.settledAt} <= now() - make_interval(secs => ${expiry.abandonAfterMs / 1000})
+          or (${command.settledAt} <= now() - make_interval(secs => ${expiry.afterRunnerSeenMs / 1000})
+            and exists (
+              select 1 from ${enrollment}
+              where ${enrollment.workspaceId} = ${command.controlWorkspaceId}
+                and ${enrollment.id} = ${command.enrollmentId}
+                and ${enrollment.lastSeenAt} >= ${command.settledAt}
+                  + make_interval(secs => ${expiry.runnerSeenMarginMs / 1000})))))`
+      : null;
     const rows = await tx
       .update(command)
       .set({
         ...(released ? { outputReleaseObservedAt: new Date() } : {}),
         ...(input.outcome === "unavailable" ? { outputUnavailableAt: new Date() } : {}),
-        reconcileAfter: new Date(Date.now() + input.retryAfterMs),
+        ...(expired ? { outputUnavailableAt: sql`case when ${expired} then now() end` } : {}),
+        reconcileAfter: expired
+          ? sql`case when ${expired} then now() else ${retryAt.toISOString()}::timestamptz end`
+          : retryAt,
         reconcileClaimId: null,
         reconcileClaimedAt: null,
-        lastReconcileOutcome: released
-          ? "output_released"
-          : input.outcome === "published"
-            ? "output_ack_published"
-            : input.outcome === "unavailable"
-              ? "output_unavailable"
-              : "output_retry",
+        lastReconcileOutcome: expired
+          ? sql`case when ${expired} then 'output_unavailable' else 'output_retry' end`
+          : released
+            ? "output_released"
+            : input.outcome === "published"
+              ? "output_ack_published"
+              : input.outcome === "unavailable"
+                ? "output_unavailable"
+                : "output_retry",
         updatedAt: new Date(),
       })
       .where(
@@ -371,8 +451,12 @@ export async function settleConnectedCommandOutputReleaseClaim(
               : []),
         ),
       )
-      .returning({ id: command.id });
-    return rows.length === 1;
+      .returning({
+        id: command.id,
+        unavailable: sql<boolean>`${command.outputUnavailableAt} is not null`,
+      });
+    if (rows.length !== 1) return null;
+    return input.outcome === "retry" && rows[0]!.unavailable ? "unavailable" : input.outcome;
   });
 }
 

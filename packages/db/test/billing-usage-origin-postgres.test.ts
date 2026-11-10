@@ -6,7 +6,6 @@ import {
 import { sql } from "drizzle-orm";
 import {
   applyCreditDebitAfterUse,
-  applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
   bootstrapWorkspace,
   createDb,
@@ -106,19 +105,24 @@ test("API usage spends credits only and never the plan allowance; runtime postur
       .balanceMicros,
   ).toBe(30 * M);
 
-  // Up-to-balance: capped at credits, plan untouched.
-  const capped = await applyCreditDebitUpToBalance(client.db, {
+  // A model response costing more than the credits is charged in full from
+  // credits, which go negative; the plan allowance does not pay.
+  const full = await applyCreditDebitAfterUse(client.db, {
     accountId,
     type: "model_usage_debit",
-    requestedAmountMicros: 50 * M,
+    amountMicros: 50 * M,
+    sourceType: "model_response",
+    sourceId: crypto.randomUUID(),
     idempotencyKey: crypto.randomUUID(),
+    usage: "model-a",
     usageOrigin: "api",
   });
-  expect(capped.debitedMicros).toBe(30 * M);
-  expect(capped.balance.plan?.creditRemainingMicros).toBe(200 * M);
-  expect(capped.balance.creditsMicros).toBe(0);
+  expect(full.debitedMicros).toBe(50 * M);
+  expect(full.grantDebitedMicros).toBe(0);
+  expect(full.balance.plan?.creditRemainingMicros).toBe(200 * M);
+  expect(full.balance.creditsMicros).toBe(-20 * M);
 
-  // After use: credits may go negative; the plan allowance still does not pay.
+  // Later API use goes further negative; the plan allowance still does not pay.
   const after = await applyCreditDebitAfterUse(client.db, {
     accountId,
     type: "model_usage_debit",
@@ -130,7 +134,7 @@ test("API usage spends credits only and never the plan allowance; runtime postur
     usageOrigin: "api",
   });
   expect(after.balance.plan?.creditRemainingMicros).toBe(200 * M);
-  expect(after.balance.creditsMicros).toBe(-5 * M);
+  expect(after.balance.creditsMicros).toBe(-25 * M);
   expect(
     (await getSpendableCreditBalance(client.db, accountId, undefined, undefined, undefined, "api"))
       .balanceMicros,
@@ -146,14 +150,14 @@ test("API usage spends credits only and never the plan allowance; runtime postur
     idempotencyKey: crypto.randomUUID(),
   });
   expect(app.balance.plan?.creditRemainingMicros).toBe(190 * M);
-  expect(app.balance.creditsMicros).toBe(-5 * M);
+  expect(app.balance.creditsMicros).toBe(-25 * M);
 
   const origins = await shared.admin`
     select usage_origin, -amount_micros as amount from credit_ledger_entries
     where account_id = ${accountId}::uuid and type = 'model_usage_debit'
     order by created_at, id`;
   expect(origins.map((row) => [row.usage_origin, Number(row.amount)])).toEqual([
-    ["api", 30 * M],
+    ["api", 50 * M],
     ["api", 5 * M],
     ["app", 10 * M],
   ]);
@@ -185,16 +189,21 @@ test("API usage never spends scoped promotional credit", async () => {
     (await getSpendableCreditBalance(client.db, accountId, "model-a", undefined, undefined, "api"))
       .balanceMicros,
   ).toBe(0);
-  const refused = await applyCreditDebitUpToBalance(client.db, {
+  // Charged in full from credits, which go negative; the grant is untouched.
+  const charged = await applyCreditDebitAfterUse(client.db, {
     accountId,
     type: "model_usage_debit",
-    requestedAmountMicros: 5 * M,
-    modelId: "model-a",
+    amountMicros: 5 * M,
+    sourceType: "model_response",
+    sourceId: crypto.randomUUID(),
+    usage: "model-a",
     idempotencyKey: crypto.randomUUID(),
     usageOrigin: "api",
   });
-  expect(refused.debitedMicros).toBe(0);
-  expect(refused.balance.promotionalCredits?.find((g) => !g.planCredit)?.remainingMicros).toBe(
+  expect(charged.debitedMicros).toBe(5 * M);
+  expect(charged.grantDebitedMicros).toBe(0);
+  expect(charged.balance.creditsMicros).toBe(-5 * M);
+  expect(charged.balance.promotionalCredits?.find((g) => !g.planCredit)?.remainingMicros).toBe(
     40 * M,
   );
 }, 180_000);

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import { useMemo } from "react";
 import type { VideoArtifactPlaybackLoader } from "../timeline";
 import { useOpenGeni, type ClientOverride } from "../session-context";
@@ -9,7 +10,7 @@ import { useOpenGeni, type ClientOverride } from "../session-context";
  * any video bytes through React.
  */
 export function useVideoArtifactPlaybackLoader(
-  options: ClientOverride = {},
+  options: ClientOverride<ChatClient> = {},
 ): VideoArtifactPlaybackLoader {
   const { client, workspaceId } = useOpenGeni(options);
   return useMemo(

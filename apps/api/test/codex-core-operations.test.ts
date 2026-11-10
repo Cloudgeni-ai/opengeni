@@ -253,6 +253,8 @@ describe("Codex transcription on the shared core", () => {
   });
 });
 
+const RTC_ANSWER = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
+
 describe("Codex realtime on the shared core", () => {
   function realtimeFixture() {
     mock("readSubscriptionCoreSessionOwner", async () => ({ ownerSubjectId: "user:owner" }));
@@ -359,5 +361,94 @@ describe("Codex realtime on the shared core", () => {
       connectionId: VOICE,
     });
     expect(released.mock.calls).toHaveLength(1);
+  });
+  test("moves on to the next connection when the provider refuses one account's realtime", async () => {
+    mock("readSubscriptionCoreSessionOwner", async () => ({ ownerSubjectId: "user:owner" }));
+    // VOICELESS still records a plan with voice (the plan lapsed since).
+    mock("listSubscriptionCoreCodexOperationCandidates", async () => [
+      { connectionId: VOICELESS, planType: "pro", explicit: false },
+      { connectionId: VOICE, planType: "pro", explicit: false },
+    ]);
+    const { acquired, released } = coreLease();
+    mock("getActiveSessionHistoryItems", async () => []);
+    mock("getSessionRealtimeContinuityEntries", async () => []);
+    let callCreations = 0;
+    const refusals: CodexRealtimeBrokerError[] = [];
+    const broker = buildSessionCodexRealtimeBroker(
+      db,
+      settings,
+      { accountId: ACCOUNT, workspaceId: WS, sessionId: SESSION },
+      async (url) => {
+        if (String(url).includes("statsig")) return Response.json({});
+        callCreations += 1;
+        if (callCreations === 1) {
+          return Response.json({ detail: "Not Found" }, { status: 404 });
+        }
+        return new Response(RTC_ANSWER, {
+          status: 201,
+          headers: { location: "/realtime/calls/rtc_fake" },
+        });
+      },
+      { onConnectionRefused: (error) => refusals.push(error) },
+    );
+    expect(
+      await broker({
+        request: { sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n", version: "v3" },
+      }),
+    ).toMatchObject({ sdp: RTC_ANSWER, version: "v3" });
+    expect(callCreations).toBe(2);
+    expect(
+      acquired.mock.calls.map((call) => (call[2] as { connectionId: string }).connectionId),
+    ).toEqual([VOICELESS, VOICE]);
+    expect(released.mock.calls).toHaveLength(2);
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]).toMatchObject({ reason: "incompatible", providerStatus: 404 });
+    expect(refusals[0]!.providerCause?.diagnostics).toMatchObject({
+      stage: "call",
+      providerErrorCode: "Not Found",
+    });
+  });
+
+  test("reports the last refusal when every connection refuses, and stops on other failures", async () => {
+    mock("readSubscriptionCoreSessionOwner", async () => ({ ownerSubjectId: "user:owner" }));
+    mock("listSubscriptionCoreCodexOperationCandidates", async () => [
+      { connectionId: VOICELESS, planType: "pro", explicit: false },
+      { connectionId: VOICE, planType: "pro", explicit: false },
+    ]);
+    const { acquired } = coreLease();
+    mock("getActiveSessionHistoryItems", async () => []);
+    mock("getSessionRealtimeContinuityEntries", async () => []);
+    const statuses = [404, 403];
+    const refusedEverywhere = buildSessionCodexRealtimeBroker(
+      db,
+      settings,
+      { accountId: ACCOUNT, workspaceId: WS, sessionId: SESSION },
+      async (url) => {
+        if (String(url).includes("statsig")) return Response.json({});
+        return Response.json({}, { status: statuses.shift()! });
+      },
+    );
+    const rtcOffer = { sdp: RTC_ANSWER, version: "v3" as const };
+    await expect(refusedEverywhere({ request: rtcOffer })).rejects.toMatchObject({
+      reason: "entitlement_denied",
+      providerStatus: 403,
+    });
+    expect(acquired.mock.calls).toHaveLength(2);
+
+    let callCreations = 0;
+    const rateLimited = buildSessionCodexRealtimeBroker(
+      db,
+      settings,
+      { accountId: ACCOUNT, workspaceId: WS, sessionId: SESSION },
+      async (url) => {
+        if (String(url).includes("statsig")) return Response.json({});
+        callCreations += 1;
+        return Response.json({}, { status: 429 });
+      },
+    );
+    await expect(rateLimited({ request: rtcOffer })).rejects.toMatchObject({
+      reason: "rate_limited",
+    });
+    expect(callCreations).toBe(1);
   });
 });

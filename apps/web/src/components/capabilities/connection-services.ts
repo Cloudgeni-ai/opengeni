@@ -1,6 +1,59 @@
-import type { ConnectionCatalogService } from "@opengeni/react/connect";
+import {
+  attentionFirst,
+  connectionOptionNeedsAttention,
+  type ConnectionCatalogService,
+} from "@opengeni/react/connect";
 import { capabilityCuration } from "@opengeni/react/app/lib/capabilities";
 import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
+
+/**
+ * One row per provider. A provider with several options becomes a single row
+ * that opens its own page; that row needs attention when any option does.
+ */
+export function collapseConnectionService(
+  service: ConnectionCatalogService,
+  row: { description?: string | undefined; onOpen: () => void },
+): ConnectionCatalogService {
+  if (service.options.length < 2) return service;
+  const attention = service.options.find(connectionOptionNeedsAttention);
+  const working = service.options.some((option) => option.state === "loading");
+  const connected = service.options.some((option) => option.connected);
+  return {
+    ...service,
+    options: [
+      {
+        id: service.id,
+        name: service.name,
+        description: row.description,
+        status: attention?.status ?? (connected ? "Connected" : "Not connected"),
+        state: attention
+          ? ("attention" as const)
+          : working
+            ? ("loading" as const)
+            : connected
+              ? ("added" as const)
+              : ("available" as const),
+        connected,
+        onOpen: row.onOpen,
+      },
+    ],
+  };
+}
+
+/**
+ * The Connected section: everything connected or needing attention, with
+ * anything that needs attention first so neither the short preview nor the
+ * full list hides a problem further down.
+ */
+export function connectedConnectionServices(
+  services: readonly ConnectionCatalogService[],
+): ConnectionCatalogService[] {
+  return attentionFirst(
+    services.filter((service) =>
+      service.options.some((option) => option.connected || connectionOptionNeedsAttention(option)),
+    ),
+  );
+}
 
 /** Partition already-grouped services in the same order shown on the page. */
 export function partitionConnectionServices(

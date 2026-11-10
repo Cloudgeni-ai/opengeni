@@ -1,7 +1,20 @@
 import { ClaudeSubscriptionReconnectRequired } from "@opengeni/db";
+import type { ProviderAccountRefusal } from "@opengeni/observability";
 import { DrizzleQueryError } from "drizzle-orm";
 import { SandboxCapabilitiesChangedError } from "./provider-dispatch-barrier";
-import { SandboxSetupAgentUnavailableError } from "./sandbox-setup-agent-failure";
+import { findPersonalMachineAccessRequiredError } from "./machine-access";
+import {
+  isSandboxProcessStartFailure,
+  SANDBOX_MACHINE_RESTARTING_CODE,
+  SANDBOX_PROCESS_START_FAILED_CODE,
+  SandboxBoxNotSavedError,
+  SandboxMachineBackError,
+  SandboxMachineReplacingError,
+  SandboxMachineRestartingError,
+  SandboxProcessStartFailedError,
+  sanitizeSandboxProcessStartMessage,
+  SandboxSetupAgentUnavailableError,
+} from "./sandbox-setup-agent-failure";
 import { heldSessionUsageReceiptsForTurn } from "./session-usage-custody";
 import {
   ActiveSessionHistoryLimitExceededError,
@@ -16,12 +29,16 @@ import {
   SandboxLeaseTransitionError,
   KnowledgeLearningScopeChangedError,
   nestedErrorRecords,
+  nestedPostgresMessage,
+  isPersonalMachineAccessRefusal,
+  type SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
   ActiveBackendUnresolvableError,
   AnthropicProviderRejection,
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
+  classifyProviderAccountRefusalError,
   compactionProviderRejection,
   describeCompactionProviderRejection,
   type CompactionProviderRejection,
@@ -50,6 +67,7 @@ import {
   providerQuotaExhaustedMessage,
   SelfhostedWorkspaceRootChangedError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
+  IncompleteChatCompletionError,
   AnthropicRequestError,
   findAnthropicRequestSizeError,
   AnthropicSizeRecoveryExhaustedError,
@@ -96,11 +114,13 @@ import {
   findCodexCreditPolicyError,
 } from "./codex-credit-policy";
 import {
+  classifyXaiSubscriptionClientOutdatedError,
   classifyXaiSubscriptionStreamingTerminalError,
   classifyXaiSubscriptionStreamIdleTimeoutError,
   isXaiSubscriptionHostedToolContinuationError,
   isXaiSubscriptionRateLimitDiagnostic,
   isXaiSubscriptionTransportError,
+  XAI_SUBSCRIPTION_CLIENT_OUTDATED_CODE,
   XaiSubscriptionReloginRequired,
 } from "@opengeni/xai-subscription";
 import type {
@@ -304,6 +324,7 @@ export function providerRecoveryResult(input: {
               input.failureCode === "provider_unavailable" ||
               input.failureCode === "upstream_connectivity_unavailable" ||
               input.failureCode === "sandbox_command_start_unavailable" ||
+              input.failureCode === SANDBOX_MACHINE_RESTARTING_CODE ||
               input.failureCode === SANDBOX_SERVICE_UNAVAILABLE_CODE ||
               input.failureCode === RETAINED_ATTACHMENT_UNAVAILABLE_CODE ||
               input.failureCode === "mcp_transport_timeout" ||
@@ -558,24 +579,154 @@ export function providerRetryAfterMs(error: unknown, nowMs = Date.now()): number
 }
 
 /**
- * Tell the model when durable MCP policy references are unavailable for this
- * exact turn. The policy projection already bounds and validates these ids;
- * this notice prevents a graceful runtime drop from becoming a silent source-
- * of-truth substitution or a false claim that the disconnected system was read.
+ * Why a connector configured for this turn has no tools in it:
+ * - `not_available`: it is not in this turn's registry (disconnected, turned
+ *   off, removed, or not available to this turn in this workspace).
+ * - `no_account`: it needs a signed-in account and none was accepted with the
+ *   turn (not signed in, sign-in expired or removed, or the sign-in was not
+ *   usable in this workspace when the message was accepted).
+ * - `account_setup_changed`: the accepted accounts no longer fit its setup.
+ * - `unsupported_sign_in`: it uses a sign-in method that is no longer supported.
+ */
+export type UnavailableMcpConnectorReason =
+  | "not_available"
+  | "no_account"
+  | "account_setup_changed"
+  | "unsupported_sign_in";
+
+export type UnavailableMcpConnector = {
+  id: string;
+  name?: string | undefined;
+  reason: UnavailableMcpConnectorReason;
+};
+
+/**
+ * A connector's account that was connected but stopped working: its provider
+ * rejected the saved sign-in, so nothing can use it until it is reconnected.
+ */
+export type McpConnectorAccountNeedingReconnect = {
+  /** The connector it belongs to, as configured for this chat. */
+  connector: { id: string; name?: string | undefined };
+  account: string;
+  ownership: "personal" | "workspace";
+  /** The day it stopped working, YYYY-MM-DD. */
+  stoppedWorkingOn: string;
+  /** Added in this workspace, so a card in this chat can reconnect it. */
+  reconnectHere: boolean;
+};
+
+/** Connectors listed by name in the notice; the rest are counted. */
+const UNAVAILABLE_MCP_NOTICE_MAX_LISTED = 8;
+const UNAVAILABLE_MCP_NAME_MAX_CHARS = 80;
+
+/**
+ * The plain reason, and what the person can do. Shared by the turn notice and
+ * by tool discovery's `unavailableSources`, so both say the same thing.
+ */
+export function unavailableMcpConnectorReasonText(reason: UnavailableMcpConnectorReason): string {
+  switch (reason) {
+    case "no_account":
+      return "no signed-in account for it was available to this turn. The person may not be signed in to it here, their sign-in may have expired or been removed, or their sign-in was not usable in this workspace yet when the message was sent (this can last a few minutes after their workspace access changes). They can sign in to it again, or send the message again shortly if their access just changed.";
+    case "account_setup_changed":
+      return "its account setup changed after the message was sent, so the account accepted for it no longer fits. Sending the message again uses the current setup.";
+    case "unsupported_sign_in":
+      return "it uses a sign-in method that is no longer supported. It needs to be connected again.";
+    case "not_available":
+      return "it is disconnected, turned off, or no longer available to this chat in this workspace. Whoever manages this workspace's connectors can reconnect it or turn it back on.";
+  }
+}
+
+function displayConnector(connector: UnavailableMcpConnector): string {
+  // Workspace-configured text: one bounded line, never instructions.
+  const name = (connector.name ?? "")
+    // oxlint-disable-next-line no-control-regex -- strip control characters
+    .replace(/[\u0000-\u001f\u007f\u2028\u2029]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, UNAVAILABLE_MCP_NAME_MAX_CHARS);
+  return name && name !== connector.id
+    ? `${JSON.stringify(name)} (${connector.id})`
+    : JSON.stringify(connector.id);
+}
+
+/**
+ * Tell the model which connectors configured for this exact turn have no tools
+ * in it, and why, so a missing connector never looks like a connector that has
+ * no such tool and the model never has to guess the cause. Every path that
+ * drops a configured connector before the runtime feeds this one notice: the
+ * tool policy (not in this turn's registry) and account-route expansion (no
+ * usable accepted account). Runtime connect and list failures are reported by
+ * tool discovery as they happen. The notice is part of this turn's own input
+ * and never changes earlier text.
  */
 export function unavailableMcpOperationalContext(input: {
-  droppedIds: readonly string[];
-  droppedCount: number;
+  connectors: readonly UnavailableMcpConnector[];
+  /** Further unavailable connectors the bounded policy projection did not name. */
+  omittedCount?: number;
+  /** Accounts of this chat's connectors that stopped working and need reconnecting. */
+  needsReconnect?: readonly McpConnectorAccountNeedingReconnect[];
 }): string | undefined {
-  if (input.droppedCount <= 0) {
-    return undefined;
+  const unavailable = unavailableMcpConnectorsNotice(input);
+  const reconnect = mcpAccountsNeedingReconnectNotice(input.needsReconnect ?? []);
+  return unavailable && reconnect ? `${unavailable}\n${reconnect}` : (unavailable ?? reconnect);
+}
+
+/**
+ * Name each account of this chat's connectors that stopped working, with the
+ * day, so the model can tell the person what happened instead of offering a
+ * first-time Connect, and knows the card that reconnects that same account.
+ */
+function mcpAccountsNeedingReconnectNotice(
+  accounts: readonly McpConnectorAccountNeedingReconnect[],
+): string | undefined {
+  if (accounts.length === 0) return undefined;
+  const listed = accounts.slice(0, UNAVAILABLE_MCP_NOTICE_MAX_LISTED);
+  const more = accounts.length - listed.length;
+  const lines = listed.map((account) => {
+    const owner = account.ownership === "personal" ? "the person's account" : "the shared account";
+    // Provider-supplied text: one bounded line, never instructions.
+    // oxlint-disable-next-line no-control-regex -- strip control characters
+    const clean = account.account.replace(/[\u0000-\u001f\u007f\u2028\u2029]+/gu, " ");
+    const label = JSON.stringify(clean.trim().slice(0, 180));
+    return `- ${displayConnector({ ...account.connector, reason: "no_account" })}: ${owner} ${label} stopped working on ${account.stoppedWorkingOn}.${
+      account.reconnectHere
+        ? ""
+        : " It was added in another workspace, so the person reconnects it from Connections there."
+    }`;
+  });
+  if (more > 0) lines.push(`- ${more} more account${more === 1 ? "" : "s"} stopped working too.`);
+  return [
+    "Accounts that need reconnecting: these accounts were connected for this chat's connectors but stopped working (their sign-in expired or was revoked), so their tools cannot use them until they are reconnected.",
+    ...lines,
+    "When the person's request needs one of these accounts, tell them plainly that it was connected and stopped working, and when. To offer the fix, capability_catalog_search lists it under setup.reconnect and capability_authorization_request posts a card that reconnects that same account; a new Connect cannot replace it.",
+  ].join("\n");
+}
+
+function unavailableMcpConnectorsNotice(input: {
+  connectors: readonly UnavailableMcpConnector[];
+  omittedCount?: number;
+}): string | undefined {
+  const omitted = Math.max(0, input.omittedCount ?? 0);
+  const unique = [
+    ...new Map(input.connectors.map((connector) => [connector.id, connector])).values(),
+  ].sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+  if (unique.length === 0 && omitted === 0) return undefined;
+  const listed = unique.slice(0, UNAVAILABLE_MCP_NOTICE_MAX_LISTED);
+  const more = unique.length - listed.length + omitted;
+  const lines = listed.map(
+    (connector) =>
+      `- ${displayConnector(connector)}: ${unavailableMcpConnectorReasonText(connector.reason)}`,
+  );
+  if (more > 0) {
+    lines.push(
+      `- ${more} more connector${more === 1 ? " is" : "s are"} unavailable for the same kinds of reasons.`,
+    );
   }
-  const omittedCount = Math.max(0, input.droppedCount - input.droppedIds.length);
-  const listed = input.droppedIds.map((id) => `"${id}"`).join(", ");
-  const inventory = listed
-    ? `${listed}${omittedCount > 0 ? `, plus ${omittedCount} additional unavailable server(s)` : ""}`
-    : `${input.droppedCount} unavailable server(s)`;
-  return `MCP capability availability for this turn: the following session-selected server(s) are disconnected or no longer registered and were skipped: ${inventory}. Do not claim to have read or updated those systems. If the task depends on one as a source of truth, explain the limitation and ask the user to reconnect it or select another authoritative source; continue with unaffected work only when safe.`;
+  return [
+    "Connector availability for this turn: these connectors are configured for this chat, but their tools were not loaded this turn, so tool search and tool lists do not show them.",
+    ...lines,
+    "When the person's request needs one of them, tell them which connector is unavailable and why, using only the reason given here; do not guess another cause or claim to have read or updated that system. Continue with unaffected work only when safe.",
+  ].join("\n");
 }
 
 /**
@@ -612,6 +763,31 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
   });
 }
 
+const MEMBERSHIP_CLAIM_REFUSALS = new Set(["initiating human lacks target-workspace membership"]);
+
+/**
+ * Name the condition that blocked a claim, so the chat can say what fixes it
+ * and start the saved message by itself once it is fixed. A personal machine
+ * refused for lack of approval is machine access whatever SQLSTATE carried it.
+ */
+function preClaimBlockReason(
+  failure: SessionEventPersistenceError,
+):
+  | "initiator_membership_required"
+  | "personal_resource_grant_required"
+  | "database_claim_rejected" {
+  const sqlState = failure.details.sqlState;
+  if (sqlState === "OG001") return "initiator_membership_required";
+  if (sqlState === "OG002" || isPersonalMachineAccessRefusal(failure)) {
+    return "personal_resource_grant_required";
+  }
+  if (sqlState === "42501") {
+    const message = nestedPostgresMessage(failure);
+    if (message && MEMBERSHIP_CLAIM_REFUSALS.has(message)) return "initiator_membership_required";
+  }
+  return "database_claim_rejected";
+}
+
 /**
  * Convert the atomic claim transaction's failure into a small, stable
  * Temporal wire contract. The original error remains in activity diagnostics,
@@ -637,14 +813,7 @@ export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
     ...(persistenceFailure && rejectedClaim
       ? {
           sqlState: persistenceFailure.details.sqlState,
-          reason:
-            persistenceFailure.details.stage === "session_attempts.claim" &&
-            persistenceFailure.details.sqlState === "OG001"
-              ? ("initiator_membership_required" as const)
-              : persistenceFailure.details.stage === "session_attempts.claim" &&
-                  persistenceFailure.details.sqlState === "OG002"
-                ? ("personal_resource_grant_required" as const)
-                : ("database_claim_rejected" as const),
+          reason: preClaimBlockReason(persistenceFailure),
           retryPolicy: "explicit_recheck" as const,
         }
       : {}),
@@ -1244,6 +1413,17 @@ export function safeErrorForTelemetry(error: unknown): Error {
 export const COMPACTION_PROVIDER_REJECTION_GUIDANCE =
   "The provider refused this exact request, so repeating it fails the same way until the conversation changes. If a new message fails again, start a new session.";
 
+/**
+ * The provider's own error message for a failed compaction request, bounded
+ * at capture. It is recorded only in the structured `providerMessage` field
+ * of the session's own events (readable by the same people as the
+ * conversation), never in the free-text `error`, which is also copied into
+ * workspace activity for automations, and never logged.
+ */
+export function compactionFailureProviderMessage(error: unknown): string | null {
+  return error instanceof CompactionProviderResponseError ? error.providerMessage : null;
+}
+
 export function compactionFailureReasonFromError(error: unknown): string {
   const rejection = compactionProviderRejection(error);
   if (rejection) {
@@ -1285,12 +1465,16 @@ export function compactionFailureTurnEventPayload(
   recovery: "user_message";
   compacted: false;
   providerRejection?: CompactionProviderRejection;
+  providerMessage?: string;
   quotaScope?: ProviderQuotaScope;
+  providerAccountRefusal?: ProviderAccountRefusal;
 } {
   const rejection = compactionProviderRejection(error);
   // The same closed marker as a `provider_quota_exhausted` turn failure, so
   // clients can name the exhausted limit and offer another model here too.
   const quota = rejection ? null : classifyProviderQuotaExhaustionError(error);
+  const accountRefusal = rejection ? null : chatModelProviderAccountRefusal(error);
+  const providerMessage = compactionFailureProviderMessage(error);
   return {
     error: overrides.error ?? compactionFailureReasonFromError(error),
     code: "context_compaction_failed",
@@ -1298,8 +1482,38 @@ export function compactionFailureTurnEventPayload(
     recovery: "user_message",
     compacted: false,
     ...(rejection ? { providerRejection: rejection } : {}),
+    ...(providerMessage ? { providerMessage } : {}),
     ...(quota ? { quotaScope: quota.scope } : {}),
+    ...(accountRefusal ? { providerAccountRefusal: accountRefusal } : {}),
   };
+}
+
+/**
+ * The chat model provider's own account refused the request (see
+ * `classifyProviderAccountRefusal`). A function tool's provider and the
+ * subscription transports, which own their account semantics, never count.
+ * Operational attribution only: it changes no retry, copy or recovery.
+ */
+function chatModelProviderAccountRefusal(error: unknown): ProviderAccountRefusal | null {
+  if (
+    isCodexTransportError(error) ||
+    isXaiSubscriptionTransportError(error) ||
+    isClaudeSubscriptionTransportError(error) ||
+    isFunctionToolProviderFailure(error)
+  ) {
+    return null;
+  }
+  return classifyProviderAccountRefusalError(error);
+}
+
+/** Mark a terminal failure with the closed provider-account refusal, if any. */
+function withProviderAccountRefusal(
+  error: unknown,
+  failure: ReturnType<typeof baseAgentRunFailurePayload>,
+): ReturnType<typeof baseAgentRunFailurePayload> {
+  if (failure.retryable === true) return failure;
+  const refusal = chatModelProviderAccountRefusal(error);
+  return refusal ? { ...failure, providerAccountRefusal: refusal } : failure;
 }
 
 export function isCompactionSummaryFailure(error: unknown): boolean {
@@ -1616,7 +1830,11 @@ export function isTransientProviderError(error: unknown): boolean {
   if (isExactStatuslessUpstreamConnectivityMessage(message)) {
     return true;
   }
-  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
+  // A statusless error is typically a provider error event in the middle of a
+  // streamed response. One that tells the caller to retry (for example an
+  // OpenAI-compatible server that produced a malformed tool call) is a bad
+  // generation, not a request fault.
+  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout|\bplease (?:retry|try again)\b/i.test(
     message,
   );
 }
@@ -1757,6 +1975,72 @@ function sandboxSetupAgentUnavailableFailure(
   };
 }
 
+/**
+ * The sandbox could not start programs (see SandboxMachineRestartingError and
+ * SandboxProcessStartFailedError). A restarted box retries the same turn; any
+ * other process-start failure, typed or only marked in a wrapper's text, stops
+ * the turn with short copy, never the agent's raw message or command text.
+ */
+function sandboxProcessStartFailure(
+  error: unknown,
+): ReturnType<typeof baseAgentRunFailurePayload> | null {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  const notSaved = nodes.find((node) => node instanceof SandboxBoxNotSavedError);
+  if (notSaved instanceof SandboxBoxNotSavedError) {
+    return { error: notSaved.message, code: SANDBOX_PROCESS_START_FAILED_CODE, retryable: false };
+  }
+  const back = nodes.find((node) => node instanceof SandboxMachineBackError);
+  if (back instanceof SandboxMachineBackError) {
+    const { uncertain } = uncertainMutationOutcome(graph, nodes);
+    if (uncertain === undefined) {
+      // The box was not restarted: an ordinary sandbox wait, not a restart.
+      return { error: back.message, code: "sandbox_command_start_unavailable", retryable: true };
+    }
+  }
+  const restarting = nodes.find((node) => node instanceof SandboxMachineRestartingError);
+  if (restarting instanceof SandboxMachineRestartingError) {
+    const { uncertain } = uncertainMutationOutcome(graph, nodes);
+    if (uncertain === undefined) {
+      return {
+        error: restarting.message,
+        code: SANDBOX_MACHINE_RESTARTING_CODE,
+        retryable: true,
+      };
+    }
+  }
+  const failed = nodes.find((node) => node instanceof SandboxProcessStartFailedError);
+  if (failed instanceof SandboxProcessStartFailedError) {
+    return {
+      error: failed.message,
+      code: SANDBOX_PROCESS_START_FAILED_CODE,
+      retryable: false,
+      detail: failed.detail,
+    };
+  }
+  if (restarting || back || isSandboxProcessStartFailure(error)) {
+    return {
+      error:
+        "The workspace machine can't start programs, so this turn stopped. Retry in a moment, or start a new chat if it keeps failing.",
+      code: SANDBOX_PROCESS_START_FAILED_CODE,
+      retryable: false,
+      detail: sanitizeSandboxProcessStartMessage(errorMessage(error)).slice(0, 2_000),
+    };
+  }
+  return null;
+}
+
+/**
+ * The failure is the attempt that asked to replace its Modal box (see
+ * SandboxMachineReplacingError), as opposed to a later attempt the same
+ * rotation fenced.
+ */
+export function isSandboxMachineReplacing(error: unknown): boolean {
+  const graph = structuredRecoveryCauseGraph(error);
+  const nodes = graph ? [...graph.keys()] : [error];
+  return nodes.some((node) => node instanceof SandboxMachineReplacingError);
+}
+
 const SANDBOX_FAILURE_SUBJECT = {
   [SANDBOX_CAPACITY_UNAVAILABLE_CODE]: "No sandbox capacity is available right now",
   [SANDBOX_SERVICE_UNAVAILABLE_CODE]: "The sandbox service is temporarily unavailable",
@@ -1834,6 +2118,9 @@ export function isClaudeSubscriptionTransportError(error: unknown): boolean {
  */
 export function classifyXaiProviderError(error: unknown): ProviderErrorOutcome | null {
   if (isProviderSafetyRefusal(error)) return null;
+  // An outdated Opengeni client is a platform release fault, not the
+  // account's: it must never mark the account unauthorized or forbidden.
+  if (classifyXaiSubscriptionClientOutdatedError(error)) return null;
   let relogin: unknown = error;
   for (let depth = 0; depth < 6 && relogin && typeof relogin === "object"; depth += 1) {
     if (relogin instanceof XaiSubscriptionReloginRequired) {
@@ -1913,11 +2200,14 @@ export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
 ): ReturnType<typeof baseAgentRunFailurePayload> {
-  return withProviderCondition(
+  return withProviderAccountRefusal(
     error,
-    withSandboxProviderAttribution(
+    withProviderCondition(
       error,
-      withProviderWebPageExplained(classifyAgentRunFailurePayload(error, options)),
+      withSandboxProviderAttribution(
+        error,
+        withProviderWebPageExplained(classifyAgentRunFailurePayload(error, options)),
+      ),
     ),
   );
 }
@@ -2072,6 +2362,13 @@ function classifyAgentRunFailurePayload(
       retryable: false,
     };
   }
+  // The chat's personal machine isn't allowed for this turn. Its cause is the
+  // database's refusal, which is not a database fault: the machine's owner
+  // allows it again, and retrying without that gives the same answer.
+  const machineAccess = findPersonalMachineAccessRequiredError(error);
+  if (machineAccess) {
+    return { error: machineAccess.message, code: machineAccess.code, retryable: false };
+  }
   // A checkpoint (compaction) request only summarizes history: it runs no
   // tools and its output is discarded unless it completes. A stream that ended
   // without a terminal event or timed out is therefore safe to send again,
@@ -2191,6 +2488,8 @@ function baseAgentRunFailurePayload(
   materializationDiagnostic?: MaterializationVerificationDiagnostic;
   requestSize?: AnthropicRequestSize;
   quotaScope?: ProviderQuotaScope;
+  /** Closed provider-account refusal for operational attribution; never changes retries or copy. */
+  providerAccountRefusal?: ProviderAccountRefusal;
   /** Closed Codex plan key on `codex_plan_entitlement` / `codex_request_rejected`. */
   planType?: string | null;
   /** Product model id a `codex_plan_entitlement` or model-provider recovery failure refers to. */
@@ -2268,6 +2567,8 @@ function baseAgentRunFailurePayload(
   if (sandboxService) return sandboxServiceFailurePayload(sandboxService);
   const setupAgentUnavailable = sandboxSetupAgentUnavailableFailure(error);
   if (setupAgentUnavailable) return setupAgentUnavailable;
+  const processStart = sandboxProcessStartFailure(error);
+  if (processStart) return processStart;
   if (error instanceof AnthropicSizeRecoveryExhaustedError) {
     return { error: error.message, code: error.code, retryable: false };
   }
@@ -2403,6 +2704,14 @@ function baseAgentRunFailurePayload(
       error:
         "SuperGrok stopped responding after its hosted search completed. Partial output was preserved.",
       code: "xai_hosted_tool_continuation_stalled",
+      retryable: false,
+    };
+  }
+  const xaiClientOutdated = classifyXaiSubscriptionClientOutdatedError(error);
+  if (xaiClientOutdated) {
+    return {
+      error: xaiClientOutdated.message,
+      code: XAI_SUBSCRIPTION_CLIENT_OUTDATED_CODE,
       retryable: false,
     };
   }
@@ -2567,6 +2876,11 @@ function baseAgentRunFailurePayload(
       timeoutClass: "transport",
       detail: message,
     };
+  }
+  if (error instanceof IncompleteChatCompletionError) {
+    // No terminal evidence means upstream work may already have happened.
+    // Stop without executing the partial tools or authorizing another request.
+    return { error: error.message, code: error.code, retryable: false };
   }
   if (code === UNKNOWN_MODEL_FINISH_REASON_CODE) {
     return {

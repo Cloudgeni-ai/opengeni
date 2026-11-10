@@ -6,7 +6,16 @@ import {
   type PersonalWorkspaceExtensionMcpServer,
 } from "./personal-workspace-connectors";
 import { personalWorkspaceOwnerOriginConnections } from "./personal-connection-delegations";
-import { isIntegrationDefinitionEnabled, type IntegrationDefinition } from "@opengeni/capabilities";
+import type { ConnectionAccountReads } from "./connection-account-reads";
+import {
+  integrationMentionMatcher,
+  integrationNamesAgree,
+  isDistinctiveIntegrationMention,
+  isIntegrationDefinitionEnabled,
+  registrableHostDomain,
+  sharedVendorDomains,
+  type IntegrationDefinition,
+} from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
 import {
@@ -192,10 +201,11 @@ export async function buildCapabilityCatalog(input: {
   );
   const builtIns = [
     ...configuredMcpCatalogItems(input.settings),
-    ...providerIntegrationCatalogItems(socialConnections),
-    fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
-    onePasswordCatalogItem(workspaceConnections.filter(isOnePasswordConnection)),
-    excelAddinCatalogItem(excelAddin(input.settings)),
+    ...builtInConnectorCatalogItems({
+      settings: input.settings,
+      socialConnections,
+      workspaceConnections,
+    }),
     ...curatedLibrarySkills.filter((item) => installedSkillById.has(item.id)),
     ...installedSkills
       .filter(
@@ -322,7 +332,9 @@ function withOrganizationConnectorItems(
     const detail = turnedOff
       ? "From your organization. Turned off in this workspace."
       : ready
-        ? "From your organization"
+        ? login === "auto_connect"
+          ? "From your organization. Connects you automatically the first time you use it."
+          : "From your organization"
         : "Your organization's setup of this connector is unavailable. Ask an organization admin to review it.";
     const projected: CapabilityCatalogItem = {
       ...base,
@@ -454,9 +466,23 @@ export function applyOperatorOAuthClientRequirement(
       ? (requirement as Record<string, unknown>).issuer
       : undefined;
   if (typeof issuer !== "string" || !issuer) return item;
+  const isConfigured = configured(issuer);
+  // An installed row keeps its own status note; the setup note is for rows
+  // that are not on yet.
+  if (isConfigured || item.enabled) {
+    return {
+      ...item,
+      runtime: { ...item.runtime, operatorOAuthClient: { configured: isConfigured } },
+    };
+  }
   return {
     ...item,
-    runtime: { ...item.runtime, operatorOAuthClient: { configured: configured(issuer) } },
+    runtime: {
+      ...item.runtime,
+      operatorOAuthClient: { configured: false },
+      notes:
+        "New connections are unavailable until this deployment registers an OAuth client with the provider.",
+    },
   };
 }
 
@@ -979,7 +1005,9 @@ function isOwnSignInToOrganizationConnector(
   ref: NonNullable<EnableCapabilityRequest["connectionRef"]>,
   connector: OrganizationConnectorRow,
 ): boolean {
-  if (organizationConnectorLogin(connector.config) !== "each_person") return false;
+  const login = organizationConnectorLogin(connector.config);
+  // An auto-connect connector falls back to the same own sign-in.
+  if (login !== "each_person" && login !== "auto_connect") return false;
   const organizationRef = installationConnectionRef(connector.config);
   return (
     !!organizationRef &&
@@ -1709,6 +1737,11 @@ export async function settingsWithEnabledCapabilityMcpServers(
     oneReadAtATime?: boolean;
     /** The workspace's organization, when the caller knows it (skips a lookup). */
     accountId?: string;
+    /**
+     * One connection-account resolution's shared reads, when `db` is that
+     * resolution's transaction (see `ConnectionAccountReads`).
+     */
+    connectionAccountReads?: ConnectionAccountReads;
   },
 ): Promise<Settings> {
   const readApiIntegrations = () =>
@@ -1755,11 +1788,11 @@ export async function settingsWithEnabledCapabilityMcpServers(
         ? options.codexApps.accountId
         : undefined) ??
       (await rlsContextForWorkspace(db, workspaceId)).accountId;
-    const origins = await personalWorkspaceOwnerOriginConnections(db, {
-      accountId,
-      workspaceId,
-      subjectId: extensionSubject,
-    });
+    const origins = await personalWorkspaceOwnerOriginConnections(
+      db,
+      { accountId, workspaceId, subjectId: extensionSubject },
+      options?.connectionAccountReads,
+    );
     if (origins.length > 0) {
       enabled = [
         ...enabled,
@@ -2438,6 +2471,26 @@ const SOCIAL_PROVIDER_TOOL_NAMES = {
 } as const;
 
 /**
+ * Opengeni's own connector rows. No registry import supplies them, so each
+ * needs a mark bundled with the shared UI (see capability-logo-source); a
+ * test fails when one is added without it. Codex Apps is the other built-in
+ * connector (codexAppsCatalogItem); deployment-configured MCP servers are the
+ * operator's own and carry no known brand.
+ */
+export function builtInConnectorCatalogItems(input: {
+  settings: Parameters<typeof excelAddin>[0];
+  socialConnections: SocialConnection[];
+  workspaceConnections: ConnectionMetadata[];
+}): CapabilityCatalogItem[] {
+  return [
+    ...providerIntegrationCatalogItems(input.socialConnections),
+    fikenCatalogItem(input.workspaceConnections.filter(isFikenConnection)),
+    onePasswordCatalogItem(input.workspaceConnections.filter(isOnePasswordConnection)),
+    excelAddinCatalogItem(excelAddin(input.settings)),
+  ];
+}
+
+/**
  * The first-party Fiken accounting connector tile. Enablement is derived from
  * the workspace-shared verified Fiken connection (either lane), mirroring how
  * the social provider tiles derive theirs from social connections.
@@ -2830,7 +2883,11 @@ export function nativeConnectionCapabilityRecommendations(
       actions: ["connect", "inspect"],
       metadata: {
         endpointPath: "/v1/workspaces/{workspaceId}/github/app",
-        firstPartyMcpTools: ["github_connect_link", "github_repositories_list"],
+        firstPartyMcpTools: [
+          "github_connect_link",
+          "github_repositories_list",
+          "github_repository_attach",
+        ],
         recommendationOnly: true,
       },
     }),
@@ -3399,6 +3456,8 @@ const FUZZY_MIN_TOKEN_LENGTH = 4;
 const FUZZY_PREFIX_MIN_TOKEN_LENGTH = 5;
 const FUZZY_MAX_COMPARED_LENGTH = 48;
 const FUZZY_MAX_TOKENS = 8;
+/** Above any sum of ordinary word hits a search sentence can collect. */
+const NAMED_ENTRY_BONUS = 10_000;
 const FUZZY_FIELDS = new Set<CapabilityCatalogSearchMatch["matchedOn"][number]>([
   "name",
   "provider",
@@ -3426,6 +3485,25 @@ export function searchCapabilityCatalogItems(
   if (tokens.length === 0) return [];
   const compactPhrase = phrase.replaceAll(" ", "");
   const fuzzyTokens = tokens.slice(0, FUZZY_MAX_TOKENS);
+  const trusted = items.filter((item) => capabilityCatalogItemIsTrustedForExposure(item));
+  const providerDomains = new Map(
+    trusted.map((item) => [item, capabilityCatalogSearchProviderDomain(item)] as const),
+  );
+  // A vendor word names an entry only when its domain is one product's.
+  const mentionsOf = integrationMentionMatcher(query, {
+    sharedDomains: sharedVendorDomains(
+      trusted.map((item) => ({ name: item.name, providerDomain: providerDomains.get(item) })),
+    ),
+  });
+  // Entries the query names distinctively ("dictate this note with
+  // whisperflow"); "send a message" does not name Send.
+  const namedNames = trusted.flatMap((item) =>
+    mentionsOf({ name: item.name, providerDomain: providerDomains.get(item) }).some((mention) =>
+      isDistinctiveIntegrationMention(mention, item.name),
+    )
+      ? [item.name]
+      : [],
+  );
   const boundedLimit = Math.min(20, Math.max(1, Math.trunc(limit)));
   const weightedFields = (item: CapabilityCatalogItem) =>
     [
@@ -3437,8 +3515,7 @@ export function searchCapabilityCatalogItems(
       ["description", item.description ?? "", 15],
     ] as const;
 
-  return items
-    .filter((item) => capabilityCatalogItemIsTrustedForExposure(item))
+  return trusted
     .flatMap((item): CapabilityCatalogSearchMatch[] => {
       let score = 0;
       let approximate = true;
@@ -3491,6 +3568,14 @@ export function searchCapabilityCatalogItems(
             else if (fuzzy === "prefix") hit(field, Math.round(weight * 0.2), true);
           }
         }
+      }
+      // An entry the query names (its name, a near spelling of it or its
+      // vendor's domain word) ranks above entries that only share ordinary
+      // words with a sentence. So do entries whose names agree with a named
+      // one ("GitHub App" when "GitHub" is named), keeping their usual order.
+      if (namedNames.some((name) => integrationNamesAgree(name, item.name))) {
+        if (score === 0) matchedOn.add("name");
+        score += NAMED_ENTRY_BONUS;
       }
       if (score === 0) return [];
       if (item.enabled) score += 12;
@@ -3574,40 +3659,14 @@ export function capabilityCatalogSearchProviderDomain(item: CapabilityCatalogIte
   return null;
 }
 
-// Common two-label public suffixes. Without a full public-suffix list this
-// keeps hosts such as api.example.co.uk on example.co.uk rather than co.uk.
-const TWO_LABEL_PUBLIC_SUFFIXES = new Set([
-  "ac.uk",
-  "co.uk",
-  "gov.uk",
-  "org.uk",
-  "com.au",
-  "net.au",
-  "org.au",
-  "co.nz",
-  "co.jp",
-  "co.kr",
-  "co.in",
-  "co.za",
-  "com.br",
-  "com.cn",
-  "com.mx",
-  "com.sg",
-  "com.tr",
-]);
-
 function registrableDomain(url: string): string | null {
   let hostname: string;
   try {
-    hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+    hostname = new URL(url).hostname;
   } catch {
     return null;
   }
-  if (!hostname || hostname.includes(":") || /^\d+(\.\d+){3}$/.test(hostname)) return null;
-  const labels = hostname.split(".").filter(Boolean);
-  if (labels.length <= 2) return labels.join(".") || null;
-  const lastTwo = labels.slice(-2).join(".");
-  return TWO_LABEL_PUBLIC_SUFFIXES.has(lastTwo) ? labels.slice(-3).join(".") : lastTwo;
+  return registrableHostDomain(hostname);
 }
 
 function fuzzyEditBudget(length: number): number {

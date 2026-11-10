@@ -38,6 +38,9 @@ const legacyBrowserUnusedMethods = [
   // Shared Insights methods are adopted by the separately owned Insights UI.
   "getWorkspaceInsightsUsage",
   "getOrganizationInsightsUsage",
+  // The overloaded Insights call-list API predates this boundary too. Erasing
+  // type signatures must not mistake its overloads for runtime consumers.
+  "listInsightsCalls",
   // Keep the existing summary/workspace reads available to SDK callers after
   // Insights moved to getOrganizationModelUsage.
   "getOrganizationUsageSummary",
@@ -187,6 +190,31 @@ const retiredGoogleDriveNativeMethods = [
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
+// Organization credit alerts land as a backend/SDK slice before the separately
+// owned billing settings and inbox UI. Remove each classification when that
+// browser consumer lands; the exact equality below enforces the handoff.
+const pendingBillingAlertMethods = ["listBillingCreditNotifications"];
+
+// The Agents page has no revision history view yet; agent revisions are read
+// by SDK callers. Remove the entry when a browser consumer lands.
+const pendingAgentsMethods = ["listAgentRevisions"];
+
+// The Agents page replaced the Bot templates and Slack agents screens, so the
+// web calls the /agents methods instead. The legacy methods stay on the SDK for
+// existing callers until the contract step removes them.
+const retiredLegacyAgentScreenMethods = [
+  "createBotTemplate",
+  "createOpenGeniSlackAgent",
+  "deleteBotTemplate",
+  "deleteOpenGeniSlackAgent",
+  "getBotTemplate",
+  "listBotTemplates",
+  "listOpenGeniSlackAgentChannels",
+  "postOpenGeniSlackAgentIntro",
+  "updateBotTemplate",
+  "updateOpenGeniSlackAgent",
+];
+
 // Chat share links: the public share page reads a link without the SDK (no
 // credentials, no SDK bundle for someone without an account), and listing a
 // person's links is offered to the agent and SDK callers, not a web screen yet.
@@ -211,6 +239,9 @@ function countIdentifier(source: string, identifier: string): number {
 }
 
 function browserUnusedMethods(clientSource: string, browserSource: string): string[] {
+  // A method named in a public projection type is not a runtime call. Count
+  // references after erasing types so adding typed views cannot hide unused API.
+  const runtimeSource = new Bun.Transpiler({ loader: "ts" }).transformSync(clientSource);
   const methodNames = [
     ...clientSource.matchAll(/^  (?:async )?([A-Za-z_$][A-Za-z0-9_$]*)\(/gm),
   ].map((match) => match[1]!);
@@ -218,7 +249,7 @@ function browserUnusedMethods(clientSource: string, browserSource: string): stri
     .filter(
       (methodName) =>
         countIdentifier(browserSource, methodName) === 0 &&
-        countIdentifier(clientSource, methodName) === 1,
+        countIdentifier(runtimeSource, methodName) === 1,
     )
     .sort();
 }
@@ -273,6 +304,9 @@ describe("browser client runtime surface", () => {
         ...retiredSettingsMethods,
         ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
+        ...pendingBillingAlertMethods,
+        ...pendingAgentsMethods,
+        ...retiredLegacyAgentScreenMethods,
         ...chatShareLinkMethods,
         ...retiredDeadWebComponentMethods,
       ].sort(),
@@ -285,10 +319,16 @@ describe("browser client runtime surface", () => {
       readBrowserProductionSources(),
     ]);
     const baseline = browserUnusedMethods(clientSource, browserSource);
-    const extendedClient = `${clientSource}\n  async unclassifiedSdkMethod() {}\n`;
+    const extendedClient = `${clientSource}\nclass ExtraClient {\n  async unclassifiedSdkMethod() {}\n}\n`;
     expect(browserUnusedMethods(extendedClient, browserSource)).toEqual(
       [...baseline, "unclassifiedSdkMethod"].sort(),
     );
+    expect(
+      browserUnusedMethods(
+        `${extendedClient}\ntype Projection = Pick<ExtraClient, "unclassifiedSdkMethod">;`,
+        browserSource,
+      ),
+    ).toEqual([...baseline, "unclassifiedSdkMethod"].sort());
     expect(
       browserUnusedMethods(extendedClient, `${browserSource}\nclient.unclassifiedSdkMethod();`),
     ).toEqual(baseline);

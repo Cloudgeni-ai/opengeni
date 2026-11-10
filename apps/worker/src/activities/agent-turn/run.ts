@@ -1,14 +1,16 @@
-import { unboundGitHubRepositoryResources } from "@opengeni/core";
+import { agentPrivateFileOwnerSubjectId, unboundGitHubRepositoryResources } from "@opengeni/core";
 import {
   getSessionAuthorityProjection,
+  getSlackPrivateSessionOwnerSubjectId,
   canSpendSubscriptionCoreCodexExtraCredits,
   reserveSubscriptionCoreCodexRequest,
   settleSubscriptionCoreCodexRequest,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
   markSessionTurnModelTransportHttpOnly,
+  readSessionAgentPrompt,
 } from "@opengeni/db";
-import { routingEnabled } from "../../sandbox-routing";
+import { lazyProvisionEnabled, routingEnabled } from "../../sandbox-routing";
 import { gitTokensMintedByOpengeni } from "../../standalone-git-credentials";
 import { createAttemptVaultAccess } from "./secret-resolver";
 import { resolveAgentToolFamilies } from "@opengeni/contracts";
@@ -53,7 +55,7 @@ import { codexUpstreamModelSlugs } from "@opengeni/config";
 import { withClaudeUsageObserver, withInferenceResidency } from "@opengeni/runtime";
 import { settingsWithTurnInferenceResidency } from "./inference-residency-gate";
 import { sessionTitlePromptFor } from "./session-title";
-import { createCodexCreditGuard, assertCodexDispatchAdmission } from "./codex-credit-policy";
+import { createCodexCreditGuard } from "./codex-credit-policy";
 import { recordCoreCodexUsageReading } from "./codex-core-settlement";
 import {
   xaiSubscriptionRequestStorage,
@@ -74,6 +76,7 @@ import {
   recordModelRequestPhase,
   recordResponsesTransportDiagnostic,
   type ModelRequestTransportLabel,
+  type ModelRequestPreDispatchStage,
   recordCompanyBrainContributions,
   recordTurnStartupPhase,
   measureTurnStartupPhase,
@@ -116,6 +119,7 @@ import { claimTurnAttempt } from "./claim";
 import { selectServingTurnCapacity } from "./subscription-serving-capacity";
 import { selectCodexTurnCapacity, type CapacityPhaseDeps } from "./codex-capacity";
 import {
+  admitCoreCodexDispatch,
   assertTurnModelConnection,
   assertCoreCodexSourceConnected,
   buildCoreCodexRequestTokenResolver,
@@ -153,8 +157,7 @@ import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environmen
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
 import { buildTurnAgent } from "./agent-build";
-import { assertTurnSandboxBackendServed } from "./sandbox-route";
-import { createAttemptSecretValueMemory, runWithAttemptSecretValues } from "./secret-values";
+import { assertTurnSandboxBackendServed, shouldDeferRepositorySkillIndex } from "./sandbox-route";
 import { runAuxiliaryProviderDispatch } from "../auxiliary-provider-dispatch";
 
 /**
@@ -633,7 +636,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             provider: turnExecutionPolicy.providerId,
             backend: turn.sandboxBackend,
           },
-          () => getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
+          () =>
+            Promise.all([
+              getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
+              getSlackPrivateSessionOwnerSubjectId(db, input.workspaceId, input.sessionId),
+            ]),
         ),
       ]);
       // Observe both operations before failure handling; the policy write
@@ -641,7 +648,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (learningResult.status === "rejected") throw learningResult.reason;
       if (attachmentResult.status === "rejected") throw attachmentResult.reason;
       const learning = learningResult.value;
-      const attachmentAuthority = attachmentResult.value;
+      const [attachmentAuthority, slackPrivateOwnerSubjectId] = attachmentResult.value;
       if (!attachmentAuthority) throw new Error("Session attachment authority unavailable");
       return await withSessionRlsActorContext(
         {
@@ -663,8 +670,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // same root-scoped audience as native attempt-authorized tool reads.
           agentRootSessionId: attachmentAuthority.rootSessionId,
           initiatingHumanSubjectId: fileAuthoritySubjectId,
-          privateFileOwnerSubjectId:
-            learning.defaultScope === "personal" ? learning.subjectId : null,
+          // A private Slack session is its owner's, like an Only-me session.
+          privateFileOwnerSubjectId: agentPrivateFileOwnerSubjectId(
+            learning,
+            slackPrivateOwnerSubjectId,
+          ),
         },
         async () => {
           if (!leases.codex.holderId) {
@@ -819,6 +829,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           let codexModelRequestSequence = 0;
           let firstModelRequestAuditRecorded = false;
           const firstModelRequestCheckpoints = new Set<string>();
+          const enterModelRequestStage = (stage: ModelRequestPreDispatchStage) =>
+            eventing.enterModelRequestStage?.(stage);
           const codexContext: CodexRequestContext | null =
             resolvedModel?.provider.kind === "codex-subscription"
               ? ((): CodexRequestContext => {
@@ -911,15 +923,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       });
                     },
                     beforeProviderDispatch: async (request) => {
-                      if (coreCodex) await assertCoreCodexSourceConnected(db, coreCodex);
-                      await assertCodexDispatchAdmission(
-                        creditGuard.assertKnownUsageAllowsDispatch,
-                        () => leases.codex.assertCurrentForDispatch(),
-                      );
-                      if (coreCodex && request) await coreCodex.requests!.reserve(request);
+                      enterModelRequestStage("provider_admission");
+                      await admitCoreCodexDispatch({
+                        lease: leases.codex,
+                        assertSourceConnected: () => assertCoreCodexSourceConnected(db, coreCodex),
+                        assertCredits: creditGuard.assertKnownUsageAllowsDispatch,
+                        reserve: request ? () => coreCodex.requests!.reserve(request) : null,
+                      });
+                      enterModelRequestStage("transport");
                     },
                     ...(coreCodex ? { onProviderRequestSettled: coreCodex.requests!.observe } : {}),
                     onRequestPreparationDiagnostic: (phase) => {
+                      enterModelRequestStage(
+                        phase === "transport_entry" ? "credential" : "request_build",
+                      );
                       if (
                         eventing.firstModelRequestCheckpointAt === null ||
                         firstModelRequestCheckpoints.has(phase)
@@ -1025,7 +1042,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                         );
                       }
                       if (event.phase === "started") {
+                        enterModelRequestStage("dispatch_checkpoint");
                         await checkpointBeforeProviderDispatch();
+                        enterModelRequestStage("request_audit");
                       }
                       const shouldRecordStartedAudit =
                         event.phase === "started" && !firstModelRequestAuditRecorded;
@@ -1377,6 +1396,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ),
               ),
             );
+          // The agent revision in this chat's system prompt, read once so every
+          // compaction and the turn itself use the same instructions. The
+          // turn's first attempt records it, so retries build the same prompt.
+          const agentPrompt = await readSessionAgentPrompt(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turn: {
+              turnId: attempt.turnId!,
+              expectedExecutionGeneration: attempt.executionGeneration!,
+              expectedAttemptId: input.attemptId,
+            },
+          });
           const compactionPrep = await prepareCompaction({
             entitlements,
             input,
@@ -1398,6 +1430,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelUsageDispatchId,
             turn,
             session,
+            agentPrompt,
             turnExecutionPolicy,
             portableModelSwitchPending,
             resolvedModel,
@@ -1405,6 +1438,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceAgentIdentity,
             structuredWorkspacePolicyActive,
             workspaceMemory,
+            lazyToolTransport,
             rigVersion,
             rigName,
             compactionModelHistoryProjector,
@@ -1440,7 +1474,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnResources: claimedTurnResources,
             runtimeResources: claimedRuntimeResources,
             repositoryRemoval,
-            mcpAvailabilityNote,
+            unavailableMcpConnectors,
             turnTools,
             connectionScope,
           } = toolPolicy;
@@ -1560,6 +1594,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } = await waitForTurnOperation(
             dropUnavailableOptionalRepositories({
               db,
+              ...(cancellationSignal ? { signal: cancellationSignal } : {}),
               settings: runSettings,
               workspaceId: input.workspaceId,
               activeSandboxBackend,
@@ -1623,6 +1658,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             initialGitCredentials,
             startRunGitCredentialsMint,
             attachGitCredentialRenewal,
+            prepareCodemodeTokenSeed,
             attachCodemodeTokenRenewal,
             attachRunCredentialRenewal,
           } = runCredentials;
@@ -1779,6 +1815,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceCreditModelsAllowed,
             hostedToolsBillCredits,
             turnTools,
+            unavailableMcpConnectors,
             connectionScope,
             sandboxArtifactRuntime,
             activeSandboxBackend,
@@ -1799,6 +1836,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             generateSessionTitleInParallel,
             postToolPreparationStartedAt,
             preparationIndependentToolNames,
+            mcpAvailabilityNote,
           } = toolRuntime;
 
           const builtAgent = await buildTurnAgent({
@@ -1821,6 +1859,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             leases,
             turn,
             session,
+            agentPrompt,
             fileAuthoritySubjectId,
             capabilitySettings,
             humanInputResume,
@@ -1868,9 +1907,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             preparationIndependentToolNames,
             codeSearchAvailable: toolRuntime.codeSearchAvailable,
             promptToolAvailability: toolRuntime.promptToolAvailability,
+            toolRouterInHistory: toolRuntime.toolRouterInHistory,
+            toolRouterExpected: toolRuntime.toolRouterExpected,
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,
+            deferRepositorySkillIndex: shouldDeferRepositorySkillIndex({
+              lazyEnabled: lazyProvisionEnabled(settings),
+              machinePrimary,
+              groupBoxBackend,
+              hasRepositoryResources: turnResources.some(
+                (resource) => resource.kind === "repository",
+              ),
+            }),
             postToolPreparationStartedAt,
             codexContext,
           });
@@ -1974,12 +2023,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelUsageDispatchId,
             turn,
             session,
+            agentPrompt,
             turnExecutionPolicy,
             resolvedModel,
             workspaceAgentInstructions,
             workspaceAgentIdentity,
             structuredWorkspacePolicyActive,
             workspaceMemory,
+            lazyToolTransport,
             rigVersion,
             rigName,
             compactionModelHistoryProjector,
@@ -2019,6 +2070,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const eagerOwnedSandboxSetup = createEagerOwnedSandboxSetup(
             {
               input,
+              attempt,
               db,
               observability,
               runtimeCancellationSignal,
@@ -2027,6 +2079,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               leases,
               runWorkspaceMutationForSandbox,
               attachGitCredentialRenewal,
+              prepareCodemodeTokenSeed,
+              attachCodemodeTokenRenewal,
               attachRunCredentialRenewal,
               activeSandboxBackend,
               groupBoxBackend,
@@ -2200,6 +2254,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               throwIfTurnCancelled,
               setLastInputTokensFenced,
               attachGitCredentialRenewal,
+              prepareCodemodeTokenSeed,
               attachCodemodeTokenRenewal,
               attachRunCredentialRenewal,
               withProviderRequestContext,
@@ -2360,16 +2415,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } catch {
             // Correlation diagnostics never affect execution or admission.
           }
-          // One known-secret memory per attempt: tool results, model input and
-          // every durable write of this attempt are masked with it.
-          const secretValues = createAttemptSecretValueMemory(resolvedServices.observability);
-          // Work that outlives the attempt (process-wide caches started inside
-          // it) neither keeps these values nor masks with them afterwards.
           // EU-only inference: model requests are refused until the claim
           // binds this context to the turn's settings.
-          return runWithAttemptSecretValues(secretValues, () =>
-            withInferenceResidency(null, () => runAgentTurn(input, resolvedServices, span)),
-          ).finally(() => secretValues.dispose());
+          return withInferenceResidency(null, () => runAgentTurn(input, resolvedServices, span));
         }),
       );
     } catch (error) {

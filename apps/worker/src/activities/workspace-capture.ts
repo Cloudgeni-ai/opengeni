@@ -331,7 +331,13 @@ export async function readCaptureRepository(
       )
       .then((value) => value)
       .catch(() => null);
-    const [diff, branchDiff] = await Promise.all([workingRequest, branchRequest]);
+    // Both reads own provider commands and retained output. A failed working
+    // tree must not release capture ownership while its branch sibling is
+    // still collecting output or cleaning its private spool.
+    const [workingResult, branchResult] = await Promise.allSettled([workingRequest, branchRequest]);
+    if (workingResult.status === "rejected") throw workingResult.reason;
+    const diff = workingResult.value;
+    const branchDiff = branchResult.status === "fulfilled" ? branchResult.value : null;
     return {
       complete: true,
       status,

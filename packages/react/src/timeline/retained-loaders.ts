@@ -1,4 +1,5 @@
 import type { OpenGeniClient, RetainedArtifactReference } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   RetainedArtifactLoadOptions,
   RetainedArtifactLoader,
@@ -8,15 +9,21 @@ import type {
 
 /** SDK methods the workspace retained-artifact loader needs. */
 export type RetainedArtifactLoaderClient = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   "createRetainedArtifactDownloadUrl" | "downloadRetainedArtifact"
 >;
 
 /** SDK method the session retained-screenshot loader needs. */
-export type RetainedScreenshotLoaderClient = Pick<OpenGeniClient, "downloadRetainedScreenshot">;
+export type RetainedScreenshotLoaderClient = Pick<
+  ChatClient<OpenGeniClient>,
+  "downloadRetainedScreenshot"
+>;
 
 /** SDK method the generated-video playback loader needs. */
-export type RetainedVideoLoaderClient = Pick<OpenGeniClient, "createVideoArtifactPlaybackSource">;
+export type RetainedVideoLoaderClient = Pick<
+  ChatClient<OpenGeniClient>,
+  "createVideoArtifactPlaybackSource"
+>;
 
 /**
  * Bind permanent retained-artifact retrieval (generated images, published

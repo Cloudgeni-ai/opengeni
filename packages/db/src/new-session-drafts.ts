@@ -1,4 +1,5 @@
 import {
+  type CreateSessionRequest,
   NewSessionDraftOptions,
   type NewSessionDraftOptions as NewSessionDraftOptionsValue,
   type NewSessionSelectionHistory,
@@ -11,6 +12,7 @@ import {
 import { stableJson } from "@opengeni/contracts";
 import { and, eq, sql } from "drizzle-orm";
 import { membershipOutsidePersonalWorkspace } from "./personal-workspace-membership";
+import { notifyActorDraftChanged } from "./session-list-notifications";
 import type { Database } from "./database";
 import * as schema from "./schema";
 import {
@@ -176,6 +178,61 @@ export function publicNewSessionDraftOptions(row: NewSessionDraftRow): NewSessio
   delete options.selectionHistory;
   delete options.selectedProjectChannelId;
   return options;
+}
+
+/** Every create option a new-session draft can hold, from the contract itself. */
+export const NEW_SESSION_DRAFT_OPTION_KEYS = Object.keys(
+  NewSessionDraftOptions.shape,
+) as readonly (keyof NewSessionDraftOptionsValue)[];
+
+// The fence reads each draft option from the create field of the same name. A
+// draft option the create request cannot carry would make every Send conflict,
+// so it must not compile.
+const draftOptionsAreCreateFields: [
+  Exclude<keyof NewSessionDraftOptionsValue, keyof CreateSessionRequest>,
+] extends [never]
+  ? true
+  : never = true;
+void draftOptionsAreCreateFields;
+// ...and the create field must accept the draft option's value, or a draft
+// option whose create field later changed shape would conflict on every Send.
+type DraftOptionsCreateFieldsDisagree = {
+  [K in keyof NewSessionDraftOptionsValue]-?: [
+    NonNullable<NewSessionDraftOptionsValue[K]>,
+  ] extends [NonNullable<CreateSessionRequest[K & keyof CreateSessionRequest]>]
+    ? never
+    : K;
+}[keyof NewSessionDraftOptionsValue];
+const draftOptionValuesAreCreateValues: [DraftOptionsCreateFieldsDisagree] extends [never]
+  ? true
+  : never = true;
+void draftOptionValuesAreCreateValues;
+
+/**
+ * The form both sides of the exact-draft fence compare. It holds exactly the
+ * contract's draft option keys, read from the saved options or from a create
+ * request alike, so a new draft option is compared without a hand-written
+ * list. Absent, null and empty-object values (an Agent learning override with
+ * nothing overridden) all mean "not set"; arrays are kept even when empty,
+ * because an empty list is a deliberate choice.
+ */
+export function comparableNewSessionDraftOptions(
+  source: Partial<Record<keyof NewSessionDraftOptionsValue, unknown>>,
+): NewSessionDraftOptionsValue {
+  const comparable: Record<string, unknown> = {};
+  for (const key of NEW_SESSION_DRAFT_OPTION_KEYS) {
+    const value = source[key];
+    if (value === undefined || value === null) continue;
+    if (
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Object.values(value).every((entry) => entry === undefined)
+    ) {
+      continue;
+    }
+    comparable[key] = value;
+  }
+  return comparable as NewSessionDraftOptionsValue;
 }
 
 function projectComputeMatches(
@@ -368,6 +425,7 @@ export async function saveNewSessionDraftInTransaction(
       .where(eq(schema.newSessionDrafts.id, current.id))
       .returning();
     if (!saved) throw new Error("New-session draft did not save");
+    await notifyActorDraftChanged(db, { ...input, sessionId: null });
     return saved;
   }
 
@@ -381,7 +439,10 @@ export async function saveNewSessionDraftInTransaction(
       target: [schema.newSessionDrafts.workspaceId, schema.newSessionDrafts.subjectId],
     })
     .returning();
-  if (inserted) return inserted;
+  if (inserted) {
+    await notifyActorDraftChanged(db, { ...input, sessionId: null });
+    return inserted;
+  }
   const raced = await getNewSessionDraftInTransaction(db, {
     ...input,
     lock: true,
@@ -539,54 +600,29 @@ function newSessionDraftCreateToolsProvided(
   return !(options.excludedMcpServerIds !== undefined && row.tools.length === 0);
 }
 
-async function lockExactNewSessionDraft(
-  db: Database,
-  input: {
-    workspaceId: string;
-    subjectId: string;
-    expectedRevision: number;
-    expectedSnapshot: NewSessionDraftSnapshot;
-  },
-): Promise<NewSessionDraftRow> {
-  const current = await lockCurrentNewSessionDraft(db, input);
-  if (!current || current.revision !== input.expectedRevision) {
-    throw new NewSessionDraftConflictError(current?.revision ?? 0);
-  }
-  const options = publicNewSessionDraftOptions(current);
-  const toolsProvided = newSessionDraftCreateToolsProvided(current, options);
-  if (
-    stableJson({
-      text: current.text,
-      resources: current.resources,
-      tools: toolsProvided ? current.tools : [],
-      toolsProvided,
-      model: current.model,
-      reasoningEffort: current.reasoningEffort,
-      latencyMode: current.latencyMode,
-      options,
-    }) !== stableJson(input.expectedSnapshot)
-  ) {
-    throw new NewSessionDraftConflictError(current.revision);
-  }
-  return current;
-}
-
 /**
- * Fence a fresh session shell on the exact actor-private draft it represents.
- * The caller keeps this row lock through its create transaction, so a draft
- * that was already stale cannot leave a committed, uninitialized session.
- * The later atomic initializer still performs the authoritative consume.
+ * Whether the stored draft holds exactly what a create sent: the same text,
+ * files, tools, model policy and create options.
  */
-export async function assertExactNewSessionDraftInTransaction(
-  db: Database,
-  input: {
-    workspaceId: string;
-    subjectId: string;
-    expectedRevision: number;
-    expectedSnapshot: NewSessionDraftSnapshot;
-  },
-): Promise<void> {
-  await lockExactNewSessionDraft(db, input);
+function newSessionDraftHolds(row: NewSessionDraftRow, sent: NewSessionDraftSnapshot): boolean {
+  const options = publicNewSessionDraftOptions(row);
+  const toolsProvided = newSessionDraftCreateToolsProvided(row, options);
+  return (
+    stableJson({
+      text: row.text,
+      resources: row.resources,
+      tools: toolsProvided ? row.tools : [],
+      toolsProvided,
+      model: row.model,
+      reasoningEffort: row.reasoningEffort,
+      latencyMode: row.latencyMode,
+      options: comparableNewSessionDraftOptions(options),
+    }) ===
+    stableJson({
+      ...sent,
+      options: comparableNewSessionDraftOptions(sent.options),
+    })
+  );
 }
 
 async function workspacePlacementDefaults(db: Database, workspaceId: string, subjectId: string) {
@@ -617,11 +653,13 @@ async function workspacePlacementDefaults(db: Database, workspaceId: string, sub
 }
 
 /**
- * Replace one exact accepted draft with the next-create safe seed. The row is
- * identity-serialized before the revision check so even the absent-row
- * revision-zero case cannot race a first save. Exact create callers receive a
- * typed conflict; legacy revision-only callers retain the old false/no-op
- * result. A missing row is an idempotent no-op.
+ * After an accepted create, clear the draft it was sent from: replace it with
+ * the next-create safe seed. Send carries its own content and is never refused
+ * because of the draft. The draft is cleared only while it still holds what was
+ * sent: it is still at the revision the sender last saw (`expectedRevision`),
+ * or it holds exactly the sent content (`expectedSnapshot`). A newer draft
+ * saved from another device since then stays as the draft; only the accepted
+ * project and machine choice is remembered. A missing row is a no-op.
  */
 export async function seedNewSessionDraftInTransaction(
   db: Database,
@@ -633,15 +671,28 @@ export async function seedNewSessionDraftInTransaction(
     acceptedSelection?: AcceptedNewSessionSelection;
   },
 ): Promise<boolean> {
-  const current = input.expectedSnapshot
-    ? await lockExactNewSessionDraft(db, {
-        workspaceId: input.workspaceId,
-        subjectId: input.subjectId,
-        expectedRevision: input.expectedRevision,
-        expectedSnapshot: input.expectedSnapshot,
-      })
-    : await lockCurrentNewSessionDraft(db, input);
-  if (!current || current.revision !== input.expectedRevision) {
+  const current = await lockCurrentNewSessionDraft(db, input);
+  if (!current) return false;
+  const holdsSent =
+    current.revision === input.expectedRevision ||
+    (input.expectedSnapshot !== undefined && newSessionDraftHolds(current, input.expectedSnapshot));
+  if (!holdsSent) {
+    if (input.acceptedSelection) {
+      await db
+        .update(schema.newSessionDrafts)
+        .set({
+          sessionOptions: storedOptions(
+            publicNewSessionDraftOptions(current),
+            newSessionDraftToolsProvided(current),
+            rememberNewSessionSelection(
+              newSessionSelectionHistory(current),
+              input.acceptedSelection,
+            ),
+            newSessionDraftModelProvided(current),
+          ),
+        })
+        .where(eq(schema.newSessionDrafts.id, current.id));
+    }
     return false;
   }
 
@@ -662,6 +713,12 @@ export async function seedNewSessionDraftInTransaction(
   const rememberRig =
     typeof options.rigId === "string" && options.rigId.length > 0 && !defaults.hasDefaultRig;
   const safeOptions: NewSessionDraftOptionsValue = {
+    // Keep the connector policy together. An exclusion-only draft stores
+    // [] + toolsProvided=true; dropping its exclusions (even []) would turn
+    // the next restored draft into an explicit selection of no connectors.
+    ...(options.excludedMcpServerIds !== undefined
+      ? { excludedMcpServerIds: options.excludedMcpServerIds }
+      : {}),
     ...(options.visibility ? { visibility: options.visibility } : {}),
     ...(rememberCompute && options.sandboxBackend
       ? { sandboxBackend: options.sandboxBackend }
@@ -711,10 +768,11 @@ export async function seedNewSessionDraftInTransaction(
     .where(
       and(
         eq(schema.newSessionDrafts.id, current.id),
-        eq(schema.newSessionDrafts.revision, input.expectedRevision),
+        eq(schema.newSessionDrafts.revision, current.revision),
       ),
     )
     .returning({ id: schema.newSessionDrafts.id });
+  if (seeded) await notifyActorDraftChanged(db, { ...input, sessionId: null });
   return Boolean(seeded);
 }
 

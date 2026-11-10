@@ -31,13 +31,41 @@ const DEMO_API_PREFIX = "/demo-api";
 // so a local miss under one of them may be answered from a previous build.
 const HASHED_ASSET_DIRECTORIES = ["assets", "office/assets", "react-demo/assets"] as const;
 const PREVIOUS_ASSET_ROOTS_ENV = "OPENGENI_WEB_PREVIOUS_ASSET_ROOTS";
-// Baseline hardening for every response the shell itself serves. Framing and
-// CSP stay unset on purpose: the console supports embedding (docs/embedding.md).
-// A route-specific value, such as the setup page's no-referrer, wins.
+const NOINDEX_ENV = "OPENGENI_WEB_NOINDEX";
+const NOINDEX_ROBOTS_TAG = "noindex, nofollow";
+// Baseline hardening for every response the shell itself serves. A
+// route-specific value, such as the setup page's no-referrer, wins.
 const SHELL_SECURITY_HEADERS = {
   "x-content-type-options": "nosniff",
   "referrer-policy": "strict-origin-when-cross-origin",
 } as const;
+// Clickjacking defence. Products embed Opengeni through SDK components and
+// the desktop app loads the console top-level, so only the console itself
+// may frame its pages. Only framing is restricted; no script policy is set.
+const CONSOLE_FRAMING_HEADERS = {
+  "content-security-policy": "frame-ancestors 'self'",
+  "x-frame-options": "SAMEORIGIN",
+} as const;
+// The Excel add-in's pages under /office/ run inside Office on the web's
+// third-party frames, nested in Microsoft's hosts. X-Frame-Options cannot name
+// other origins, so these pages carry only the CSP list.
+const OFFICE_FRAME_ANCESTORS = [
+  "'self'",
+  "https://*.officeapps.live.com",
+  "https://*.office.com",
+  "https://*.office365.com",
+  "https://*.microsoft365.com",
+  "https://*.cloud.microsoft",
+  "https://*.sharepoint.com",
+  "https://onedrive.live.com",
+  "https://*.onedrive.live.com",
+  "https://teams.microsoft.com",
+  "https://*.teams.microsoft.com",
+] as const;
+const OFFICE_FRAMING_HEADERS = {
+  "content-security-policy": `frame-ancestors ${OFFICE_FRAME_ANCESTORS.join(" ")}`,
+} as const;
+const OFFICE_PAGE_PATH = /^\/office(?:\/|$)/u;
 const HOP_BY_HOP_HEADERS = [
   "connection",
   "keep-alive",
@@ -77,6 +105,12 @@ export type WebHandlerOptions = {
    * never served from them. Missing roots are ignored.
    */
   previousAssetRoots?: readonly string[] | undefined;
+  /**
+   * Ask search engines not to index this deployment, for example a staging
+   * console: every response the handler serves carries
+   * `X-Robots-Tag: noindex, nofollow`. Off by default.
+   */
+  noindex?: boolean | undefined;
 };
 
 type RenderedShell = { html: Uint8Array<ArrayBuffer>; gzip: Uint8Array<ArrayBuffer> };
@@ -106,12 +140,18 @@ export function createWebHandler(
   let renderedShell: Promise<RenderedShell> | null = null;
 
   return async function webHandler(request: Request): Promise<Response> {
+    const response = await routeRequest(request);
+    if (options.noindex) response.headers.set("x-robots-tag", NOINDEX_ROBOTS_TAG);
+    return response;
+  };
+
+  async function routeRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === DEMO_API_PREFIX || url.pathname.startsWith(`${DEMO_API_PREFIX}/`)) {
       return proxyDemoApi(request, url, options.demoApiProxy);
     }
-    return withShellSecurityHeaders(await serveShell(request, url));
-  };
+    return withShellSecurityHeaders(url.pathname, await serveShell(request, url));
+  }
 
   async function serveShell(request: Request, url: URL): Promise<Response> {
     if (request.method !== "GET" && request.method !== "HEAD") {
@@ -283,8 +323,23 @@ export function previousAssetRootsFromEnvironment(
     .filter(Boolean);
 }
 
-function withShellSecurityHeaders(response: Response): Response {
-  for (const [name, value] of Object.entries(SHELL_SECURITY_HEADERS)) {
+/**
+ * Whether `OPENGENI_WEB_NOINDEX` asks search engines not to index this
+ * deployment (`true` or `1`, case-insensitive). Anything else leaves indexing
+ * to the defaults.
+ */
+export function noindexFromEnvironment(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  const value = env[NOINDEX_ENV]?.trim().toLowerCase();
+  return value === "true" || value === "1";
+}
+
+function withShellSecurityHeaders(pathname: string, response: Response): Response {
+  const framing = OFFICE_PAGE_PATH.test(pathname)
+    ? OFFICE_FRAMING_HEADERS
+    : CONSOLE_FRAMING_HEADERS;
+  for (const [name, value] of Object.entries({ ...SHELL_SECURITY_HEADERS, ...framing })) {
     if (!response.headers.has(name)) response.headers.set(name, value);
   }
   return response;
@@ -494,6 +549,7 @@ if (import.meta.main) {
       publicOrigin: publicWebOriginFromEnvironment(),
       officePublisher: officeManifestPublisherFromEnvironment(),
       previousAssetRoots: previousAssetRootsFromEnvironment(),
+      noindex: noindexFromEnvironment(),
     }),
   });
   // As a container's PID 1 the process gets no default SIGTERM action, so stop

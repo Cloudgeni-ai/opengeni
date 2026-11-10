@@ -10,11 +10,14 @@ import {
   BYOK_PAID_CREDIT_REQUIRED_CODE,
   SUBSCRIPTION_PLAN_REQUIRED_CODE,
   SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
+  SUBSCRIPTION_API_UNAVAILABLE_CODE,
+  SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
   type BillingOrigin,
 } from "@opengeni/contracts";
 import {
   byokPaidCreditRefusalMessage,
   byokPlatformFeeActive,
+  connectedSubscriptionsRefusedForOrigin,
   ownModelFunding,
   ownSubscriptionPlanAllows,
 } from "./byok-platform-fee";
@@ -180,7 +183,11 @@ export async function requireLimit(deps: LimitDependencies, input: LimitCheckInp
     return;
   }
   throw new HTTPException(
-    CREDIT_REFUSAL_CODES.has(decision.code) || decision.code === "allowance_exhausted" ? 402 : 429,
+    decision.code === SUBSCRIPTION_API_UNAVAILABLE_CODE
+      ? 403
+      : CREDIT_REFUSAL_CODES.has(decision.code) || decision.code === "allowance_exhausted"
+        ? 402
+        : 429,
     {
       message: decision.message,
       cause: decision,
@@ -192,6 +199,24 @@ export async function checkLimit(
   deps: LimitDependencies,
   input: LimitCheckInput,
 ): Promise<LimitDecision> {
+  // Refuse the route even when its connection is unavailable. A paid plan or
+  // credits cannot make an API request eligible for a connected subscription.
+  if (
+    isCostlyAction(input.action) &&
+    connectedSubscriptionsRefusedForOrigin(
+      deps.settings,
+      chargeBillingOrigin(input.billingOrigin),
+    ) &&
+    ownModelFunding(
+      input.model ? resolveModelProviderForTurn(deps.settings, input.model)?.model : null,
+    ) === "subscription"
+  ) {
+    return {
+      allowed: false,
+      code: SUBSCRIPTION_API_UNAVAILABLE_CODE,
+      message: SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
+    };
+  }
   // Resolve the canonical codex-billed predicate ONCE. Returns false for any
   // action that carries no model (infra caps) or any codex/<slug> model without
   // an active credential — so the bypass never triggers on the prefix alone.
@@ -257,7 +282,7 @@ async function checkCreditBalance(
   if (externallyBilled) {
     // The person's own subscription pays no fee but needs a paid plan.
     if (ownSubscription && isCostlyAction(input.action)) {
-      return await checkOwnSubscriptionPlan(deps, input.accountId);
+      return await checkOwnSubscriptionPlan(deps, input.accountId, input.billingOrigin);
     }
     // Paid outside Opengeni; the person's own key still pays the platform fee.
     if (
@@ -326,7 +351,15 @@ export async function checkByokPaidCredit(
 export async function checkOwnSubscriptionPlan(
   deps: Pick<LimitDependencies, "db" | "settings">,
   accountId: string,
+  billingOrigin?: BillingOrigin | null,
 ): Promise<LimitDecision> {
+  if (connectedSubscriptionsRefusedForOrigin(deps.settings, chargeBillingOrigin(billingOrigin))) {
+    return {
+      allowed: false,
+      code: SUBSCRIPTION_API_UNAVAILABLE_CODE,
+      message: SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
+    };
+  }
   return (await ownSubscriptionPlanAllows(deps.db, deps.settings, accountId))
     ? { allowed: true }
     : {

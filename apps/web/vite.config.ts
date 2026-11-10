@@ -67,6 +67,17 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // The shared subscription account display: the chat header's
+              // account menu and the Models settings rows both draw it. Its
+              // file sits beside the settings-only models pages, so without
+              // this leaf it joins settings-pages and a chat load fetches the
+              // whole management surface through the account menu.
+              name: "subscription-account-display",
+              test: /packages[\\/]react[\\/]src[\\/]app[\\/](?:components[\\/]models[\\/]subscription-usage|lib[\\/]subscription-accounts)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Startup's permission, organization and account-email helpers
               // read these small pure modules. Entry-aware grouping can fold
               // them into the app-context chunk, which imports the API chunk
@@ -105,7 +116,7 @@ export default defineConfig({
               // entry-aware merge otherwise folds them into a chunk startup
               // needs for the organization model, so keep them in a leaf.
               name: "row-detail-primitives",
-              test: /packages[\\/]react[\\/]src[\\/]ui[\\/](?:relative-time|disabled-reason|section-variant)\.tsx$/,
+              test: /packages[\\/]react[\\/]src[\\/]ui[\\/](?:relative-time|time-format|disabled-reason|section-variant)\.tsx?$/,
               includeDependenciesRecursively: false,
               priority: 22,
             },
@@ -669,6 +680,17 @@ export default defineConfig({
               priority: 20,
             },
             {
+              // The meetings model and the on-screen meeting signal are read by
+              // the Meetings pages, the lazy command-menu actions and dictation
+              // settings, never by a direct session load. Entry-aware merging
+              // otherwise folds them in beside the session's archive helpers, so
+              // a direct session downloads them for nothing.
+              name: "meetings-model",
+              test: /packages[\\/]react[\\/]src[\\/](?:recordings-model|meetings[\\/]meeting-on-screen)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.
@@ -754,7 +776,7 @@ export default defineConfig({
             {
               // Keep customer model setup in its own lazy feature boundary.
               name: "customer-model-setup",
-              test: /(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]direct-model-provider-connections?\.tsx$/,
+              test: /(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/]components[\\/]direct-model-provider-connection\.tsx$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },

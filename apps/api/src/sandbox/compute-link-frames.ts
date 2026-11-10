@@ -28,7 +28,7 @@ export type HostFrame =
       headers?: AgentLinkHeaders;
       payload: Uint8Array;
     }
-  | { t: "state"; s: number; state: "awake" | "asleep" }
+  | { t: "state"; s: number; state: "awake" | "asleep"; busy?: "handing_off" }
   | { t: "close"; s: number };
 
 export type AgentLinkRelay = { url: string; token: string; expires_at_ms: number };
@@ -208,7 +208,11 @@ export function decodeHostFrame(bytes: Uint8Array): HostFrame {
       if (state !== "awake" && state !== "asleep") {
         throw new AgentLinkProtocolError("frame field state is invalid");
       }
-      return { t, s: sessionOf(header), state };
+      // What the host is busy with that keeps the sandbox from running for
+      // now. A kind this gateway does not know is read as none, as an older
+      // host's frame without the field is.
+      const busy = header.busy === "handing_off" ? ("handing_off" as const) : undefined;
+      return { t, s: sessionOf(header), state, ...(busy ? { busy } : {}) };
     }
     case "close":
       return { t, s: sessionOf(header) };
@@ -261,18 +265,23 @@ export function subjectWithin(subject: string, prefix: string): boolean {
   return subject.startsWith(`${prefix}.`) && subject.length > prefix.length + 1;
 }
 
-/** The subjects one sandbox's session may use, as the NATS callout grants a
- * Connected Machine (workspaceAgentPermissions): subscribe within the scope;
- * publish within the scope or `_INBOX.>`. A reply subject must lie within
+/** The subjects one sandbox's session may use: subscribe within the scope;
+ * publish within the scope, or to `_INBOX.>` only as the answer to a request
+ * delivered to this session and not yet answered (`unanswered`), so an agent
+ * can never answer a request it was not sent. A reply subject must lie within
  * the scope, the only place the agent can hear an answer. */
 export function maySubscribe(scope: string, subject: string): boolean {
   return validSubject(subject, true) && subjectWithin(subject, scope);
 }
 
-export function mayPublish(scope: string, subject: string): boolean {
+export function mayPublish(
+  scope: string,
+  subject: string,
+  unanswered: ReadonlySet<string>,
+): boolean {
   return (
     validSubject(subject, false) &&
-    (subjectWithin(subject, scope) || subjectWithin(subject, "_INBOX"))
+    (subjectWithin(subject, scope) || (subjectWithin(subject, "_INBOX") && unanswered.has(subject)))
   );
 }
 

@@ -22,12 +22,11 @@ import { sessionDisplayStatus, type SessionDisplayStatus } from "../../../sessio
 import { ModelMark } from "../../../components/model-mark";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { SessionEventsConnectionState } from "../../../hooks/use-session-events";
-import type { SessionSummary } from "@opengeni/sdk";
+import type { ChatSession as SessionSummary } from "@opengeni/sdk";
 import { SiteOriginLink, SiteOriginMenuItem } from "../session/site-origin-link";
 import { sessionSiteOrigin } from "../../lib/session-site-origin";
-import { sessionSlackAgentInfo } from "../../lib/session-slack-agent";
-import { MetaChip } from "../../../ui/meta-chip";
-import type { CreateBotTemplateRequest, WorkspaceBotTemplate } from "@opengeni/contracts";
+import { sessionAgentRef, sessionAgentSourceLine, useSessionAgent } from "../../lib/session-agent";
+import { SessionAgentChip } from "../agents/session-agent-chip";
 import {
   ArchiveIcon,
   BellIcon,
@@ -112,13 +111,11 @@ import { repliesMuteLabel, type SessionRepliesMute } from "../../lib/inbox";
 import { labelEffort, type IntelligenceEffort } from "../../lib/session-tools";
 import type { LatencyMode, Session } from "../../types";
 import { usePage } from "../../lib/navigation";
-import { toast } from "../../lib/toast";
 import { SessionAvatar } from "../session/session-avatar";
 import {
   SessionProfileEditorDialog,
   type UpdateSessionProfileFn,
 } from "../session/session-profile-editor";
-import { BotTemplateDialog } from "../bots/bot-template-dialog";
 import { useUiEventTarget } from "../../lib/ui-events";
 
 const SUBSCRIPTION_RAILS: ReadonlySet<BillingClass> = new Set([
@@ -142,7 +139,7 @@ export function SessionHeader({
   onRename,
   onPin,
   onUpdateProfile,
-  onSaveBotTemplate,
+  onMakeAgent,
   onArchive,
   repliesMute,
   adminAccess,
@@ -181,11 +178,8 @@ export function SessionHeader({
   onPin: (session: Session, pinned: boolean) => Promise<Session | null>;
   /** Saves the chat's name, description and avatar. Absent hides Edit profile. */
   onUpdateProfile?: UpdateSessionProfileFn | null | undefined;
-  /** Saves a bot template in the workspace. Absent hides Save as bot template. */
-  onSaveBotTemplate?:
-    | ((request: CreateBotTemplateRequest) => Promise<WorkspaceBotTemplate>)
-    | null
-    | undefined;
+  /** Opens New agent prefilled from this chat. Absent hides Make this an agent. */
+  onMakeAgent?: (() => void) | null | undefined;
   /** Archives or restores this root session. Absent hides the action. */
   onArchive?: ((session: Session, archived: boolean) => Promise<void>) | undefined;
   /**
@@ -236,15 +230,23 @@ export function SessionHeader({
 }) {
   const uiEvents = useUiEventTarget("document");
   const page = usePage();
-  const waiting = sessionInputWait({ ...session, status });
-  // A session the runtime could not start reads as stuck, not "Waiting on you".
+  // A session the runtime could not start reads as stuck, not "Waiting on you",
+  // and an archived chat reads as archived, never as its last run state.
   const displayStatus = sessionDisplayStatus({
     status,
     admissionBlock: session.admissionBlock,
+    archived: session.archived,
+    retention: session.retention,
   });
+  const archived = displayStatus === "archived";
+  // Archiving stops the chat's work, which also pauses it and settles its waits:
+  // the header names the archive, not a pause or a wait.
+  const waiting = archived ? null : sessionInputWait({ ...session, status });
+  const paused = !archived && sessionControlPaused(session);
   const startup = useSessionStartup({ ...session, status });
-  const startupLabel =
-    startup === "starting"
+  const startupLabel = archived
+    ? undefined
+    : startup === "starting"
       ? "Starting"
       : startup === "delayed" || startup === "retrying"
         ? "Waiting to start"
@@ -273,8 +275,8 @@ export function SessionHeader({
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
   const context = useOptionalAppContext();
-  // Archiving is one-way, so an archived chat offers no archive action, and
-  // only people who can control the chat archive it.
+  // An archived chat is restored from its own notice, so it offers no
+  // archive action, and only people who can control the chat archive it.
   const canArchive =
     Boolean(onArchive) &&
     session.parentSessionId === null &&
@@ -295,7 +297,6 @@ export function SessionHeader({
   const [shareOpen, setShareOpen] = useState(false);
   const canEditProfile = Boolean(onUpdateProfile);
   const [profileOpen, setProfileOpen] = useState(false);
-  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
   // Menu actions that move focus (rename input, find field) run after the menu
   // has closed, so its focus restoration cannot steal focus back to the trigger.
   const afterMenuClose = useRef<(() => void) | null>(null);
@@ -307,8 +308,11 @@ export function SessionHeader({
   const panelKeys = useActionShortcut("view.workspacePanel");
   const hasCrumb =
     Boolean(session.parentSessionId) || ancestors.length > 0 || Boolean(lineageError);
-  // A chat started for a Slack agent says which one; its avatar is the agent's icon.
-  const slackAgent = sessionSlackAgentInfo(session.metadata);
+  // A chat with an agent names it beside the title; the agent's icon is on the chip.
+  const agent = useSessionAgent(session.workspaceId, sessionAgentRef(session));
+  // Where it started, when not here: "Started in Slack by Kari".
+  const sourceLine = sessionAgentSourceLine(session);
+  const hasSubline = !hasCrumb && sourceLine !== null;
   const overflow = useSessionHeaderOverflow({
     present: SESSION_HEADER_PARTS.filter((part) => {
       switch (part) {
@@ -324,8 +328,8 @@ export function SessionHeader({
           return Boolean(sandboxSlot);
         case "site":
           return sessionSiteOrigin(session) !== null;
-        case "slackAgent":
-          return slackAgent !== null;
+        case "agent":
+          return agent !== null;
         case "accessKey":
           return keyAuthRequired;
         default:
@@ -388,14 +392,14 @@ export function SessionHeader({
         <div
           ref={overflow.rowRef}
           data-session-title-row=""
-          className={cn("flex min-w-0 items-center gap-1", hasCrumb && "h-7")}
+          className={cn("flex min-w-0 items-center gap-1", (hasCrumb || hasSubline) && "h-7")}
         >
           <div
             ref={overflow.titleRef}
             className={cn("flex min-w-0 items-center gap-1.5", rename.editing && "flex-1")}
           >
-            {/* A bot's avatar travels with its title. */}
-            {session.avatar ? (
+            {/* A chat's own avatar travels with its title; an agent's is on its chip. */}
+            {session.avatar && !agent ? (
               <button
                 type="button"
                 aria-label="Edit profile"
@@ -422,7 +426,7 @@ export function SessionHeader({
           {/* Below lg (or when the full badge has no room) the lifecycle is a
               dot beside the title. */}
           <CompactSessionStatus
-            paused={sessionControlPaused(session)}
+            paused={paused}
             waiting={Boolean(waiting)}
             status={displayStatus}
             label={startupLabel}
@@ -446,17 +450,9 @@ export function SessionHeader({
               <SiteOriginLink session={session} />
             </span>
           ) : null}
-          {slackAgent && !inMenu("slackAgent") ? (
-            <span ref={part("slackAgent")} className="flex min-w-0 shrink-0 items-center">
-              <MetaChip
-                variant="soft"
-                title={`Slack agent: ${slackAgent.name}`}
-                className="max-w-48"
-              >
-                <span data-session-slack-agent="" className="min-w-0 truncate">
-                  Slack agent: {slackAgent.name}
-                </span>
-              </MetaChip>
+          {agent && !inMenu("agent") ? (
+            <span ref={part("agent")} className="flex min-w-0 shrink-0 items-center">
+              <SessionAgentChip agent={agent} workspaceId={session.workspaceId} />
             </span>
           ) : null}
           {onOpenAutomations && !inMenu("automations") ? (
@@ -472,6 +468,15 @@ export function SessionHeader({
             </span>
           ) : null}
         </div>
+        {hasSubline ? (
+          <p
+            data-session-source=""
+            className="min-w-0 truncate text-2xs leading-4 text-fg-muted"
+            title={sourceLine ?? undefined}
+          >
+            {sourceLine}
+          </p>
+        ) : null}
       </div>
       <div ref={overflow.clusterRef} className="flex shrink-0 items-center gap-0.5 lg:gap-2">
         {/* Provider + model · effort · speed stay one cluster on the action side. */}
@@ -551,7 +556,7 @@ export function SessionHeader({
                 control is Active (Running + Active) is redundant noise. When
                 paused, admission is the headline — hide lifecycle so we don't
                 imply the session is still "Running"/"Idle" under a pause gate. */}
-            {!sessionControlPaused(session) ? (
+            {!paused ? (
               waiting ? (
                 <StatusPill
                   className="border-border bg-surface text-fg-muted"
@@ -670,14 +675,14 @@ export function SessionHeader({
                 Edit profile…
               </DropdownMenuItem>
             ) : null}
-            {onSaveBotTemplate ? (
+            {onMakeAgent && !agent ? (
               <DropdownMenuItem
                 onSelect={() => {
-                  afterMenuClose.current = () => setSaveTemplateOpen(true);
+                  afterMenuClose.current = onMakeAgent;
                 }}
               >
                 <BotIcon />
-                Save as bot template…
+                Make this an agent
               </DropdownMenuItem>
             ) : null}
             <DropdownMenuItem
@@ -752,9 +757,9 @@ export function SessionHeader({
               />
             ) : null}
             {inMenu("site") ? <SiteOriginMenuItem session={session} /> : null}
-            {slackAgent && inMenu("slackAgent") ? (
-              <div className="flex min-h-9 min-w-0 items-center px-2 text-sm text-fg-muted">
-                <span className="min-w-0 truncate">Slack agent: {slackAgent.name}</span>
+            {agent && inMenu("agent") ? (
+              <div className="flex min-h-9 min-w-0 items-center px-1.5">
+                <SessionAgentChip agent={agent} workspaceId={session.workspaceId} />
               </div>
             ) : null}
             {keyAuthRequired && inMenu("accessKey") ? (
@@ -838,29 +843,6 @@ export function SessionHeader({
             update={onUpdateProfile}
             open={profileOpen}
             onOpenChange={setProfileOpen}
-          />
-        ) : null}
-        {onSaveBotTemplate && saveTemplateOpen ? (
-          <BotTemplateDialog
-            open={saveTemplateOpen}
-            onOpenChange={setSaveTemplateOpen}
-            workspaceId={session.workspaceId}
-            seed={session.id}
-            mode="save"
-            initial={{
-              name: sessionDisplayTitle(session),
-              description: session.description ?? "",
-              avatar: session.avatar ?? null,
-              setupInstructions: "",
-              // Shared like the chat, so an Only me chat stays private by default.
-              visibility: session.tenancy?.visibility === "private" ? "private" : "workspace",
-            }}
-            onSubmit={async (values) => {
-              const created = await onSaveBotTemplate({ ...values, sourceSessionId: session.id });
-              toast.success("Bot template saved", {
-                description: created.name,
-              });
-            }}
           />
         ) : null}
         {adminAccess ? (

@@ -538,8 +538,6 @@ describe("API Integration provider OAuth", () => {
     for (const suffix of [
       "connections/slack-bot/install",
       "connections/fiken/oauth/start",
-      "connections/google-drive/install",
-      "connections/atlassian/install",
       "connections/github/oauth/start",
       "connections/example/github/reconnect",
     ]) {
@@ -1865,4 +1863,146 @@ describe("API Integration provider OAuth", () => {
     expect(connections).toHaveLength(1);
     expect(connections[0]!.subjectId).toBeNull();
   }, 60_000);
+
+  // What Microsoft sends back when an organization's consent policy stopped the
+  // person: each leaves the attempt with the administrator's approval link and
+  // returns the browser to the app that started it.
+  const consentCallbacks = [
+    {
+      name: "consent missing (AADSTS65001)",
+      error: "access_denied",
+      description:
+        "AADSTS65001: The user or administrator has not consented to use the application.",
+      state: "failed",
+      code: "admin_consent_required",
+    },
+    {
+      name: "only an administrator may grant it (AADSTS90094)",
+      error: "access_denied",
+      description: "AADSTS90094: The grant requires admin permission.",
+      state: "failed",
+      code: "admin_consent_required",
+    },
+    {
+      name: "an administrator has to approve the request (AADSTS90093)",
+      error: "access_denied",
+      description: "AADSTS90093: Calling principal cannot consent due to lack of permissions.",
+      state: "failed",
+      code: "admin_consent_required",
+    },
+    {
+      name: "consent_required",
+      error: "consent_required",
+      description: undefined,
+      state: "failed",
+      code: "admin_consent_required",
+    },
+    {
+      name: "left the approval page (AADSTS65004)",
+      error: "access_denied",
+      description: "AADSTS65004: User declined to consent to access the app.",
+      state: "cancelled",
+      code: "provider_denied",
+    },
+    {
+      name: "access_denied without a description",
+      error: "access_denied",
+      description: undefined,
+      state: "cancelled",
+      code: "provider_denied",
+    },
+    {
+      name: "another provider error",
+      error: "server_error",
+      description: "AADSTS50000: There was an error issuing a token.",
+      state: "failed",
+      code: "provider_denied",
+    },
+  ] as const;
+
+  for (const definition of [
+    MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+    MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+  ]) {
+    test(`a ${definition.id} sign-in that returns a consent error carries the approval link`, async () => {
+      if (!available) return;
+      const workspace = await freshWorkspace();
+      const fixture = providerFixture();
+      const app = testApp(fixture);
+      const headers = {
+        authorization: await bearer(workspace),
+        "content-type": "application/json",
+        "x-opengeni-access-key": EDGE_ACCESS_KEY,
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      };
+      const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+      for (const returned of consentCallbacks) {
+        const begun = await app.request(base, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            providerId: definition.id,
+            ownership: "personal",
+            returnUrl: "https://host.example/capabilities",
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        });
+        expect(begun.status).toBe(200);
+        const attempt = await begun.json();
+        const signIn = new URL(attempt.nextAction.url);
+        const query = new URLSearchParams({
+          error: returned.error,
+          state: signIn.searchParams.get("state")!,
+        });
+        if (returned.description) query.set("error_description", returned.description);
+        const response = await app.request(`/v1/integrations/provider-oauth/callback?${query}`);
+        expect(response.status, returned.name).toBe(302);
+        expect(response.headers.get("location"), returned.name).toBe(
+          "https://host.example/capabilities",
+        );
+
+        const current = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
+        expect(current, returned.name).toMatchObject({
+          state: returned.state,
+          nextAction: { type: "none" },
+          credentialsCommitted: false,
+          error: { code: returned.code, retryable: true },
+        });
+        const link = new URL(
+          /https:\/\/login\.microsoftonline\.com\/\S+?(?=\s|$)/.exec(current.error.message)![0],
+        );
+        expect(link.pathname, returned.name).toBe("/organizations/v2.0/adminconsent");
+        expect(link.searchParams.get("client_id")).toBe(MICROSOFT_CLIENT_ID);
+        expect(link.searchParams.get("redirect_uri")).toBe(signIn.searchParams.get("redirect_uri"));
+        expect(link.searchParams.get("state")).toBe("microsoft_admin_consent");
+        expect(link.searchParams.get("scope")).not.toContain("offline_access");
+        // The approval link never carries the sign-in's signed state.
+        expect(current.error.message).not.toContain(signIn.searchParams.get("state")!);
+      }
+      expect(fixture.tokenRequests).toHaveLength(0);
+      expect(
+        await listConnectionsMetadata(client.db, workspace.workspaceId, workspace.subjectId),
+      ).toEqual([]);
+    }, 60_000);
+  }
+
+  test("an administrator returning from the approval link sees whether it was approved", async () => {
+    if (!available) return;
+    const app = testApp(providerFixture());
+    for (const path of [
+      "/v1/integrations/provider-oauth/callback",
+      "/v1/integrations/oauth/callback",
+    ]) {
+      const approved = await app.request(
+        `${path}?admin_consent=True&tenant=tenant-1&state=microsoft_admin_consent`,
+      );
+      expect(approved.status, path).toBe(200);
+      expect(await approved.text()).toContain("Approved");
+      const refused = await app.request(
+        `${path}?error=access_denied&error_description=AADSTS65004&state=microsoft_admin_consent`,
+      );
+      expect(refused.status, path).toBe(400);
+      expect(await refused.text()).toContain("Not approved");
+    }
+  });
 });

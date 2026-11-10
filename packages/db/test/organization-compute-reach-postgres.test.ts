@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireRestrictedRuntimeTestDatabase,
-  grantDeferredRuntimeAccess,
   type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
@@ -420,11 +419,6 @@ describe("every organization machine and rig, wherever it works", () => {
     expect(await visibleMachineIds(org, org.second)).not.toContain(machine.enrollmentId);
     expect(await visibleRigIds(org, org.second)).not.toContain(rig.id);
 
-    // Withheld for one release: the caller learns it is not there yet.
-    expect(await listOrganizationCompute(client.db, access(org, org.second), "machine")).toBeNull();
-    expect(await listOrganizationCompute(client.db, access(org, org.second), "rig")).toBeNull();
-
-    await grantDeferredRuntimeAccess(shared.admin);
     expect(await listOrganizationCompute(client.db, access(org, org.second), "machine")).toEqual([
       {
         id: machine.enrollmentId,

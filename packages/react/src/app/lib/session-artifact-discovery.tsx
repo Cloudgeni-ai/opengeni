@@ -1,10 +1,11 @@
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { SessionEditableArtifactSummary } from "../components/session/editable-artifacts-workspace";
 import { retainArtifactsAfterRefreshFailure } from "./artifact-refresh";
 import { artifactKey } from "./artifact-catalog";
 
-type DiscoveryClient = Pick<OpenGeniBrowserClient, "listArtifactCatalog">;
+type DiscoveryClient = Pick<ChatClient<OpenGeniBrowserClient>, "listArtifactCatalog">;
 
 /**
  * The session dock and workspace library discover the same durable resources.

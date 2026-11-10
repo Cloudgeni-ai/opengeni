@@ -1,9 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql as drizzleSql, type SQL } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import { rawRows } from "../src/database";
+import { LOSSLESS_CONTENT_CODEC_VERSION, toPostgresLosslessJson } from "../src/lossless-json";
+import * as schema from "../src/schema";
 import {
   SESSION_ARCHIVE_EXPORT_TABLES,
+  SESSION_ARCHIVE_PURGED_EVENT_TYPES,
   SESSION_ARCHIVE_PURGE_TABLES,
   SessionArchivedError,
   abandonSessionArchive,
@@ -25,6 +30,7 @@ import {
   readSessionArchiveTranscriptEvents,
   readSessionEventStorageGapEnd,
   sessionArchiveExportSql,
+  sessionArchiveTranscriptEvent,
   setSessionKeepLive,
   submitHumanPromptInTransaction,
   withRlsContext,
@@ -507,6 +513,60 @@ describe("idle-session archive lifecycle", () => {
 });
 
 describe("idle-session archive export reads", () => {
+  test("every foreign key into a purged table is checked by an index seek", async () => {
+    // Each purged row fires its referencing tables' foreign-key checks (a
+    // deferred NO ACTION check, a cascade or a SET NULL). Each check filters by
+    // the key columns alone, so it seeks only an index that leads with them;
+    // otherwise every deleted row scans the referencing table's index or heap
+    // across all workspaces.
+    const references = await shared.admin<
+      { constraint: string; referencing: string; columns: string[]; seekable: boolean }[]
+    >`select c.conname::text as constraint, c.conrelid::regclass::text as referencing,
+        array(select a.attname::text from unnest(c.conkey) k(attnum)
+          join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum) as columns,
+        exists (
+          select 1 from pg_index i join pg_class ic on ic.oid = i.indexrelid
+          join pg_am am on am.oid = ic.relam
+          where i.indrelid = c.conrelid and i.indisvalid and am.amname = 'btree'
+            -- The leading key column is a key column of the reference and is
+            -- not only the tenant: the check binds it, so the index seeks.
+            and i.indkey[0] = any(c.conkey)
+            and (select a.attname from pg_attribute a
+              where a.attrelid = c.conrelid and a.attnum = i.indkey[0])
+              not in ('account_id', 'workspace_id')
+            -- A partial index serves the check only when it keeps every
+            -- non-null key, which the check's equality implies.
+            and (i.indpred is null or pg_get_expr(i.indpred, i.indrelid) = any(array(
+              select format('(%I IS NOT NULL)', a.attname) from unnest(c.conkey) k(attnum)
+              join pg_attribute a on a.attrelid = c.conrelid and a.attnum = k.attnum)))
+        ) or exists (
+          -- Or a tenant-led index whose next key column is a key column too.
+          select 1 from pg_index i join pg_class ic on ic.oid = i.indexrelid
+          join pg_am am on am.oid = ic.relam
+          where i.indrelid = c.conrelid and i.indisvalid and am.amname = 'btree'
+            and i.indpred is null and i.indnkeyatts >= 2
+            and i.indkey[0] = any(c.conkey) and i.indkey[1] = any(c.conkey)
+        ) as seekable
+      from pg_constraint c
+      where c.contype = 'f'
+        and c.confrelid = any(${SESSION_ARCHIVE_PURGE_TABLES.map((table) => table as string)}::regclass[])
+      order by 1`;
+    expect(references.length).toBeGreaterThan(5);
+    expect(references.filter((reference) => !reference.seekable)).toEqual([]);
+
+    // The planner uses it: the deferred check of a purged history item binds
+    // only delivered_history_item_id.
+    const plan = await shared.admin.begin(async (tx) => {
+      await tx`set local enable_seqscan = off`;
+      return await tx<{ "QUERY PLAN": string }[]>`explain (costs off)
+        select 1 from only session_system_updates x
+        where ${crypto.randomUUID()}::uuid = delivered_history_item_id for key share of x`;
+    });
+    expect(plan.map((row) => row["QUERY PLAN"]).join("\n")).toContain(
+      "session_system_updates_delivered_history_item_idx",
+    );
+  });
+
   test("every export table pages by a unique id or seeks a single leakproof key", async () => {
     // Unique, non-partial btree indexes on a table, as ordered key column names.
     const uniqueIndexes = async (table: string) =>
@@ -701,6 +761,85 @@ describe("idle-session archive export reads", () => {
       expect(String(failure)).toContain("the session changed while archiving");
     } finally {
       await exporter.close();
+    }
+  }, 120_000);
+
+  test("transcript events made from exported event rows equal the transcript read in every time zone", async () => {
+    const { scope } = await idleSession();
+    const [turn] = await shared.admin`select id, execution_generation from session_turns
+      where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId} limit 1`;
+    const kept = [
+      "agent.message.completed",
+      "turn.completed",
+      "user.message",
+      "agent.toolCall.created",
+    ];
+    const types = [...SESSION_ARCHIVE_PURGED_EVENT_TYPES, ...kept];
+    // Stored the way the lossless codec stores what PostgreSQL text cannot hold.
+    const encoded = toPostgresLosslessJson({
+      text: "nul \u0000, lone \ud800 and \u2028 survive",
+      nested: { big: 2 ** 64, list: [1.5, -0, "x"], __proto__x: true },
+    });
+    await shared.admin.begin(async (sql) => {
+      await sql`set local session_replication_role = replica`;
+      // 3,000 events across the bundle's 200-row pages and the old transcript's
+      // 500-event pages, with times across a daylight-saving change, whole
+      // seconds, and microseconds the millisecond Date truncates.
+      await sql`insert into session_events (account_id, workspace_id, session_id, sequence, type,
+          payload, payload_codec_version, occurred_at, client_event_id, turn_id, turn_generation,
+          turn_association)
+        select ${scope.accountId}, ${scope.workspaceId}, ${scope.sessionId}, m.last + n,
+          (${types}::text[])[1 + n % ${types.length}],
+          case when n % 7 = 0 then ${sql.json(encoded as never)}::jsonb
+            else jsonb_build_object('text', 'event ' || n, 'n', n, 'quote', '"\\', 'emoji', '🧪') end,
+          case when n % 7 = 0 then ${LOSSLESS_CONTENT_CODEC_VERSION}::int end,
+          case when n % 50 = 0
+            then date_trunc('second', timestamptz '2025-10-26 00:20:00+00' + n * interval '2.3456789 seconds')
+            when n % 50 = 1 then timestamptz '2025-10-26 00:59:59.999999+00'
+            else timestamptz '2025-10-26 00:20:00+00' + n * interval '2.3456789 seconds' end,
+          case when n % 3 = 0 then 'client-' || n end,
+          case when n % 2 = 0 then ${turn!.id}::uuid end,
+          case when n % 2 = 0 then ${turn!.execution_generation}::int end,
+          case when n % 2 = 0 then 'current' end
+        from (select max(sequence) as last from session_events
+          where workspace_id = ${scope.workspaceId} and session_id = ${scope.sessionId}) m,
+          generate_series(1, 3000) n`;
+    });
+
+    for (const timeZone of [
+      "UTC",
+      "Europe/Oslo",
+      "Asia/Kolkata",
+      "America/St_Johns",
+      "Pacific/Chatham",
+    ]) {
+      const wire = postgres(shared.appUrl, { max: 1, connection: { TimeZone: timeZone } });
+      const db = drizzle(wire, { schema }) as unknown as Database;
+      try {
+        const [setting] = await wire`select current_setting('TimeZone') as zone`;
+        expect(setting!.zone).toBe(timeZone);
+        const read: string[] = [];
+        for (let afterSequence = 0; ;) {
+          const page = await readSessionArchiveTranscriptEvents(db, scope, {
+            afterSequence,
+            limit: 500,
+          });
+          for (const event of page) read.push(JSON.stringify({ event }));
+          if (page.length < 500) break;
+          afterSequence = page.at(-1)!.sequence;
+        }
+        const derived: string[] = [];
+        for (const rows of await exportAll(db, scope, exportSpec("session_events"), 200)) {
+          for (const row of rows) {
+            const event = sessionArchiveTranscriptEvent(row);
+            if (event) derived.push(JSON.stringify({ event }));
+          }
+        }
+        expect(read.length).toBeGreaterThan(500);
+        expect(derived).toEqual(read);
+      } finally {
+        await wire.end();
+      }
     }
   }, 120_000);
 });

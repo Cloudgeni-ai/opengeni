@@ -1,17 +1,10 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
-import type { SearchRecordForm } from "./hosted-search-evidence";
+// Nothing was sent: callers render the message, which names the choices.
 export {
-  activeAttemptSecretValues,
-  installToolResultSecretMasking,
-  secretMaskedTool,
-  secretValueModelInputFilter,
-  withAttemptSecretValues,
-} from "./tool-result-secret-masking";
-import {
-  firstPartySecretValuesMeta,
-  installToolResultSecretMasking,
-  secretMaskedToolResolver,
-} from "./tool-result-secret-masking";
+  McpAccountParameterChoiceError,
+  isMcpAccountParameterChoiceError,
+} from "./mcp-account-parameters";
+import type { SearchRecordForm } from "./hosted-search-evidence";
 export {
   COMMAND_COMPLETION_NOTICE_MAX_BYTES,
   CommandCompletionDelivery,
@@ -27,6 +20,25 @@ import {
   installCommandCompletionDelivery,
   type CommandCompletionDelivery,
 } from "./command-completion-delivery";
+import {
+  installSandboxSetupNoticeDelivery,
+  queueSandboxSetupNotice,
+  takeSandboxSetupNotices,
+  dropSandboxSetupNotices,
+} from "./sandbox-setup-notices";
+export { queueSandboxSetupNotice, takeSandboxSetupNotices } from "./sandbox-setup-notices";
+import {
+  SOFT_SETUP_FAILURE_NOTICE_PREFIX,
+  softFailingSetupHooks,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
+} from "./sandbox-setup-soft-failure";
+import { SandboxLifecycleCommandExitError } from "./sandbox/lifecycle-command-error";
+export {
+  softRunCredentialWriteFailure,
+  softSetupFailureNotice,
+  type SoftSetupFailure,
+} from "./sandbox-setup-soft-failure";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
@@ -62,6 +74,16 @@ export {
   type ModelImageSizerOptions,
   type SizedImage,
 } from "./model-image-sizing";
+import { withViewableHeifImages } from "./heif-image";
+export {
+  HeifDecodeError,
+  heifToJpeg,
+  sniffHeifImage,
+  withViewableHeifImages,
+  type HeifImageKind,
+  type HeifJpegOptions,
+  type HeifJpegRendition,
+} from "./heif-image";
 import { runSingleModelCall, type SingleModelCallTarget } from "./single-model-call";
 export {
   runSingleModelCall,
@@ -76,7 +98,7 @@ export {
   type SingleModelCallResult,
   type SingleModelCallTarget,
 } from "./single-model-call";
-import { instrumentedModelFetch, modelToolNameObservers } from "./model-provider-client";
+import { instrumentedModelFetch } from "./model-provider-client";
 import { inferenceResidencyRequirement, sideFeatureRouteRunnable } from "./inference-residency";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
@@ -151,6 +173,7 @@ import {
 import {
   ToolGatewayInputValidationError,
   ToolGatewaySchemaCompilationError,
+  ToolGatewayToolNotFoundError,
   createWorkspaceToolGateway,
   digestCanonicalJson,
   type ToolGateway,
@@ -158,6 +181,7 @@ import {
   type ToolGatewayApprovalResolver,
   type ToolGatewayArgumentResolver,
   type ToolGatewayCallLifecycle,
+  type ToolGatewayCatalogWarning,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 import { createSecretArgumentResolver } from "./secret-argument-resolution";
@@ -171,7 +195,6 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   FIRST_PARTY_MCP_CALLER_META_KEY,
-  FIRST_PARTY_SECRET_VALUES_META_KEY,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -191,6 +214,7 @@ import {
   GenerateVideoToolInput,
   GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
+  type HumanInputQuestionFeatures,
   resolveAgentToolFamilies,
   resolveAgentMediaToolSurface,
   type ResolvedAgentConfig,
@@ -227,7 +251,6 @@ import {
   isSecretReferenceError,
   SECRET_USE_APPROVAL_QUESTION_PREFIX,
   type SecretResolver,
-  type SecretValueMemory,
 } from "@opengeni/contracts";
 export { renderSessionGoalContext } from "@opengeni/contracts";
 export {
@@ -241,18 +264,22 @@ export {
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
   MCP_MAX_RESPONSE_BYTES,
+  MCP_MAX_SELECTED_SERVERS,
   MCP_MAX_TOOL_RESULT_BYTES,
   McpAggregateToolListBudget,
   assertMcpPayloadWithinBytes,
   assertMcpServerSelectionWithinBounds,
-  assertMcpToolListWithinBounds,
   boundedParallelMap,
   cancelMcpResponseBody,
+  describeMcpToolListDrops,
+  fitMcpToolListWithinBounds,
   guardedMcpFetch,
+  isMcpPayloadTooLargeError,
   mcpJsonRpcErrorPayloadForRequest,
   mcpOuterConnectTimeoutMs,
   mcpRequestReplayInfo,
   undiciFetch,
+  type McpToolListDrop,
   type McpRequestReplayInfo,
 } from "./mcp-network";
 import {
@@ -266,6 +293,7 @@ import {
   type LazyToolTransport,
 } from "./lazy-tool-transport";
 import { legacyMcpToolDigest, prefixedMcpToolName } from "./mcp-model-tool-name";
+import { uniqueListedMcpTools, withoutRedundantUuidPatterns } from "./mcp-listed-tools";
 export { prefixedMcpToolName } from "./mcp-model-tool-name";
 import { createToolSelector } from "./tool-discovery-decision";
 import { withAccountLine } from "./tool-discovery-ranking";
@@ -295,6 +323,17 @@ import {
 } from "./slack-rest-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
+import {
+  McpAccountParameterChoiceError,
+  isMcpAccountParameterChoiceError,
+  accountChoicesFromResult,
+  fillAccountParameters,
+  mcpAccountParametersFor,
+  withAccountParameterDefaults,
+  type AccountParameterFill,
+  type McpAccountChoice,
+  type McpAccountParameter,
+} from "./mcp-account-parameters";
 import {
   MCP_INPUT_PENDING_RESULT,
   awaitingMcpInput,
@@ -326,6 +365,7 @@ export {
   wrapAttemptToolDefinitions,
   wrapAttemptToolExecute,
   type ProjectModelToolResult,
+  type SpilledToolResultReaders,
   type SpillOversizedModelToolResult,
 } from "./tool-result-spill";
 export {
@@ -376,6 +416,7 @@ import {
   connectMcpServers,
   MaxTurnsExceededError,
   MCPServerStreamableHttp,
+  ModelBehaviorError,
   RunState,
   run,
   Runner,
@@ -447,7 +488,10 @@ import { recordStableSystemPromptPrefix } from "./system-prompt-cache-prefix";
 import { sandboxBaseInstructions } from "./sandbox-base-instructions";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
 import {
+  agentSharesWorkspace,
+  agentInstructionsLayerContent,
   composeModularAgentInstructions,
+  NEUTRAL_AGENT_IDENTITY,
   resolveAgentIdentity,
   rigInstructions,
   UNATTENDED_SESSION_GUIDANCE,
@@ -460,8 +504,11 @@ import {
   type WorkspaceEnvironmentContext,
 } from "./agent-instructions";
 export {
+  AGENT_INSTRUCTIONS_PREAMBLE,
   AGENT_PROMPT_MODULES,
+  agentInstructionsLayerContent,
   DEFAULT_AGENT_IDENTITY,
+  NEUTRAL_AGENT_IDENTITY,
   INSTRUCTION_PRECEDENCE,
   SESSION_INSTRUCTIONS_PREAMBLE,
   composeModularAgentInstructions,
@@ -487,6 +534,7 @@ import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
   compactionSummaryOutputTokens,
+  truncateCompactionSummary,
   buildRemoteCompactionV2PromptInput,
   extractRemoteCompactionV2OutputItem,
   estimateSerializedValueTokens,
@@ -523,6 +571,13 @@ import {
   sandboxCommandStdout,
 } from "./sandbox/command-result";
 import {
+  ownedBoxRepairCommand,
+  ownedBoxRepairHost,
+  ownedBoxRepairNote,
+  parseOwnedBoxRepairOutput,
+  type OwnedBoxRepairReport,
+} from "./sandbox/owned-box-repair";
+import {
   sandboxHookOperationPurpose,
   withSandboxOperationPurpose,
 } from "./sandbox/operation-purpose";
@@ -533,6 +588,16 @@ import {
   managedCodemodeClientDirectory,
   type ManagedCodemodeClientDownload,
 } from "./sandbox/codemode-client";
+import {
+  installManagedShellTools,
+  loadManagedShellTools,
+  type ManagedShellTools,
+} from "./sandbox/shell-tools";
+export {
+  loadManagedShellTools,
+  MANAGED_SHELL_TOOLS_ARCHES,
+  type ManagedShellToolsDownload,
+} from "./sandbox/shell-tools";
 export {
   loadManagedCodemodeClient,
   managedCodemodeClientBytes,
@@ -594,6 +659,7 @@ import {
   resolveTurnModel,
 } from "./model-provider";
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
+export { REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES } from "./workspace-skills";
 import {
   composeRuntimeSkills,
   readRuntimeSkill,
@@ -741,6 +807,8 @@ export {
 } from "./model-preparation-diagnostics";
 export {
   CodexSubscriptionUnavailableError,
+  INCOMPLETE_CHAT_COMPLETION_CODE,
+  IncompleteChatCompletionError,
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
   OrganizationOpperUnavailableError,
@@ -938,6 +1006,8 @@ export {
 export {
   PROVIDER_QUOTA_EXHAUSTED_CODE,
   PROVIDER_QUOTA_RETRY_HINT_MS,
+  classifyProviderAccountRefusal,
+  classifyProviderAccountRefusalError,
   classifyProviderQuotaError,
   providerMessageRetryHintMs,
   providerQuotaExhaustedMessage,
@@ -954,7 +1024,9 @@ export { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents
 export {
   CompactionNeededError,
   CompactionProviderResponseError,
+  COMPACTION_PROVIDER_MESSAGE_MAX_CHARS,
   EmptyCompactionSummaryError,
+  compactionProviderMessage,
   compactionProviderRejection,
   compactionProviderRejectionFromDiagnostics,
   describeCompactionProviderRejection,
@@ -962,6 +1034,10 @@ export {
   buildCompactionPromptInput,
   buildCompactionReplacement,
   buildCompactionReplacementHistory,
+  buildTrimmedCompactionReplacement,
+  buildTrimmedContextCheckpointItem,
+  DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
+  TRIMMED_CONTEXT_NOTICE,
   type CompactionReplacement,
   type CompactionTurnContext,
   compactionAttachmentFileIds,
@@ -980,7 +1056,6 @@ export {
   isRemoteCompactionItem,
   isRetainedRemoteV2Message,
   latestCompactionReplacementFingerprint,
-  portableSwitchTranscriptStart,
   PORTABLE_MODEL_SWITCH_COMPACTION_IMPLEMENTATION,
   prepareCompactionPromptInput,
   projectRemoteCompactionOverflowRetryInput,
@@ -1449,27 +1524,31 @@ export async function summarizeForCompaction(
   const azureResponses = provider.wireProfile === "azure-openai";
   const maxTokens =
     options.maxOutputTokens ?? compactionSummaryOutputTokens(settings.contextWindowTokens);
+  // Set when an endpoint refused the output cap and the summary was requested
+  // without one; the summary is then held to the cap here instead.
+  let outputCapDropped = false;
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
-    let completion: unknown;
-    try {
-      completion = await client.chat.completions.create(
-        {
-          model,
-          max_tokens: maxTokens,
-          messages: [
-            ...(options.systemInstructions
-              ? [{ role: "system" as const, content: options.systemInstructions }]
-              : []),
-            { role: "user", content: transcript },
-          ],
-          ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
-        } as any,
-        options.signal ? { signal: options.signal } : undefined,
+    const requestCompletion = (outputCap: boolean) => {
+      if (!outputCap) outputCapDropped = true;
+      return sendCompactionRequest(() =>
+        client.chat.completions.create(
+          {
+            model,
+            ...(outputCap ? { max_tokens: maxTokens } : {}),
+            messages: [
+              ...(options.systemInstructions
+                ? [{ role: "system" as const, content: options.systemInstructions }]
+                : []),
+              { role: "user", content: transcript },
+            ],
+            ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+          } as any,
+          options.signal ? { signal: options.signal } : undefined,
+        ),
       );
-    } catch (error) {
-      throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
-    }
+    };
+    const completion = await withCompactionOutputCapRetry(provider, requestCompletion);
     const usage = modelResponseUsageFromResponse(completion);
     if (usage) {
       await options.onUsage?.(usage);
@@ -1495,7 +1574,7 @@ export async function summarizeForCompaction(
     if (!summary) {
       throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(completion, summary));
     }
-    return summary;
+    return outputCapDropped ? truncateCompactionSummary(summary, maxTokens) : summary;
   }
   // Use the same SDK Responses adapter as the real agent call. It converts the
   // structured AgentInputItems (callId/providerData/etc.) to provider wire
@@ -1548,12 +1627,7 @@ export async function summarizeForCompaction(
         ...(options.signal ? { signal: options.signal } : {}),
       };
   const dispatch = async (send: () => Promise<unknown>): Promise<unknown> => {
-    let result: unknown;
-    try {
-      result = await send();
-    } catch (error) {
-      throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
-    }
+    const result = await sendCompactionRequest(send);
     const usage = modelResponseUsageFromResponse(result);
     if (usage) {
       await options.onUsage?.(usage);
@@ -1571,7 +1645,6 @@ export async function summarizeForCompaction(
         false,
         inferenceResidencyRequirement(settings),
       ),
-      modelToolNameObservers(provider.id),
     );
     const claudeRequest = (forbidToolCalls: boolean) =>
       anthropicCompactionRequest(input, {
@@ -1590,24 +1663,103 @@ export async function summarizeForCompaction(
       response = await dispatch(() => claude.getResponse(claudeRequest(true)));
     }
   } else {
-    response = await dispatch(() =>
-      new CompactionResponsesModel(client, model, provider).fetchResponse(request),
-    );
+    const responses = new CompactionResponsesModel(client, model, provider);
+    response = await withCompactionOutputCapRetry(provider, (outputCap) => {
+      if (!outputCap) outputCapDropped = true;
+      return dispatch(() =>
+        responses.fetchResponse(
+          outputCap ? request : { ...request, modelSettings: withoutMaxTokens(request) },
+        ),
+      );
+    });
   }
   if (compactionResponseCalledTool(response)) {
     throw new EmptyCompactionSummaryError({ stage: "checkpoint_response", reason: "tool_call" });
   }
-  if (
-    (response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens" ||
-    isFailedCompactionProviderResponse(response)
-  ) {
-    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
+  // A summary cut off at the output limit is unusable, the same as a Chat
+  // Completions `length` finish; it is not a provider failure.
+  if ((response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens") {
+    throw new EmptyCompactionSummaryError({ stage: "checkpoint_response", reason: "max_tokens" });
+  }
+  if (isFailedCompactionProviderResponse(response)) {
+    throw new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(response),
+      undefined,
+      response,
+    );
   }
   const summary = extractResponseOutputText(response).trim();
   if (!summary) {
     throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
   }
-  return summary;
+  return outputCapDropped ? truncateCompactionSummary(summary, maxTokens) : summary;
+}
+
+/** Send one checkpoint request; any provider or transport failure becomes the content-free error. */
+async function sendCompactionRequest<T>(send: () => Promise<T>): Promise<T> {
+  try {
+    return await send();
+  } catch (error) {
+    if (error instanceof CompactionProviderResponseError) throw error;
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+  }
+}
+
+/** A workspace's or organization's own OpenAI-compatible endpoint. */
+function isCompatibleModelEndpoint(provider: ResolvedModelProvider): boolean {
+  return (
+    provider.kind === "direct-compatible-workspace" ||
+    provider.kind === "direct-compatible-organization"
+  );
+}
+
+/** Statuses with which a server refuses a request it parsed as invalid. */
+const COMPACTION_OUTPUT_CAP_RETRY_STATUSES = new Set([400, 422]);
+
+/**
+ * Send a checkpoint request, and when an OpenAI-compatible endpoint refuses it
+ * as invalid, send it once more without the output cap. Ordinary requests to
+ * these endpoints carry no cap, and compatible servers commonly refuse one
+ * that is above the model's output limit or above what is left of its context
+ * window. The retry uses the request shape the endpoint already accepts. The
+ * caller holds the uncapped summary to the cap afterwards (cut from the
+ * middle), so the checkpoint fits exactly as a capped one would. A context-length refusal is retried too:
+ * such servers often count the requested output against the window, so it
+ * cannot be told apart from an oversized cap. Other providers are not retried.
+ * Each `send` wraps its own provider call; any other error it throws, such as
+ * one from usage accounting, passes through unchanged and is never retried.
+ */
+async function withCompactionOutputCapRetry<T>(
+  provider: ResolvedModelProvider,
+  send: (outputCap: boolean) => Promise<T>,
+): Promise<T> {
+  try {
+    return await send(true);
+  } catch (error) {
+    if (
+      !isCompatibleModelEndpoint(provider) ||
+      !(error instanceof CompactionProviderResponseError) ||
+      error.status === undefined ||
+      !COMPACTION_OUTPUT_CAP_RETRY_STATUSES.has(error.status)
+    ) {
+      throw error;
+    }
+    try {
+      return await send(false);
+    } catch (retryError) {
+      if (!(retryError instanceof CompactionProviderResponseError)) throw retryError;
+      throw new CompactionProviderResponseError(
+        { ...retryError.diagnostics, outputCapRetried: true },
+        retryError.cause,
+        retryError,
+      );
+    }
+  }
+}
+
+function withoutMaxTokens(request: ModelRequest): ModelRequest["modelSettings"] {
+  const { maxTokens: _maxTokens, ...modelSettings } = request.modelSettings;
+  return modelSettings;
 }
 
 /**
@@ -1840,7 +1992,11 @@ export async function requestRemoteCompactionV2(
     await options.onUsage?.(usage);
   }
   if (isFailedCompactionProviderResponse(response)) {
-    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
+    throw new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(response),
+      undefined,
+      response,
+    );
   }
   try {
     return extractRemoteCompactionV2OutputItem(response);
@@ -2350,12 +2506,28 @@ export type BuildAgentOptions = {
   /** Admitted decision provider; caller owns its accounting and cancellation. */
   toolSearchDecisionModel?: import("@opengeni/decisions").DecisionModel | undefined;
   /**
+   * Called when a tool search's decision model fails or misses its deadline
+   * and the search falls back to keywords: the search result says only that
+   * it fell back.
+   */
+  onToolSelectionError?:
+    | ((failure: import("./tool-discovery-decision").ToolSelectionFailure) => void)
+    | undefined;
+  /**
    * Ranks tools by meaning alongside keywords in tool search; the caller owns
    * its route checks. Absent means keyword ranking alone.
    */
   toolSearchMeaningRanker?: import("./tool-discovery-meaning").ToolMeaningRanker | undefined;
   /** Durable router use survives capability and tool-policy changes. */
   toolRouterInHistory?: boolean;
+  /**
+   * `false` when the host proved from frozen facts that nothing this attempt
+   * attaches is deferred (see the worker's `turnToolRouterExpected`). Pending
+   * background preparation alone then exposes no search router, and the
+   * instructions omit tool discovery. Tools that do turn out searchable still
+   * expose it, so nothing becomes unreachable. Omitted keeps today's rule.
+   */
+  toolRouterExpected?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
   authorizeAttemptExecution?: () => Promise<void> | void;
   /** Trusted attempt-local wait receipt shared with prepared tools. */
@@ -2363,6 +2535,12 @@ export type BuildAgentOptions = {
   model?: Model;
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
+  /**
+   * Whether this session has a parent agent (frozen at create). `true` adds the
+   * parent-agent guidance to `request_human_input`, `false` leaves it out, and
+   * omitted keeps it conditioned on being a sub-session.
+   */
+  subSession?: boolean;
   /**
    * The session is unattended (frozen at create): no person will see or answer
    * a question until the task ends. Both compositions say so, and the
@@ -2694,6 +2872,14 @@ export type BuildAgentOptions = {
   // timeline message. Omitted ⇒ the composed instructions are byte-identical to
   // a workspace-only persona.
   sessionInstructions?: string;
+  /**
+   * The instructions of the agent revision this chat is bound to
+   * (`sessions.agent_prompt_revision`), composed as their own layer after the
+   * Codemode/code-search directives and before Git bindings, memory and
+   * session instructions. Omitted for every chat not bound to an agent
+   * revision, whose instructions stay byte-identical.
+   */
+  agentInstructions?: string;
 
   skillActivations?: readonly RuntimeSkillActivation[];
   /** Host-owned descriptors and reader; mutually exclusive with skillActivations. */
@@ -2706,6 +2892,14 @@ export type BuildAgentOptions = {
    * holding Steer/Pause behind its requested yield or natural exit.
    */
   turnCancellationSignal?: AbortSignal;
+  /**
+   * Leave repository skills unindexed and tell the model where to look
+   * instead. Set for sessions whose workspace is provisioned lazily, where
+   * indexing would be the operation that prepares it (box, environment setup,
+   * clone) before the first model request; that preparation then starts when
+   * a tool first uses it.
+   */
+  deferRepositorySkillIndex?: boolean;
   /**
    * Receives the physical sandbox-tool fence at agent construction time. A
    * cancelled/fenced worker attempt must await it before publishing its durable
@@ -2722,21 +2916,21 @@ export type BuildAgentOptions = {
   /**
    * The attempt's credential profile: variables added to the environment of
    * every sandbox command (exec_command and background commands), resolved
-   * through `secretResolver` (so the values are remembered and masked like
-   * any other resolved value). Omitted: commands get no profile variables.
+   * through `secretResolver` like any other reference. Omitted: commands get
+   * no profile variables.
    */
   credentials?: CredentialEnvironment | null;
-  /**
-   * The attempt's known secret values (docs/secrets.md, Masking). Every tool
-   * result is masked with it before the model, the run state or history sees it.
-   */
-  secretValueMemory?: SecretValueMemory | null;
   /**
    * The session's finished background commands, delivered with the next
    * plain-text tool result (command-completion-delivery.ts). Applied while
    * settings.experimentCutPolling is on.
    */
   commandCompletionDelivery?: CommandCompletionDelivery | null;
+  /**
+   * Receives each sandbox setup notice appended to a tool result
+   * (sandbox-setup-notices.ts), so audit views can show the tool's own output.
+   */
+  onSandboxSetupNoticeDelivered?: (appended: string) => void;
 };
 
 /** @deprecated Persistent display metadata is no longer model-visible. */
@@ -2859,6 +3053,123 @@ function gitBindingDiscoveryApplies(
  * attachments deliberately select nothing here: a turn with a file must share
  * the cached instructions of a turn without one.
  */
+type HumanInputWireSchemaNode = {
+  properties?: Record<string, HumanInputWireSchemaNode>;
+  required?: string[];
+  enum?: unknown[];
+  items?: HumanInputWireSchemaNode;
+};
+
+let fullHumanInputWireParameters: unknown;
+
+/**
+ * The model-facing schema of `request_human_input`: the full contract exactly
+ * as the Agents SDK converts it, with only fields removed. Always removed are
+ * the `$schema` marker and `allowOther`, which the model never needs: new
+ * choice requests always offer Other (`serializeHumanInputRequests`), a Skill
+ * review always drops it, and a text question that sets it is rejected. The disabled
+ * features are removed too. Converting a reduced zod schema directly would
+ * take the SDK's other converter, which adds length keywords and can make the
+ * reduced schema larger than the full one. Calls are still parsed by the zod
+ * schema, so an omitted `allowOther` takes its contract default.
+ */
+function humanInputWireParameters(features: HumanInputQuestionFeatures): unknown {
+  fullHumanInputWireParameters ??= agentTool({
+    name: HUMAN_INPUT_TOOL_NAME,
+    description: "",
+    parameters: RequestHumanInputToolInput,
+    execute: () => "",
+  }).parameters;
+  const schema = structuredClone(fullHumanInputWireParameters) as HumanInputWireSchemaNode & {
+    $schema?: unknown;
+  };
+  delete schema.$schema;
+  const question = schema.properties?.questions?.items;
+  if (!question?.properties) throw new Error("request_human_input schema has no question object");
+  const drop = (field: string) => {
+    delete question.properties![field];
+    if (question.required) question.required = question.required.filter((name) => name !== field);
+  };
+  drop("allowOther");
+  if (!features.secrets) {
+    drop("secret");
+    const kind = question.properties.kind;
+    if (kind?.enum) kind.enum = kind.enum.filter((value) => value !== "secret");
+  }
+  if (!features.skillReview) drop("skillReview");
+  return schema;
+}
+
+function withHumanInputWireParameters<T extends { parameters: unknown }>(
+  features: HumanInputQuestionFeatures,
+  built: T,
+): T {
+  return { ...built, parameters: humanInputWireParameters(features) as T["parameters"] };
+}
+
+/**
+ * What the Agents SDK parses a `request_human_input` call against before the
+ * tool's input guardrail runs: any JSON object. The SDK redacts every
+ * argument it cannot parse (Opengeni sets OPENAI_AGENTS_DONT_LOG_TOOL_DATA),
+ * hands the guardrail blank arguments and replaces its rejection with "Tool
+ * execution failed. Error details are redacted.", so the model could not
+ * learn what to fix. The guardrail validates the full contract instead and
+ * names each invalid field; turns run it before the approval pause
+ * (`preApprovalInputGuardrails`), so no invalid request reaches the person.
+ * The model-facing schema is set separately (`withHumanInputWireParameters`),
+ * so this changes nothing the model sees.
+ */
+const HumanInputSdkArguments = z.looseObject({});
+
+const HUMAN_INPUT_ISSUES_SHOWN = 5;
+
+/** A model-facing explanation of invalid `request_human_input` arguments. */
+export function humanInputArgumentsRejection(input: unknown): string | null {
+  const parsed = RequestHumanInputToolInput.safeParse(input);
+  if (parsed.success) return null;
+  const questionsText =
+    input !== null &&
+    typeof input === "object" &&
+    typeof (input as { questions?: unknown }).questions === "string";
+  const issues = parsed.error.issues.map(
+    (issue) => `${issue.path.map(String).join(".") || "arguments"}: ${issue.message}`,
+  );
+  const shown = issues.slice(0, HUMAN_INPUT_ISSUES_SHOWN);
+  if (issues.length > shown.length) shown.push(`and ${issues.length - shown.length} more`);
+  return [
+    "Nothing was asked: the request_human_input arguments do not match its schema.",
+    questionsText ? "questions must be an array of question objects, not JSON text." : null,
+    `Fix ${issues.length === 1 ? "this" : "these"} and call request_human_input again: ${shown.join("; ")}.`,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" ");
+}
+
+/**
+ * The tool view the modular composer reads. An attempt that cannot install the
+ * search router (see `lazyToolTransportFor`) has no tool search, so the
+ * composer leaves out its guidance even when the host did not say so.
+ */
+function modularToolAvailability(
+  settings: Settings,
+  options: BuildAgentOptions,
+): { toolAvailability?: AgentPromptToolAvailability } {
+  const view = options.agentPromptToolAvailability;
+  if (lazyToolTransportFor(settings, options)) return view ? { toolAvailability: view } : {};
+  return { toolAvailability: { ...(view ?? { unavailable: [] }), toolSearchAbsent: true } };
+}
+
+/**
+ * The Skill index layer renders unless it is already in history. A configured
+ * session leaves out an empty index: there is nothing to read.
+ */
+function skillCatalogLayerApplies(
+  options: Pick<BuildAgentOptions, "skillCatalog" | "skillCatalogInHistory" | "agentConfig">,
+): boolean {
+  if (!options.skillCatalog || options.skillCatalogInHistory) return false;
+  return !(options.agentConfig && options.skillCatalog.length === 0);
+}
+
 export function agentPromptResourcesFor(
   settings: Settings,
   resources: readonly ResourceRef[],
@@ -2873,6 +3184,7 @@ export function agentPromptResourcesFor(
     | "secrets"
     | "unattended"
     | "personalGitHubLogin"
+    | "skillCatalog"
   >,
 ): AgentPromptResources {
   const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
@@ -2903,6 +3215,8 @@ export function agentPromptResourcesFor(
       ? { commandCompletionDelivery: true }
       : {}),
     ...(repositoryIdentities.length > 0 ? { repositoryIdentities } : {}),
+    // A host-supplied index that lists no Skill: nothing to read this turn.
+    ...(options.skillCatalog?.length === 0 ? { skillsReadable: false } : {}),
   };
 }
 
@@ -2964,12 +3278,15 @@ function inspectModularAgentInstructions(
   config: ResolvedAgentConfig,
   options: BuildAgentOptions,
 ): PersistentAgentInstructionInspection {
+  const resources = options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options);
   const identity = resolveAgentIdentity({
     sessionIdentity: config.identity,
     workspaceIdentity: options.workspaceAgentIdentity ?? options.instructionsTemplate,
     deploymentTemplate: settings.agentInstructionsTemplate,
+    ...(agentSharesWorkspace(config.capabilities, resources)
+      ? {}
+      : { defaultIdentity: NEUTRAL_AGENT_IDENTITY }),
   });
-  const resources = options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options);
   const composed = composeModularAgentInstructions({
     // An unattended session gets no human-input tool, so no clause offers it.
     capabilities: resources.unattended
@@ -2978,17 +3295,16 @@ function inspectModularAgentInstructions(
     renderer: config.renderer,
     identity: appendDeploymentAgentInstructions(identity, settings),
     resources,
-    ...(options.agentPromptToolAvailability
-      ? { toolAvailability: options.agentPromptToolAvailability }
-      : {}),
+    ...modularToolAvailability(settings, options),
     ...agentPromptExperimentsFor(settings),
     ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
     ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
+    ...(options.agentInstructions ? { agentInstructions: options.agentInstructions } : {}),
     ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
       ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
       : {}),
-    ...(options.skillCatalog && !options.skillCatalogInHistory
-      ? { skillCatalog: formatSkillCatalog(options.skillCatalog) }
+    ...(skillCatalogLayerApplies(options)
+      ? { skillCatalog: formatSkillCatalog(options.skillCatalog!) }
       : {}),
     workspaceGovernance: options.workspaceGovernance,
     workspaceMemory: options.workspaceMemory,
@@ -3017,19 +3333,11 @@ export function inspectPersistentAgentInstructions(
     ),
     settings,
   );
-  if (settings.experimentSystemPromptCacheSplit) {
-    // The deployment persona with no workspace environment or sandbox
-    // environment is shared by every interactive session; a workspace
-    // persona is not.
-    recordStableSystemPromptPrefix(
-      personaTemplate === settings.agentInstructionsTemplate &&
-        !options.workspaceEnvironment &&
-        !options.rig &&
-        !options.unattended
-        ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
-        : OPENGENI_OPERATIONAL_INSTRUCTIONS,
-    );
-  }
+  const sharedPersona =
+    personaTemplate === settings.agentInstructionsTemplate &&
+    !options.workspaceEnvironment &&
+    !options.rig &&
+    !options.unattended;
   const layers: PersistentAgentInstructionLayerDraft[] = [
     {
       id: "operational_contract",
@@ -3038,6 +3346,14 @@ export function inspectPersistentAgentInstructions(
     },
     { id: "persona_and_core", title: "Persona and CORE", content: personaAndCore },
   ];
+  const agentLayer = agentInstructionsLayerContent(options.agentInstructions);
+  // The agent layer is a Markdown section: it and the layer after it start on
+  // their own paragraph. Chats without one keep the historical joins.
+  let paragraphBreakNext = false;
+  const add = (layer: PersistentAgentInstructionLayerDraft) => {
+    layers.push(paragraphBreakNext ? { ...layer, joinBefore: "\n\n" } : layer);
+    paragraphBreakNext = layer.id === "agent_instructions";
+  };
   const push = (
     id: PersistentAgentInstructionLayerDraft["id"],
     title: string,
@@ -3045,53 +3361,85 @@ export function inspectPersistentAgentInstructions(
   ) => {
     const trimmed = content?.trim();
     if (!trimmed) return;
-    layers.push({ id, title, content: trimmed });
+    add({ id, title, content: trimmed });
+  };
+  const pushAgentInstructions = () => {
+    if (agentLayer)
+      add({
+        id: "agent_instructions",
+        title: "Agent instructions",
+        content: agentLayer,
+        joinBefore: "\n\n",
+      });
   };
   if (!options.workspaceGovernance?.trim()) {
     if (codemodeIsAvailable(options)) {
-      layers.push({
+      add({
         id: "codemode",
         title: "Codemode",
         content: CODEMODE_PROGRAMMATIC_DIRECTIVE,
       });
     }
     if (options.codeSearchAvailable) {
-      layers.push({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
+      add({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
     }
+    pushAgentInstructions();
     if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
-      layers.push({
+      add({
         id: "git_bindings",
         title: "Git credential bindings",
         content: GIT_BINDING_DISCOVERY_DIRECTIVE,
       });
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
-    if (options.skillCatalog && !options.skillCatalogInHistory)
-      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
+    if (skillCatalogLayerApplies(options))
+      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog!));
     push("session_instructions", "Session instructions", options.sessionInstructions);
   } else {
+    // Directives follow the session text on this path, so the agent layer
+    // sits right after the persona to stay ahead of session instructions.
+    pushAgentInstructions();
     push("workspace_governance", "Workspace governance", options.workspaceGovernance);
-    if (options.skillCatalog && !options.skillCatalogInHistory)
-      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
+    if (skillCatalogLayerApplies(options))
+      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog!));
     push("session_instructions", "Session instructions", options.sessionInstructions);
     if (codemodeIsAvailable(options)) {
-      layers.push({
+      add({
         id: "codemode",
         title: "Codemode",
         content: CODEMODE_PROGRAMMATIC_DIRECTIVE,
       });
     }
     if (options.codeSearchAvailable) {
-      layers.push({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
+      add({ id: "code_search", title: "Code search", content: CODE_SEARCH_DIRECTIVE });
     }
     if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
-      layers.push({
+      add({
         id: "git_bindings",
         title: "Git credential bindings",
         content: GIT_BINDING_DISCOVERY_DIRECTIVE,
       });
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
+  }
+  if (settings.experimentSystemPromptCacheSplit) {
+    // The deployment persona with no workspace environment or sandbox
+    // environment is shared by every interactive session; a workspace
+    // persona is not. An agent chat extends it through the agent's
+    // instructions, which every chat of that agent shares.
+    let stable = sharedPersona
+      ? `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`
+      : OPENGENI_OPERATIONAL_INSTRUCTIONS;
+    if (sharedPersona && agentLayer) {
+      const through = layers.findIndex((layer) => layer.id === "agent_instructions");
+      const directives = layers.slice(2, through);
+      if (
+        through > 1 &&
+        directives.every((layer) => layer.id === "codemode" || layer.id === "code_search")
+      )
+        stable = joinPersistentAgentInstructionLayers(layers.slice(0, through + 1));
+    }
+    recordStableSystemPromptPrefix(stable);
   }
   return { layers, composed: joinPersistentAgentInstructionLayers(layers) };
 }
@@ -3212,9 +3560,21 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
  * properties and asks the model to correct them instead of "Please try again".
  */
 const HUMAN_INPUT_TOOL_DESCRIPTION =
-  "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Mark the option you suggest as recommended (it is shown, never pre-selected). Give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second, so the person answers with your own button labels. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed. The person may instead let you decide: the result then has agentDecides true, so make your own best choice, continue, and say in one short sentence what you chose. In a sub-session, your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.";
+  "Pause the turn to ask a person for a decision or information only they can give. Mark the option you suggest as recommended (shown, never pre-selected), and give an option a short preview, such as a code or text sample, when seeing it helps the choice. For a yes/no decision, set confirm on a single_select with exactly two options, the action first and the way out second; their labels become the buttons. Choice questions always offer an Other free-text answer; interpret it normally and ask again only if genuine clarification is still needed.";
 
-/** Appended to the tool result when the person chose "Let the agent decide". */
+/**
+ * Rendered for a session with a parent agent (nested depth above zero). When
+ * the caller does not say whether there is a parent, the same text is
+ * conditioned on being a sub-session instead.
+ */
+const HUMAN_INPUT_PARENT_DESCRIPTION =
+  "Your parent agent also sees this request and may answer it; the first answer wins. When what you need is agent work rather than a person's decision (for example starting a reviewer or worker you cannot start yourself), message your parent agent instead if you can; otherwise say in the question that it is for your parent agent.";
+
+/**
+ * Appended to the tool result when the person chose "Let the agent decide".
+ * It is the only place the model learns what to do then, so the tool
+ * description does not repeat it.
+ */
 export const HUMAN_INPUT_AGENT_DECIDES_NOTE =
   "The person let you decide. Make your own best choice for every question, continue, and say in one short sentence what you chose.";
 
@@ -3232,7 +3592,7 @@ export function secretApprovalQuestionRejection(input: RequestHumanInputToolInpu
   ) {
     return null;
   }
-  return "Nothing was asked. Opengeni already asked the person, in this chat and by notification, to allow that use of the secret, and their answer reaches you as an update in this chat. Do not ask them again; if they allow it, retry the same call.";
+  return "Nothing was asked. The person was already asked, in this chat and by notification, to allow that use of the secret, and their answer reaches you as an update in this chat. Do not ask them again; if they allow it, retry the same call.";
 }
 
 /**
@@ -3286,6 +3646,10 @@ export function mcpToolErrorOutput(error: unknown): {
   structuredContent?: InteractionToolErrorResult["structuredContent"];
 } {
   if (isRoutingMutationOutputRejectedError(error)) throw error;
+  // Nothing was sent: the text names the account's values to choose from.
+  if (isMcpAccountParameterChoiceError(error)) {
+    return { isError: true, content: [{ type: "text", text: error.message }] };
+  }
   const interactionFailure = interactionToolErrorOutput(error);
   if (interactionFailure) return interactionFailure;
   // Nothing ran; the output names each failure and, for a missing secret,
@@ -3384,6 +3748,25 @@ export function hasCanonicalEditableArtifactToolSurface(
   });
 }
 
+/**
+ * errorFunction for built-in tools whose execution failures must stay fatal.
+ * With `errorFunction: null` the SDK also rethrows its own InvalidToolInputError
+ * (arguments that do not match the schema), which ends the whole turn over a
+ * correctable model mistake. This returns that one error to the model as a tool
+ * result and rethrows every other error unchanged. The SDK's own parser stays the
+ * authority (including strict-mode null stripping). Tool data is redacted in this
+ * process (OPENAI_AGENTS_DONT_LOG_TOOL_DATA), so the error carries no field
+ * detail; the model already has the schema.
+ */
+function invalidToolInputOnlyErrorFunction(toolName: string) {
+  return (_context: unknown, error: unknown): string => {
+    if (!(error instanceof ModelBehaviorError) || error.name !== "InvalidToolInputError") {
+      throw error;
+    }
+    return `The ${toolName} tool was not called because its arguments do not match its input schema. Correct the arguments and call the tool again.`;
+  };
+}
+
 const SkillReadToolInput = z.object({
   skill: z.string().min(1).max(512),
   listFiles: z.boolean().optional(),
@@ -3430,11 +3813,30 @@ export function buildOpenGeniAgent(
     : skillComposition.index.length > 0
       ? skillCatalogFromComposition(skillComposition)
       : undefined;
+  const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
+    image:
+      options.imageGeneration?.kind === "native_hosted" &&
+      !sideFeatureRouteRunnable(settings, "image_generation.openai_hosted")
+        ? null
+        : (options.imageGeneration?.kind ?? null),
+    video: Boolean(options.videoGeneration),
+  });
+  // This build attaches every media tool it has, so an empty surface proves
+  // the turn has none: the media guidance would describe tools it cannot use.
+  const mediaToolsAbsent =
+    resolveAgentToolFamilies(options.agentConfig).media &&
+    mediaTools.hosted.length === 0 &&
+    mediaTools.runtime.length === 0;
   const instructionOptions: BuildAgentOptions = {
     ...options,
     ...(skillCatalog !== undefined ? { skillCatalog } : {}),
     ...(options.agentConfig && !options.agentPromptResources
-      ? { agentPromptResources: agentPromptResourcesFor(settings, resources, options) }
+      ? {
+          agentPromptResources: {
+            ...agentPromptResourcesFor(settings, resources, options),
+            ...(mediaToolsAbsent ? { mediaTools: false } : {}),
+          },
+        }
       : {}),
   };
   // Resolved per-turn gating. Each override defaults to today's settings-derived
@@ -3452,14 +3854,6 @@ export function buildOpenGeniAgent(
     humanInput: options.humanInputEnabled !== false && options.unattended !== true,
   });
   const hostedWebSearch = toolFamilies.webSearch;
-  const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
-    image:
-      options.imageGeneration?.kind === "native_hosted" &&
-      !sideFeatureRouteRunnable(settings, "image_generation.openai_hosted")
-        ? null
-        : (options.imageGeneration?.kind ?? null),
-    video: Boolean(options.videoGeneration),
-  });
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
   // Wire value must be provider-mapped by the caller (OpenAI `fast`, Azure/Codex
   // `priority`). Do not fall back to latencyMode itself — that would send
@@ -3498,7 +3892,7 @@ export function buildOpenGeniAgent(
         description:
           "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; every reference must be a PNG, JPEG, or WebP image, so convert SVG or other formats first. Describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
         parameters: GenerateImageToolInput,
-        errorFunction: null,
+        errorFunction: invalidToolInputOnlyErrorFunction("generate_image"),
         execute: async (input, _context, details) => {
           const toolCallId = details?.toolCall?.callId;
           if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
@@ -3517,7 +3911,7 @@ export function buildOpenGeniAgent(
         description:
           "Return the video-generation models and exact source, duration, resolution, aspect-ratio, and audio capabilities currently enabled for this workspace. Call immediately before generate_video, then select a listed model and source mode; availability is runtime state and is never encoded in the generate_video schema.",
         parameters: GetVideoGenerationCapabilitiesToolInput,
-        errorFunction: null,
+        errorFunction: invalidToolInputOnlyErrorFunction("get_video_generation_capabilities"),
         execute: async () => {
           const adapter = options.videoGeneration;
           if (!adapter) throw new Error("Video-generation capability changed during execution");
@@ -3531,7 +3925,7 @@ export function buildOpenGeniAgent(
         description:
           "Start one durable asynchronous video generation after get_video_generation_capabilities. Match the selected model's exact source mode: omit references for text-to-video, provide one exact /workspace image path for image-to-video, or provide one exact /workspace video path for video editing. Call once per intentionally distinct result. An accepted result means work continues independently and must never be retried automatically. A rejected result means no operation or provider request was created; correct the stated reference problem and call again only with corrected input.",
         parameters: GenerateVideoToolInput,
-        errorFunction: null,
+        errorFunction: invalidToolInputOnlyErrorFunction("generate_video"),
         execute: async (input, _context, details) => {
           const toolCallId = details?.toolCall?.callId;
           if (!toolCallId) throw new Error("Video-generation tool call has no durable identity");
@@ -3541,79 +3935,99 @@ export function buildOpenGeniAgent(
         },
       })
     : null;
+  const humanInputFeatures: HumanInputQuestionFeatures = {
+    secrets: toolFamilies.secrets,
+    skillReview: toolFamilies.skills === "manage",
+  };
   const humanInputTool = !toolFamilies.humanInput
     ? null
-    : agentTool({
-        name: HUMAN_INPUT_TOOL_NAME,
-        description: toolFamilies.secrets
-          ? `${HUMAN_INPUT_TOOL_DESCRIPTION} ${HUMAN_INPUT_SECRET_DESCRIPTION}`
-          : HUMAN_INPUT_TOOL_DESCRIPTION,
-        parameters: RequestHumanInputToolInput,
-        needsApproval: true,
-        inputGuardrails: [
-          {
-            name: "validate_human_input_request",
-            run: async ({ toolCall }) => {
-              // Switched to work without a person after the chat started: the
-              // tool stays (its list never changes) but nobody would answer.
-              if (options.unattendedNow) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(
-                  UNATTENDED_PERSON_REFUSAL_TEXT,
-                );
-              }
-              let input: unknown;
-              try {
-                input = JSON.parse(toolCall.arguments);
-              } catch {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(
-                  "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
-                );
-              }
-              const parsed = RequestHumanInputToolInput.safeParse(input);
-              if (!parsed.success) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(
-                  "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
-                );
-              }
-              const approvalRejection = secretApprovalQuestionRejection(parsed.data);
-              if (approvalRejection) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(approvalRejection);
-              }
-              const secretRejection = await secretQuestionRejection(parsed.data, {
-                enabled: toolFamilies.secrets,
-                hasActingHuman: options.secrets?.hasActingHuman ?? false,
-                ...(options.secrets?.validateQuestionVault
-                  ? { validateQuestionVault: options.secrets.validateQuestionVault }
-                  : {}),
-              });
-              if (secretRejection) {
-                return ToolGuardrailFunctionOutputFactory.rejectContent(secretRejection);
-              }
-              return ToolGuardrailFunctionOutputFactory.allow();
+    : withHumanInputWireParameters(
+        humanInputFeatures,
+        agentTool({
+          name: HUMAN_INPUT_TOOL_NAME,
+          // Built from the enabled features: the parent-agent text only with a
+          // parent, the secret kind and spec only with secrets, the Skill review
+          // reference only with Skill management. Calls are still validated
+          // against the full contract below.
+          description: [
+            HUMAN_INPUT_TOOL_DESCRIPTION,
+            options.subSession === true
+              ? HUMAN_INPUT_PARENT_DESCRIPTION
+              : options.subSession === undefined &&
+                `In a sub-session, y${HUMAN_INPUT_PARENT_DESCRIPTION.slice(1)}`,
+            toolFamilies.secrets && HUMAN_INPUT_SECRET_DESCRIPTION,
+          ]
+            .filter((part): part is string => typeof part === "string")
+            .join(" "),
+          // Replaced on the wire by the feature schema; see HumanInputSdkArguments.
+          parameters: HumanInputSdkArguments,
+          needsApproval: true,
+          inputGuardrails: [
+            {
+              name: "validate_human_input_request",
+              run: async ({ toolCall }) => {
+                // Switched to work without a person after the chat started: the
+                // tool stays (its list never changes) but nobody would answer.
+                if (options.unattendedNow) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    UNATTENDED_PERSON_REFUSAL_TEXT,
+                  );
+                }
+                let input: unknown;
+                try {
+                  input = JSON.parse(toolCall.arguments);
+                } catch {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
+                  );
+                }
+                const parsed = RequestHumanInputToolInput.safeParse(input);
+                if (!parsed.success) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(
+                    humanInputArgumentsRejection(input) ??
+                      "Invalid request_human_input arguments. Call the tool again with an object matching its schema.",
+                  );
+                }
+                const approvalRejection = secretApprovalQuestionRejection(parsed.data);
+                if (approvalRejection) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(approvalRejection);
+                }
+                const secretRejection = await secretQuestionRejection(parsed.data, {
+                  enabled: toolFamilies.secrets,
+                  hasActingHuman: options.secrets?.hasActingHuman ?? false,
+                  ...(options.secrets?.validateQuestionVault
+                    ? { validateQuestionVault: options.secrets.validateQuestionVault }
+                    : {}),
+                });
+                if (secretRejection) {
+                  return ToolGuardrailFunctionOutputFactory.rejectContent(secretRejection);
+                }
+                return ToolGuardrailFunctionOutputFactory.allow();
+              },
             },
+          ],
+          // A missing/mismatched durable response is a protocol integrity failure,
+          // not model-visible tool output the agent may reason past.
+          errorFunction: null,
+          execute: (_input, _context, details) => {
+            const settled = options.humanInputResponse;
+            if (!settled) {
+              throw new Error("Human-input tool resumed without a durable response");
+            }
+            const resumedCallId = details?.toolCall?.callId;
+            if (resumedCallId && resumedCallId !== settled.toolCallId) {
+              throw new Error("Human-input response does not belong to the resumed tool call");
+            }
+            return JSON.stringify({
+              requestId: settled.requestId,
+              ...settled.response,
+              ...(settled.response.outcome === "skipped" && settled.response.agentDecides
+                ? { note: HUMAN_INPUT_AGENT_DECIDES_NOTE }
+                : {}),
+            });
           },
-        ],
-        // A missing/mismatched durable response is a protocol integrity failure,
-        // not model-visible tool output the agent may reason past.
-        errorFunction: null,
-        execute: (_input, _context, details) => {
-          const settled = options.humanInputResponse;
-          if (!settled) {
-            throw new Error("Human-input tool resumed without a durable response");
-          }
-          const resumedCallId = details?.toolCall?.callId;
-          if (resumedCallId && resumedCallId !== settled.toolCallId) {
-            throw new Error("Human-input response does not belong to the resumed tool call");
-          }
-          return JSON.stringify({
-            requestId: settled.requestId,
-            ...settled.response,
-            ...(settled.response.outcome === "skipped" && settled.response.agentDecides
-              ? { note: HUMAN_INPUT_AGENT_DECIDES_NOTE }
-              : {}),
-          });
-        },
-      });
+        }),
+      );
   const agentTools = [
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
@@ -3630,7 +4044,7 @@ export function buildOpenGeniAgent(
           description:
             "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Set listFiles:true without paths to list relative paths only, with no file bodies. Use an id or name from the Skill index.",
           parameters: SkillReadToolInput,
-          errorFunction: null,
+          errorFunction: invalidToolInputOnlyErrorFunction("skill_read"),
           execute: (input) =>
             JSON.stringify(
               readRuntimeSkill(skillComposition, {
@@ -3746,10 +4160,11 @@ export function buildOpenGeniAgent(
     if (options.commandCompletionDelivery && settings.experimentCutPolling) {
       installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
     }
-    // Last, so it masks exactly what every other wrapper hands to the model.
-    if (options.secretValueMemory) {
-      installToolResultSecretMasking(agent, options.secretValueMemory);
-    }
+    installSandboxSetupNoticeDelivery(agent, {
+      ...(options.onSandboxSetupNoticeDelivered
+        ? { onDelivered: options.onSandboxSetupNoticeDelivered }
+        : {}),
+    });
     return agent;
   }
 
@@ -3781,6 +4196,7 @@ export function buildOpenGeniAgent(
       ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
+      ...(options.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -3902,11 +4318,31 @@ export function buildOpenGeniAgent(
   if (options.commandCompletionDelivery && settings.experimentCutPolling) {
     installCommandCompletionDelivery(agent, options.commandCompletionDelivery);
   }
-  // Last, so it masks exactly what every other wrapper hands to the model.
-  if (options.secretValueMemory) {
-    installToolResultSecretMasking(agent, options.secretValueMemory);
-  }
+  installSandboxSetupNoticeDelivery(agent, {
+    ...(options.onSandboxSetupNoticeDelivered
+      ? { onDelivered: options.onSandboxSetupNoticeDelivered }
+      : {}),
+  });
   return agent;
+}
+
+/**
+ * The lazy tool transport this attempt installs, or undefined when it has no
+ * search router: no transport, or the deployment turned tool search off and
+ * the session never exposed the router.
+ */
+function lazyToolTransportFor(
+  settings: Settings,
+  options: Pick<BuildAgentOptions, "lazyToolTransport" | "agentConfig" | "toolRouterInHistory">,
+): NonNullable<BuildAgentOptions["lazyToolTransport"]> | undefined {
+  const transport =
+    options.lazyToolTransport ??
+    (options.agentConfig && options.toolRouterInHistory ? "generic_dispatch" : undefined);
+  if (!transport) return undefined;
+  const enabled =
+    transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
+  if (!enabled && !(options.agentConfig && options.toolRouterInHistory)) return undefined;
+  return transport;
 }
 
 /**
@@ -3928,13 +4364,8 @@ function maybeInstallLazyToolTransport(
   settings: Settings,
   options: BuildAgentOptions,
 ): void {
-  const transport =
-    options.lazyToolTransport ??
-    (options.agentConfig && options.toolRouterInHistory ? "generic_dispatch" : undefined);
+  const transport = lazyToolTransportFor(settings, options);
   if (!transport) return;
-  const enabled =
-    transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
-  if (!enabled && !(options.agentConfig && options.toolRouterInHistory)) return;
 
   const mcpServers = options.mcpServers ?? [];
   // Prepared servers use exact model-name mappings, not SDK lifecycle names
@@ -3961,7 +4392,12 @@ function maybeInstallLazyToolTransport(
         if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
           continue;
         for (const name of server.modelToolNames()) {
-          if (identities.has(name)) throw new Error("MCP model tool identity collision");
+          // Server lists are disjoint by model name (the shared budget leaves a
+          // taken name out), so this is only a backstop: keep the first owner.
+          if (identities.has(name)) {
+            warnMcpModelNameCollision(name, identities.get(name)!, server.registryId);
+            continue;
+          }
           identities.set(name, server.registryId);
         }
       }
@@ -3987,7 +4423,10 @@ function maybeInstallLazyToolTransport(
       return names;
     },
     options.toolSearchDecisionModel
-      ? createToolSelector(options.toolSearchDecisionModel)
+      ? createToolSelector(
+          options.toolSearchDecisionModel,
+          options.onToolSelectionError ? { onError: options.onToolSelectionError } : {},
+        )
       : undefined,
     () => options.unavailableMcpServers ?? new Map(),
     harnessControlServer ? catalogConnectableIntegrationLookup(harnessControlServer) : undefined,
@@ -4005,6 +4444,7 @@ function maybeInstallLazyToolTransport(
           label: route.account ? `${route.connector} (${route.account})` : route.connector,
           connector: route.connector,
           ...(route.kind ? { kind: route.kind } : {}),
+          ...(route.providerDomain ? { providerDomain: route.providerDomain } : {}),
         };
         for (const name of server.modelToolNames()) accounts.set(name, account);
       }
@@ -4024,6 +4464,7 @@ function maybeInstallLazyToolTransport(
       }
       return published;
     },
+    options.toolRouterExpected !== false,
   );
   if (options.openingToolNames?.length) lazyRuntime.loadAtOpening(options.openingToolNames);
 }
@@ -4257,6 +4698,9 @@ export function toolPreflightFailureOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
+  if (isMcpAccountParameterChoiceError(error)) {
+    return { isError: true, content: [{ type: "text", text: error.message }] };
+  }
   const message = exactErrorMessage(error);
   const bounded =
     message.length > TOOL_PREFLIGHT_FAILURE_MESSAGE_MAX_CHARS
@@ -4463,13 +4907,24 @@ function installMcpApprovalPolicy(
         connector?: string;
         recommendsApproval: boolean;
         readReview: ToolReviewReader;
+        accountChoice: (
+          toolName: string,
+          args: unknown,
+        ) => Promise<McpAccountParameterChoiceError | undefined>;
       }
     >();
     for (const server of agent.mcpServers ?? []) {
       if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
         continue;
       for (const descriptor of await server.listTools()) {
-        if (identities.has(descriptor.name)) throw new Error("MCP model tool identity collision");
+        if (identities.has(descriptor.name)) {
+          warnMcpModelNameCollision(
+            descriptor.name,
+            identities.get(descriptor.name)!.serverId,
+            server.registryId,
+          );
+          continue;
+        }
         const display = server.toolDisplayMetadata(descriptor.name);
         const accountLabel = display?.connector
           ? display.accountLabel
@@ -4482,6 +4937,7 @@ function installMcpApprovalPolicy(
           inputSchema: descriptor.inputSchema,
           recommendsApproval: mcpToolRecommendsApproval(descriptor),
           readReview: (name, args) => server.reviewContext(name, args),
+          accountChoice: (name, args) => server.accountParameterChoice(name, args),
           ...(descriptor.title ? { title: descriptor.title } : {}),
           ...(display?.connector ? { connector: display.connector } : {}),
           ...(accountLabel ? { accountLabel } : {}),
@@ -4574,6 +5030,13 @@ function installMcpApprovalPolicy(
             parsedInput: Parameters<typeof originalNeedsApproval>[1],
             callId: Parameters<typeof originalNeedsApproval>[2],
           ) => {
+            // A call the account's values must first be chosen for is never
+            // sent; containment returns the choice for this call id instead of
+            // asking anyone. Without an id the call itself returns it.
+            const choice = callId
+              ? await identity?.accountChoice(unprefixed, parsedInput)
+              : undefined;
+            if (choice) throw choice;
             if (!connectorActionPolicy) {
               return (
                 recommendsApproval || (await originalNeedsApproval(runContext, parsedInput, callId))
@@ -5000,6 +5463,27 @@ function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesys
 }
 
 /**
+ * Bind the filesystem capability to a view of its session whose `view_image`
+ * shows HEIC/HEIF photos as a JPEG, the format attached photos reach the model
+ * in, so a photo looks the same whether it was attached or found in the
+ * sandbox. Like {@link neutralizeStructuredToolTransport}, this is an own
+ * property that `Capability.clone()` carries onto each per-run instance, and it
+ * must bind and return `this`.
+ */
+function showHeifImagesAsJpeg(capability: ReturnType<typeof filesystem>): void {
+  const bind = capability.bind;
+  const bindViewingHeif = function (this: typeof capability, session: unknown): unknown {
+    return bind.call(
+      this,
+      (session && typeof session === "object"
+        ? withViewableHeifImages(session)
+        : session) as Parameters<typeof bind>[0],
+    );
+  };
+  (capability as unknown as { bind: typeof bindViewingHeif }).bind = bindViewingHeif;
+}
+
+/**
  * Build the SandboxAgent capability set explicitly. The SDK default includes
  * its inline provider compaction capability; Opengeni deliberately omits it
  * because durable portable compaction owns the full history transition.
@@ -5249,6 +5733,7 @@ function buildAgentCapabilitiesFromComposition(
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
+    deferRepositorySkillIndex?: boolean;
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
     computerToolMode?: ComputerToolMode;
@@ -5303,6 +5788,7 @@ function buildAgentCapabilitiesFromComposition(
   const filesystemCapability = filesystem({
     configureTools: configureFilesystemTools,
   });
+  showHeifImagesAsJpeg(filesystemCapability);
   if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);
   }
@@ -5345,6 +5831,7 @@ function buildAgentCapabilitiesFromComposition(
         options.workspaceSkillPaths,
         skillComposition.configuredNames,
         skillComposition.nativeToolNames,
+        options.deferRepositorySkillIndex ? { deferred: true } : {},
       ),
     );
   }
@@ -5507,6 +5994,13 @@ export type ToolPreparationPhaseMeasurement = {
 export type PrepareToolsOptions = {
   /** Current-caller request lifetime; does not change attempt-owned lifetimes. */
   requestSignal?: AbortSignal;
+  /**
+   * Connectors configured for this turn that the caller already left out, by
+   * server id, with the plain reason. Tool discovery reports them beside the
+   * connectors that fail to connect or list here, so a connector dropped
+   * before preparation is never silently missing from search and listing.
+   */
+  preparationUnavailableMcpServers?: ReadonlyMap<string, string>;
   /**
    * Current-human workspace gateway only: give every connection-backed MCP
    * server (built-in bridges and remote servers) a side-effect-free approval
@@ -5895,6 +6389,13 @@ class DeferredPreparedMcpServer implements MCPServer {
     return (await this.preparedTarget?.reviewContext(toolName, args)) ?? {};
   }
 
+  async accountParameterChoice(
+    toolName: string,
+    args: unknown,
+  ): Promise<McpAccountParameterChoiceError | undefined> {
+    return await this.preparedTarget?.accountParameterChoice(toolName, args);
+  }
+
   async unprefixedToolName(name: string): Promise<string> {
     const target = await this.requiredTarget();
     if (!(target instanceof PrefixedMcpServer)) throw new Error("Unknown prepared MCP identity");
@@ -5950,6 +6451,43 @@ class DeferredPreparedMcpServer implements MCPServer {
   }
 }
 
+/**
+ * More servers than one turn can connect must not fail the turn. Opengeni's
+ * own server is kept first, then required servers, then best-effort ones
+ * (optional or connection-backed), each group in selection order; the
+ * servers left out are logged and named to the model.
+ */
+function fitMcpServerSelection(
+  settings: Settings,
+  tools: ToolRef[],
+  unavailableSink: Map<string, string>,
+): ToolRef[] {
+  if (tools.length <= MCP_MAX_SELECTED_SERVERS) return tools;
+  const configs = new Map(settings.mcpServers.map((server) => [server.id, server]));
+  const rank = (tool: ToolRef): number => {
+    const config = configs.get(tool.id);
+    if (config && !config.connectionRef && isFirstPartyMcpServer(settings, config)) return 0;
+    return tool.optional === true || config?.connectionRef ? 2 : 1;
+  };
+  const ordered = [0, 1, 2].flatMap((group) => tools.filter((tool) => rank(tool) === group));
+  const kept = new Set(ordered.slice(0, MCP_MAX_SELECTED_SERVERS));
+  const left = tools.filter((tool) => !kept.has(tool));
+  console.warn("[mcp] more servers selected than one turn can connect; skipping the rest", {
+    event: "tool_catalog_degraded",
+    code: "server_selection_limit",
+    selectedCount: tools.length,
+    keptCount: kept.size,
+    skippedServerIds: left.slice(0, 32).map((tool) => tool.id.slice(0, 256)),
+  });
+  for (const tool of left) {
+    unavailableSink.set(
+      tool.id,
+      `not loaded this turn: more than ${MCP_MAX_SELECTED_SERVERS} integrations are selected, so its tools are unavailable.`,
+    );
+  }
+  return tools.filter((tool) => kept.has(tool));
+}
+
 export async function prepareAgentTools(
   settings: Settings,
   tools: ToolRef[],
@@ -5959,10 +6497,13 @@ export async function prepareAgentTools(
   // One live Set per prepared tool environment, shared with the codex_apps
   // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = options.deferredCodexConnectorNamespaces ?? new Set<string>();
-  const unavailableMcpServers = new Map<string, string>();
+  const unavailableMcpServers = new Map<string, string>(options.preparationUnavailableMcpServers);
+  // Why a connection-backed server's setup was refused a credential, by
+  // server id, so its connect/list failure says why instead of a bare 401.
+  const setupAuthNeededReasons = new Map<string, ToolAuthNeededPayload["reason"]>();
   const resolvedMcpConnectionIds = options.deferredResolvedMcpConnectionIds ?? new Map();
   const resolvedMcpToolConnectionIds = new Map<string, string>();
-  assertMcpServerSelectionWithinBounds(tools);
+  tools = fitMcpServerSelection(settings, tools, unavailableMcpServers);
   if (options.attemptToolDefinitions?.length && !attemptToolScope(options)) {
     throw new Error("in-process attempt tools require exact attempt scope");
   }
@@ -6134,10 +6675,18 @@ export async function prepareAgentTools(
               codexConnectorNamespaces,
             )
           : mcpFetchImpl;
+        // The SDK can replace a size refusal's error (a later page, an SSE
+        // disconnect); this record lets the server still recognise it.
+        const listSizeRefusal = { refused: false };
         const guardedTransport = guardedMcpFetch(
           firstParty ? { ...settings, integrationsAllowPrivateNetworkTargets: true } : settings,
           baseFetch,
           {
+            onSizeRefusal: (rpcMethod) => {
+              if (rpcMethod === undefined || rpcMethod === "tools/list") {
+                listSizeRefusal.refused = true;
+              }
+            },
             ...(firstParty ? { requireHttpsOutsideLocalTest: false } : {}),
             ...(useBunNativeFetch && !isCodexAppsMcpServer(config)
               ? { usePinnedRequestTransport: true }
@@ -6201,6 +6750,7 @@ export async function prepareAgentTools(
                 resolvedMcpConnectionIds,
                 resolvedMcpToolConnectionIds,
                 optional,
+                setupAuthNeededReasons,
               )
             : firstParty
               ? firstPartyAuthFetch(guardedFetch, settings, options)
@@ -6326,12 +6876,14 @@ export async function prepareAgentTools(
             undefined,
             firstParty,
             eagerToolNames,
+            firstParty || bridge ? [] : mcpAccountParametersFor(config.url),
           ),
           config,
           options,
           url,
           Boolean(config.connectionRef) && !bridge && !isCodexAppsMcpServer(config),
         );
+        if (!bridge) server.listSizeRefusal = listSizeRefusal;
         return {
           server,
           bestEffort,
@@ -6360,8 +6912,11 @@ export async function prepareAgentTools(
   const joinsBarrier = (entry: (typeof servers)[number]): boolean =>
     entry.eager ? !entry.bestEffort : entry.joinsFirstRequestBarrier;
   for (const entry of servers) {
-    if (entry.bestEffort && entry.server instanceof PrefixedMcpServer) {
+    // Every server reports missing tools: a best-effort server that failed to
+    // list, and any server whose list was trimmed to fit this turn.
+    if (entry.server instanceof PrefixedMcpServer) {
       entry.server.unavailableSink = unavailableMcpServers;
+      entry.server.setupAuthNeededReasons = setupAuthNeededReasons;
     }
   }
   const eagerEntries = deferNonEager ? servers.filter(joinsBarrier) : servers;
@@ -6409,7 +6964,11 @@ export async function prepareAgentTools(
         failed.releaseAggregateBudget();
         unavailableMcpServers.set(
           failed.registryId,
-          mcpUnavailableReason(connected.errors.get(failed), "connect"),
+          mcpUnavailableReason(
+            connected.errors.get(failed),
+            "connect",
+            setupAuthNeededReasons.get(failed.registryId),
+          ),
         );
       }
       if (
@@ -6453,23 +7012,30 @@ export async function prepareAgentTools(
     }
     return { required: requiredResult.value, bestEffort: connectedBestEffort };
   };
-  const connectedEager = await connectEntryGroups(
-    eagerRequiredEntries,
-    eagerBestEffortEntries,
-    "blocking",
-  );
-  const connectedEagerRequired = connectedEager.required;
-  const connectedEagerBestEffort = connectedEager.bestEffort;
-  warnBestEffortFailures(connectedEagerBestEffort);
-  let connectedDeferredRequired: ConnectedMcpServerBatches | null = null;
-  let connectedDeferredBestEffort: ConnectedMcpServerBatches | null = null;
+  // Built-in tools claim their model names and budget before any connector
+  // lists, so a connector's tool can never displace or impersonate one.
   let localToolServer: AttemptDefinitionMcpServer | null = attemptToolDefinitions.length
     ? new AttemptDefinitionMcpServer(
         attemptToolDefinitions,
         aggregateToolBudget,
         options.subjectId ?? "worker:mcp-model",
+        unavailableMcpServers,
       )
     : null;
+  const connectedEager = await connectEntryGroups(
+    eagerRequiredEntries,
+    eagerBestEffortEntries,
+    "blocking",
+  ).catch(async (error: unknown) => {
+    // The built-in tool server is created first; free its budget share too.
+    await localToolServer?.close().catch(() => undefined);
+    throw error;
+  });
+  const connectedEagerRequired = connectedEager.required;
+  const connectedEagerBestEffort = connectedEager.bestEffort;
+  warnBestEffortFailures(connectedEagerBestEffort);
+  let connectedDeferredRequired: ConnectedMcpServerBatches | null = null;
+  let connectedDeferredBestEffort: ConnectedMcpServerBatches | null = null;
   // Eager servers must connect before disclosure, but their complete execution
   // catalog is still independent of the first model request. The same deferred
   // lifecycle owns catalog work even when no server needs a deferred connection.
@@ -6505,6 +7071,9 @@ export async function prepareAgentTools(
         ...(connectedDeferredRequired?.active ?? []),
         ...(connectedDeferredBestEffort?.active ?? []),
       ];
+      // Eager servers come first here and in the first-request freeze below,
+      // so both fix one consistent admission order.
+      PrefixedMcpServer.sequenceAggregateBudget(aggregateToolBudget, activeMcpServers);
       attemptToolEnvironment = await measureToolPreparationPhase(
         options,
         "attempt_catalog_build",
@@ -6515,6 +7084,7 @@ export async function prepareAgentTools(
             resolvedMcpConnectionIds,
             options,
             settings.modelToolOutputTruncationTokens,
+            unavailableMcpServers,
           ),
         execution,
       );
@@ -6633,12 +7203,15 @@ export async function prepareAgentTools(
   );
   void ready.catch(() => undefined);
   try {
+    const eagerActive = [
+      ...(connectedEagerRequired?.active ?? []),
+      ...(connectedEagerBestEffort?.active ?? []),
+    ];
+    PrefixedMcpServer.sequenceAggregateBudget(aggregateToolBudget, eagerActive);
     await Promise.all(
-      [...(connectedEagerRequired?.active ?? []), ...(connectedEagerBestEffort?.active ?? [])].map(
-        async (server) => {
-          if (server instanceof PrefixedMcpServer) await server.freezeTools();
-        },
-      ),
+      eagerActive.map(async (server) => {
+        if (server instanceof PrefixedMcpServer) await server.freezeTools();
+      }),
     );
   } catch (error) {
     // Publication did not complete, so no caller can own these resources.
@@ -6714,7 +7287,8 @@ function localMcpServerRegistry(
   registrations: readonly LocalMcpServerRegistration[],
   settingsRegistry: ReadonlyMap<string, Settings["mcpServers"][number]>,
 ): ReadonlyMap<string, LocalMcpServerRegistration> {
-  assertMcpServerSelectionWithinBounds(registrations);
+  // No count limit here: a host registers a server for every tool it offers,
+  // and only the selection that fits the turn (fitMcpServerSelection) is built.
   const registry = new Map<string, LocalMcpServerRegistration>();
   for (const registration of registrations) {
     if (!settingsRegistry.has(registration.id)) {
@@ -6812,6 +7386,7 @@ async function prepareAttemptToolEnvironment(
   resolvedMcpConnectionIds: ReadonlyMap<string, string>,
   options: PrepareToolsOptions,
   defaultModelToolOutputTruncationTokens: number,
+  unavailableSink?: Map<string, string>,
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
@@ -6907,11 +7482,49 @@ async function prepareAttemptToolEnvironment(
       activeModelToolInvocation(modelName)?.approvalConfirmed === true,
     ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
     ...(secretArguments ? { resolveArguments: secretArguments } : {}),
+    ...(unavailableSink
+      ? { onWarnings: (warnings) => noteToolCatalogOmissions(warnings, unavailableSink) }
+      : {}),
   });
   for (const { server } of prepared.servers) {
     server.bindAttemptToolEnvironment(environment, subjectId);
   }
   return environment;
+}
+
+/**
+ * Tell the model, through tool_search's unavailable sources, which servers lost
+ * tools while the catalog was built. A server that already reported its own,
+ * more specific reason keeps it.
+ */
+function noteToolCatalogOmissions(
+  warnings: readonly ToolGatewayCatalogWarning[],
+  unavailableSink: Map<string, string>,
+): void {
+  const omitted = new Map<string, { count: number; full: boolean; names: string[] }>();
+  for (const warning of warnings) {
+    if (warning.code === "path_disambiguated" || warning.code === "duplicate_identity") continue;
+    if (!warning.serverId) continue;
+    const entry = omitted.get(warning.serverId) ?? { count: 0, full: false, names: [] };
+    entry.count += 1;
+    entry.full ||= warning.code === "catalog_entry_limit" || warning.code === "catalog_byte_limit";
+    if (entry.names.length < 5 && warning.toolName) entry.names.push(warning.toolName);
+    omitted.set(warning.serverId, entry);
+  }
+  for (const [serverId, { count, full, names }] of omitted) {
+    if (unavailableSink.has(serverId)) continue;
+    unavailableSink.set(
+      serverId,
+      `connected, but ${count} of its tools are unavailable this turn (${
+        full
+          ? "this turn's tool catalog is full"
+          : "their definitions conflict with another tool or are invalid"
+      })${names.length ? `, for example ${names.join(", ")}` : ""}. Its other tools work.`.slice(
+        0,
+        1_000,
+      ),
+    );
+  }
 }
 
 function installAttemptConnectorActionGatewayLifecycle(
@@ -7246,6 +7859,11 @@ async function prepareToolGatewayDefinitionsFromServers(
     }
     return { server, config };
   });
+  // Network listings run within the concurrency bound; ordered admission
+  // happens afterwards, so a slow early server never blocks later listings.
+  await boundedParallelMap(preparedServers, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, ({ server }) =>
+    server.prefetchTools(),
+  );
   const perServerDefinitions = await boundedParallelMap(
     preparedServers,
     MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
@@ -7390,19 +8008,12 @@ export function attemptToolCallMeta(
   },
   callIdentity?: McpCallIdentity,
 ): Record<string, unknown> {
-  const {
-    [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored,
-    [FIRST_PARTY_SECRET_VALUES_META_KEY]: _ignoredValues,
-    ...transportMeta
-  } = context.transportMeta ?? {};
+  const { [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored, ...transportMeta } =
+    context.transportMeta ?? {};
   return {
     ...transportMeta,
     opengeniOperationId: context.operationId,
     ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
-    // The values this call's arguments resolved to, so the first-party server
-    // masks them in what it stores and returns (docs/secrets.md, Masking).
-    // Never logged; third-party servers never see it.
-    ...(serverId === "opengeni" ? firstPartySecretValuesMeta(context.operationId) : {}),
     // Trusted worker scope; spread after transport metadata so a caller cannot spoof it.
     ...(callIdentity
       ? {
@@ -7487,11 +8098,27 @@ function connectionBrokerFetch(
   resolvedMcpConnectionIds: Map<string, string>,
   resolvedMcpToolConnectionIds: Map<string, string>,
   suppressSetupAuthNeeded: boolean,
+  setupAuthNeededReasons?: Map<string, ToolAuthNeededPayload["reason"]>,
 ): FetchLike {
   const connectionRef = config.connectionRef;
   if (!connectionRef) {
     return baseFetch;
   }
+  const authNeeded = async (
+    request: McpRequestReplayInfo,
+    auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
+  ): Promise<Response> => {
+    // A setup request (connect or tools/list) has no tool name.
+    if (!request.toolName) setupAuthNeededReasons?.set(config.id, auth.reason);
+    return await authNeededFetchResponse(
+      options,
+      config.id,
+      request,
+      auth,
+      connectionRef,
+      suppressSetupAuthNeeded,
+    );
+  };
   return async (input, init) => {
     const request = await mcpRequestReplayInfo(input, init);
     const destinationUrl = mcpRequestDestinationUrl(input);
@@ -7504,15 +8131,9 @@ function connectionBrokerFetch(
       false,
     );
     if (first.status === "auth_needed") {
-      return await authNeededFetchResponse(
-        options,
-        config.id,
-        request,
-        first,
-        connectionRef,
-        suppressSetupAuthNeeded,
-      );
+      return await authNeeded(request, first);
     }
+    if (!request.toolName) setupAuthNeededReasons?.delete(config.id);
     recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, first.connectionId);
     recordResolvedMcpToolConnectionId(
       resolvedMcpToolConnectionIds,
@@ -7521,14 +8142,7 @@ function connectionBrokerFetch(
       first.connectionId,
     );
     if (!(await authorizeResolvedProviderRequest(first))) {
-      return await authNeededFetchResponse(
-        options,
-        config.id,
-        request,
-        providerRequestAuthorizationDenied(connectionRef, first),
-        connectionRef,
-        suppressSetupAuthNeeded,
-      );
+      return await authNeeded(request, providerRequestAuthorizationDenied(connectionRef, first));
     }
     if (request.method === "tools/call") {
       assertMcpOperationObservationAuthority({
@@ -7594,27 +8208,16 @@ function connectionBrokerFetch(
           );
           return mcpOutcomeUncertainResponse(request, providerFailure!);
         }
-        return await authNeededFetchResponse(
-          options,
-          config.id,
-          request,
-          refreshed,
-          connectionRef,
-          suppressSetupAuthNeeded,
-        );
+        return await authNeeded(request, refreshed);
       }
       recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, refreshed.connectionId);
       if (!request.replaySafeAfter401) {
         return mcpOutcomeUncertainResponse(request, providerFailure!);
       }
       if (!(await authorizeResolvedProviderRequest(refreshed))) {
-        return await authNeededFetchResponse(
-          options,
-          config.id,
+        return await authNeeded(
           request,
           providerRequestAuthorizationDenied(connectionRef, refreshed),
-          connectionRef,
-          suppressSetupAuthNeeded,
         );
       }
       const retry = await baseFetch(
@@ -7625,39 +8228,25 @@ function connectionBrokerFetch(
         const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed);
         if (auth) {
           await cancelMcpResponseBody(retry);
-          return await authNeededFetchResponse(
-            options,
-            config.id,
-            request,
-            auth,
-            connectionRef,
-            suppressSetupAuthNeeded,
-          );
+          return await authNeeded(request, auth);
         }
         return retry;
       }
       if (retry.status === 401) {
         await cancelMcpResponseBody(retry);
-        return await authNeededFetchResponse(
-          options,
-          config.id,
-          request,
-          {
-            status: "auth_needed",
-            reason: "expired",
-            providerDomain: connectionRef.providerDomain,
-            ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
-            connectionId: refreshed.connectionId,
-            ...(refreshed.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
-            ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
-            ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
-            ...(connectionRef.selectedResources
-              ? { selectedResources: connectionRef.selectedResources }
-              : {}),
-          },
-          connectionRef,
-          suppressSetupAuthNeeded,
-        );
+        return await authNeeded(request, {
+          status: "auth_needed",
+          reason: "expired",
+          providerDomain: connectionRef.providerDomain,
+          ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
+          connectionId: refreshed.connectionId,
+          ...(refreshed.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
+          ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
+          ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+          ...(connectionRef.selectedResources
+            ? { selectedResources: connectionRef.selectedResources }
+            : {}),
+        });
       }
       return retry;
     }
@@ -7665,14 +8254,7 @@ function connectionBrokerFetch(
       const auth = insufficientScopeAuth(response.headers, connectionRef, first);
       if (auth) {
         await cancelMcpResponseBody(response);
-        return await authNeededFetchResponse(
-          options,
-          config.id,
-          request,
-          auth,
-          connectionRef,
-          suppressSetupAuthNeeded,
-        );
+        return await authNeeded(request, auth);
       }
       return response;
     }
@@ -8193,6 +8775,30 @@ function isIntegrationInvocationOutcomeUnknownError(error: unknown): boolean {
   }
 }
 
+/**
+ * A generated OpenAPI/GraphQL integration call that failed with a known
+ * outcome (rejected before or by the provider, nothing left half-done): a
+ * provider redirect, a missing parameter, an expired authorization. It is an
+ * ordinary tool error the model can act on, not an unavailable tool.
+ */
+function recoverableIntegrationFailure(
+  error: unknown,
+): { code: string; message: string; status?: number; retryable: boolean } | undefined {
+  try {
+    if (!(error instanceof IntegrationInvocationError)) return undefined;
+    if (error.outcome !== "failed" && error.outcome !== "not_started") return undefined;
+    return {
+      code: error.code,
+      message: error.message,
+      ...(typeof error.status === "number" ? { status: error.status } : {}),
+      retryable: error.retryable,
+    };
+  } catch {
+    // Typed error recognition is observational. Preserve the source failure.
+    return undefined;
+  }
+}
+
 function mcpToolOutcomeUncertainContent(error: unknown): Array<{ type: "text"; text: string }> {
   let body: unknown;
   try {
@@ -8307,7 +8913,29 @@ type McpPublicFailureCode =
   | "mcp_close_failed"
   | "mcp_transport_failed"
   | "mcp_tools_list_failed"
-  | "mcp_tool_call_failed";
+  | "mcp_tool_call_failed"
+  | "mcp_account_parameter_lookup_failed";
+
+/** Bound for looking up a connected account's parameter values; past it the call goes on unfilled. */
+const MCP_ACCOUNT_PARAMETER_LOOKUP_MS = 10_000;
+/** After a lookup that found nothing, calls go on unfilled for this long before it is tried again. */
+const MCP_ACCOUNT_PARAMETER_RETRY_MS = 60_000;
+
+/** A shared promise, abandoned (not cancelled) when this caller's signal aborts. */
+async function abortable<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return await promise;
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort!);
+  }
+}
 
 function safeMcpServerIdentity(serverId: string): string {
   return serverId.replace(/[\u0000-\u001f\u007f]/g, "_").slice(0, 128);
@@ -8381,7 +9009,39 @@ function mcpErrorFields(
  * only from the public diagnostic projection: status, error class and code,
  * never provider message text.
  */
-export function mcpUnavailableReason(error: unknown, phase: "connect" | "list"): string {
+/**
+ * Why a connection-backed server's setup got no credential, in plain words with
+ * what the person can do. The connect or list then fails with a bare 401, which
+ * says nothing about the cause.
+ */
+function mcpSetupAuthNeededReason(reason: ToolAuthNeededPayload["reason"]): string {
+  switch (reason) {
+    case "missing_connection":
+      return "no signed-in account is available for it; the person can sign in to it and try again";
+    case "expired":
+    case "refresh_failed":
+      return "its sign-in expired or could not be renewed; the person can sign in to it again";
+    case "insufficient_scope":
+      return "its sign-in lacks a permission these tools need; the person can sign in again and grant it";
+    case "personal_authority_unavailable":
+      return "the person's own sign-in for it is not usable in this workspace for this turn, for example right after their workspace access changed; this can clear within minutes, otherwise they can sign in to it again";
+    case "resource_scope_unavailable":
+      return "its sign-in does not cover the resource these tools need; the person can sign in again and choose it";
+    case "designated_credential_unavailable":
+      return "the account this workspace designated for it cannot be used right now; whoever manages this workspace's connectors can reconnect it";
+    case "unsupported_auth":
+      return "it uses a sign-in method that is not supported; it needs to be connected again";
+  }
+}
+
+export function mcpUnavailableReason(
+  error: unknown,
+  phase: "connect" | "list",
+  /** The credential refusal behind the failure, when its setup had one. */
+  authNeededReason?: ToolAuthNeededPayload["reason"],
+): string {
+  const what = phase === "connect" ? "could not connect" : "connected but could not list its tools";
+  if (authNeededReason) return `${what}: ${mcpSetupAuthNeededReason(authNeededReason)}.`;
   const fields = mcpErrorFields(
     error,
     phase === "connect" ? "mcp_connect_failed" : "mcp_tools_list_failed",
@@ -8410,7 +9070,6 @@ export function mcpUnavailableReason(error: unknown, phase: "connect" | "list"):
   ]
     .filter(Boolean)
     .join(", ");
-  const what = phase === "connect" ? "could not connect" : "connected but could not list its tools";
   const next =
     status === 401 || status === 403
       ? "; its connection may need to be signed in again"
@@ -9362,13 +10021,8 @@ class AttemptDefinitionMcpServer implements MCPServer {
     definitions: readonly AttemptToolDefinition[],
     private readonly aggregateToolBudget: McpAggregateToolListBudget,
     private readonly subjectId: string,
+    unavailableSink?: Map<string, string>,
   ) {
-    for (const definition of definitions) {
-      this.catalogIdentities.set(definition.modelName, {
-        identity: definition.identity,
-        source: definition.source,
-      });
-    }
     const descriptors = definitions.map(
       (definition) =>
         ({
@@ -9381,9 +10035,29 @@ class AttemptDefinitionMcpServer implements MCPServer {
           ...(definition.icons ? { icons: definition.icons } : {}),
         }) as RuntimeMcpTool,
     );
-    this.tools = [
-      ...(this.aggregateToolBudget.replace(this.name, descriptors) as RuntimeMcpTool[]),
-    ];
+    // These tools register before any connector lists, so a connector can
+    // never take one of their names. Limits still trim instead of failing.
+    const fitted = this.aggregateToolBudget.admit(this.name, descriptors);
+    this.tools = [...fitted.tools];
+    const listed = new Set(this.tools.map((tool) => tool.name));
+    for (const definition of definitions) {
+      if (!listed.has(definition.modelName) || this.catalogIdentities.has(definition.modelName))
+        continue;
+      this.catalogIdentities.set(definition.modelName, {
+        identity: definition.identity,
+        source: definition.source,
+      });
+    }
+    if (fitted.dropped.length > 0) {
+      console.warn("[mcp] built-in tools left out of this turn's tool list", {
+        event: "tool_catalog_degraded",
+        serverId: this.name,
+        keptCount: this.tools.length,
+        droppedCount: fitted.dropped.length,
+        dropped: fitted.dropped.slice(0, 32),
+      });
+      unavailableSink?.set(this.name, describeMcpToolListDrops(fitted.dropped));
+    }
   }
 
   /** Canonical identity behind one model-visible name, for analytics only. */
@@ -9440,10 +10114,16 @@ class AttemptDefinitionMcpServer implements MCPServer {
     if (this.closed) throw new Error("local model tool server is closed");
     const environment = await this.requiredAttemptToolEnvironment();
     const sourceCallId = modelMcpSourceCallId(toolName);
+    // Bind the call to the tool this server advertised: if another server's
+    // tool won this model name in the catalog, the call is not found.
+    // A name this server did not list (or left out this turn) is not found.
+    const expectedIdentity = this.catalogIdentities.get(toolName)?.identity;
+    if (expectedIdentity === undefined) throw new ToolGatewayToolNotFoundError();
     return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
       environment.callModel({
         modelName: toolName,
         ...(sourceCallId === undefined ? {} : { sourceCallId }),
+        expectedIdentity,
         arguments: cleanArgs ?? {},
         subjectId: this.subjectId,
         ...(meta === undefined ? {} : { transportMeta: meta }),
@@ -9487,13 +10167,18 @@ export class PrefixedMcpServer implements MCPServer {
   // doesn't spam the log when the SDK re-lists across model turns.
   private readonly bestEffort: boolean;
   private loggedListToolsFailure = false;
-  /** Where a best-effort server records that its tools are unavailable this attempt. */
+  /** Where this server records that some or all of its tools are unavailable this attempt. */
   unavailableSink: Map<string, string> | undefined;
+  /** Why setup was refused a credential, by server id (see connectionBrokerFetch). */
+  setupAuthNeededReasons: ReadonlyMap<string, ToolAuthNeededPayload["reason"]> | undefined;
+  /** Set by this server's transport when a tools/list response is refused for size. */
+  listSizeRefusal: { refused: boolean } | undefined;
   private listedToolSchemaTokens = 0;
   private alwaysVisibleToolSchemaTokens = 0;
   private readonly eagerToolNames: ReadonlySet<string>;
   private readonly firstRequestModelNames = new Set<string>();
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
+  private rawToolList: Promise<unknown[]> | null = null;
   private readonly originalToolNames = new Map<string, string>();
   private readonly displayMetadata = new Map<string, ToolDisplayMetadata>();
   /**
@@ -9504,6 +10189,13 @@ export class PrefixedMcpServer implements MCPServer {
   private readonly displayTitles = new Map<string, string>();
   /** Unprefixed names of API integration operations; their cards read the request's fields. */
   private readonly apiOperations = new Set<string>();
+  /** Unprefixed tool name -> the account parameters its calls may have filled in. */
+  private readonly accountParameterTools = new Map<string, readonly McpAccountParameter[]>();
+  /** One shared lookup of the account's values per parameter for this attempt. */
+  private readonly accountChoiceLookups = new Map<
+    string,
+    { lookup: Promise<readonly McpAccountChoice[]>; retryAfter?: number }
+  >();
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
     return this.displayMetadata.get(name);
@@ -9559,6 +10251,11 @@ export class PrefixedMcpServer implements MCPServer {
      * request while this server's other schemas are deferred behind search.
      */
     eagerToolNames?: readonly string[],
+    /**
+     * Parameters the connected account fixes (mcp-account-parameters.ts).
+     * Applied only by the wrapper around the physical server.
+     */
+    private readonly accountParameters: readonly McpAccountParameter[] = [],
   ) {
     this.eagerToolNames = new Set(eagerToolNames ?? []);
     this.registryId = registryId;
@@ -9674,6 +10371,27 @@ export class PrefixedMcpServer implements MCPServer {
     this.aggregateToolBudget?.remove(this.aggregateSourceId);
   }
 
+  /** Fix the order in which these servers' tool lists are admitted to the shared budget. */
+  static sequenceAggregateBudget(
+    budget: McpAggregateToolListBudget,
+    servers: readonly MCPServer[],
+  ) {
+    const prefixed = servers
+      .filter((server): server is PrefixedMcpServer => server instanceof PrefixedMcpServer)
+      .filter((server) => server.aggregateToolBudget === budget);
+    // Opengeni's own server (harness control, goals) is admitted before any
+    // connector, so a full budget never cuts its tools.
+    budget.sequence(
+      [
+        ...prefixed.filter((server) => server.firstPartyCatalog),
+        ...prefixed.filter((server) => !server.firstPartyCatalog),
+      ].map((server) => ({
+        sourceId: server.aggregateSourceId,
+        start: () => server.freezeTools(),
+      })),
+    );
+  }
+
   async listTools(): Promise<RuntimeMcpTool[]> {
     const startedAt = performance.now();
     let outcome: "completed" | "failed" = "completed";
@@ -9694,6 +10412,27 @@ export class PrefixedMcpServer implements MCPServer {
         ...(count === undefined ? {} : { count }),
       });
     }
+  }
+
+  /**
+   * Starts this server's network listing without admitting it. The catalog
+   * build prefetches inside its bounded concurrency so a server waiting for
+   * its admission turn never holds a listing slot.
+   */
+  prefetchTools(): Promise<void> {
+    if (this.frozenTools) return Promise.resolve();
+    return this.rawTools().then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+
+  private rawTools(): Promise<unknown[]> {
+    if (!this.rawToolList) {
+      if (this.listSizeRefusal) this.listSizeRefusal.refused = false;
+      this.rawToolList = this.inner.listTools() as Promise<unknown[]>;
+    }
+    return this.rawToolList;
   }
 
   freezeTools(): Promise<RuntimeMcpTool[]> {
@@ -9777,14 +10516,47 @@ export class PrefixedMcpServer implements MCPServer {
 
   private async loadAndFreezeTools(): Promise<RuntimeMcpTool[]> {
     try {
-      const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
-      const exposed = tools
+      // De-duplicate before any size check: a paginated listing that repeats
+      // pages must not count its repeats against the limits.
+      const tools = (await this.rawTools()) as RuntimeMcpTool[];
+      // Account parameters apply once, around the physical server, and only
+      // when the server lists the tool that looks the account's values up.
+      const listedNames = new Set(tools.map((tool) => tool.name));
+      const accountParameters =
+        this.inner instanceof PrefixedMcpServer
+          ? []
+          : this.accountParameters.filter((parameter) =>
+              listedNames.has(parameter.resolver.toolName),
+            );
+      this.accountParameterTools.clear();
+      const exposed = uniqueListedMcpTools(this.registryId, tools)
         .filter((tool) => this.isAllowed(tool.name))
         .map((tool) => {
+          // Opengeni's own server validates every UUID itself; the model needs
+          // only `format: "uuid"`, not the regular expression repeating it.
+          if (this.firstPartyCatalog) {
+            tool = { ...tool, inputSchema: withoutRedundantUuidPatterns(tool.inputSchema) };
+          }
+          // A recoverable operation is never filled, so it keeps its own schema.
+          const defaults = configuredMcpOperationRecovery(this, tool.name)
+            ? { inputSchema: tool.inputSchema, filled: [] }
+            : withAccountParameterDefaults(tool.inputSchema, accountParameters);
+          if (defaults.filled.length > 0) {
+            this.accountParameterTools.set(tool.name, defaults.filled);
+            tool = { ...tool, inputSchema: defaults.inputSchema as RuntimeMcpTool["inputSchema"] };
+          }
           const name = prefixedMcpToolName(this.registryId, tool.name);
           const prior = this.originalToolNames.get(name);
-          if (prior !== undefined && prior !== tool.name)
-            throw new Error("MCP model tool identity collision");
+          if (prior !== undefined && prior !== tool.name) {
+            // Two different names would share one model name and so one
+            // executor. Keep the first; the other is unavailable this turn.
+            console.warn("[mcp] server listed two tools with one model name; skipping the later", {
+              event: "mcp_tool_model_name_collision",
+              serverId: this.registryId,
+              toolName: tool.name.slice(0, 256),
+            });
+            return null;
+          }
           this.originalToolNames.set(name, tool.name);
           const metaTitle = tool.title ? undefined : displayTitleFromMeta(tool);
           if (metaTitle) this.displayTitles.set(tool.name, metaTitle);
@@ -9812,9 +10584,32 @@ export class PrefixedMcpServer implements MCPServer {
               ? { description: withAccountLine(this.accountLabel.model, tool.description) }
               : {}),
           };
-        });
-      const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
-        assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
+        })
+        .filter((tool): tool is NonNullable<typeof tool> => tool !== null);
+      // Over-limit lists and model names another server already lists are
+      // trimmed, never fatal: the server stays connected with the tools that
+      // fit. Harness control and eager tools are admitted first.
+      const keepFirst = (tool: RuntimeMcpTool) =>
+        isHarnessControlMcpToolName(this.registryId, tool.name) ||
+        this.eagerToolNames.has(this.originalToolNames.get(tool.name) ?? "");
+      // Servers list concurrently; the budget admits them in their configured
+      // order so the same selection keeps the same tools on every turn.
+      const fitted = this.aggregateToolBudget
+        ? await this.aggregateToolBudget.admitInOrder(this.aggregateSourceId, exposed, {
+            keepFirst,
+          })
+        : fitMcpToolListWithinBounds(exposed, { keepFirst });
+      const bounded = fitted.tools;
+      if (fitted.dropped.length > 0) {
+        const kept = new Set(bounded.map((tool) => tool.name));
+        for (const name of [...this.originalToolNames.keys()]) {
+          if (kept.has(name)) continue;
+          this.originalToolNames.delete(name);
+          this.displayMetadata.delete(name);
+          this.omittedModelNames.add(name);
+        }
+        this.reportDroppedTools(fitted.dropped, bounded.length);
+      }
       this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
       const alwaysVisible = bounded.filter(
         (tool) =>
@@ -9827,9 +10622,16 @@ export class PrefixedMcpServer implements MCPServer {
         alwaysVisible.length > 0 ? estimateSerializedValueTokens(alwaysVisible) : 0;
       return bounded;
     } catch (error) {
+      // A size-limit refusal is deterministic: failing the turn would fail
+      // every later turn the same way. Even a required server degrades to no
+      // tools here; it was reached, and the model is told why its tools are
+      // missing. Any other required-server failure still fails loudly.
+      const tooLarge = isMcpPayloadTooLargeError(error) || this.listSizeRefusal?.refused === true;
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
-      if (!this.bestEffort) {
+      if (!this.bestEffort && !tooLarge) {
+        // Let servers ordered after this one admit without waiting on it.
+        this.releaseAggregateBudget();
         throw mcpTransportErrorWithRetryMetadata(error, {
           recoverySafeSetup: this.recoverySafeSetup,
         });
@@ -9849,14 +10651,46 @@ export class PrefixedMcpServer implements MCPServer {
       if (!this.loggedListToolsFailure) {
         this.loggedListToolsFailure = true;
         console.warn(
-          "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
-          mcpErrorFields(error, "mcp_tools_list_failed", this.registryId),
+          tooLarge
+            ? "[mcp] server tools/list is over its size limit; its tools are unavailable this turn"
+            : "[mcp] best-effort server tools/list failed; its tools are unavailable this turn",
+          {
+            ...mcpErrorFields(error, "mcp_tools_list_failed", this.registryId),
+            ...(tooLarge ? { event: "tool_catalog_degraded", required: !this.bestEffort } : {}),
+          },
         );
       }
-      this.unavailableSink?.set(this.registryId, mcpUnavailableReason(error, "list"));
+      this.unavailableSink?.set(
+        this.registryId,
+        tooLarge
+          ? "connected, but its tool list is larger than one turn can hold, so its tools are unavailable this turn."
+          : mcpUnavailableReason(error, "list", this.setupAuthNeededReasons?.get(this.registryId)),
+      );
       this.releaseAggregateBudget();
       return [];
     }
+  }
+
+  private loggedDroppedTools = false;
+  private readonly omittedModelNames = new Set<string>();
+
+  /** Warn once per attempt and tell the model which of this server's tools are missing. */
+  private reportDroppedTools(dropped: readonly McpToolListDrop[], keptCount: number): void {
+    if (!this.loggedDroppedTools) {
+      this.loggedDroppedTools = true;
+      const reasons: Record<string, number> = {};
+      for (const { reason } of dropped) reasons[reason] = (reasons[reason] ?? 0) + 1;
+      console.warn("[mcp] server tools left out of this turn's tool list", {
+        event: "tool_catalog_degraded",
+        serverId: this.registryId.slice(0, 256),
+        required: !this.bestEffort,
+        keptCount,
+        droppedCount: dropped.length,
+        reasons,
+        dropped: dropped.slice(0, 32),
+      });
+    }
+    this.unavailableSink?.set(this.registryId, describeMcpToolListDrops(dropped));
   }
 
   /** Latest exact tools/list projection used to build the model request. */
@@ -9896,6 +10730,9 @@ export class PrefixedMcpServer implements MCPServer {
     meta?: Record<string, unknown> | null,
     options?: { signal?: AbortSignal },
   ): Promise<any> {
+    // A tool this server listed but left out of this turn (over a limit, or
+    // its name is another server's) is unavailable here, never rerouted.
+    if (this.omittedModelNames.has(toolName)) throw new ToolGatewayToolNotFoundError();
     const unprefixed = this.unprefixToolName(toolName);
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
@@ -9906,6 +10743,9 @@ export class PrefixedMcpServer implements MCPServer {
         return await this.attemptToolEnvironment.callModel({
           modelName: toolName,
           ...(sourceCallId === undefined ? {} : { sourceCallId }),
+          // Bind the call to this server's own tool: a model name the catalog
+          // gave to another server's tool is not found, never rerouted.
+          expectedIdentity: { serverId: this.registryId, toolName: unprefixed },
           arguments: cleanArgs ?? {},
           subjectId: this.attemptToolSubjectId,
           ...(meta === undefined ? {} : { transportMeta: meta }),
@@ -10018,6 +10858,14 @@ export class PrefixedMcpServer implements MCPServer {
           : undefined;
     try {
       this.runMcpCredentials?.assertAvailable(this.registryId);
+      const accountFill = recordsPhysicalCall
+        ? await this.fillAccountParameters(unprefixed, args ?? {}, options?.signal)
+        : undefined;
+      // Nothing was sent: the model chooses one of the account's values.
+      if (accountFill?.kind === "choose") {
+        throw new McpAccountParameterChoiceError(accountFill.parameter, accountFill.choices);
+      }
+      const providerArgs = accountFill?.arguments ?? args ?? {};
       const physicalCall = async (callArgs: Record<string, unknown>) => {
         if (!exchange) {
           return this.inner.callToolResult
@@ -10053,7 +10901,7 @@ export class PrefixedMcpServer implements MCPServer {
               call: async (callArgs) =>
                 AttemptToolResult.parse(unwrapSdkMcpResultProjection(await physicalCall(callArgs))),
             })
-          : await physicalCall(args ?? {});
+          : await physicalCall(providerArgs);
       const rawOutput = unwrapSdkMcpResultProjection(projectedOutput);
       const connectionId = operationId
         ? this.connectorAttachmentAuthority?.connectionIdForOperation(operationId)
@@ -10104,6 +10952,8 @@ export class PrefixedMcpServer implements MCPServer {
       }
       return result;
     } catch (error) {
+      // Not a provider failure: the choice text is the result, never "unavailable".
+      if (isMcpAccountParameterChoiceError(error)) throw error;
       if (isRunMcpCredentialError(error)) {
         recordOutcome("auth_needed");
         return boundedMcpToolResult({
@@ -10173,6 +11023,27 @@ export class PrefixedMcpServer implements MCPServer {
         recordOutcome("outcome_uncertain");
         throw error;
       }
+      // A generated integration's known-outcome failure goes back to the model
+      // as the tool's error, on any server: it says what the provider rejected
+      // and the tool stays usable with corrected arguments.
+      const integrationFailure = options?.propagateInvocationErrors
+        ? undefined
+        : recoverableIntegrationFailure(error);
+      if (integrationFailure) {
+        recordOutcome(
+          integrationFailure.code === "connection_required" ||
+            integrationFailure.code === "authorization_rejected"
+            ? "auth_needed"
+            : "provider_declared_error",
+        );
+        return boundedMcpToolResult({
+          isError: true,
+          content: [
+            { type: "text", text: JSON.stringify({ ok: false, error: integrationFailure }) },
+          ],
+          structuredContent: { ok: false, error: integrationFailure },
+        });
+      }
       recordOutcome(mcpThrownToolCallOutcome(error, options?.signal));
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When
       // the model calls a best-effort server's tool and the call throws for ANY
@@ -10210,6 +11081,99 @@ export class PrefixedMcpServer implements MCPServer {
       return this.inputWaitYield?.beginWait(request);
     } catch {
       return undefined;
+    }
+  }
+
+  /**
+   * The choice the model must make before this call can run, or undefined.
+   * Approval hooks ask first, so nobody approves a call that would not be
+   * sent. Never fatal; the lookup is shared with the call itself.
+   */
+  async accountParameterChoice(
+    toolName: string,
+    args: unknown,
+  ): Promise<McpAccountParameterChoiceError | undefined> {
+    if (this.inner instanceof PrefixedMcpServer)
+      return await this.inner.accountParameterChoice(this.inner.unprefixedToolName(toolName), args);
+    const fill = await this.fillAccountParameters(
+      toolName,
+      args && typeof args === "object" && !Array.isArray(args)
+        ? (args as Record<string, unknown>)
+        : {},
+    ).catch(() => undefined);
+    return fill?.kind === "choose"
+      ? new McpAccountParameterChoiceError(fill.parameter, fill.choices)
+      : undefined;
+  }
+
+  /**
+   * Fill this tool's unset account parameters from the connected account.
+   * Any lookup failure sends the call on as the model made it; only the
+   * caller's own abort ends it. A recoverable operation dispatches exactly one
+   * physical call, so it is left as it is.
+   */
+  private async fillAccountParameters(
+    toolName: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<AccountParameterFill | undefined> {
+    const parameters = this.accountParameterTools.get(toolName);
+    if (!parameters || hasActiveRecoverableMcpOperation()) return undefined;
+    signal?.throwIfAborted();
+    try {
+      return await fillAccountParameters(parameters, args, (parameter) =>
+        abortable(this.accountChoices(parameter), signal),
+      );
+    } catch {
+      if (signal?.aborted) throw signal.reason;
+      return undefined;
+    }
+  }
+
+  /**
+   * The account's values for a parameter, looked up once per attempt and
+   * shared by concurrent calls. A lookup that found nothing is retried after
+   * a short pause, so a hanging provider delays at most one call per window.
+   */
+  private accountChoices(parameter: McpAccountParameter): Promise<readonly McpAccountChoice[]> {
+    const key = JSON.stringify([parameter.resolver.toolName, parameter.name]);
+    const existing = this.accountChoiceLookups.get(key);
+    if (existing && (existing.retryAfter === undefined || Date.now() < existing.retryAfter))
+      return existing.lookup;
+    const entry: { lookup: Promise<readonly McpAccountChoice[]>; retryAfter?: number } = {
+      lookup: this.lookUpAccountChoices(parameter),
+    };
+    this.accountChoiceLookups.set(key, entry);
+    void entry.lookup.then((choices) => {
+      if (choices.length === 0) entry.retryAfter = Date.now() + MCP_ACCOUNT_PARAMETER_RETRY_MS;
+    });
+    return entry.lookup;
+  }
+
+  private async lookUpAccountChoices(
+    parameter: McpAccountParameter,
+  ): Promise<readonly McpAccountChoice[]> {
+    const signal = AbortSignal.timeout(MCP_ACCOUNT_PARAMETER_LOOKUP_MS);
+    const { toolName, arguments: resolverArgs } = parameter.resolver;
+    try {
+      const call = async () =>
+        this.inner.callToolResult
+          ? await this.inner.callToolResult(toolName, { ...resolverArgs }, null, { signal })
+          : mcpContentAsResult(
+              await this.inner.callTool(toolName, { ...resolverArgs }, null, { signal }),
+            );
+      const aborted = new Promise<never>((_, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+      );
+      aborted.catch(() => undefined);
+      const result = await Promise.race([call(), aborted]);
+      return accountChoicesFromResult(parameter, unwrapSdkMcpResultProjection(result));
+    } catch (error) {
+      console.warn(
+        "[mcp] account parameter lookup failed; the call goes on as the model made it",
+        mcpErrorFields(error, "mcp_account_parameter_lookup_failed", this.registryId),
+      );
+      return [];
     }
   }
 
@@ -10299,9 +11263,9 @@ export async function restoreInterruptedRunState(
   }
   return await RunState.fromString(agent, serializedRunState, {
     clientToolSearchRehydration: "preserve_history",
-    resolveMissingFunctionTool: secretMaskedToolResolver(
+    resolveMissingFunctionTool: commandCompletionToolResolver(
       agent,
-      commandCompletionToolResolver(agent, mcpToolResolverForAgent(agent)),
+      mcpToolResolverForAgent(agent),
     ),
   });
 }
@@ -10504,11 +11468,6 @@ export type RunAgentStreamOptions = {
    * same for every model call of the run.
    */
   searchRecordForm?: SearchRecordForm;
-  /**
-   * Masks known secret values in the instructions and input of every model
-   * call, after every filter that can add input (docs/secrets.md, Masking).
-   */
-  secretMaskingInputFilter?: CallModelInputFilter;
   /**
    * Observes the exact model-visible prefix after every input filter. Must not
    * throw; capture failures are swallowed so they cannot change inference.
@@ -10857,6 +11816,7 @@ async function runAgentStreamInternal(
         ? { codemodeClientDownload: ownedCodemodeClientDownload }
         : {}),
       ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
+      onSetupNotice: sandboxSetupNoticeSink(agent, undefined),
     };
     // Keep both credential seeding and lifecycle decoration as a safety net for
     // any session the SDK does create/resume during this run. They are inert for
@@ -10907,8 +11867,6 @@ async function runAgentStreamInternal(
             prepared.modelInputAlreadyProjected === true,
           ),
         ),
-        // Secret masking runs after every filter that can add model input.
-        measuredModelInputFilter("input_filter_secret_mask", overrides.secretMaskingInputFilter),
         measuredModelInputFilter(
           "input_filter_context",
           deferCompactionToModelBoundary(
@@ -10966,6 +11924,7 @@ async function runAgentStreamInternal(
                 "sandbox_session_manifest_inventory",
                 (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
               );
+              deliverHeldSandboxSetupNotices(agent, prepared);
               return runScopedRunner(settings, agent, inputWaitYield).run(
                 agent,
                 prepared.input,
@@ -11048,6 +12007,7 @@ async function runAgentStreamInternal(
           ...(codemodeTokenSeed ? { codemodeTokenSeed } : {}),
           ...(codemodeTokenFile ? { codemodeTokenFile } : {}),
           ...(legacyRigSetup ? { rigSetup: legacyRigSetup } : {}),
+          onSetupNotice: sandboxSetupNoticeSink(agent, undefined),
         },
       )
     : undefined;
@@ -11082,8 +12042,6 @@ async function runAgentStreamInternal(
         "input_filter_modality",
         modelModalityProjectionFilterForAgent(agent, prepared.modelInputAlreadyProjected === true),
       ),
-      // Secret masking runs after every filter that can add model input.
-      measuredModelInputFilter("input_filter_secret_mask", overrides.secretMaskingInputFilter),
       measuredModelInputFilter(
         "input_filter_context",
         deferCompactionToModelBoundary(
@@ -11141,6 +12099,7 @@ async function runAgentStreamInternal(
               "sandbox_agent_manifest_inventory",
               (agent as { defaultManifest?: Manifest }).defaultManifest,
             );
+            deliverHeldSandboxSetupNotices(agent, prepared);
             return runScopedRunner(settings, agent, inputWaitYield).run(
               agent,
               prepared.input,
@@ -11158,20 +12117,60 @@ function appendSandboxFileDownloadFailureNote(
   input: PreparedAgentInput,
   failures: SandboxFileDownloadFailure[],
 ): void {
-  const note = sandboxFileDownloadFailureNote(failures);
+  appendPreparedInputNote(input, sandboxFileDownloadFailureNote(failures));
+}
+
+/**
+ * Append a platform note to this turn's model input, after the person's
+ * message. False when that input cannot take one.
+ */
+function appendPreparedInputNote(input: PreparedAgentInput, note: string): boolean {
   if (!note) {
-    return;
+    return true;
   }
   if (typeof input.input === "string") {
     input.input = [input.input, "", note].join("\n");
-    return;
+    return true;
   }
   if (Array.isArray(input.input)) {
     input.input = [
       ...input.input,
       { type: "message", role: "user", content: note } as AgentInputItem,
     ];
+    return true;
   }
+  return false;
+}
+
+/**
+ * Route a setup notice: into the turn's input while the model has not started,
+ * otherwise held for the next tool result.
+ */
+function sandboxSetupNoticeSink(
+  agent: Agent<any, any>,
+  preparedInput: PreparedAgentInput | undefined,
+): (notice: string) => void {
+  return (notice) => {
+    if (preparedInput && appendPreparedInputNote(preparedInput, notice)) return;
+    queueSandboxSetupNotice(agent, notice);
+  };
+}
+
+/** Notices held by setup that finished before this run starts join its input. */
+function deliverHeldSandboxSetupNotices(agent: Agent<any, any>, prepared: PreparedAgentInput) {
+  const held = takeSandboxSetupNotices(agent);
+  if (held && !appendPreparedInputNote(prepared, held)) {
+    queueSandboxSetupNotice(agent, held);
+  }
+}
+
+/**
+ * Drop held soft setup failure notices that describe a box this turn no
+ * longer uses; that box's setup reports its own. Other held notices, such as a
+ * repository folder moved aside, describe files that may still exist and stay.
+ */
+export function discardHeldSoftSetupFailureNotices(agent: object): void {
+  dropSandboxSetupNotices(agent, (notice) => notice.startsWith(SOFT_SETUP_FAILURE_NOTICE_PREFIX));
 }
 
 /**
@@ -11199,9 +12198,9 @@ function lazyToolRunBindings(agent: Agent<any, any>): {
   const runtime = lazyToolRuntimeForAgent(agent);
   return {
     ...(runtime ? { toolNotFoundBehavior: "return_error_to_model" as const } : {}),
-    resolveMissingFunctionTool: secretMaskedToolResolver(
+    resolveMissingFunctionTool: commandCompletionToolResolver(
       agent,
-      commandCompletionToolResolver(agent, mcpToolResolverForAgent(agent)),
+      mcpToolResolverForAgent(agent),
     ),
   };
 }
@@ -11326,6 +12325,20 @@ async function resolveBareFirstPartyToolCall(
   return tool;
 }
 
+/**
+ * Two servers offering one model name must never fail the run. The first
+ * owner keeps the name; the later tool is unavailable this attempt.
+ */
+function warnMcpModelNameCollision(modelName: string, keptOwner: string, skippedOwner: string) {
+  console.warn("[mcp] two tools share one model name; keeping the first", {
+    event: "tool_catalog_degraded",
+    code: "duplicate_model_name",
+    modelName: modelName.slice(0, 256),
+    keptOwner: keptOwner.slice(0, 256),
+    skippedOwner: skippedOwner.slice(0, 256),
+  });
+}
+
 /** Old hashes are aliases only for an exact tool in the current authorized
  * catalog. Never recover tools from history, labels, URLs, or a different account. */
 function mcpToolResolverForAgent(agent: Agent<any, any>) {
@@ -11345,8 +12358,11 @@ function mcpToolResolverForAgent(agent: Agent<any, any>) {
       for (const descriptor of await server.listTools()) {
         const rawName = await server.unprefixedToolName(descriptor.name);
         if (legacyMcpToolDigest(server.registryId, rawName) !== input.name) continue;
-        if (resolvedName !== undefined && resolvedName !== descriptor.name)
-          throw new Error("MCP legacy model tool identity collision");
+        if (resolvedName !== undefined && resolvedName !== descriptor.name) {
+          // Ambiguous old alias: resolve to no tool rather than guess one.
+          warnMcpModelNameCollision(input.name, resolvedName, descriptor.name);
+          return null;
+        }
         resolvedName = descriptor.name;
       }
     }
@@ -11380,9 +12396,13 @@ function runScopedRunner(
 
 export { restoreGenericDispatchHistoryItems } from "./lazy-tool-transport";
 export { isOpeningToolLoadResponse } from "./lazy-tool-transport";
+export { isAlwaysVisibleBaseToolName } from "./lazy-tool-transport";
+export { HARNESS_CONTROL_FIRST_PARTY_TOOLS } from "./codex-tool-search";
+export { connectableIntegrationsNamedIn } from "./lazy-tool-transport";
 export type { LazyToolTransport } from "./lazy-tool-transport";
 export { createToolSelector } from "./tool-discovery-decision";
 export type {
+  ToolSelectionFailure,
   ToolSelector,
   ToolDecisionInput,
   ToolDecisionCandidate,
@@ -11664,6 +12684,9 @@ export async function runOwnedSandboxSetup(
     environment: Record<string, string>;
     preparedInput?: PreparedAgentInput;
     fileDownloadsMaterialized?: boolean;
+    /** Setup steps the worker ran first that already failed softly (run
+     * credential files), reported in the same notice as the hooks'. */
+    priorSoftSetupFailures?: readonly SoftSetupFailure[];
     /** Lazy setup runs after SDK preparation has already observed the logical manifest. */
     recordLazyManifest?: boolean;
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
@@ -11729,6 +12752,7 @@ export async function runOwnedSandboxSetup(
     ...(ownedCodemodeClientDownload ? { codemodeClientDownload: ownedCodemodeClientDownload } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
+    onSetupNotice: sandboxSetupNoticeSink(agent, opts.preparedInput),
   };
   // OWNED-PATH HOOKS: run the beforeAgentStart hooks directly against the provided
   // box, once per turn, BEFORE the run starts (repository-clone hook seeds the B1
@@ -11738,7 +12762,19 @@ export async function runOwnedSandboxSetup(
   // (effective backend "selfhosted"): the box is the user's REAL computer — the
   // platform must not run setup against it (clone hooks are already empty there;
   // this keeps az login off it too).
+  // Setup steps that failed softly this turn, including the worker's own
+  // earlier steps (run credential files), reported in one notice below.
+  const softFailures: SoftSetupFailure[] = [...(opts.priorSoftSetupFailures ?? [])];
   if (agentActiveSandboxBackend.get(agent) !== "selfhosted") {
+    // WORKSPACE MACHINE SELF-REPAIR: a compute box is Opengeni's own machine, so a
+    // clock or resolver the agent broke is repaired before anything below needs
+    // the network (rig setup, clones, the Codemode client). Never on any other
+    // backend, and above all never on a connected machine.
+    if ((agentActiveSandboxBackend.get(agent) ?? settings.sandboxBackend) === "compute") {
+      const repair = await repairOwnedComputeBox(setupSession, environment, opts.commandRunner);
+      const note = repair ? ownedBoxRepairNote(repair) : null;
+      if (note && opts.preparedInput) appendPreparedInputNote(opts.preparedInput, note);
+    }
     if (ownedRigSetupHooks.length > 0 && ownedRigSetup) {
       const execute = async (): Promise<void> => {
         await runBeforeAgentStartHooks(setupSession, ownedRigSetupHooks, ownedHookContext);
@@ -11768,8 +12804,30 @@ export async function runOwnedSandboxSetup(
         await execute();
       }
     }
-    await runBeforeAgentStartHooks(setupSession, ownedTurnPrivateHooks, ownedHookContext);
+    // A hook failure the box itself caused (a full /workspace, a blocked
+    // path) must not fail every later turn before the model can fix it: the
+    // turn starts and the model is told what failed (sandbox-setup-soft-failure.ts).
+    await runBeforeAgentStartHooks(
+      setupSession,
+      softFailingSetupHooks(ownedTurnPrivateHooks, softFailures, (failure) => {
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            message: "platform setup step failed softly; the turn continues with a notice",
+            event: "sandbox.setup.soft_failure",
+            hookId: failure.hookId,
+            cause: failure.cause.kind,
+            ...(failure.cause.kind === "command_failed"
+              ? { exitCode: failure.cause.exitCode }
+              : {}),
+          }),
+        );
+      }),
+      ownedHookContext,
+    );
   }
+  const softFailureNotice = softSetupFailureNotice(softFailures);
+  if (softFailureNotice) sandboxSetupNoticeSink(agent, opts.preparedInput)(softFailureNotice);
   // FILE RESOURCES are user-selected turn inputs, not platform machine setup.
   // Deliver them on every backend, including connected machines. The command is
   // workspace-relative, integrity-verified, read-only, and atomic; repository,
@@ -12580,7 +13638,54 @@ export type SandboxLifecycleHookContext = {
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
   commandRunner?: SandboxLifecycleCommandRunner;
+  /**
+   * Model-facing text a hook needs the agent to read, such as where a
+   * repository folder was moved aside. Delivered with the turn's input when
+   * setup runs before the model, otherwise with the next tool result.
+   */
+  onSetupNotice?: (notice: string) => void;
 };
+
+/**
+ * Check a compute box's clock and resolver against the worker and repair what
+ * is broken (see sandbox/owned-box-repair). Best effort: a failed check never
+ * fails setup, but a Steer/Pause cancellation still stops it.
+ */
+async function repairOwnedComputeBox(
+  session: SandboxSessionLike,
+  environment: Record<string, string>,
+  commandRunner?: SandboxLifecycleCommandRunner,
+): Promise<OwnedBoxRepairReport | null> {
+  let result: unknown;
+  try {
+    result = await withSandboxOperationPurpose("box_repair", () =>
+      runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: ownedBoxRepairCommand({
+            workerEpochSeconds: Date.now() / 1000,
+            host: ownedBoxRepairHost(environment),
+          }),
+          workdir: "/workspace",
+          yieldTimeMs: 30_000,
+          maxOutputTokens: 1_000,
+        },
+        commandRunner,
+      ),
+    );
+  } catch (error) {
+    if (error instanceof TurnSandboxCommandCancelledError) throw error;
+    console.warn("[sandbox] workspace machine clock and DNS check failed", {
+      error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+    });
+    return null;
+  }
+  const report = parseOwnedBoxRepairOutput(sandboxCommandOutput(result));
+  if (report.clock || report.dns) {
+    console.warn("[sandbox] workspace machine clock or DNS was broken before the turn", report);
+  }
+  return report;
+}
 
 async function runSandboxLifecycleCommand(
   session: SandboxSessionLike,
@@ -12895,6 +14000,16 @@ function sandboxCodemodeTokenHooksForAgent(
               },
             ]
           : []),
+        ...(managedShellToolsBackend(agentActiveSandboxBackend.get(agent))
+          ? [
+              {
+                id: "shell-tools",
+                phase: "beforeAgentStart" as const,
+                independent: true,
+                run: runManagedShellToolsHook,
+              },
+            ]
+          : []),
         {
           id: "codemode-token",
           phase: "beforeAgentStart",
@@ -13157,16 +14272,24 @@ async function stageGitHttpBrokerBindingSeeds(
   session: GitCredentialTokenWriterSession,
   bindings: GitCredentialBindingSeed[],
   runAs?: string,
+  options: { ghGatewayKit?: boolean } = {},
 ): Promise<{
   editor: ReturnType<NonNullable<GitCredentialTokenWriterSession["createEditor"]>> | null;
   staged: StagedGitCredentialBindingSeed[];
+  /** Staged GH_GATEWAY_KIT_SCRIPT, or null when not requested or not delivered. */
+  ghGatewayKit: string | null;
 }> {
   const brokered = bindings.filter((binding) => binding.transport?.kind === "http_broker");
-  if (brokered.length === 0) return { editor: null, staged: [] };
+  if (brokered.length === 0) return { editor: null, staged: [], ghGatewayKit: null };
   const editor = session.createEditor?.(runAs);
   if (!editor) {
     throw new Error("Sandbox does not support private Git broker credential delivery");
   }
+  // The kit is static and optional: it is written alongside the seeds, and a
+  // failed write only leaves `gh` without the gateway for this turn.
+  const ghGatewayKit = options.ghGatewayKit
+    ? stageGhGatewayKit(editor)
+    : Promise.resolve<string | null>(null);
   const staged: StagedGitCredentialBindingSeed[] = [];
   const cleanupEligible: StagedGitCredentialBindingSeed[] = [];
   try {
@@ -13185,26 +14308,55 @@ async function stageGitHttpBrokerBindingSeeds(
       await editor.createFile({ type: "create_file", path, diff });
       staged.push(candidate);
     }
-    return { editor, staged };
+    return { editor, staged, ghGatewayKit: await ghGatewayKit };
   } catch {
-    await cleanupStagedGitCredentialSeeds(editor, cleanupEligible);
+    const kit = await ghGatewayKit;
+    await cleanupStagedGitCredentialSeeds(editor, cleanupEligible, kit);
     throw new Error("Sandbox could not receive the Git broker credential");
+  }
+}
+
+const GIT_BROKER_SEED_ROOT = "/workspace/.opengeni/git-broker-seeds";
+
+async function stageGhGatewayKit(
+  editor: NonNullable<ReturnType<NonNullable<GitCredentialTokenWriterSession["createEditor"]>>>,
+): Promise<string | null> {
+  const path = `${GIT_BROKER_SEED_ROOT}/${randomUUID()}`;
+  const diff = GH_GATEWAY_KIT_SCRIPT.split("\n")
+    .map((line) => `+${line}`)
+    .join("\n");
+  try {
+    await editor.createFile({ type: "create_file", path, diff });
+    return path;
+  } catch (error) {
+    console.warn("[sandbox] gh gateway kit was not delivered", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    try {
+      await editor.deleteFile({ type: "delete_file", path });
+    } catch {
+      // Best effort: the random path holds no credential.
+    }
+    return null;
   }
 }
 
 async function cleanupStagedGitCredentialSeeds(
   editor: NonNullable<ReturnType<NonNullable<GitCredentialTokenWriterSession["createEditor"]>>>,
   staged: StagedGitCredentialBindingSeed[],
+  ghGatewayKit: string | null = null,
 ): Promise<void> {
   await Promise.all(
-    staged.map(async ({ path }) => {
-      try {
-        await editor.deleteFile({ type: "delete_file", path });
-      } catch {
-        // Cleanup is best effort. The staged path is random, excluded from
-        // workspace capture, and the broker bearer expires within five minutes.
-      }
-    }),
+    [...staged.map(({ path }) => path), ...(ghGatewayKit ? [ghGatewayKit] : [])].map(
+      async (path) => {
+        try {
+          await editor.deleteFile({ type: "delete_file", path });
+        } catch {
+          // Cleanup is best effort. The staged path is random, excluded from
+          // workspace capture, and the broker bearer expires within five minutes.
+        }
+      },
+    ),
   );
 }
 
@@ -13485,6 +14637,116 @@ function gitCredentialHelperBindingCaseLines(
     });
 }
 
+const PERSONAL_GIT_BROKER_PATH = "/v1/git/personal/";
+const PERSONAL_GITHUB_GATEWAY_PATH = "/v1/github/personal/gateway";
+
+/**
+ * Where `gh` reaches GitHub as the person: the Opengeni API that serves the
+ * session's personal GitHub broker routes. Its pass (the broker token file)
+ * is the only credential in the sandbox. Null without exactly one personal
+ * GitHub broker binding.
+ */
+function personalGitHubGatewayDescriptor(
+  routes: RuntimeGitHttpBrokerRouteDescriptor[],
+): { base: string; bindingHash: string; host: string; gitPath: string } | null {
+  const github = routes.filter(
+    (route) => route.provider === "github" && route.brokerUri.includes(PERSONAL_GIT_BROKER_PATH),
+  );
+  const hashes = new Set(github.map((route) => route.bindingHash));
+  const route = github[0];
+  if (!route || hashes.size !== 1) return null;
+  const base = route.brokerUri.slice(0, route.brokerUri.indexOf(PERSONAL_GIT_BROKER_PATH));
+  if (
+    github.some(
+      (candidate) => !candidate.brokerUri.startsWith(`${base}${PERSONAL_GIT_BROKER_PATH}`),
+    )
+  ) {
+    return null;
+  }
+  const basePath = new URL(base).pathname.replace(/^\/+|\/+$/g, "");
+  return {
+    base,
+    bindingHash: route.bindingHash,
+    host: route.host,
+    gitPath: `${basePath ? `${basePath}/` : ""}${PERSONAL_GITHUB_GATEWAY_PATH.slice(1)}/git/`,
+  };
+}
+
+/**
+ * Local proxy `gh` talks to over a Unix socket (`http_unix_socket`). GitHub
+ * API and upload requests go to the Opengeni gateway with the session's pass
+ * instead of a GitHub token; any other host (a log or archive download that
+ * GitHub redirected to) is fetched directly without credentials.
+ */
+export const GH_GATEWAY_PROXY_SCRIPT = String.raw`"use strict";
+const http = require("node:http");
+const https = require("node:https");
+const fs = require("node:fs");
+const [socketPath, gatewayBase, passFile] = process.argv.slice(2);
+const base = new URL(gatewayBase);
+const basePath = base.pathname.replace(/\/+$/, "");
+const routes = {
+  "api.github.com": "/v1/github/personal/gateway/api",
+  "uploads.github.com": "/v1/github/personal/gateway/uploads",
+};
+const dropped = new Set([
+  "authorization", "connection", "host", "keep-alive", "proxy-authorization",
+  "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",
+]);
+function forwardHeaders(source) {
+  const headers = {};
+  for (const [name, value] of Object.entries(source)) {
+    if (value !== undefined && !dropped.has(name.toLowerCase())) headers[name] = value;
+  }
+  return headers;
+}
+function fail(res, status, message) {
+  if (!res.headersSent) res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify({ message }));
+}
+const parent = process.ppid;
+setInterval(() => {
+  if (process.ppid !== parent) process.exit(0);
+}, 1000).unref();
+try { fs.unlinkSync(socketPath); } catch {}
+http.createServer((req, res) => {
+  const hostHeader = String(req.headers.host || "");
+  const host = hostHeader.toLowerCase().replace(/:\d+$/, "");
+  const route = routes[host];
+  let target;
+  const headers = forwardHeaders(req.headers);
+  if (route) {
+    let pass = "";
+    try { pass = fs.readFileSync(passFile, "utf8").trim(); } catch {}
+    if (!pass) {
+      fail(res, 401, "GitHub access is unavailable for this session. Run the command again in a new message.");
+      req.resume();
+      return;
+    }
+    target = new URL(base.origin + basePath + route + req.url);
+    headers.authorization = "Bearer " + pass;
+    headers["accept-encoding"] = "identity";
+  } else {
+    target = new URL("https://" + hostHeader + req.url);
+    delete headers.cookie;
+  }
+  const upstream = (target.protocol === "http:" ? http : https).request(
+    target,
+    { method: req.method, headers },
+    (upstreamRes) => {
+      const responseHeaders = {};
+      for (const [name, value] of Object.entries(upstreamRes.headers)) {
+        if (value !== undefined && !dropped.has(name.toLowerCase())) responseHeaders[name] = value;
+      }
+      res.writeHead(upstreamRes.statusCode || 502, upstreamRes.statusMessage, responseHeaders);
+      upstreamRes.pipe(res);
+    },
+  );
+  upstream.on("error", () => fail(res, 502, "The GitHub gateway is unreachable. Try again."));
+  req.pipe(upstream);
+}).listen(socketPath);
+`;
+
 function gitCredentialHelperBrokerCaseLines(
   routes: RuntimeGitHttpBrokerRouteDescriptor[],
 ): string[] {
@@ -13695,6 +14957,70 @@ function gitConfigQuotedContent(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+/**
+ * Shell helpers for every write to the global Git config during repository
+ * preparation. Several preparations can run on one box at once (chats created
+ * together share their sandbox, and each clones its repositories in
+ * parallel), and they all write the same `$HOME/.gitconfig`. Git takes a
+ * `.gitconfig.lock` for each write and fails at once when another writer holds
+ * it, so:
+ *
+ * - `with_git_global_config_lock <command...>` runs a whole group of global
+ *   config reads and writes under one per-box mutex (flock on a file beside
+ *   the other Opengeni state), so concurrent preparations take turns and a
+ *   check-then-add never duplicates an entry. It is re-entrant, and it waits
+ *   at most GIT_GLOBAL_CONFIG_LOCK_WAIT_SECONDS before running the group
+ *   anyway. Without flock (macOS) the group runs unserialised.
+ * - `git_global_config <git config args...>` is `git config --global` that
+ *   retries, within a bound, while the lock is held - by a writer outside the
+ *   mutex, such as the agent's own `git config --global`, or when the mutex is
+ *   unavailable. Any other failure returns at once with git's status.
+ */
+const GIT_GLOBAL_CONFIG_LOCK_WAIT_SECONDS = 60;
+const GIT_GLOBAL_CONFIG_WRITE_ATTEMPTS = 100;
+const GIT_GLOBAL_CONFIG_FUNCTION_LINES: readonly string[] = [
+  "git_global_config() {",
+  "  git_global_config_attempt=0",
+  "  while :; do",
+  '    if git_global_config_output="$(LC_ALL=C command git config --global "$@" 2>&1)"; then',
+  '      [ -z "$git_global_config_output" ] || printf \'%s\\n\' "$git_global_config_output"',
+  "      return 0",
+  "    else",
+  "      git_global_config_status=$?",
+  "    fi",
+  '    case "$git_global_config_output" in',
+  '      *"could not lock config file"*) ;;',
+  "      *)",
+  '        [ -z "$git_global_config_output" ] || printf \'%s\\n\' "$git_global_config_output" >&2',
+  '        return "$git_global_config_status"',
+  "        ;;",
+  "    esac",
+  "    git_global_config_attempt=$((git_global_config_attempt + 1))",
+  `    if [ "$git_global_config_attempt" -ge ${GIT_GLOBAL_CONFIG_WRITE_ATTEMPTS} ]; then`,
+  "      printf '%s\\n' \"$git_global_config_output\" >&2",
+  '      return "$git_global_config_status"',
+  "    fi",
+  "    sleep 0.1 2>/dev/null || sleep 1",
+  "  done",
+  "}",
+  "with_git_global_config_lock() {",
+  '  if [ -n "${OPENGENI_GIT_GLOBAL_CONFIG_LOCKED:-}" ] || ! command -v flock >/dev/null 2>&1; then',
+  '    "$@"',
+  "    return $?",
+  "  fi",
+  '  git_global_config_lock_file="$HOME/.opengeni/git-global-config.lock"',
+  '  if ! { mkdir -p "$HOME/.opengeni" && : >>"$git_global_config_lock_file"; } 2>/dev/null; then',
+  '    "$@"',
+  "    return $?",
+  "  fi",
+  "  (",
+  `    flock -w ${GIT_GLOBAL_CONFIG_LOCK_WAIT_SECONDS} 9 2>/dev/null || true`,
+  "    OPENGENI_GIT_GLOBAL_CONFIG_LOCKED=1",
+  '    "$@"',
+  '  ) 9>>"$git_global_config_lock_file"',
+  "}",
+];
+
 function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescriptor[]): string[] {
   const rewrites = gitHttpBrokerRewrites(routes);
   const brokeredRepositoryUris = new Set(rewrites.map((rewrite) => rewrite.repositoryUri));
@@ -13726,8 +15052,11 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
     ),
     'mv -f "$git_http_broker_config.tmp.$$" "$git_http_broker_config"',
     'umask "$broker_umask"',
-    'git config --global --unset-all include.path "$git_http_broker_config" >/dev/null 2>&1 || true',
-    'git config --global --add include.path "$git_http_broker_config"',
+    "include_git_http_broker_config() {",
+    '  git_global_config --unset-all include.path "$git_http_broker_config" >/dev/null 2>&1 || true',
+    '  git_global_config --add include.path "$git_http_broker_config"',
+    "}",
+    "with_git_global_config_lock include_git_http_broker_config",
   ];
 }
 
@@ -13757,7 +15086,7 @@ function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescri
  * than spinning. Only repository selecting global options (`-C`,
  * `--git-dir`, `--work-tree`) are replayed for the identity lookup.
  */
-export const GIT_COMMAND_WRAPPER_SCRIPT = [
+const GIT_COMMAND_WRAPPER_HEAD_LINES = [
   "#!/bin/sh",
   "# Opengeni git wrapper: per-repository commit identity.",
   '[ "${OPENGENI_GIT_WRAPPER_PID:-}" = "$$" ] || OPENGENI_GIT_WRAPPERS_SEEN=',
@@ -13817,13 +15146,77 @@ export const GIT_COMMAND_WRAPPER_SCRIPT = [
   "    fi",
   "  fi",
   "fi",
+];
+
+// Part of the gh gateway kit (GH_GATEWAY_KIT_SCRIPT), which the git wrapper
+// sources only while it runs under `gh` as the person.
+const GIT_COMMAND_WRAPPER_GATEWAY_LINES = [
+  // Under `gh` as the person: gh reads `git remote -v` to find the GitHub
+  // repository, so it sees the configured github.com URLs rather than the
+  // Opengeni Git routes they are rewritten to; a clone keeps the rewrite.
+  'if [ -n "${OPENGENI_GH_GATEWAY_GIT:-}" ]; then',
+  '  if [ "$#" -eq 2 ] && [ "$1" = remote ] && [ "$2" = -v ]; then',
+  "    \"$real_git\" config --get-regexp '^remote\\..*\\.url$' 2>/dev/null | while read -r remote_key remote_url; do",
+  '      remote_name="${remote_key#remote.}"',
+  '      remote_name="${remote_name%.url}"',
+  '      remote_push="$("$real_git" config --get "remote.$remote_name.pushurl" 2>/dev/null || printf \'%s\' "$remote_url")"',
+  '      printf \'%s\\t%s (fetch)\\n%s\\t%s (push)\\n\' "$remote_name" "$remote_url" "$remote_name" "$remote_push"',
+  "    done",
+  "    exit 0",
+  "  fi",
+  "  gateway_expect=",
+  "  gateway_clone=",
+  '  for arg in "$@"; do',
+  '    if [ -n "$gateway_expect" ]; then gateway_expect=; continue; fi',
+  '    case "$arg" in',
+  "      -c|-C|--git-dir|--work-tree|--namespace|--config-env) gateway_expect=1 ;;",
+  "      -*) ;;",
+  "      clone) gateway_clone=1; break ;;",
+  "      *) break ;;",
+  "    esac",
+  "  done",
+  '  if [ -n "$gateway_clone" ]; then',
+  "    gateway_expect=",
+  "    gateway_done=",
+  '    for arg in "$@"; do',
+  "      shift",
+  '      set -- "$@" "$arg"',
+  '      if [ -n "$gateway_done" ]; then continue; fi',
+  '      if [ -n "$gateway_expect" ]; then gateway_expect=; continue; fi',
+  '      case "$arg" in',
+  "        -c|-C|--git-dir|--work-tree|--namespace|--config-env) gateway_expect=1 ;;",
+  '        clone) set -- "$@" -c "url.$OPENGENI_GH_GATEWAY_GIT/.insteadOf=https://github.com/"; gateway_done=1 ;;',
+  "      esac",
+  "    done",
+  "  fi",
+  "fi",
+];
+
+const GIT_COMMAND_WRAPPER_TAIL_LINES = [
   'OPENGENI_GIT_WRAPPERS_SEEN="$OPENGENI_GIT_WRAPPERS_SEEN:$real_git"',
   "OPENGENI_GIT_WRAPPER_PID=$$",
   "export OPENGENI_GIT_WRAPPERS_SEEN OPENGENI_GIT_WRAPPER_PID",
   'exec "$real_git" "$@"',
-].join("\n");
+];
 
-function gitCommandWrapperCommandLines(): string[] {
+function gitCommandWrapperScript(ghGateway: boolean): string {
+  return [
+    ...GIT_COMMAND_WRAPPER_HEAD_LINES,
+    ...(ghGateway
+      ? [
+          'if [ -n "${OPENGENI_GH_GATEWAY_GIT:-}" ] && [ -r "${OPENGENI_GH_GATEWAY_KIT:-}" ]; then',
+          "  opengeni_gh_gateway_role=git",
+          '  . "$OPENGENI_GH_GATEWAY_KIT"',
+          "fi",
+        ]
+      : []),
+    ...GIT_COMMAND_WRAPPER_TAIL_LINES,
+  ].join("\n");
+}
+
+export const GIT_COMMAND_WRAPPER_SCRIPT = gitCommandWrapperScript(false);
+
+function gitCommandWrapperCommandLines(ghGateway = false): string[] {
   return [
     // Record the box's creation-time env identity (if any) so the wrapper can
     // tell it apart from an identity a command sets on purpose.
@@ -13838,7 +15231,7 @@ function gitCommandWrapperCommandLines(): string[] {
     'git_wrapper="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}/git"',
     'mkdir -p "$(dirname "$git_wrapper")"',
     "cat > \"$git_wrapper.tmp.$$\" <<'GIT_WRAPPER_EOF'",
-    GIT_COMMAND_WRAPPER_SCRIPT,
+    gitCommandWrapperScript(ghGateway),
     "GIT_WRAPPER_EOF",
     'chmod 0755 "$git_wrapper.tmp.$$"',
     'mv -f "$git_wrapper.tmp.$$" "$git_wrapper"',
@@ -13924,7 +15317,7 @@ export function repositoryIdentityCommandLines(
     '  if [ -n "$identity_dir" ]; then',
     '    command git -C "$identity_dir" config --local "$@"',
     "  else",
-    '    command git config --global "$@"',
+    '    git_global_config "$@"',
     "  fi",
     "}",
     "identity_value() {",
@@ -14003,22 +15396,142 @@ export function repositoryIdentityCommandLines(
     '  remove_managed_identity "$1"',
     "}",
     ...calls,
+    // The box-wide default goes to the shared global config: one locked unit.
     defaultIdentity
-      ? `apply_managed_identity '' ${identityArguments(defaultIdentity, "default")} || true`
-      : "remove_managed_identity '' || true",
+      ? `with_git_global_config_lock apply_managed_identity '' ${identityArguments(defaultIdentity, "default")} || true`
+      : "with_git_global_config_lock remove_managed_identity '' || true",
   ];
 }
+
+/**
+ * `gh` as the person: when the session has a personal GitHub connection and
+ * no attached App credential is selected (by OPENGENI_GIT_BINDING or the
+ * repository's origin), run the real `gh` against a per-command local proxy
+ * to the Opengeni gateway. Its Git operations use the gateway's Git routes.
+ */
+const GH_GATEWAY_WRAPPER_LINES = [
+  "real_tool_path() {",
+  '  gw_self_real="$(readlink -f "$0" 2>/dev/null || printf \'%s\\n\' "$0")"',
+  '  gw_old_ifs="$IFS"',
+  "  IFS=:",
+  "  for gw_path_dir in $PATH; do",
+  '    [ -n "$gw_path_dir" ] || gw_path_dir=.',
+  '    gw_candidate="$gw_path_dir/$tool"',
+  '    [ -x "$gw_candidate" ] || continue',
+  '    gw_candidate_real="$(readlink -f "$gw_candidate" 2>/dev/null || printf \'%s\\n\' "$gw_candidate")"',
+  '    [ "$gw_candidate_real" = "$gw_self_real" ] && continue',
+  '    IFS="$gw_old_ifs"',
+  "    printf '%s\\n' \"$gw_candidate\"",
+  "    return 0",
+  "  done",
+  '  IFS="$gw_old_ifs"',
+  "  return 1",
+  "}",
+  "run_gh_gateway() {",
+  '  gw_gh="$(real_tool_path)" || { printf \'%s\\n\' "gh: real command not found on PATH" >&2; return 127; }',
+  "  if command -v node >/dev/null 2>&1; then gw_js=node",
+  "  elif command -v bun >/dev/null 2>&1; then gw_js=bun",
+  "  else printf '%s\\n' 'gh: Node.js or Bun is needed to use gh as you' >&2; return 127",
+  "  fi",
+  '  gw_pass="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$gh_gateway_binding-token"',
+  '  gw_dir="$(mktemp -d "${TMPDIR:-/tmp}/opengeni-gh.XXXXXX")"',
+  '  gw_sock="$gw_dir/gateway.sock"',
+  "  cat > \"$gw_dir/proxy.cjs\" <<'GH_GATEWAY_PROXY_EOF'",
+  GH_GATEWAY_PROXY_SCRIPT,
+  "GH_GATEWAY_PROXY_EOF",
+  '  printf \'git_protocol: https\\nprompt: disabled\\nhttp_unix_socket: %s\\n\' "$gw_sock" > "$gw_dir/config.yml"',
+  '  "$gw_js" "$gw_dir/proxy.cjs" "$gw_sock" "$gh_gateway_base" "$gw_pass" </dev/null >/dev/null 2>"$gw_dir/proxy.log" &',
+  "  gw_pid=$!",
+  '  trap \'kill "$gw_pid" 2>/dev/null || true; rm -rf "$gw_dir"\' EXIT',
+  "  trap 'exit 130' INT",
+  "  trap 'exit 143' TERM",
+  "  gw_wait=0",
+  '  while [ ! -S "$gw_sock" ]; do',
+  '    if ! kill -0 "$gw_pid" 2>/dev/null || [ "$gw_wait" -ge 200 ]; then',
+  '      cat "$gw_dir/proxy.log" >&2 2>/dev/null || true',
+  "      printf '%s\\n' \"gh: the GitHub gateway proxy did not start\" >&2",
+  "      return 1",
+  "    fi",
+  "    gw_wait=$((gw_wait + 1))",
+  "    sleep 0.05",
+  "  done",
+  '  gw_git="$gh_gateway_base/v1/github/personal/gateway/git"',
+  '  gw_count="${GIT_CONFIG_COUNT:-0}"',
+  '  case "$gw_count" in ""|*[!0-9]*) gw_count=0 ;; esac',
+  '  eval "GIT_CONFIG_KEY_$gw_count=\\"url.\\$gw_git/.insteadOf\\"; GIT_CONFIG_VALUE_$gw_count=https://github.com/; export GIT_CONFIG_KEY_$gw_count GIT_CONFIG_VALUE_$gw_count"',
+  "  GIT_CONFIG_COUNT=$((gw_count + 1))",
+  "  unset GH_HOST GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GITHUB_TOKEN",
+  '  GH_CONFIG_DIR="$gw_dir"',
+  "  GH_TOKEN=opengeni-gateway",
+  "  GH_PROMPT_DISABLED=1",
+  "  GH_NO_UPDATE_NOTIFIER=1",
+  "  GH_NO_EXTENSION_UPDATE_NOTIFIER=1",
+  '  OPENGENI_GH_GATEWAY_GIT="$gw_git"',
+  '  OPENGENI_GH_GATEWAY_KIT="$gh_gateway_kit"',
+  "  export GIT_CONFIG_COUNT GH_CONFIG_DIR GH_TOKEN GH_PROMPT_DISABLED GH_NO_UPDATE_NOTIFIER GH_NO_EXTENSION_UPDATE_NOTIFIER OPENGENI_GH_GATEWAY_GIT OPENGENI_GH_GATEWAY_KIT",
+  "  gw_status=0",
+  '  "$gw_gh" "$@" || gw_status=$?',
+  '  return "$gw_status"',
+  "}",
+  'if [ "$provider" = github ] && [ -n "$gh_gateway_binding" ]; then',
+  "  gh_gateway=",
+  '  if [ -n "${OPENGENI_GIT_BINDING:-}" ]; then',
+  '    [ "$(hash_binding_id "$OPENGENI_GIT_BINDING")" != "$gh_gateway_binding" ] || gh_gateway=1',
+  "  else",
+  '    gw_origin="$(git config --get remote.origin.url 2>/dev/null || true)"',
+  '    if [ -z "$gw_origin" ] || origin_is_brokered "$gw_origin" || ! binding_hash_for_origin "$gw_origin" >/dev/null 2>&1; then',
+  "      gh_gateway=1",
+  "    fi",
+  "  fi",
+  '  if [ -n "$gh_gateway" ]; then',
+  "    gh_gateway_status=0",
+  '    run_gh_gateway "$@" || gh_gateway_status=$?',
+  '    exit "$gh_gateway_status"',
+  "  fi",
+  "fi",
+];
+
+/**
+ * The static part of `gh` as the person, as one shell file the gh and git
+ * wrappers source. It reaches the box through the same private file ingress
+ * as the broker pass, under a content-addressed name, so the per-turn setup
+ * program only carries the session's gateway address and binding and stays
+ * small enough to run in one command.
+ */
+export const GH_GATEWAY_KIT_SCRIPT = [
+  "# Opengeni: gh as the person. Sourced by the gh and git wrappers.",
+  'if [ "${opengeni_gh_gateway_role:-}" = git ]; then',
+  ...GIT_COMMAND_WRAPPER_GATEWAY_LINES,
+  "else",
+  ...GH_GATEWAY_WRAPPER_LINES,
+  "fi",
+  "",
+].join("\n");
+
+export const GH_GATEWAY_KIT_FILE_NAME = `gh-gateway-${createHash("sha256")
+  .update(GH_GATEWAY_KIT_SCRIPT, "utf8")
+  .digest("hex")
+  .slice(0, 16)}.sh`;
 
 function gitCredentialHelperCommandLines(
   resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
   bindings: GitCredentialBindingSeed[] = [],
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
+  ghGatewayKitSeed: string | null = null,
 ): string[] {
   const brokerRoutes = runtimeGitHttpBrokerRouteDescriptors(resources, bindings);
   const hostProviderCases = gitAskpassHostProviderCaseLines(resources, brokerRoutes);
+  const personalGateway = personalGitHubGatewayDescriptor(brokerRoutes);
   const bindingCases = [
     ...gitCredentialHelperBindingCaseLines(resources, bindings),
     ...gitCredentialHelperBrokerCaseLines(brokerRoutes),
+    // Repositories `gh` clones as the person go through the gateway's Git
+    // routes with the same pass.
+    ...(personalGateway
+      ? [
+          `  ${shellQuote(`https|${personalGateway.host}|${personalGateway.gitPath}`)}*) username=opengeni; token_file="$credential_dir/${personalGateway.bindingHash}-token" ;;`,
+        ]
+      : []),
   ];
   const descriptors = runtimeGitBindingDescriptors(resources);
   const brokeredBindings = brokeredGitCredentialBindingKeys(bindings);
@@ -14185,13 +15698,34 @@ function gitCredentialHelperCommandLines(
     // Empty helper resets lower-priority/system helpers; our exact path-aware
     // helper returns no credential for an unbound remote, so multi-binding
     // sessions fail closed instead of falling through to ambient credentials.
-    "git config --global --unset-all credential.helper >/dev/null 2>&1 || true",
-    "git config --global --add credential.helper ''",
-    'git config --global --add credential.helper "$git_credential_helper"',
-    "git config --global credential.useHttpPath true",
+    "install_git_credential_helper() {",
+    "  git_global_config --unset-all credential.helper >/dev/null 2>&1 || true",
+    "  git_global_config --add credential.helper ''",
+    '  git_global_config --add credential.helper "$git_credential_helper"',
+    "  git_global_config credential.useHttpPath true",
+    "}",
+    "with_git_global_config_lock install_git_credential_helper",
     ...gitHttpBrokerConfigCommandLines(brokerRoutes),
     'wrapper_dir="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"',
     'mkdir -p "$wrapper_dir"',
+    // The gh gateway kit arrives as a staged private file. Without it (the
+    // ingress failed) a kit an earlier turn installed under the same name
+    // still serves, and otherwise `gh` keeps its non-gateway behaviour.
+    ...(personalGateway && ghGatewayKitSeed
+      ? [
+          `gh_gateway_kit_seed=${shellQuote(ghGatewayKitSeed)}`,
+          `gh_gateway_kit_file="$wrapper_dir/"${shellQuote(GH_GATEWAY_KIT_FILE_NAME)}`,
+          'if [ -f "$gh_gateway_kit_seed" ]; then',
+          '  if mv -f "$gh_gateway_kit_seed" "$gh_gateway_kit_file.tmp.$$" && chmod 0644 "$gh_gateway_kit_file.tmp.$$" && mv -f "$gh_gateway_kit_file.tmp.$$" "$gh_gateway_kit_file"; then',
+          // Kits of earlier releases go once a day old, so a gh command
+          // still running from an earlier turn keeps the kit it sourced.
+          `    find "$wrapper_dir" -maxdepth 1 -type f -name 'gh-gateway-*.sh' ! -name ${shellQuote(GH_GATEWAY_KIT_FILE_NAME)} -mtime +0 -exec rm -f {} + 2>/dev/null || true`,
+          "  else",
+          '    rm -f "$gh_gateway_kit_seed" "$gh_gateway_kit_file.tmp.$$"',
+          "  fi",
+          "fi",
+        ]
+      : []),
     "for opengeni_git_cli_tool in gh glab az; do",
     '  wrapper="$wrapper_dir/$opengeni_git_cli_tool"',
     "  cat > \"$wrapper.tmp.$$\" <<'CLI_WRAPPER_EOF'",
@@ -14257,6 +15791,15 @@ function gitCredentialHelperCommandLines(
     "}",
     `multi_binding_providers=${shellQuote(multiWrapperProviders.join(" "))}`,
     `broker_only_providers=${shellQuote(brokerOnlyProviders.join(" "))}`,
+    // `gh` as the person, only when this session has a personal GitHub gateway.
+    ...(personalGateway
+      ? [
+          `gh_gateway_base=${shellQuote(personalGateway.base)}`,
+          `gh_gateway_binding=${shellQuote(personalGateway.bindingHash)}`,
+          `gh_gateway_kit="\${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}/"${shellQuote(GH_GATEWAY_KIT_FILE_NAME)}`,
+          'if [ "$provider" = github ] && [ -r "$gh_gateway_kit" ]; then . "$gh_gateway_kit"; fi',
+        ]
+      : []),
     'if [ -n "$provider" ]; then',
     "  binding_hash=",
     '  if [ -n "${OPENGENI_GIT_BINDING:-}" ]; then',
@@ -14328,7 +15871,7 @@ function gitCredentialHelperCommandLines(
     '  chmod 0755 "$wrapper.tmp.$$"',
     '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
-    ...gitCommandWrapperCommandLines(),
+    ...gitCommandWrapperCommandLines(personalGateway !== null),
     "if [ -d /etc/profile.d ] && [ -w /etc/profile.d ]; then",
     '  printf \'%s\\n\' \'case ":$PATH:" in *":${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:"*) ;; *) export PATH="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}:$PATH" ;; esac\' > /etc/profile.d/opengeni-git-cli.sh',
     "fi",
@@ -14430,6 +15973,107 @@ export async function refreshGitCredentialBindingTokenFiles(
 const SKIPPED_OPTIONAL_REPOSITORY_PREFIX = "Warning: skipped optional repository resource ";
 
 /**
+ * The clone script's report of a folder it moved aside instead of deleting:
+ * this prefix, the run's token in brackets, a colon, then the target, the new
+ * path and a reason code, tab-separated.
+ */
+const RECOVERED_REPOSITORY_PREFIX = "Notice: moved repository folder aside";
+const RECOVERED_REPOSITORY_NAME = /^\.opengeni-recovered-\d{8}T\d{6}Z(?:-\d+)?$/u;
+const RECOVERED_REPOSITORY_REASONS: Record<string, string> = {
+  unreadable: "it was not a readable Git work tree",
+  "remote-commits": "the remote now has commits",
+};
+
+/** A fresh token for one clone run's move-aside reports. */
+export function repositoryRecoveryNoticeToken(): string {
+  return randomUUID().replaceAll("-", "");
+}
+
+/** One repository folder the clone hook moved aside before cloning fresh. */
+export type RecoveredRepositoryFolder = {
+  /** Absolute path of the repository folder, as the sandbox sees it. */
+  target: string;
+  /** Absolute path the earlier copy now has. */
+  movedTo: string;
+  /** Workspace-relative mount path of the repository. */
+  path: string;
+  /** Workspace-relative path of the earlier copy. */
+  movedToPath: string;
+  reason: string;
+};
+
+/**
+ * The folders the clone script reported moving aside. Only whole lines carrying
+ * this run's token count, for this hook's own repository targets moved to
+ * their own recovery sibling, with a known reason code: no other output (a
+ * remote's fetch messages) can add an entry or choose its text.
+ */
+export function recoveredRepositoryFolders(
+  output: string,
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  token: string,
+): RecoveredRepositoryFolder[] {
+  if (!/^[0-9a-f]{32}$/u.test(token)) return [];
+  const linePrefix = `${RECOVERED_REPOSITORY_PREFIX} [${token}]: `;
+  // The longest matching mount path, so `app` never claims `repos/acme/app`.
+  const repositories = resources
+    .map((resource) => ({ resource, mountPath: resourceMountPath(resource) }))
+    .sort((left, right) => right.mountPath.length - left.mountPath.length);
+  const recovered: RecoveredRepositoryFolder[] = [];
+  for (const line of output.split(/\r?\n/u)) {
+    if (!line.startsWith(linePrefix)) continue;
+    const fields = line.slice(linePrefix.length).split("\t");
+    if (fields.length !== 3) continue;
+    const [target = "", movedTo = "", code = ""] = fields;
+    const repository = repositories.find(({ mountPath }) => target.endsWith(`/${mountPath}`));
+    if (!repository) continue;
+    const recoveredName = movedTo.slice(target.length);
+    if (!movedTo.startsWith(target) || !RECOVERED_REPOSITORY_NAME.test(recoveredName)) continue;
+    const pinned = repository.resource.expectedCommitSha;
+    const reason =
+      code === "pin"
+        ? pinned
+          ? `its checked-out commit is not the pinned commit ${pinned}`
+          : undefined
+        : RECOVERED_REPOSITORY_REASONS[code];
+    if (!reason) continue;
+    if (recovered.some((entry) => entry.movedTo === movedTo)) continue;
+    recovered.push({
+      target,
+      movedTo,
+      path: repository.mountPath,
+      movedToPath: `${repository.mountPath}${recoveredName}`,
+      reason,
+    });
+  }
+  return recovered;
+}
+
+/** The clone event's workspace-relative record of folders moved aside. */
+function recoveredRepositoriesPayload(folders: RecoveredRepositoryFolder[]) {
+  return folders.length > 0
+    ? {
+        recoveredRepositories: folders.map((folder) => ({
+          path: folder.path,
+          movedTo: folder.movedToPath,
+        })),
+      }
+    : {};
+}
+
+/** Model text for repository folders the clone hook moved aside. */
+export function recoveredRepositoryFoldersNote(folders: RecoveredRepositoryFolder[]): string {
+  if (folders.length === 0) return "";
+  return [
+    "[Opengeni setup notice] These repository folders were moved aside instead of deleted, and a fresh copy was cloned in their place:",
+    ...folders.map(
+      (folder) => `- ${folder.target} was moved to ${folder.movedTo} because ${folder.reason}.`,
+    ),
+    "Any uncommitted or unpushed work from before is in the moved copy. Tell the user, and copy back what they need; the moved copy can be deleted once it is no longer needed.",
+  ].join("\n");
+}
+
+/**
  * Wall-clock bound for one automatically attached (optional) repository clone,
  * and the share of the repository-clone lifecycle command all optional clones
  * may use. Both stay below SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS so a hung
@@ -14484,33 +16128,133 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '      command git "$@"',
   "    fi",
   "  }",
+  // A folder another user owns (for example after `chown -R` on the workspace machine) is
+  // not a broken repository: Git only refuses to read it. Trust exactly that
+  // path (and its resolved form) in the global Git config and keep the work
+  // tree as it is. The message is matched in the C locale, in both wordings.
+  "  repository_trust_owner() {",
+  '    trust_output="$(export LC_ALL=C; repository_git -C "$target" rev-parse --is-inside-work-tree 2>&1 >/dev/null)" && return 0',
+  '    case "$trust_output" in *"dubious ownership"*|*"unsafe repository"*) ;; *) return 0 ;; esac',
+  '    trust_resolved="$(cd "$target" 2>/dev/null && pwd -P)" || trust_resolved="$target"',
+  '    for trust_path in "$target" "$trust_resolved"; do',
+  // Parallel clones share one global config file: check and add as one unit.
+  '      with_git_global_config_lock repository_trust_path "$trust_path" || true',
+  "    done",
+  '    if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      echo "Repository resource at $target is owned by another user; added it to safe.directory"',
+  "    else",
+  '      echo "Repository resource at $target is owned by another user and could not be trusted with safe.directory" >&2',
+  "    fi",
+  "  }",
+  "  repository_trust_path() {",
+  '    if command git config --global --get-all safe.directory 2>/dev/null | grep -Fqx -- "$1"; then return 0; fi',
+  '    git_global_config --add safe.directory "$1" >/dev/null 2>&1',
+  "  }",
+  // Whether a readable work tree still serves the pinned commit. The clone
+  // records the commit it materialized, so the agent's own commits, branches
+  // and rebases keep the folder while the pin is unchanged, and a changed pin
+  // (in either direction) does not. Folders cloned before the record existed
+  // count when HEAD is the pin or built on it, and get the record.
+  "  repository_pin_kept() {",
+  '    if [ -z "$expected_commit" ]; then return 0; fi',
+  '    pin_recorded="$(repository_git -C "$target" config --get opengeni.materializedCommit 2>/dev/null || true)"',
+  '    if [ -n "$pin_recorded" ]; then',
+  '      if [ "$pin_recorded" = "$expected_commit" ]; then return 0; fi',
+  "      return 1",
+  "    fi",
+  '    pin_head="$(repository_git -C "$target" rev-parse --verify --quiet HEAD 2>/dev/null || true)"',
+  '    if [ -z "$pin_head" ]; then return 1; fi',
+  '    if [ "$pin_head" != "$expected_commit" ] && ! repository_git -C "$target" merge-base --is-ancestor "$expected_commit" "$pin_head" >/dev/null 2>&1; then return 1; fi',
+  '    repository_git -C "$target" config opengeni.materializedCommit "$expected_commit" >/dev/null 2>&1 || true',
+  "    return 0",
+  "  }",
+  // Never delete a folder that may hold work. Rename it to a sibling (a mount
+  // point cannot be renamed, so its entries are moved, which copies them across
+  // the mount), report where it went, and let the caller clone fresh into the
+  // empty target. The argument is the reason code the hook turns into text.
+  "  repository_move_aside() {",
+  '    move_base="${target}.opengeni-recovered-$(date -u +%Y%m%dT%H%M%SZ)"',
+  '    move_path="$move_base"',
+  "    move_index=1",
+  '    while [ -e "$move_path" ] || [ -L "$move_path" ]; do',
+  "      move_index=$((move_index + 1))",
+  '      move_path="${move_base}-${move_index}"',
+  "    done",
+  '    if ! mv "$target" "$move_path" 2>/dev/null; then',
+  // A concurrent setup already moved it.
+  '      if [ ! -e "$target" ] && [ ! -L "$target" ]; then return 0; fi',
+  "      move_failed=1",
+  '      if [ -d "$target" ] && [ ! -L "$target" ] && mkdir "$move_path" 2>/dev/null; then',
+  '        find "$target" -mindepth 1 -maxdepth 1 -exec mv -- {} "$move_path/" \\; 2>/dev/null || true',
+  '        if [ -z "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then',
+  "          move_failed=0",
+  "        else",
+  // Keep the folder whole: put back what was moved.
+  '          find "$move_path" -mindepth 1 -maxdepth 1 -exec mv -- {} "$target/" \\; 2>/dev/null || true',
+  '          rmdir "$move_path" 2>/dev/null || true',
+  "        fi",
+  "      fi",
+  '      if [ "$move_failed" -ne 0 ]; then',
+  '        if [ -e "$move_path" ]; then',
+  '          echo "Could not move the repository folder $target aside, so it was not re-cloned. Nothing was deleted; some entries are in $move_path." >&2',
+  "        else",
+  '          echo "Could not move the repository folder $target aside, so it was not re-cloned. Nothing was deleted." >&2',
+  "        fi",
+  "        exit 1",
+  "      fi",
+  "    fi",
+  // One write per line, tagged with this run's token so no other output
+  // (a remote's fetch messages) can pass for it.
+  `    printf '%s [%s]: %s\\t%s\\t%s\\n' ${shellQuote(RECOVERED_REPOSITORY_PREFIX)} "\${OPENGENI_REPOSITORY_NOTICE_TOKEN:-}" "$target" "$move_path" "$1" >&2`,
+  "  }",
   '  if [ -e "$target" ] && { [ -f "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; }; then',
   // This hook re-runs every turn on a long-lived box, so \"non-empty\" alone is not
   // proof of a completed materialization: an interrupted clone (worker crash /
   // lifecycle timeout mid-mv/cp) leaves a partial tree that would otherwise pass
   // this check forever. A full-repo target must actually BE a work tree to be
-  // skipped; a partial one is wiped and rebuilt (nothing legitimate writes under
-  // the mount path before the repo exists). Subpath extracts are not git repos —
-  // for those the plain non-empty check stands (no stronger signal available).
-  '    if [ -n "$subpath" ] || repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
-  '      if [ -z "$expected_commit" ] || { [ -z "$subpath" ] && [ "$(repository_git -C "$target" rev-parse HEAD 2>/dev/null || true)" = "$expected_commit" ]; }; then',
+  // skipped; anything else is moved aside, never deleted, and rebuilt. Subpath
+  // extracts are not git repos: for those the plain non-empty check stands (no
+  // stronger signal is available, pinned or not).
+  '    if [ -n "$subpath" ]; then',
+  '      echo "Repository resource already present at $target"',
+  "      return 0",
+  "    fi",
+  "    repository_trust_owner",
+  '    if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  '      present_head="$(repository_git -C "$target" rev-parse --verify --quiet HEAD 2>/dev/null || true)"',
+  '      if [ -n "$expected_commit" ]; then',
+  "        if repository_pin_kept; then",
+  '          echo "Repository resource already present at $target"',
+  "          return 0",
+  "        fi",
+  '        echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+  "        repository_move_aside pin",
   // An empty remote materializes as an unborn branch (below). If the remote now
   // has that branch and the mount still holds nothing but `.git` (no agent work,
   // committed or not), clone it properly instead of keeping the stub. Commits
   // on any other branch keep the stub: re-fetching the requested ref would fail.
-  '        if [ -z "$subpath" ] && ! repository_git -C "$target" rev-parse --verify --quiet HEAD >/dev/null 2>&1 && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null)" ] && unborn_ref="$(repository_git -C "$target" symbolic-ref --quiet HEAD 2>/dev/null)" && present_refs="$(repository_git -C "$target" ls-remote origin "$unborn_ref" 2>/dev/null)" && [ -n "$present_refs" ]; then',
-  '          echo "Repository resource remote for $target now has commits; rematerializing" >&2',
+  '      elif [ -z "$present_head" ] && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name .git -print -quit 2>/dev/null)" ] && unborn_ref="$(repository_git -C "$target" symbolic-ref --quiet HEAD 2>/dev/null)" && present_refs="$(repository_git -C "$target" ls-remote origin "$unborn_ref" 2>/dev/null)" && [ -n "$present_refs" ]; then',
+  '        echo "Repository resource remote for $target now has commits; rematerializing" >&2',
+  // The stub Opengeni created holds no work while it has no refs and nothing
+  // staged, as Git itself confirms; anything more is moved aside like any
+  // other work.
+  '        if stub_refs="$(repository_git -C "$target" for-each-ref 2>/dev/null)" && [ -z "$stub_refs" ] && stub_files="$(repository_git -C "$target" ls-files 2>/dev/null)" && [ -z "$stub_files" ]; then',
+  '          rm -rf "$target/.git"',
   "        else",
-  '          echo "Repository resource already present at $target"',
-  "          return 0",
+  "          repository_move_aside remote-commits",
   "        fi",
   "      else",
-  '        echo "Repository resource at $target does not match expected commit; rematerializing" >&2',
+  '        echo "Repository resource already present at $target"',
+  "        return 0",
   "      fi",
+  // Only Opengeni's own temporary clones, nested by a lost install race.
+  '    elif [ -d "$target" ] && [ ! -L "$target" ] && [ -z "$(find "$target" -mindepth 1 -maxdepth 1 ! -name "${target##*/}.tmp.*" -print -quit 2>/dev/null)" ]; then',
+  '      echo "Re-materializing partial repository resource at $target" >&2',
+  '      find "$target" -mindepth 1 -maxdepth 1 -name "${target##*/}.tmp.*" -exec rm -rf {} +',
   "    else",
   '      echo "Re-materializing partial repository resource at $target" >&2',
+  "      repository_move_aside unreadable",
   "    fi",
-  '    find "$target" -mindepth 1 -maxdepth 1 -exec rm -rf {} +',
   "  fi",
   '  mkdir -p "$(dirname "$target")"',
   '  tmp="${target}.tmp.$$"',
@@ -14583,6 +16327,9 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   '    rm -rf "$tmp"',
   "    exit 1",
   "  fi",
+  '  if [ -n "$expected_commit" ] && [ -z "$subpath" ]; then',
+  '    repository_git -C "$tmp" config opengeni.materializedCommit "$expected_commit"',
+  "  fi",
   '  if [ -n "$subpath" ]; then',
   '    if [ ! -e "$tmp/$subpath" ]; then',
   '      echo "Repository subpath not found: $subpath" >&2',
@@ -14602,14 +16349,22 @@ const cloneRepositoryFunctionLines: readonly string[] = [
   // Two concurrent turn holders can race this install: without the existence
   // re-check the loser's un-flagged `mv` would nest its tmp clone INSIDE the
   // winner's tree as <name>.tmp.<pid>. If the winner produced a valid work tree,
-  // accept it; a non-empty non-repo survivor here is a mount point the manifest
-  // re-filled — install into it by content copy instead of rename.
+  // accept it. Anything else that appeared there is moved aside, never
+  // overwritten; an empty survivor is a mount point, so install into it by
+  // content copy instead of rename.
   '    if [ -e "$target" ]; then',
-  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1 && { [ -z "$expected_commit" ] || [ "$(repository_git -C "$target" rev-parse HEAD)" = "$expected_commit" ]; }; then',
-  '        rm -rf "$tmp"',
-  '        echo "Repository resource already present at $target"',
-  "        return 0",
+  '      if repository_git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then',
+  "        if repository_pin_kept; then",
+  '          rm -rf "$tmp"',
+  '          echo "Repository resource already present at $target"',
+  "          return 0",
+  "        fi",
+  "        repository_move_aside pin",
+  '      elif [ -f "$target" ] || [ -L "$target" ] || [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then',
+  "        repository_move_aside unreadable",
   "      fi",
+  "    fi",
+  '    if [ -e "$target" ]; then',
   '      cp -a "$tmp/." "$target/"',
   '      rm -rf "$tmp"',
   "    else",
@@ -14637,6 +16392,7 @@ const cloneRepositoryFunctionLines: readonly string[] = [
 function optionalRepositoryCloneRunnerLines(timeoutSeconds: number): string[] {
   const script = [
     "set -eu",
+    ...GIT_GLOBAL_CONFIG_FUNCTION_LINES,
     ...cloneRepositoryFunctionLines,
     `trap 'rm -rf "\${tmp:-/nonexistent-opengeni-optional-clone}"; exit 143' TERM INT`,
     'clone_repository "$@"',
@@ -14668,7 +16424,11 @@ export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   bindings: GitCredentialBindingSeed[] = [],
   stagedSeeds: StagedGitCredentialBindingSeed[] = [],
-  options: { optionalCloneTimeoutSeconds?: number } = {},
+  options: {
+    optionalCloneTimeoutSeconds?: number;
+    /** Staged private file holding GH_GATEWAY_KIT_SCRIPT, if any. */
+    ghGatewayKitSeed?: string | null;
+  } = {},
 ): string {
   // Shallow clones are network- and filesystem-bound, not CPU-bound: nine
   // repositories in one sandbox finished in ~11 s all at once versus ~28 s in
@@ -14709,7 +16469,13 @@ export function repositoryCloneCommand(
     "  exit 127",
     "}",
     "ensure_git",
-    ...gitCredentialHelperCommandLines(resources, bindings, stagedSeeds),
+    ...GIT_GLOBAL_CONFIG_FUNCTION_LINES,
+    ...gitCredentialHelperCommandLines(
+      resources,
+      bindings,
+      stagedSeeds,
+      options.ghGatewayKitSeed ?? null,
+    ),
     ...cloneRepositoryFunctionLines,
     ...(resources.some((resource) => resource.optional === true)
       ? optionalRepositoryCloneRunnerLines(optionalCloneTimeoutSeconds)
@@ -14860,6 +16626,72 @@ export async function runManagedCodemodeClientHook(
       context.codemodeClientDownload,
     ),
   );
+}
+
+/**
+ * Managed sandboxes whose commands the worker runs itself. Compute sandboxes,
+ * Connected Machines and run_on targets run commands through the machine
+ * agent, which carries its own rg and jq; `local` is the operator's own host.
+ */
+export function managedShellToolsBackend(backend: Settings["sandboxBackend"] | undefined): boolean {
+  return backend !== undefined && MANAGED_SHELL_TOOLS_BACKENDS.has(backend);
+}
+
+/** Listed explicitly, so a new backend receives nothing until it is added here. */
+const MANAGED_SHELL_TOOLS_BACKENDS: ReadonlySet<Settings["sandboxBackend"]> = new Set([
+  "docker",
+  "modal",
+  "daytona",
+  "runloop",
+  "e2b",
+  "blaxel",
+  "cloudflare",
+  "vercel",
+  "opensandbox",
+]);
+
+/**
+ * Delivers the release's rg and jq beside the managed Codemode client. Best
+ * effort: a box that cannot receive them keeps its own tools, so only a turn
+ * cancellation stops setup here.
+ */
+export async function runManagedShellToolsHook(
+  session: SandboxSessionLike,
+  context: SandboxLifecycleHookContext,
+  load: () => Promise<ManagedShellTools | null> = loadManagedShellTools,
+): Promise<void> {
+  try {
+    const tools = await load();
+    if (!tools) return;
+    const result = await withSandboxOperationPurpose("hook.shell-tools", () =>
+      installManagedShellTools(
+        session,
+        tools,
+        async (cmd) =>
+          await runSandboxLifecycleCommand(
+            session,
+            {
+              cmd,
+              workdir: "/workspace",
+              ...(context.runAs ? { runAs: context.runAs } : {}),
+              yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+              maxOutputTokens: 1_000,
+            },
+            context.commandRunner,
+          ),
+        context.runAs,
+        context.codemodeClientDownload?.shellTools,
+      ),
+    );
+    if (result === "failed") {
+      console.warn("Managed shell tools were not delivered; the box keeps its own tools");
+    }
+  } catch (error) {
+    if (error instanceof TurnSandboxCommandCancelledError) throw error;
+    console.warn("Managed shell tools were not delivered; the box keeps its own tools", {
+      error: error instanceof Error ? error.name : "unknown",
+    });
+  }
 }
 
 export async function refreshCodemodeTokenFile(
@@ -15451,10 +17283,12 @@ export async function runRepositoryCloneHook(
   let stagedBrokerSeeds: Awaited<ReturnType<typeof stageGitHttpBrokerBindingSeeds>> = {
     editor: null,
     staged: [],
+    ghGatewayKit: null,
   };
   let stagedCloneScript: string | null = null;
   // A successful program has moved every staged broker seed into its token file.
   let brokerSeedsConsumed = false;
+  let recoveredFolders: RecoveredRepositoryFolder[] = [];
   try {
     // Direct provider tokens retain the established off-manifest per-exec seed.
     // Smart-Git broker bearers take a stricter path: stage opaque bytes through
@@ -15469,10 +17303,19 @@ export async function runRepositoryCloneHook(
       session,
       gitCredentialBindings,
       context.runAs,
+      {
+        ghGatewayKit:
+          personalGitHubGatewayDescriptor(
+            runtimeGitHttpBrokerRouteDescriptors(resources, gitCredentialBindings),
+          ) !== null,
+      },
     );
+    // Per run, inline with the seeds, so the staged program stays reusable.
+    const noticeToken = repositoryRecoveryNoticeToken();
     const seedPrefix = [
       gitTokenSeedExportPrefix(gitTokenSeeds),
       gitCredentialBindingSeedExportPrefix(gitCredentialBindings),
+      `export OPENGENI_REPOSITORY_NOTICE_TOKEN=${noticeToken}`,
     ]
       .filter(Boolean)
       .join("\n");
@@ -15480,7 +17323,7 @@ export async function runRepositoryCloneHook(
       resources,
       gitCredentialBindings,
       stagedBrokerSeeds.staged,
-      options,
+      { ...options, ghGatewayKitSeed: stagedBrokerSeeds.ghGatewayKit },
     );
     const runClone = (cmd: string) =>
       runSandboxLifecycleCommand(
@@ -15570,6 +17413,20 @@ export async function runRepositoryCloneHook(
         }
       }
     }
+    // A folder moved aside stays moved even when a later clone fails, so the
+    // model hears where it is either way.
+    recoveredFolders = recoveredRepositoryFolders(
+      sandboxCommandOutput(result),
+      resources,
+      noticeToken,
+    );
+    if (recoveredFolders.length > 0) {
+      console.warn("[sandbox] repository folders were moved aside before a fresh clone", {
+        movedCount: recoveredFolders.length,
+        repositoryCount: resources.length,
+      });
+      context.onSetupNotice?.(recoveredRepositoryFoldersNote(recoveredFolders));
+    }
     assertSandboxCommandSucceeded(result, "Repository clone hook");
     brokerSeedsConsumed = true;
     const skippedOptionalRepositories = skippedOptionalRepositoryPaths(
@@ -15587,6 +17444,7 @@ export async function runRepositoryCloneHook(
       payload: {
         ...payload,
         ...(skippedOptionalRepositories.length > 0 ? { skippedOptionalRepositories } : {}),
+        ...recoveredRepositoriesPayload(recoveredFolders),
       },
     });
   } catch (error) {
@@ -15595,6 +17453,7 @@ export async function runRepositoryCloneHook(
       payload: {
         ...payload,
         error: errorMessage(error),
+        ...recoveredRepositoriesPayload(recoveredFolders),
       },
     });
     throw error;
@@ -15613,7 +17472,11 @@ export async function runRepositoryCloneHook(
       ).catch(() => undefined);
     }
     if (stagedBrokerSeeds.editor && !brokerSeedsConsumed) {
-      await cleanupStagedGitCredentialSeeds(stagedBrokerSeeds.editor, stagedBrokerSeeds.staged);
+      await cleanupStagedGitCredentialSeeds(
+        stagedBrokerSeeds.editor,
+        stagedBrokerSeeds.staged,
+        stagedBrokerSeeds.ghGatewayKit,
+      );
     }
   }
 }
@@ -15648,8 +17511,10 @@ function assertSandboxCommandSucceeded(result: unknown, operation: string): void
   }
   const exitCode = sandboxCommandExitCode(result);
   if (exitCode !== null && exitCode !== 0) {
-    throw new Error(
+    throw new SandboxLifecycleCommandExitError(
       `${operation} failed with exit code ${exitCode}${output ? `:\n${output}` : ""}`,
+      exitCode,
+      output,
     );
   }
   if (exitCode === null) {

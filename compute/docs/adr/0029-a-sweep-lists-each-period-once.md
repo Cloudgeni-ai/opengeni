@@ -61,8 +61,14 @@ by a pointer ceasing to name it.
 - **A sweep starts listing for at most 40 minutes** and leaves the rest
   to the next, so hourly sweeps do not run into each other. It keeps its
   record every two minutes and at the end.
-- **Deletes go up to a thousand to a request** where the store deletes in
-  bulk (S3's DeleteObjects).
+- **Each delete is a request of its own**, sixteen at a time, each retried
+  as any request is. Not in bulk: a store may work through a bulk
+  request's keys one after another, as Garage does with S3's
+  DeleteObjects. On a slow store a request of a thousand keys then
+  outlasts the request timeout and deletes nothing, however often it is
+  tried. A request of one key fits. Deletes cost nothing on S3 or Cloud
+  Storage. A key whose delete fails stays pending, and one already gone
+  counts as deleted.
 - **A sweep logs its progress**: when it has kept every pointer, when it
   has found what pointers no longer name, each period it lists, and when
   it is done.

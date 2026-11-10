@@ -56,6 +56,7 @@ for (const persistence of ["committed", "failed", "independent"] as const) {
       // No explicit workspace recovery adds a discontinuity notice here.
       spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
       spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
+      spyOn(db, "listTurnGitHubGatewayApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
       spyOn(db, "isSubscriptionCoreCodexSourceDisconnected").mockResolvedValue(false),
       spyOn(modelUsage, "processSessionTitleModelUsageEvent").mockImplementation(async (input) => {

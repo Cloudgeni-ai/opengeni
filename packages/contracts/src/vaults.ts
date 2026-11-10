@@ -1210,28 +1210,11 @@ export const SecretSaveInput = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type SecretSaveInput = z.infer<typeof SecretSaveInput>;
-/**
- * A plain field whose value looks like a secret (docs/secrets.md, Field
- * kinds): saved as concealed when no kind was given, or kept as text with
- * this note when `text` was asked for or the field already was text.
- */
-export const SecretSaveFieldNote = /* @__PURE__ */ defineSchema(() =>
-  z.object({
-    field: primitives.string,
-    /** The kind the field was saved as. */
-    kind: z.enum(["concealed", "text"]),
-    reason: z.enum(["format", "random", "name"]),
-    message: primitives.string,
-  }),
-);
-export type SecretSaveFieldNote = z.infer<typeof SecretSaveFieldNote>;
 export const SecretSaveOutput = /* @__PURE__ */ defineSchema(() =>
   z.object({
     item: VaultItemSummary,
     references: VaultItemReferences,
     generatedFields: z.array(primitives.string),
-    /** Present when a plain field looked like a secret. */
-    fieldNotes: z.array(SecretSaveFieldNote).optional(),
   }),
 );
 export type SecretSaveOutput = z.infer<typeof SecretSaveOutput>;

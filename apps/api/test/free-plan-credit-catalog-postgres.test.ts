@@ -3,10 +3,10 @@ import { acquireSharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import {
-  applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
   bootstrapWorkspace,
   createDb,
+  getSpendableCreditBalance,
   grantPlanCreditPeriod,
   upsertOrganizationPlan,
 } from "@opengeni/db";
@@ -46,14 +46,8 @@ test("only Free monthly credit funds the catalog hint and uncovered-model gap", 
       idempotencyKey: `verified-signup-trial:v1:${user}`,
       eligibleModelIds: ["gpt-6-luna"],
     });
-    const beforeMonthly = await applyCreditDebitUpToBalance(client.db, {
-      accountId: grant.accountId,
-      type: "model_debit",
-      requestedAmountMicros: 1,
-      modelId: "gpt-6-luna",
-      idempotencyKey: crypto.randomUUID(),
-    });
-    expect(beforeMonthly.debitedMicros).toBe(0);
+    const beforeMonthly = await getSpendableCreditBalance(client.db, grant.accountId, "gpt-6-luna");
+    expect(beforeMonthly.balanceMicros).toBe(0);
     const period = {
       accountId: grant.accountId,
       planKey: "free",

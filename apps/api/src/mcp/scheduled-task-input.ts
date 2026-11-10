@@ -91,7 +91,7 @@ export function scheduledTaskEventsToolInput() {
         "Optional filters; every one must hold. field is type, subject, summary, url, actor.kind, actor.name or data.<path>. contains ignores case.",
       ),
       includeOwnEvents: EventTriggerInput.shape.includeOwnEvents.describe(
-        "Also fire on events Opengeni's own bots made. Off by default, which prevents loops.",
+        "Also fire on events this deployment's own bots made. Off by default, which prevents loops.",
       ),
       arguments: EventTriggerInput.shape.arguments.describe(
         "MCP sources: subscription arguments that match the event type's argumentsSchema.",
@@ -125,7 +125,8 @@ export function scheduledTaskEventsToolInput() {
  * Agent-config fields agents never set through the schedule tools: a person
  * chooses Slack posting and connector policy, and chat settings for an
  * automation (attached servers, memory, reach, inline Skills) are set by a
- * person or the app that manages it.
+ * person or the app that manages it. An agent's schedule always keeps its own
+ * chat's Opengeni tools and permissions.
  */
 export const SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG = {
   slackBotChannelId: true,
@@ -134,6 +135,8 @@ export const SCHEDULED_TASK_TOOL_OMITTED_AGENT_CONFIG = {
   memoryScope: true,
   agentAccess: true,
   skills: true,
+  firstPartyMcpTools: true,
+  firstPartyMcpPermissions: true,
 } as const;
 
 export function scheduledTaskCreateToolInput(options: { events: boolean } = { events: false }) {

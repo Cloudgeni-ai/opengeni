@@ -21,6 +21,7 @@ import {
   lookupExternalIdentity,
 } from "@opengeni/db";
 import { rethrowExternalWorkspaceOperation } from "../access/external-membership-refusal";
+import { releaseAdmissionBlocksAfterAccessChange } from "./admission-release";
 import {
   accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
@@ -35,6 +36,21 @@ import {
  * in `../access`, under the same key authority and lifecycle fence.
  * Existing memberships are not overwritten, including reduced permissions. */
 export async function addExternalWorkspaceMemberForRequest(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  input: unknown,
+): Promise<ExternalIdentity> {
+  const identity = await addExternalWorkspaceMember(c, deps, workspaceId, input);
+  // After commit: a returning member's saved messages may wait for this.
+  await releaseAdmissionBlocksAfterAccessChange(
+    { db: deps.db },
+    { accountId: identity.accountId, workspaceId, change: "membership" },
+  );
+  return identity;
+}
+
+async function addExternalWorkspaceMember(
   c: Context,
   deps: AccessDeps,
   workspaceId: string,

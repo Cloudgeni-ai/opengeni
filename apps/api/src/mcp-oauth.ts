@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
+  ID_JAG_GRANT_PROFILE,
+  JWT_BEARER_GRANT_TYPE,
   MCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS,
   MCP_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS,
   MCP_OAUTH_CONSENT_TTL_SECONDS,
@@ -47,6 +49,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { trustedRequestSourceRateLimitKey, type RequestSourceTrust } from "./http/request-source";
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "./http/acting-person";
@@ -56,6 +59,12 @@ import {
   requireWorkspaceToolGatewayAuthorization,
 } from "./workspace-tool-gateway";
 import { parseRequestBody } from "./http/request-body";
+import {
+  redeemIdJagGrant,
+  registerMcpAutoConnectRoutes,
+  resolveMcpOAuthClient,
+  type McpAutoConnectHelpers,
+} from "./mcp-auto-connect";
 import {
   assertOAuthConsentContentFlowAllowed,
   requireCallingWorkspaceContentExchange,
@@ -85,7 +94,27 @@ export type McpOAuthRouteAccess = {
   allowedToolIdentities: ToolGatewayIdentity[];
 };
 
+/** What the auto-connect routes share with the sign-in flow. */
+const AUTO_CONNECT_HELPERS: McpAutoConnectHelpers = {
+  issuer: (deps) => mcpOAuthIssuer(deps),
+  organizationResource: (deps) => `${mcpOAuthIssuer(deps)}${ORGANIZATION_MCP_PATH}`,
+  accessToken: () => opaque(ACCESS_PREFIX),
+  tokenHash: (value) => tokenHash(value),
+  validateRedirectUri: (value) => validateRedirectUri(value),
+  oauthError: (c, error, status, description) => oauthError(c, error, status, description),
+};
+
 export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
+  // Enforced on the streamed body, so a chunked request without a
+  // Content-Length is refused at the limit rather than buffered and parsed.
+  const protocolBodyLimit = bodyLimit({
+    maxSize: MCP_OAUTH_PROTOCOL_MAX_BODY_BYTES,
+    onError: (c) =>
+      c.json({ code: "PAYLOAD_TOO_LARGE", message: "Request body is too large." }, 413),
+  });
+  // First: the organization issuer's RFC 8414 metadata sits under the
+  // authorization server metadata wildcard below.
+  registerMcpAutoConnectRoutes(app, deps, AUTO_CONNECT_HELPERS);
   // RFC 8414 path-aware discovery: MCP clients (Claude among them) ask for the
   // metadata at /.well-known/oauth-authorization-server/<resource path> first
   // and give up on anything but JSON. Serve the same document at both.
@@ -100,11 +129,15 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         token_endpoint: `${issuer}/oauth/token`,
         registration_endpoint: `${issuer}/oauth/register`,
         response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code", "refresh_token"],
+        // The JWT bearer grant redeems an ID-JAG from an issuer an
+        // organization trusts (auto-connect).
+        grant_types_supported: ["authorization_code", "refresh_token", JWT_BEARER_GRANT_TYPE],
+        authorization_grant_profiles_supported: [ID_JAG_GRANT_PROFILE],
         code_challenge_methods_supported: ["S256"],
         token_endpoint_auth_methods_supported: ["none"],
         scopes_supported: [MCP_OAUTH_SCOPE],
         authorization_response_iss_parameter_supported: true,
+        client_id_metadata_document_supported: true,
       }),
     );
   };
@@ -129,7 +162,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
-  app.post("/oauth/register", async (c) => {
+  app.post("/oauth/register", protocolBodyLimit, async (c) => {
     requireMcpOAuthEnabled(deps);
     const parsed = McpOAuthClientRegistrationRequest.safeParse(
       await c.req.json().catch(() => null),
@@ -282,7 +315,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
 
-  app.post("/oauth/authorize", async (c) => {
+  app.post("/oauth/authorize", protocolBodyLimit, async (c) => {
     requireMcpOAuthEnabled(deps);
     const form = new URLSearchParams(await c.req.text());
     const requestToken = form.get("request") ?? "";
@@ -482,10 +515,12 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     });
   });
 
-  app.post("/oauth/token", async (c) => {
+  app.post("/oauth/token", protocolBodyLimit, async (c) => {
     requireMcpOAuthEnabled(deps);
     const form = new URLSearchParams(await c.req.text());
     const grantType = form.get("grant_type");
+    if (grantType === JWT_BEARER_GRANT_TYPE)
+      return await redeemIdJagGrant(c, deps, AUTO_CONNECT_HELPERS, form);
     const clientId = form.get("client_id") ?? "";
     const resource = form.get("resource");
     const client = await getMcpOAuthClient(deps.db, clientId);
@@ -609,6 +644,28 @@ export function isMcpOAuthPublicProtocolPath(pathname: string): boolean {
   );
 }
 
+/**
+ * Largest body accepted by the anonymous OAuth protocol posts (client
+ * registration, the consent form, and the token endpoint). Their requests are
+ * small forms or JSON documents, far below this.
+ */
+export const MCP_OAUTH_PROTOCOL_MAX_BODY_BYTES = 16 * 1024;
+
+/**
+ * The OAuth protocol posts. The app-wide request-body limit skips them because
+ * each route enforces {@link MCP_OAUTH_PROTOCOL_MAX_BODY_BYTES} on the
+ * streamed body; the generic ceiling would otherwise buffer a body of many
+ * megabytes on an anonymous route before the route could refuse it.
+ */
+export function isMcpOAuthProtocolPostRequest(method: string, pathname: string): boolean {
+  return (
+    method === "POST" &&
+    (pathname === "/oauth/register" ||
+      pathname === "/oauth/authorize" ||
+      pathname === "/oauth/token")
+  );
+}
+
 export function mcpOAuthAuthenticateHeader(deps: ApiRouteDeps, pathname: string): string {
   return `Bearer resource_metadata="${mcpOAuthIssuer(deps)}/.well-known/oauth-protected-resource${pathname}", scope="${MCP_OAUTH_SCOPE}"`;
 }
@@ -662,7 +719,10 @@ async function requireAuthorizationClient(deps: ApiRouteDeps, query: URLSearchPa
     });
   }
   const clientId = query.get("client_id") ?? "";
-  const client = await getMcpOAuthClient(deps.db, clientId);
+  // A registered client, or one named by its Client ID Metadata Document URL.
+  const client = await resolveMcpOAuthClient(deps, AUTO_CONNECT_HELPERS, clientId, {
+    redirectUri: query.get("redirect_uri"),
+  });
   if (!client || !client.grantTypes.includes("authorization_code")) {
     throw new HTTPException(400, { message: "invalid OAuth client" });
   }
@@ -1024,10 +1084,10 @@ function escapeHtml(value: string): string {
   );
 }
 
-function oauthError(c: Context, error: string, status: 400 | 401 | 429) {
+function oauthError(c: Context, error: string, status: 400 | 401 | 429, description?: string) {
   c.header("cache-control", "no-store");
   c.header("pragma", "no-cache");
-  return c.json({ error }, status);
+  return c.json(description ? { error, error_description: description } : { error }, status);
 }
 
 /* ----------------------------------------------------------------------------

@@ -2,7 +2,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { Tool } from "@openai/agents";
 import { Manifest, shell } from "@openai/agents/sandbox";
 import { UnixLocalSandboxClient } from "@openai/agents/sandbox/local";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -792,6 +801,62 @@ describe("turn sandbox-tool physical cancellation fence", () => {
         expect(synchronousRefused.exitCode).toBe(125);
         expect(synchronousRefused.stdout).toBe("");
         expect(existsSync(`${markerPath}-sync`)).toBe(false);
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.skipIf(Bun.which("setsid") === null || Bun.which("python3") === null)(
+    "starts the agent's fallback shell from OPENGENI_SYSTEM_SHELL in a new session",
+    async () => {
+      const binDir = mkdtempSync(join(tmpdir(), "opengeni-fallback-shell-"));
+      const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
+      const fallback = join(binDir, "fallback-sh");
+      const started = join(binDir, "started");
+      // Stands in for the dash the agent found: records each start, then runs
+      // the real shell.
+      writeFileSync(fallback, `#!/bin/sh\nprintf x >> '${started}'\nexec /bin/sh "$@"\n`);
+      chmodSync(fallback, 0o755);
+      try {
+        for (const executable of ["mkdir", "rm", "ps", "tr", "setsid", "python3"]) {
+          symlinkSync(Bun.which(executable)!, join(binDir, executable));
+        }
+        const run = async (cmd: string) => {
+          const child = Bun.spawn(["/bin/sh", "-c", cmd], {
+            env: { ...process.env, PATH: binDir, OPENGENI_SYSTEM_SHELL: fallback },
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const [stdout, stderr, exitCode] = await Promise.all([
+            new Response(child.stdout).text(),
+            new Response(child.stderr).text(),
+            child.exited,
+          ]);
+          return { stdout, stderr, exitCode };
+        };
+        const command = "printf isolated";
+        for (const [wrapper, marker] of [
+          [cancellableShellCommand, markerPath],
+          [cancellableSynchronousShellCommand, `${markerPath}-sync`],
+        ] as const) {
+          const viaSetsid = await run(wrapper(command, marker));
+          expect(viaSetsid.exitCode, viaSetsid.stderr).toBe(0);
+          expect(viaSetsid.stdout).toBe("isolated");
+        }
+        expect(readFileSync(started, "utf8")).toBe("xx");
+        // macOS has no setsid executable; the Python fallback reads it too.
+        rmSync(join(binDir, "setsid"));
+        for (const [wrapper, marker] of [
+          [cancellableShellCommand, markerPath],
+          [cancellableSynchronousShellCommand, `${markerPath}-sync`],
+        ] as const) {
+          const viaPython = await run(wrapper(command, marker));
+          expect(viaPython.exitCode, viaPython.stderr).toBe(0);
+          expect(viaPython.stdout).toBe("isolated");
+        }
+        expect(readFileSync(started, "utf8")).toBe("xxxx");
       } finally {
         rmSync(binDir, { recursive: true, force: true });
       }
@@ -2171,6 +2236,70 @@ describe("turn sandbox-tool physical cancellation fence", () => {
 
     expect(signals).toEqual(["TERM", "KILL"]);
     expect(processAlive).toBe(false);
+  });
+
+  test("a setup command that exits as the turn is paused still settles the fence", async () => {
+    // A lifecycle command yields, then the turn is paused while its eager
+    // read is in flight and the command finishes on its own. Its wrapper
+    // removes the identity marker on exit, so only a provider read can prove
+    // the exit. That read is control, not the cancelled eager observation.
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    let processAlive = true;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const reads: Array<{ aborted: boolean }> = [];
+    const session = {
+      supportsPty: () => true,
+      exec: async (input: { cmd: string; tty?: boolean; yieldTimeMs?: number }) => {
+        if (input.cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
+          // The EXIT trap already removed the marker.
+          return { exitCode: processAlive ? 0 : 1, output: processAlive ? "4600 4600\n" : "" };
+        }
+        if (input.cmd.includes("command kill")) return { exitCode: 0, output: "" };
+        markStarted();
+        return { sessionId: 14, output: "installing\n" };
+      },
+      writeStdin: async ({ signal }: { chars?: string; signal?: AbortSignal }) => {
+        reads.push({ aborted: signal?.aborted === true });
+        // A conforming provider read stops at once when its signal is aborted.
+        signal?.throwIfAborted();
+        if (!processAlive) return exited(0, "installed\n");
+        return await new Promise<string>((resolve, reject) => {
+          const timer = setTimeout(() => resolve(running(14)), 5_000);
+          signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      },
+    };
+
+    const command = controller.runSandboxCommand(session, {
+      cmd: "install-client",
+      yieldTimeMs: 120_000,
+    });
+    await started;
+    await Bun.sleep(5);
+    processAlive = false;
+    abort.abort(new Error("paused during setup"));
+    await expect(command).rejects.toThrow("paused during setup");
+
+    expect(
+      await Promise.race([
+        controller.waitForQuiescence().then(() => "quiesced"),
+        Bun.sleep(1_000).then(() => "stalled"),
+      ]),
+    ).toBe("quiesced");
+    expect(controller.outstandingWriters()).toEqual([]);
+    // The proving read was not bound to the cancelled eager observation.
+    expect(reads.at(-1)).toEqual({ aborted: false });
   });
 
   test("preserves explicit non-TTY lifecycle commands and cancels them without Ctrl-C", async () => {

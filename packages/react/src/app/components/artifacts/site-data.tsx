@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import { DatabaseIcon, DownloadIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 import { toast } from "../../lib/toast";
 import type {
@@ -29,10 +30,10 @@ import { formatBytes } from "../../lib/format";
 import { userErrorText } from "../../../ui/api-error";
 
 export type SiteDataClient = Pick<
-  OpenGeniBrowserClient,
+  ChatClient<OpenGeniBrowserClient>,
   "getSiteData" | "querySiteData" | "writeSiteData" | "exportSiteData"
 > &
-  Partial<Pick<OpenGeniBrowserClient, "getSiteSql" | "updateSiteSqlSettings">>;
+  Partial<Pick<ChatClient<OpenGeniBrowserClient>, "getSiteSql" | "updateSiteSqlSettings">>;
 
 const PAGE_SIZE = 50;
 const COLLECTION_COLUMNS: RowListColumn[] = [

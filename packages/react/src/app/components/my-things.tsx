@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OwnResource, OwnResourceReachWorkspace } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Button } from "../../ui/button";
@@ -24,7 +25,7 @@ import {
  */
 export type MyThingsClient = OwnReachClient &
   Pick<
-    OpenGeniBrowserClient,
+    ChatClient<OpenGeniBrowserClient>,
     "listOwnResources" | "listCapabilities" | "listOwnConnectionAccounts"
   >;
 

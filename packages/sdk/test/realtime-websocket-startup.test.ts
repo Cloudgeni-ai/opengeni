@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { RealtimeControllerTransportStarter } from "../src/codex-realtime-controller";
 import { createRealtimeWebsocketTransportStarter } from "../src/realtime-websocket-transport";
 
+// The exact tool output the voice model reads while a delegation runs.
+const REALTIME_DELEGATION_PENDING_OUTPUT = JSON.stringify({
+  status: "running",
+  note: "The request was passed on and is being worked on. You do not have its answer yet. If you have not already said so, tell the user briefly that you are checking. Do not state any answer, cause, status, or other fact about it until its result arrives in <execution_result>.",
+});
+
 // Controlled browser primitives exercise the actual starter, not a live browser,
 // microphone, CSP policy, provider connection or media device.
 const original = {
@@ -420,7 +426,7 @@ describe("context delivery to the voice model", () => {
           ? (event as unknown as { item: { type: string } }).item.type
           : event.type,
       ),
-    ).toEqual(["message", "function_call_output", "response.create"]);
+    ).toEqual(["message", "message", "response.create"]);
     expect(live.items()[0]).toMatchObject({
       content: [
         {
@@ -428,6 +434,98 @@ describe("context delivery to the voice model", () => {
         },
       ],
     });
+    expect(live.items()[1]).toMatchObject({
+      content: [{ text: "<execution_result>\nDone.\n</execution_result>" }],
+    });
+    live.connection.stop();
+  });
+
+  // A delegation left as an unanswered tool call let the voice model speak on
+  // its own before the agent answered (Eleven Realtime gives up waiting for a
+  // tool result after about 20 seconds), and it invented the answer. The call
+  // is answered at once as running, and the real answer is relayed as its own
+  // item when it arrives.
+  test("a delegation is answered as running at once and its result is relayed later", async () => {
+    const live = await connected();
+    const delegations: Record<string, unknown>[] = [];
+    const channel = live.connection.events as unknown as EventTarget;
+    channel.addEventListener("message", (event) => {
+      const parsed = JSON.parse((event as MessageEvent).data as string) as Record<string, unknown>;
+      if (parsed.type === "delegation.created") delegations.push(parsed);
+    });
+    const timeline = () =>
+      live.socket.sent
+        .filter((event) => event.type !== "input_audio_buffer.append")
+        .map((event) => {
+          if (event.type !== "conversation.item.create") return event.type;
+          const item = (event as unknown as { item: Record<string, unknown> }).item;
+          if (item.type === "function_call_output") return `output:${String(item.output)}`;
+          const content = item.content as Array<{ text: string }>;
+          return `message:${content.map((part) => part.text).join("")}`;
+        });
+
+    // The person asks; the model says it is checking and delegates.
+    live.providerEvent({
+      type: "response.output_audio_transcript.done",
+      item_id: "item_ack",
+      transcript: "One moment.",
+    });
+    live.providerEvent({
+      type: "response.function_call_arguments.done",
+      call_id: "call_1",
+      name: "delegate_to_session",
+      arguments: JSON.stringify({ request: "Why are the app builds failing?" }),
+    });
+    expect(delegations).toHaveLength(1);
+    expect(delegations[0]).toMatchObject({
+      item: { id: "call_1", content: [{ text: "Why are the app builds failing?" }] },
+    });
+    // The call is answered at once, saying the answer is not known yet, and
+    // no response is requested for it.
+    expect(timeline()).toEqual([`output:${REALTIME_DELEGATION_PENDING_OUTPUT}`]);
+    const pending = JSON.parse(REALTIME_DELEGATION_PENDING_OUTPUT) as Record<string, string>;
+    expect(pending.status).toBe("running");
+    expect(pending.note).toContain("You do not have its answer yet.");
+    expect(pending.note).toContain("Do not state any answer, cause, status, or other fact");
+    const callOutput = live.socket.sent.find(
+      (event) => event.type === "conversation.item.create",
+    ) as unknown as { item: Record<string, unknown> };
+    expect(callOutput.item).toEqual({
+      type: "function_call_output",
+      call_id: "call_1",
+      output: REALTIME_DELEGATION_PENDING_OUTPUT,
+    });
+
+    // The agent's working notes are held, then read with the person's next
+    // speech, labelled as progress.
+    await live.append(progress("Looking at the latest build logs."));
+    expect(timeline()).toHaveLength(1);
+    live.providerEvent({ type: "input_audio_buffer.speech_started" });
+    expect(timeline().at(-1)).toBe(
+      "message:<execution_progress>\nLooking at the latest build logs.\n</execution_progress>",
+    );
+
+    // The agent's answer arrives: it is relayed as a result item with a
+    // response request, never as a second output for the answered call.
+    await live.append({
+      type: "delegation.context.append",
+      delegation_item_id: "call_1",
+      channel: "speakable",
+      content: [{ type: "text", text: "The signing certificate expired yesterday." }],
+    });
+    expect(timeline()).toEqual([
+      `output:${REALTIME_DELEGATION_PENDING_OUTPUT}`,
+      "message:<execution_progress>\nLooking at the latest build logs.\n</execution_progress>",
+      "message:<execution_result>\nThe signing certificate expired yesterday.\n</execution_result>",
+      "response.create",
+    ]);
+    expect(
+      live.socket.sent.filter(
+        (event) =>
+          event.type === "conversation.item.create" &&
+          (event as unknown as { item: { type: string } }).item.type === "function_call_output",
+      ),
+    ).toHaveLength(1);
     live.connection.stop();
   });
 });

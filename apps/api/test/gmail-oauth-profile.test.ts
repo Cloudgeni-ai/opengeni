@@ -141,14 +141,6 @@ describe("Gmail REST OAuth profile", () => {
     expect(
       gmailOAuthClientConfigured(
         testSettings({
-          googleDriveClientId: "drive-client",
-          googleDriveClientSecret: "drive-secret",
-        }),
-      ),
-    ).toBe(false);
-    expect(
-      gmailOAuthClientConfigured(
-        testSettings({
           integrationsOauthClientsJson: JSON.stringify({
             "https://other.example.test": { clientId: "other", tokenEndpointAuthMethod: "none" },
           }),

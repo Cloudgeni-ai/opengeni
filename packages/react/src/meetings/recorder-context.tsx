@@ -389,6 +389,42 @@ export function useMeetingRecorderState(): MeetingRecorder["state"] | null {
   );
 }
 
+/** A track whose source went away while recording: which, and whether it comes back by itself. */
+export type MeetingRecorderLostTrack = {
+  source: MeetingRecorder["tracks"][number]["source"];
+  lost: NonNullable<MeetingRecorder["tracks"][number]["lost"]>;
+  systemAudioKind: MeetingRecorder["systemAudioKind"];
+};
+
+/**
+ * The first track that records nothing because its source went away, while
+ * recording or paused; null otherwise, or before the capture code loads. For
+ * a sign outside the recorder, such as the tab's title. Doesn't load the
+ * capture code, and re-renders only when it changes.
+ */
+export function useMeetingRecorderLostTrack(): MeetingRecorderLostTrack | null {
+  const store = useContext(MeetingRecorderContext);
+  const key = useSyncExternalStore(
+    store?.subscribe ?? noopSubscribe,
+    () => {
+      const recorder = store?.get();
+      if (recorder?.state !== "recording" && recorder?.state !== "paused") return null;
+      const track = recorder.tracks.find((item) => item.lost);
+      return track?.lost ? `${track.source}|${track.lost}|${recorder.systemAudioKind ?? ""}` : null;
+    },
+    () => null,
+  );
+  return useMemo(() => {
+    if (!key) return null;
+    const [source, lost, kind] = key.split("|");
+    return {
+      source: source as MeetingRecorderLostTrack["source"],
+      lost: lost as MeetingRecorderLostTrack["lost"],
+      systemAudioKind: (kind || null) as MeetingRecorderLostTrack["systemAudioKind"],
+    };
+  }, [key]);
+}
+
 /**
  * The recorder's Start and Stop, for the app's actions (⌘K, keys, the desktop
  * menu bar). Null without a recorder provider. Re-renders on state changes,

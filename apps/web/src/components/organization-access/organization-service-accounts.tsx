@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import { useMemo } from "react";
 
 import {
@@ -17,7 +18,7 @@ export function OrganizationServiceAccounts({
   onNavigate,
   onCreateKey,
 }: {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   organizationId: string;
   canMakeAdmin: boolean;
   /** An organization admin who isn't the owner: admin service accounts are read-only. */

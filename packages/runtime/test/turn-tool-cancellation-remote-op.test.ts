@@ -235,6 +235,83 @@ describe("remote synchronous command custody", () => {
     expect(rig.runner.runs.get(opId)?.exit.cancelled).toBe(true);
   });
 
+  test.each(["unreachable", "blocked"] as const)(
+    "finalization retries durable custody independently of transport state: %s",
+    async (transportState) => {
+      let machineAnswers = true;
+      let finalizing = false;
+      let adoptionAttempts = 0;
+      const blockTransport = deferred();
+      const commitCustody = deferred();
+      const adoptions: SelfhostedBackgroundCommandAdoption[] = [];
+      const opId = `retry_custody_${transportState}:0`;
+      const rig = makeRig({
+        beforeRequest: async (request) => {
+          if (request.op?.$case === "opStart") {
+            machineAnswers = false;
+            return;
+          }
+          if (finalizing && transportState === "blocked") await blockTransport.promise;
+          if (!machineAnswers) throw machineOfflineError();
+        },
+        defaultScript: () => ({ frames: [], live: true, holdUntilCancel: true }),
+        sessionDeps: {
+          execTimeoutMs: 0,
+          adoptBackgroundCommand: async (input) => {
+            adoptionAttempts++;
+            if (!finalizing) throw new Error("ledger temporarily unavailable");
+            adoptions.push(input);
+            await commitCustody.promise;
+            return { commandId: "33333333-3333-4333-8333-333333333333" };
+          },
+        },
+      });
+      const controller = createTurnToolCancellationController();
+      try {
+        const result = await sdkExec(controller, rig.session).invoke(
+          {} as never,
+          JSON.stringify({ cmd: "long running command" }),
+          {
+            toolCall: {
+              type: "function_call",
+              callId: `retry_custody_${transportState}`,
+              name: "exec_command",
+              arguments: "{}",
+            },
+          },
+        );
+        expect(result).toContain("machine offline");
+        expect(adoptionAttempts).toBe(1);
+        finalizing = true;
+        const drain = controller.waitForQuiescence();
+        await waitFor(() => adoptions.length === 1, "finalizer custody retry");
+        expect(await remainsPending(drain)).toBe(true);
+        commitCustody.resolve();
+        expect(await remainsPending(drain)).toBe(false);
+        await drain;
+        expect(adoptions).toEqual([
+          {
+            controlWorkspaceId: WORKSPACE,
+            enrollmentId: AGENT,
+            connectionInstanceId: CONNECTION,
+            opId,
+            command: "long running command",
+            abandoned: true,
+          },
+        ]);
+        expect(rig.runner.starts.map((start) => start.opId)).toEqual([opId]);
+        expect(rig.runner.runs.get(opId)?.exit.cancelled).toBe(false);
+        expect(rig.runner.runs.get(opId)?.finalAcked).toBe(false);
+      } finally {
+        machineAnswers = true;
+        blockTransport.resolve();
+        commitCustody.resolve();
+        await rig.session.cancelExecCommand(opId);
+        await controller.waitForQuiescence();
+      }
+    },
+  );
+
   test.each(["synchronous", "model"] as const)(
     "trusted local admission refusal settles an unstarted %s command with no RPC",
     async (mode) => {
@@ -382,6 +459,66 @@ describe("remote synchronous command custody", () => {
     } finally {
       cancellationAvailable = true;
       await rig.session.cancelExecCommand(opId);
+    }
+  });
+
+  test("finalization hands off an unresolved protocol failure without waiting for cancellation", async () => {
+    let finalizing = false;
+    let cancellationAvailable = false;
+    const adoptions: SelfhostedBackgroundCommandAdoption[] = [];
+    const opId = "protocol_failure:0";
+    const rig = makeRig({
+      beforeRequest: (request) => {
+        if (request.op?.$case === "opCancel" && !cancellationAvailable) {
+          throw new Error("cancellation receipt unavailable");
+        }
+      },
+      defaultScript: () => ({ frames: [], live: true, holdUntilCancel: true }),
+      sessionDeps: {
+        execTimeoutMs: 0,
+        adoptBackgroundCommand: async (input) => {
+          if (!finalizing) throw new Error("adoption did not commit");
+          adoptions.push(input);
+          return { commandId: "44444444-4444-4444-8444-444444444444" };
+        },
+      },
+    });
+    const controller = createTurnToolCancellationController();
+    try {
+      const result = await sdkExec(controller, rig.session).invoke(
+        {} as never,
+        JSON.stringify({ cmd: "long running command", yield_time_ms: 1 }),
+        {
+          toolCall: {
+            type: "function_call",
+            callId: "protocol_failure",
+            name: "exec_command",
+            arguments: "{}",
+          },
+        },
+      );
+      expect(result).toContain("cancellation receipt unavailable");
+      finalizing = true;
+      const drain = controller.waitForQuiescence();
+      expect(await remainsPending(drain)).toBe(false);
+      await drain;
+      expect(adoptions).toEqual([
+        {
+          controlWorkspaceId: WORKSPACE,
+          enrollmentId: AGENT,
+          connectionInstanceId: CONNECTION,
+          opId,
+          command: "long running command",
+          abandoned: true,
+        },
+      ]);
+      expect(rig.runner.starts).toHaveLength(1);
+      expect(rig.runner.runs.get(opId)?.exit.cancelled).toBe(false);
+      expect(rig.runner.runs.get(opId)?.finalAcked).toBe(false);
+    } finally {
+      cancellationAvailable = true;
+      await rig.session.cancelExecCommand(opId);
+      await controller.waitForQuiescence();
     }
   });
 

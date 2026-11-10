@@ -10,13 +10,13 @@ import {
 
 /**
  * Text rewriting for the secret history scrub (docs/secrets.md, "Removing
- * secrets from stored history"). Matching itself belongs to the masking
- * matchers; this module only applies their ranges to stored text and JSON.
+ * secrets from stored history"). Matching itself belongs to the scrub's
+ * matcher; this module only applies its ranges to stored text and JSON.
  */
 
 /**
- * What the scrub needs from a matcher (the masking matchers in
- * `@opengeni/contracts` provide them). `marker` is the exact text written in
+ * What the scrub needs from a matcher (`@opengeni/core`'s
+ * session-secret-redaction-matchers provides it). `marker` is the exact text written in
  * place of each match, `[redacted: <reference or kind>]`; it never contains a
  * value. `redact` returns the text with every match replaced by `marker` and
  * must leave markers already in the text untouched, so a second run changes
@@ -63,7 +63,7 @@ function isScrubMarkerLabel(label: string): boolean {
   }
 }
 
-/** The longest placeholder both masking modules skip: `[masked <1-40 characters>]`. */
+/** The longest placeholder the scrub's matcher skips: `[masked <1-40 characters>]`. */
 const PLACEHOLDER_MAX = 49;
 
 /** `open` with dashes and `]` to make `size` characters (never shorter than `open]`). */
@@ -100,7 +100,7 @@ function placeholderRun(length: number, nonce: string, index: number): string {
 
 /**
  * Run `redact` on the whole text with every marker an earlier run wrote
- * swapped for placeholders masking never searches (`[masked …]`, as long as
+ * swapped for placeholders the matcher never searches (`[masked …]`, as long as
  * the marker), then put the markers back. A later run, with a value that happens to appear in an
  * earlier marker's label (such as a username named in a reference), never
  * rewrites a marker, and every matcher still sees the text around it as it

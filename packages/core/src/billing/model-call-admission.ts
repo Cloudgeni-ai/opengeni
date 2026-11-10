@@ -2,6 +2,7 @@ import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
 import {
   API_CREDITS_REQUIRED_MESSAGE,
   SUBSCRIPTION_PLAN_REQUIRED_MESSAGE,
+  SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
   type BillingOrigin,
   type EntitlementsPort,
 } from "@opengeni/contracts";
@@ -16,10 +17,12 @@ import {
 import {
   byokPaidCreditRefusalMessage,
   byokPlatformFeeActive,
+  connectedSubscriptionsRefusedForOrigin,
   ownSubscriptionPlanAllows,
 } from "./byok-platform-fee";
 
 export type ModelCallAdmissionDenial =
+  | "subscription_api_unavailable"
   | "insufficient_credits"
   | "allowance_exhausted"
   | "monthly_model_cost_limit"
@@ -70,6 +73,16 @@ export async function admitModelCall(
   const { settings, db } = services;
   const metered = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
   let creditPolicyRevision: number | undefined;
+  if (
+    input.ownSubscription &&
+    connectedSubscriptionsRefusedForOrigin(settings, chargeBillingOrigin(input.billingOrigin))
+  ) {
+    return {
+      allowed: false,
+      denial: "subscription_api_unavailable",
+      message: SUBSCRIPTION_API_UNAVAILABLE_MESSAGE,
+    };
+  }
   if (
     !input.chargesOpenGeniCredits &&
     input.ownSubscription &&

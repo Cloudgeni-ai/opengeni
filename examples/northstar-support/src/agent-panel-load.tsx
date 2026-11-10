@@ -189,21 +189,21 @@ export class AgentPanelLoadBoundary extends Component<
 export function AgentPanelLoadError() {
   return (
     <aside
-      className="flex h-full min-h-0 flex-col border-l border-[#302a40] bg-white"
+      className="flex h-full min-h-0 flex-col border-l border-og-ink bg-og-offwhite"
       data-agent-panel-load-error
       role="alert"
     >
-      <div className="flex h-[72px] items-center border-b border-[#302a40] bg-[#252131] px-5 text-sm font-semibold text-white">
+      <div className="flex h-16 items-center bg-og-ink px-5 text-[15px] font-semibold text-white">
         Opengeni panel unavailable
       </div>
       <div className="m-auto max-w-sm px-8 text-center">
-        <p className="text-sm font-semibold text-[#30332f]">The agent panel could not be loaded.</p>
-        <p className="mt-2 text-xs leading-5 text-[#777771]">
+        <p className="text-sm font-semibold text-og-ink">The agent panel could not be loaded.</p>
+        <p className="mt-2 text-[13px] leading-5 text-[#62655f]">
           Reload the demo to try again. If it keeps failing, the current build needs attention.
         </p>
         <button
           type="button"
-          className="mt-5 rounded-lg bg-[#6254c7] px-4 py-2 text-xs font-semibold text-white"
+          className="mt-5 rounded-md bg-og-ink px-4 py-2 text-[13px] font-semibold text-white"
           onClick={() => window.location.reload()}
         >
           Reload demo

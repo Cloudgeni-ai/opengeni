@@ -186,3 +186,54 @@ test("in Slack, nothing the agent sent can add a line that reads as a server fac
   expect(lines.some((line) => /^\s*last used:/i.test(line))).toBe(false);
   expect(lines.join("\n")).not.toMatch(/[\u0085\u2028\u2029]/u);
 });
+
+test("a first-party call that states its target lists those facts in Slack, not its raw arguments", () => {
+  const attach = { repository: "acme/ops", ref: "release" };
+  const context = {
+    kind: "generic" as const,
+    title: "Attach acme/ops to this chat",
+    targetFacts: [
+      { label: "Repository", value: "acme/ops" },
+      { label: "Branch", value: "release" },
+      { label: "Access", value: "Workspace GitHub App" },
+      { label: "Note", value: "Removed from this chat earlier" },
+    ],
+  };
+  const fields = toolReviewFields(attach, context, "github_repository_attach");
+  expect(fields).toEqual({
+    fields: context.targetFacts.map((fact, index) => ({
+      path: `/$target/${index}`,
+      label: fact.label,
+      preview: fact.value,
+      truncated: false,
+    })),
+    moreFields: 0,
+  });
+  const lines = slackToolReviewBlocks(
+    {
+      ...review,
+      consequence: undefined,
+      effects: [],
+      ...toolReviewAction("github_repository_attach", attach, context),
+      ...fields,
+      reason: "This action asks first by default.",
+      accountLabel: null,
+      samples: [],
+    },
+    true,
+  ).flatMap((block) => (block.type === "section" ? block.text.text.split("\n") : []));
+  expect(lines).toEqual([
+    "Attach acme/ops to this chat",
+    "Repository: acme/ops",
+    "Branch: release",
+    "Access: Workspace GitHub App",
+    "Note: Removed from this chat earlier",
+    "This action asks first by default.",
+  ]);
+  // Without stated facts, a call still lists its own arguments.
+  expect(
+    toolReviewFields(attach, { kind: "generic" }, "github_repository_attach").fields.map(
+      (field) => field.path,
+    ),
+  ).toEqual(["/repository", "/ref"]);
+});

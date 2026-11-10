@@ -281,3 +281,85 @@ export const BeginConnectRequest = /* @__PURE__ */ defineSchema(() =>
     }),
 );
 export type BeginConnectRequest = z.infer<typeof BeginConnectRequest>;
+
+/**
+ * Organizations can require an administrator to approve an app before their
+ * people may connect it (Microsoft Entra consent policies, Google Workspace
+ * API controls). The provider then stops the person on its own page and may
+ * never send them back. These helpers derive what an administrator needs from
+ * the sign-in URL itself, so any sign-in can offer it without provider
+ * configuration. Nothing here is secret: a sign-in URL's client ID, redirect
+ * and scopes are public; its state and PKCE challenge are never copied.
+ */
+export type OrganizationAppApproval = {
+  /** A link an administrator opens to approve the app for the whole organization, when the provider has one. */
+  approvalUrl: string | null;
+  /** The app's OAuth client ID, which administrators use to find and allow an app. */
+  appId: string;
+};
+
+/** State on the Microsoft approval link, so the shared callback can tell an administrator's return from a sign-in. */
+export const MICROSOFT_ADMIN_CONSENT_STATE = "microsoft_admin_consent";
+
+const MICROSOFT_LOGIN_ORIGIN = "https://login.microsoftonline.com";
+const MICROSOFT_GRAPH_RESOURCE = "https://graph.microsoft.com";
+const OPENID_SCOPES = new Set(["offline_access", "openid", "profile", "email"]);
+
+/**
+ * Microsoft's organization-wide admin consent link for an app's delegated Graph
+ * permissions. `tenant` defaults to `organizations`: the administrator's own
+ * sign-in picks their organization.
+ */
+export function microsoftAdminConsentUrl(input: {
+  clientId: string;
+  redirectUri: string;
+  scopes: readonly string[];
+  tenant?: string | undefined;
+}): string {
+  const scopes = input.scopes
+    .filter((scope) => !OPENID_SCOPES.has(scope))
+    .map((scope) => (scope.includes("://") ? scope : `${MICROSOFT_GRAPH_RESOURCE}/${scope}`));
+  const url = new URL(
+    `${MICROSOFT_LOGIN_ORIGIN}/${encodeURIComponent(input.tenant ?? "organizations")}/v2.0/adminconsent`,
+  );
+  url.searchParams.set("client_id", input.clientId);
+  url.searchParams.set("scope", scopes.join(" "));
+  url.searchParams.set("redirect_uri", input.redirectUri);
+  url.searchParams.set("state", MICROSOFT_ADMIN_CONSENT_STATE);
+  return url.toString();
+}
+
+/**
+ * What an organization's administrator needs to approve the app a sign-in URL
+ * asks for, or null when the provider has no organization approval (or the URL
+ * is not a provider sign-in it recognizes).
+ */
+export function organizationAppApproval(authorizeUrl: string): OrganizationAppApproval | null {
+  let url: URL;
+  try {
+    url = new URL(authorizeUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || url.username || url.password) return null;
+  const appId = url.searchParams.get("client_id")?.trim();
+  if (!appId || appId.length > 256) return null;
+  if (url.origin === MICROSOFT_LOGIN_ORIGIN) {
+    const tenant = /^\/([^/]+)\/oauth2\/v2\.0\/authorize$/.exec(url.pathname)?.[1];
+    const redirectUri = url.searchParams.get("redirect_uri");
+    // Personal Microsoft accounts have no organization to approve anything.
+    if (!tenant || tenant === "consumers" || !redirectUri) return null;
+    return {
+      approvalUrl: microsoftAdminConsentUrl({
+        clientId: appId,
+        redirectUri,
+        scopes: (url.searchParams.get("scope") ?? "").split(/\s+/).filter(Boolean),
+        tenant: tenant === "common" ? "organizations" : tenant,
+      }),
+      appId,
+    };
+  }
+  // Google Workspace administrators allow an app by its client ID.
+  if (url.origin === "https://accounts.google.com") return { approvalUrl: null, appId };
+  return null;
+}

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   CreateRigRequest,
   ProposeRigChangeRequest,
@@ -10,7 +11,7 @@ import { useCallback } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner, usePolledValue } from "./internal";
 
-export type UseRigsOptions = ClientOverride & {
+export type UseRigsOptions = ClientOverride<ChatClient> & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
 };
@@ -136,7 +137,7 @@ export function useRigs(options: UseRigsOptions = {}): UseRigsResult {
   };
 }
 
-export type UseRigOptions = ClientOverride & {
+export type UseRigOptions = ClientOverride<ChatClient> & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
 };
@@ -263,7 +264,7 @@ export function useRig(rigId: string, options: UseRigOptions = {}): UseRigResult
   };
 }
 
-export type UseRigVersionsOptions = ClientOverride & {
+export type UseRigVersionsOptions = ClientOverride<ChatClient> & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
 };
@@ -297,7 +298,7 @@ export function useRigVersions(
   };
 }
 
-export type UseRigChangesOptions = ClientOverride & {
+export type UseRigChangesOptions = ClientOverride<ChatClient> & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
 };

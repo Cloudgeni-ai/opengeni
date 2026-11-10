@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplicationFailure } from "@temporalio/activity";
-import { stopArchivedSessionWork } from "@opengeni/core";
+import { reviveRestoredArchivedSessions, stopArchivedSessionWork } from "@opengeni/core";
 import {
   SESSION_ARCHIVE_EXPORT_TABLES,
   SESSION_ARCHIVE_FORMAT,
@@ -20,13 +20,19 @@ import {
   readSessionArchiveTablePages,
   readSessionArchiveTree,
   readSessionArchiveSessionRow,
-  readSessionArchiveTranscriptEvents,
+  sessionArchiveTranscriptEvent,
+  readPendingSessionContentRestore,
+  restoreArchivedSessionContent,
   sessionArchiveObjectKeys,
   type Database,
   type SessionArchiveManifest,
+  type SessionArchiveObject,
+  type SessionArchiveRestoreTable,
   type SessionArchiveScope,
 } from "@opengeni/db";
 import {
+  downloadWorkspaceArchiveSpool,
+  readCompressedJsonLines,
   uploadWorkspaceArchiveSpool,
   writeCompressedJsonLines,
   WorkspaceArchiveStorageError,
@@ -70,8 +76,16 @@ export const SESSION_ARCHIVE_STALE_SECONDS = 2 * 60 * 60;
 export const SESSION_ARCHIVE_EXPORT_PAGE_ROWS = 200;
 export const SESSION_ARCHIVE_PURGE_BATCH_ROWS = 2_000;
 
-/** Write the full-fidelity bundle: header, every exported row as exact JSON, footer. */
-async function writeBundle(db: Database, scope: SessionArchiveScope, path: string) {
+/**
+ * Write the full-fidelity bundle (header, every exported row as exact JSON,
+ * footer), handing each exported row to `onRow` after it is written.
+ */
+async function writeBundle(
+  db: Database,
+  scope: SessionArchiveScope,
+  path: string,
+  onRow: (table: string, row: string) => Promise<void>,
+) {
   const rowCounts: Record<string, number> = {};
   const sessionRow = await readSessionArchiveSessionRow(db, scope);
   const spool = await writeCompressedJsonLines(path, async (write) => {
@@ -88,6 +102,7 @@ async function writeBundle(db: Database, scope: SessionArchiveScope, path: strin
       })) {
         for (const row of rows) {
           await write(`{"table":${JSON.stringify(spec.table)},"row":${row}}`);
+          await onRow(spec.table, row);
         }
         count += rows.length;
       }
@@ -98,10 +113,21 @@ async function writeBundle(db: Database, scope: SessionArchiveScope, path: strin
   return { spool, rowCounts };
 }
 
-/** Write the readable transcript: public SessionEvent objects, one per line. */
-async function writeTranscript(db: Database, scope: SessionArchiveScope, path: string) {
+/**
+ * Write the bundle and the readable transcript (public SessionEvent objects,
+ * one per line) together. The transcript comes from the event rows the bundle
+ * export reads, in the same sequence order, instead of a second read.
+ * Each kept event goes straight into the transcript's compressed stream, which
+ * waits for it to drain and fails the export if writing the file fails.
+ */
+async function writeBundleAndTranscript(
+  db: Database,
+  scope: SessionArchiveScope,
+  paths: { bundle: string; transcript: string },
+) {
   let events = 0;
-  const spool = await writeCompressedJsonLines(path, async (write) => {
+  let bundle: Awaited<ReturnType<typeof writeBundle>> | undefined;
+  const spool = await writeCompressedJsonLines(paths.transcript, async (write) => {
     await write(
       JSON.stringify({
         format: SESSION_ARCHIVE_TRANSCRIPT_FORMAT,
@@ -110,20 +136,16 @@ async function writeTranscript(db: Database, scope: SessionArchiveScope, path: s
         sessionId: scope.sessionId,
       }),
     );
-    let afterSequence = 0;
-    for (;;) {
-      const page = await readSessionArchiveTranscriptEvents(db, scope, {
-        afterSequence,
-        limit: 500,
-      });
-      for (const event of page) await write(JSON.stringify({ event }));
-      events += page.length;
-      if (page.length < 500) break;
-      afterSequence = page.at(-1)!.sequence;
-    }
+    bundle = await writeBundle(db, scope, paths.bundle, async (table, row) => {
+      if (table !== "session_events") return;
+      const event = sessionArchiveTranscriptEvent(row);
+      if (!event) return;
+      await write(JSON.stringify({ event }));
+      events += 1;
+    });
     await write(JSON.stringify({ end: true, events }));
   });
-  return { spool, events };
+  return { bundle: bundle!, transcript: { spool, events } };
 }
 
 export type ArchiveSessionOutcome = "archived" | "skipped" | "failed";
@@ -137,12 +159,71 @@ export type ArchivedSessionRequest = {
   archivedAt: string;
 };
 
+/** A chat whose stored content should be restored, with its sub-chats archived with it. */
+export type SessionArchiveRestoreRequest = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  /** Who restored it; absent on requests started before it was recorded. */
+  subjectId?: string;
+};
+
 export type SessionArchiveActivityOptions = {
   candidatesPerPass?: number;
   timeBudgetMs?: number;
   now?: () => number;
   upload?: (storage: ObjectStorage, key: string, spool: Spool) => Promise<void>;
+  /** Fetch a stored object to a private file, verified against its size and digest. */
+  download?: (
+    storage: ObjectStorage,
+    object: SessionArchiveObject,
+  ) => Promise<{ path: string; dispose: () => Promise<void> }>;
 };
+
+/**
+ * One table's rows from a downloaded bundle, as their exact JSON, checked
+ * against the count the bundle's footer records for that table.
+ */
+export async function* sessionArchiveBundleRows(
+  path: string,
+  table: SessionArchiveRestoreTable,
+): AsyncGenerator<string> {
+  const prefix = `{"table":${JSON.stringify(table)},"row":`;
+  let count = 0;
+  let footer: { rowCounts?: Record<string, number> } | null = null;
+  for await (const line of readCompressedJsonLines(path)) {
+    if (line.startsWith(prefix) && line.endsWith("}")) {
+      count += 1;
+      yield line.slice(prefix.length, -1);
+    } else if (line.startsWith('{"end":true')) {
+      footer = JSON.parse(line) as { rowCounts?: Record<string, number> };
+    }
+  }
+  if (footer?.rowCounts?.[table] !== undefined && footer.rowCounts[table] !== count) {
+    throw new Error(`session archive bundle is incomplete: ${table} has ${count} rows`);
+  }
+  if (!footer) throw new Error("session archive bundle has no footer");
+}
+
+/** The bundle's header names its format and the session it belongs to. */
+async function verifyBundleHeader(path: string, sessionId: string): Promise<void> {
+  for await (const line of readCompressedJsonLines(path)) {
+    const header = JSON.parse(line) as {
+      format?: unknown;
+      version?: unknown;
+      session?: { id?: unknown };
+    };
+    if (
+      header.format !== SESSION_ARCHIVE_FORMAT ||
+      header.version !== SESSION_ARCHIVE_FORMAT_VERSION ||
+      header.session?.id !== sessionId
+    ) {
+      throw new Error("session archive bundle does not belong to this session");
+    }
+    return;
+  }
+  throw new Error("session archive bundle is empty");
+}
 
 export type ArchiveIdleSessionsResult = {
   enabled: boolean;
@@ -150,6 +231,7 @@ export type ArchiveIdleSessionsResult = {
   skipped: number;
   failed: number;
   abandoned: number;
+  restored: number;
   purgedRows: number;
   objectsDeleted: number;
 };
@@ -167,6 +249,13 @@ export function createSessionArchiveActivities(
   const timeBudgetMs = options.timeBudgetMs ?? SESSION_ARCHIVE_TIME_BUDGET_MS;
   const now = options.now ?? Date.now;
   const upload = options.upload ?? uploadWorkspaceArchiveSpool;
+  const download =
+    options.download ??
+    (async (storage: ObjectStorage, object: SessionArchiveObject) =>
+      await downloadWorkspaceArchiveSpool(storage, object.key, {
+        bytes: object.bytes,
+        sha256: object.sha256,
+      }));
 
   async function archiveOne(
     db: Database,
@@ -182,8 +271,10 @@ export function createSessionArchiveActivities(
     if (!begun) return "skipped";
     const directory = await mkdtemp(join(tmpdir(), "opengeni-session-archive-"));
     try {
-      const bundle = await writeBundle(db, scope, join(directory, "bundle.jsonl.zst"));
-      const transcript = await writeTranscript(db, scope, join(directory, "transcript.jsonl.zst"));
+      const { bundle, transcript } = await writeBundleAndTranscript(db, scope, {
+        bundle: join(directory, "bundle.jsonl.zst"),
+        transcript: join(directory, "transcript.jsonl.zst"),
+      });
       await upload(storage, keys.bundle, bundle.spool);
       await upload(storage, keys.transcript, transcript.spool);
       const manifest: SessionArchiveManifest = {
@@ -229,6 +320,37 @@ export function createSessionArchiveActivities(
     return purged;
   }
 
+  /**
+   * Restore one stored chat whose restore was requested: download and verify
+   * its bundle, then put the purged rows back and make it live in one
+   * transaction. "skipped" when there was nothing to restore (done already).
+   */
+  async function restoreOne(
+    db: Database,
+    storage: ObjectStorage,
+    scope: SessionArchiveScope,
+  ): Promise<"restored" | "skipped"> {
+    const pending = await readPendingSessionContentRestore(db, scope);
+    if (!pending) return "skipped";
+    const spool = await download(storage, pending.bundle);
+    try {
+      await verifyBundleHeader(spool.path, scope.sessionId);
+      const result = await restoreArchivedSessionContent(db, scope, {
+        sha256: pending.sha256,
+        rows: (table) => sessionArchiveBundleRows(spool.path, table),
+      });
+      if (result.status === "manifest_changed") {
+        throw ApplicationFailure.retryable(
+          "the stored archive changed while it was being restored",
+          "session_archive_restore_retry",
+        );
+      }
+      return result.status === "restored" ? "restored" : "skipped";
+    } finally {
+      await spool.dispose();
+    }
+  }
+
   async function archiveIdleSessions(): Promise<ArchiveIdleSessionsResult> {
     const { db, objectStorage, observability, settings } = await services();
     const deadline = now() + timeBudgetMs;
@@ -238,6 +360,7 @@ export function createSessionArchiveActivities(
       skipped: 0,
       failed: 0,
       abandoned: 0,
+      restored: 0,
       purgedRows: 0,
       objectsDeleted: 0,
     };
@@ -271,6 +394,12 @@ export function createSessionArchiveActivities(
       try {
         if (unfinished.state === "archiving") {
           if (await abandonSessionArchive(db, unfinished)) result.abandoned += 1;
+        } else if (unfinished.state === "restoring") {
+          // A restore whose own workflow was lost.
+          if (objectStorage && (await restoreOne(db, objectStorage, unfinished)) === "restored") {
+            result.restored += 1;
+            await reviveRestored(unfinished);
+          }
         } else {
           result.purgedRows += await purgeUntilDone(db, unfinished, deadline);
         }
@@ -328,7 +457,10 @@ export function createSessionArchiveActivities(
         }
       }
     }
-    if (result.archived + result.failed + result.abandoned + result.objectsDeleted > 0) {
+    if (
+      result.archived + result.failed + result.abandoned + result.restored + result.objectsDeleted >
+      0
+    ) {
       observability.info("session archive pass finished", { ...result });
     }
     return result;
@@ -361,24 +493,45 @@ export function createSessionArchiveActivities(
   async function stopArchivedSessionWorkActivity(
     input: ArchivedSessionRequest,
   ): Promise<{ pending: boolean }> {
+    return await stopArchivedSessionWork(await sessionCommandDeps(), input);
+  }
+
+  async function sessionCommandDeps(): Promise<Parameters<typeof stopArchivedSessionWork>[0]> {
     const { db, bus, wakeSessionWorkflow } = await services();
-    return await stopArchivedSessionWork(
-      {
-        db,
-        bus,
-        workflowClient: {
-          // Committed wakes are drained from their durable outbox.
-          requestSessionWorkflowWakeDispatch: async () => undefined,
-          wakeSessionWorkflow: async (wake) => {
-            if (wakeSessionWorkflow) return await wakeSessionWorkflow(wake);
-          },
-        },
-        schedulePromptPostCommit: (task) => {
-          void task().catch(() => undefined);
+    return {
+      db,
+      bus,
+      workflowClient: {
+        // Committed wakes are drained from their durable outbox.
+        requestSessionWorkflowWakeDispatch: async () => undefined,
+        wakeSessionWorkflow: async (wake) => {
+          if (wakeSessionWorkflow) return await wakeSessionWorkflow(wake);
         },
       },
-      input,
-    );
+      schedulePromptPostCommit: (task) => {
+        void task().catch(() => undefined);
+      },
+    };
+  }
+
+  /**
+   * A restored chat takes new messages again: the chats its Archive stopped
+   * go back to idle and are resumed, as the person who restored it when
+   * known. Fails (to be retried) while a stopped turn is still settling.
+   */
+  async function reviveRestored(scope: SessionArchiveScope, subjectId?: string): Promise<void> {
+    const { settling } = await reviveRestoredArchivedSessions(await sessionCommandDeps(), {
+      ...scope,
+      actor: subjectId
+        ? { type: "human", subjectId }
+        : { type: "service", subjectId: "service:session-archive-restore" },
+    });
+    if (settling > 0) {
+      throw ApplicationFailure.retryable(
+        `${settling} restored chat(s) are still stopping their archived work`,
+        "session_archive_restore_retry",
+      );
+    }
   }
 
   /**
@@ -425,9 +578,62 @@ export function createSessionArchiveActivities(
     return { stored };
   }
 
+  /**
+   * Restore a chat and the sub-chats archived with it whose restore was
+   * requested (see unarchiveSession). Each chat is restored in its own
+   * transaction; a failure leaves that chat stored and is retried.
+   */
+  async function restoreArchivedSessions(
+    input: SessionArchiveRestoreRequest,
+  ): Promise<{ restored: number }> {
+    const { db, objectStorage } = await services();
+    if (!objectStorage) {
+      throw ApplicationFailure.retryable(
+        "object storage is not configured, so stored chats cannot be restored",
+        "session_archive_restore_unavailable",
+      );
+    }
+    const tree = await readSessionArchiveTree(db, input);
+    let restored = 0;
+    let failed = 0;
+    for (const row of tree) {
+      if (row.contentArchiveState !== "archived" || row.contentRestoreRequestedAt === null)
+        continue;
+      try {
+        const outcome = await restoreOne(db, objectStorage, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: row.id,
+        });
+        if (outcome === "restored") restored += 1;
+      } catch (error) {
+        failed += 1;
+        const { observability } = await services();
+        observability.warn("session archive restore failed; it will be retried", {
+          workspaceId: input.workspaceId,
+          sessionId: row.id,
+          errorClass: "SessionArchiveOperationError",
+          errorCode: sessionArchiveFailureCode(error),
+        });
+      }
+    }
+    if (failed > 0) {
+      throw ApplicationFailure.retryable(
+        `${failed} archived chat(s) could not be restored yet`,
+        "session_archive_restore_retry",
+      );
+    }
+    await reviveRestored(
+      { accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId },
+      input.subjectId,
+    );
+    return { restored };
+  }
+
   return {
     archiveIdleSessions,
     stopArchivedSessionWork: stopArchivedSessionWorkActivity,
     storeArchivedSession,
+    restoreArchivedSessions,
   };
 }

@@ -97,6 +97,12 @@
      canvas, a card or a menu panel - by the same visible step. Selected and
      active rows use the stronger, opaque `selection`. */
   --og-color-hover: rgb(230 230 230 / 0.08);
+  /* Selected text (::selection, the code editor, the terminal and the native
+     composer); `selection` above is the selected-row fill. A translucent calm
+     blue, the hue people read as "selected" - a neutral grey here would look
+     like one more surface step. Composites to about #3b5882 on #303030,
+     keeping fg text above 4.5:1 on every surface. */
+  --og-color-text-selection: #488ceb70;
   --og-color-border: #454545;
   --og-color-border-strong: #555555;
   --og-color-fg: #e6e6e6;
@@ -252,6 +258,8 @@
   --og-color-surface-3: #e5e5e5;
   --og-color-selection: #e2e2e2;
   --og-color-hover: rgb(36 36 36 / 0.06);
+  /* Composites to about #bfd6ff on white. */
+  --og-color-text-selection: #3884ff52;
   --og-color-border: #dedede;
   --og-color-border-strong: #bdbdbd;
   --og-color-fg: #242424;

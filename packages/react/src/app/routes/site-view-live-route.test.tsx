@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { SitePublicationLink } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import type { Session, SessionEvent, WorkspaceArtifactVersion } from "@opengeni/sdk";
+import type { ChatSession as Session, SessionEvent, WorkspaceArtifactVersion } from "@opengeni/sdk";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 

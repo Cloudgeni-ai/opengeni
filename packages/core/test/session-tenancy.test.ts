@@ -9,6 +9,7 @@ import {
   acceptOrganizationInvitation,
   claimSessionWorkForAttempt,
   createDb,
+  createAgent,
   createOrganizationInvitation,
   createSession,
   ensureManagedAccessForUser,
@@ -20,6 +21,7 @@ import {
   submitHumanPromptInTransaction,
   withSessionRlsActorContext,
   withWorkspaceSubjectSessionActivityRls,
+  SessionAgentRequiresPrivateChatError,
   SessionTenancyConflictError,
   SessionTenancyNotActivatedError,
   transitionSessionVisibility,
@@ -1047,6 +1049,91 @@ describe("managed-human session tenancy application service", () => {
     );
     expect(forked).toMatchObject({ replay: false });
     expect(await countSessions()).toBe(before + 1);
+  }, 180_000);
+
+  test("a chat with an Only me agent cannot be shared", async () => {
+    if (!shared || !client) return;
+    const userId = `core-session-agent-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Only me agent owner",
+    });
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId !== access.defaultWorkspaceId,
+    );
+    if (!grant) throw new Error("managed human has no personal workspace grant");
+    await shared.admin`
+      insert into session_tenancy_activations (
+        account_id, activation_version, inventory_digest, parity_digest, activated_by
+      ) values (
+        ${grant.accountId}, 1, ${"1".repeat(64)}, ${"2".repeat(64)}, 'core-test'
+      )`;
+    await shared.admin`
+      insert into organization_private_session_settings (
+        account_id, enabled, version, updated_by_membership_id
+      ) values (${grant.accountId}, true, 1, null)
+      on conflict (account_id) do update set enabled = true`;
+    const { agent } = await createAgent(
+      client.db,
+      { accountId: grant.accountId, workspaceId: grant.workspaceId },
+      {
+        visibility: "private",
+        ownerSubjectId: subjectId,
+        name: "Diary",
+        description: "",
+        avatar: null,
+        instructions: "Keep it private.",
+        firstMessage: "",
+        memoryEnabled: false,
+        origin: "app",
+        sourceSessionId: null,
+        createdBySubjectId: subjectId,
+      },
+    );
+    const chat = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Dear diary",
+      resources: [],
+      metadata: {},
+      createdBy: { kind: "subject", subjectId },
+      subjectId,
+      visibility: "user_private",
+      agent: { id: agent.id },
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const authorization: AccessGrantAuthorization = {
+      grant,
+      accountGrant: access.accountGrants[0] ?? null,
+      authenticatedSubjectId: subjectId,
+      contextIntegrity: true,
+      canonicalManagedHumanSession: true,
+    };
+    const sessionAuthorization: SessionAuthorizationPort = {
+      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    const deps = {
+      db: client.db,
+      bus: new MemoryEventBus(),
+      sessionAuthorization,
+      settings: testSettings(),
+    };
+    await expect(
+      updateManagedHumanSessionVisibility(deps, authorization, grant.workspaceId, chat.id, {
+        visibility: "workspace",
+        expectedAuthorityEpoch: 1,
+        idempotencyKey: "agent-chat-share-1",
+      }),
+    ).rejects.toBeInstanceOf(SessionAgentRequiresPrivateChatError);
+    const [row] = await shared.admin<{ visibility: string; agent_id: string }[]>`
+      select visibility, agent_id::text from sessions where id = ${chat.id}`;
+    expect(row).toEqual({ visibility: "user_private", agent_id: agent.id });
   }, 180_000);
 
   test("make private anyway stops a running response and drops another member's authority in one call", async () => {

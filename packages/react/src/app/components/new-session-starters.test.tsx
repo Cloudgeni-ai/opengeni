@@ -96,7 +96,7 @@ test("without the chat list, the new-chat page shows no recent chats or project 
   expect(route).toContain("{chatList ? <RecentSessions workspaceId={workspaceId} /> : null}");
   // The strip still shows Runs on and Visibility; only the project chip goes.
   expect(route).toMatch(
-    /chatList \|\| runsOnSetup \|\| visibilitySetup \? \(\s*<SessionSetupStrip/,
+    /chatList \|\| agentChip \|\| runsOnSetup \|\| visibilitySetup \? \(\s*<SessionSetupStrip/,
   );
   expect(route).toMatch(/project=\{\s*chatList\s*\?/);
 });

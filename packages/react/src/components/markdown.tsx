@@ -63,6 +63,7 @@ import {
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { prepareMathMarkdown } from "../markdown-math";
 import { useMathPlugins } from "./markdown-math-loader";
+import { useArtifactLinkTarget } from "./artifact-link-scope";
 import { LazyPart } from "./lazy-part";
 
 /**
@@ -359,10 +360,29 @@ const markdownComponents: Components = {
     const inherited = useOpenGeniLinkResolver();
     const { [STANDALONE_LINK_ATTRIBUTE]: standaloneMarker, ...props } =
       linkProps as typeof linkProps & Record<typeof STANDALONE_LINK_ATTRIBUTE, unknown>;
-    const target = parseOpenGeniLink(href);
+    const parsed = parseOpenGeniLink(href);
+    const resolved = useArtifactLinkTarget(parsed);
+    if (resolved.pending) return <span aria-busy="true">{children}</span>;
+    if (resolved.error) {
+      return (
+        <ActionMarkdownLink
+          className={linkClass}
+          title={t("markdown.openArtifact")}
+          onOpen={resolved.retry}
+        >
+          {children}
+        </ActionMarkdownLink>
+      );
+    }
+    const target = resolved.target;
     if (target) {
       // Explicit per-kind props keep their historical precedence.
-      if (target.kind === "file" && target.workspaceId === null && artifactHref) {
+      if (
+        target.kind === "file" &&
+        parsed?.kind === "file" &&
+        parsed.workspaceId === null &&
+        artifactHref
+      ) {
         const destination = defaultUrlTransform(artifactHref(target.fileId));
         if (destination) {
           return (

@@ -1,10 +1,11 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { SessionBackgroundCommand } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef } from "react";
 
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { usePolledValue } from "./internal";
 
-export type UseSessionBackgroundCommandsOptions = ClientOverride & {
+export type UseSessionBackgroundCommandsOptions = ClientOverride<ChatClient> & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
 };

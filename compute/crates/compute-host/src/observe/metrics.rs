@@ -177,6 +177,8 @@ pub enum RequestKind {
     Adopt,
     /// From the control service: hand a sandbox off to the next host.
     HandOff,
+    /// Boot a sandbox afresh from its disk where it is.
+    Restart,
     /// From the control service: build a sandbox image from an OCI image,
     /// unless the store holds it.
     Prepare,
@@ -188,7 +190,7 @@ pub enum RequestKind {
 
 impl RequestKind {
     /// Every kind.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Create,
         Self::Remove,
         Self::Touch,
@@ -200,6 +202,7 @@ impl RequestKind {
         Self::Status,
         Self::Adopt,
         Self::HandOff,
+        Self::Restart,
         Self::Prepare,
         Self::Capture,
         Self::Invalid,
@@ -220,6 +223,7 @@ impl RequestKind {
             Self::Status => "status",
             Self::Adopt => "adopt",
             Self::HandOff => "hand_off",
+            Self::Restart => "restart",
             Self::Prepare => "prepare",
             Self::Capture => "capture",
             Self::Invalid => "invalid",

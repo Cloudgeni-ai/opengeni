@@ -1,6 +1,9 @@
 import type {
   ApiIntegrationAuthPreview,
   ApiIntegrationPreview,
+  AutoConnectSupport,
+  CheckOrganizationConnectorAutoConnectRequest,
+  TestOrganizationConnectorAutoConnectResponse,
   CreateOrganizationConnectorRequest,
   IntegrationSourceInput,
   OrganizationApiKeyPlacement,
@@ -10,6 +13,7 @@ import type {
   PreviewOrganizationApiIntegrationRequest,
   UpdateOrganizationConnectorRequest,
 } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { PlugIcon, TrashIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
@@ -39,6 +43,8 @@ import type { CapabilityCatalogItem } from "@opengeni/react/app/types";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { errorMessage } from "@opengeni/contracts/values";
 import { Button } from "@opengeni/react/ui/button";
+import { CopyField } from "@opengeni/react/ui/copy-field";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
 import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
 import { DetailPage, DetailPageBody, DetailPageHeader } from "@opengeni/react/ui/detail-page";
 import { DetailSection, DetailSkeleton } from "@opengeni/react/ui/detail-sheet";
@@ -74,15 +80,17 @@ import { Toolbar, ToolbarSearch } from "@opengeni/react/ui/toolbar";
    API shows under its Custom APIs).
    -------------------------------------------------------------------------- */
 
-type Client = OpenGeniBrowserClient;
+type Client = ChatClient<OpenGeniBrowserClient>;
 
 export const CONNECTOR_LOGIN_LABEL: Record<OrganizationConnectorLogin, string> = {
+  auto_connect: "Connects everyone automatically",
   each_person: "Each person signs in",
   organization_key: "Organization key",
   none: "No sign-in",
 };
 
 const MANAGED_BY = "Organization owners and admins manage it.";
+const AUTO_CONNECT_MCP_ONLY = "Auto-connect is for MCP servers.";
 const EMPTY_REACH = "Pick at least one workspace, or choose All workspaces.";
 
 function reachOf(availability: OrganizationConnectorAvailability): WorkspaceReach {
@@ -216,6 +224,11 @@ export function OrganizationConnectors({
   const catalog = useConnectorCatalog(client, workspaceId);
   const workspaces = useOrganizationWorkspaces(client, organizationId, location.kind !== "list");
   const toList = () => onNavigate({ kind: "list" });
+  const checkAutoConnect = useCallback(
+    (request: CheckOrganizationConnectorAutoConnectRequest) =>
+      client.checkOrganizationConnectorAutoConnect(organizationId, request),
+    [client, organizationId],
+  );
   const logoFor = (connector: OrganizationConnector) =>
     connector.source === "catalog"
       ? catalog.logo(catalog.items?.find((item) => item.id === connector.capabilityId))
@@ -244,6 +257,7 @@ export function OrganizationConnectors({
         onPreviewApi={(request) =>
           client.previewOrganizationApiIntegration(organizationId, request)
         }
+        onCheckAutoConnect={checkAutoConnect}
         onCreate={async (request) => {
           const created = await client.createOrganizationConnector(organizationId, request);
           state.accept(created);
@@ -348,6 +362,20 @@ export function OrganizationConnectors({
         onNavigate({ kind: "connector", connectorId: connector.id, view: "replace-key" })
       }
       onSetStatus={(status) => update({ status })}
+      onChangeAutoConnectClientId={(autoConnectClientId) => update({ autoConnectClientId })}
+      onTestAutoConnect={async () => {
+        const result = await client.testOrganizationConnectorAutoConnect(
+          organizationId,
+          connector.id,
+        );
+        // The saved outcome moves the generation; later changes send the new one.
+        state.accept({
+          ...connector,
+          autoConnect: result.autoConnect,
+          generation: result.generation,
+        });
+        return result;
+      }}
       onRemove={async () => {
         await client.deleteOrganizationConnector(organizationId, connector.id);
         state.drop(connector.id);
@@ -442,6 +470,8 @@ export function catalogLoginChoices(item: Pick<CapabilityCatalogItem, "authKind"
     case "oauth2":
       return {
         allowed: {
+          // Whether its server accepts auto-connect is checked once it is picked.
+          auto_connect: null,
           each_person: null,
           organization_key: null,
           none: `${item.name} needs people to sign in.`,
@@ -451,6 +481,7 @@ export function catalogLoginChoices(item: Pick<CapabilityCatalogItem, "authKind"
     case "api_key":
       return {
         allowed: {
+          auto_connect: noOwnSignIn,
           each_person: noOwnSignIn,
           organization_key: null,
           none: `${item.name} needs a key.`,
@@ -459,11 +490,19 @@ export function catalogLoginChoices(item: Pick<CapabilityCatalogItem, "authKind"
       };
     case "none":
       return {
-        allowed: { each_person: noOwnSignIn, organization_key: null, none: null },
+        allowed: {
+          auto_connect: noOwnSignIn,
+          each_person: noOwnSignIn,
+          organization_key: null,
+          none: null,
+        },
         initial: "none",
       };
     default:
-      return { allowed: { each_person: null, organization_key: null, none: null }, initial: null };
+      return {
+        allowed: { auto_connect: null, each_person: null, organization_key: null, none: null },
+        initial: null,
+      };
   }
 }
 
@@ -479,6 +518,7 @@ export function apiLoginChoices(preview: Pick<ApiIntegrationPreview, "name" | "a
     case "none":
       return {
         allowed: {
+          auto_connect: AUTO_CONNECT_MCP_ONLY,
           each_person: `${preview.name} has no sign-in of its own.`,
           organization_key: `${preview.name} needs no key.`,
           none: null,
@@ -488,6 +528,7 @@ export function apiLoginChoices(preview: Pick<ApiIntegrationPreview, "name" | "a
     case "oauth2":
       return {
         allowed: {
+          auto_connect: AUTO_CONNECT_MCP_ONLY,
           each_person: null,
           organization_key: `${preview.name} signs in with OAuth, so each person connects their own account.`,
           none: `${preview.name} needs people to sign in.`,
@@ -497,6 +538,7 @@ export function apiLoginChoices(preview: Pick<ApiIntegrationPreview, "name" | "a
     default:
       return {
         allowed: {
+          auto_connect: AUTO_CONNECT_MCP_ONLY,
           each_person: null,
           organization_key: null,
           none: `${preview.name} needs a key.`,
@@ -613,6 +655,81 @@ function ReachFields({
   );
 }
 
+type AutoConnectCheck =
+  | { status: "idle" }
+  | { status: "checking" }
+  | { status: "done"; support: AutoConnectSupport }
+  | { status: "failed" };
+
+/**
+ * Whether the picked server accepts auto-connect, asked as soon as it is
+ * known (a typed address after a short pause).
+ */
+function useAutoConnectCheck(
+  target: CheckOrganizationConnectorAutoConnectRequest | null,
+  check: (request: CheckOrganizationConnectorAutoConnectRequest) => Promise<AutoConnectSupport>,
+): { check: AutoConnectCheck; retry: () => void } {
+  const [attempt, setAttempt] = useState(0);
+  const key = target ? JSON.stringify({ ...target, attempt }) : null;
+  const [state, setState] = useState<{ key: string | null; check: AutoConnectCheck }>({
+    key: null,
+    check: { status: "idle" },
+  });
+  const retry = useCallback(() => setAttempt((current) => current + 1), []);
+  useEffect(() => {
+    if (!key) return;
+    let live = true;
+    const { attempt: _attempt, ...request } = JSON.parse(
+      key,
+    ) as CheckOrganizationConnectorAutoConnectRequest & { attempt: number };
+    const timer = setTimeout(
+      () => {
+        setState({ key, check: { status: "checking" } });
+        Promise.resolve()
+          .then(() => check(request))
+          .then((support) => {
+            if (live) setState({ key, check: { status: "done", support } });
+          })
+          .catch(() => {
+            if (live) setState({ key, check: { status: "failed" } });
+          });
+      },
+      request.endpointUrl ? 500 : 0,
+    );
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [key, check]);
+  if (!key) return { check: { status: "idle" }, retry };
+  return { check: state.key === key ? state.check : { status: "checking" }, retry };
+}
+
+function sentence(text: string): string {
+  return /[.!?]$/u.test(text) ? text : `${text}.`;
+}
+
+/** Why "Connect everyone automatically" can't be chosen yet, or null. */
+export function autoConnectUnavailableReason(
+  check: AutoConnectCheck,
+  name: string,
+  source: "catalog" | "custom" = "custom",
+): string | null {
+  switch (check.status) {
+    case "idle":
+      return source === "catalog"
+        ? "Choose a connector first."
+        : "Enter the server's address first.";
+    case "checking":
+      return `Checking whether ${name} supports it…`;
+    case "failed":
+      return `Couldn't check ${name}.`;
+    case "done":
+      if (check.support.supported) return null;
+      return sentence(check.support.reason ?? `${name} doesn't support auto-connect yet`);
+  }
+}
+
 function NewConnectorPage({
   catalog: catalogState,
   organizationName,
@@ -620,6 +737,7 @@ function NewConnectorPage({
   workspaces,
   onClose,
   onPreviewApi,
+  onCheckAutoConnect,
   onCreate,
 }: {
   catalog: Catalog;
@@ -630,6 +748,9 @@ function NewConnectorPage({
   onPreviewApi: (
     request: PreviewOrganizationApiIntegrationRequest,
   ) => Promise<ApiIntegrationPreview>;
+  onCheckAutoConnect: (
+    request: CheckOrganizationConnectorAutoConnectRequest,
+  ) => Promise<AutoConnectSupport>;
   onCreate: (request: CreateOrganizationConnectorRequest) => Promise<void>;
 }) {
   const [source, setSource] = useState<"catalog" | "custom" | "api">("catalog");
@@ -655,6 +776,7 @@ function NewConnectorPage({
   });
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
   const [formError, setFormError] = useState<ReactNode>(null);
+  const [autoConnectClientId, setAutoConnectClientId] = useState("");
   const catalog = catalogState.items;
   const added = useMemo(
     () => new Set((existing ?? []).map((connector) => connector.capabilityId)),
@@ -666,7 +788,37 @@ function NewConnectorPage({
       ? catalogLoginChoices(item)
       : source === "api" && checked
         ? apiLoginChoices(checked.preview)
-        : { allowed: { each_person: null, organization_key: null, none: null }, initial: null };
+        : {
+            allowed: { auto_connect: null, each_person: null, organization_key: null, none: null },
+            initial: null,
+          };
+  const autoConnectTarget = useMemo<CheckOrganizationConnectorAutoConnectRequest | null>(
+    () =>
+      source === "catalog" && item?.authKind === "oauth2"
+        ? { capabilityId: item.id }
+        : source === "custom" && /^https:\/\/[^\s/]+\.[^\s]+$/u.test(endpointUrl.trim())
+          ? { endpointUrl: endpointUrl.trim() }
+          : null,
+    [source, item?.id, item?.authKind, endpointUrl],
+  );
+  const { check: autoConnect, retry: retryAutoConnect } = useAutoConnectCheck(
+    autoConnectTarget,
+    onCheckAutoConnect,
+  );
+  const serverName =
+    source === "catalog" ? (item?.name ?? "the server") : name.trim() || "the server";
+  const autoConnectReason =
+    choices.allowed.auto_connect ??
+    autoConnectUnavailableReason(
+      autoConnect,
+      serverName,
+      source === "catalog" ? "catalog" : "custom",
+    );
+  const autoConnectSupport = autoConnect.status === "done" ? autoConnect.support : null;
+  const needsClientId =
+    login === "auto_connect" &&
+    autoConnectSupport?.supported === true &&
+    !autoConnectSupport.clientIdMetadataDocumentSupported;
   const query = search.trim().toLowerCase();
   const shown = (catalog ?? []).filter((each) =>
     `${each.name} ${each.description ?? ""}`.toLowerCase().includes(query),
@@ -747,7 +899,10 @@ function NewConnectorPage({
         if (source === "api" && !checked) {
           // How people sign in is chosen once the API is checked.
         } else if (!login) next.login = "Choose how people sign in.";
+        else if (login === "auto_connect" && autoConnectReason) next.login = autoConnectReason;
         else if (choices.allowed[login]) next.login = choices.allowed[login] ?? undefined;
+        if (needsClientId && !autoConnectClientId.trim())
+          next.autoConnectClientId = `Enter the client ID ${serverName} gave Opengeni.`;
         const keyed =
           login === "organization_key" && source === "api" && checked
             ? apiKeyPlacements(checked.preview.auth, apiKey)
@@ -783,6 +938,7 @@ function NewConnectorPage({
                 ? { headers: { [header.name.trim()]: header.value.trim() } }
                 : {}),
             availability: availabilityOf(reach),
+            ...(needsClientId ? { autoConnectClientId: autoConnectClientId.trim() } : {}),
           });
           return true;
         } catch (caught) {
@@ -977,6 +1133,15 @@ function NewConnectorPage({
               disabled={Boolean(choices.allowed.each_person)}
               disabledReason={choices.allowed.each_person ?? undefined}
             />
+            {source === "api" ? null : (
+              <ChoiceCard
+                value="auto_connect"
+                title="Connect everyone automatically"
+                description="Each person gets their own account the first time they use it, with no sign-in."
+                disabled={Boolean(autoConnectReason)}
+                disabledReason={autoConnectReason ?? undefined}
+              />
+            )}
             <ChoiceCard
               value="organization_key"
               title="Organization key"
@@ -997,6 +1162,35 @@ function NewConnectorPage({
             />
           </ChoiceCards>
         )}
+        {source !== "api" && autoConnect.status === "failed" ? (
+          <Button
+            type="button"
+            variant="link"
+            size="sm"
+            className="-mt-2 h-auto self-start px-0 text-xs font-medium underline underline-offset-4"
+            onClick={retryAutoConnect}
+          >
+            Check auto-connect again
+          </Button>
+        ) : null}
+        {needsClientId ? (
+          <Field
+            label="Client ID"
+            hint={`${serverName} doesn't read Opengeni's client details on its own. Enter the client ID it gave Opengeni.`}
+            error={errors.autoConnectClientId}
+          >
+            <TextInput
+              value={autoConnectClientId}
+              onChange={(event) => {
+                setAutoConnectClientId(event.target.value);
+                clear("autoConnectClientId");
+              }}
+              maxLength={256}
+              mono
+              suppressAutofill
+            />
+          </Field>
+        ) : null}
         {login === "organization_key" && source === "api" && checked ? (
           <ApiKeyFields
             auth={checked.preview.auth}
@@ -1040,6 +1234,8 @@ function ConnectorPage({
   onEditAvailability,
   onReplaceKey,
   onSetStatus,
+  onTestAutoConnect,
+  onChangeAutoConnectClientId,
   onRemove,
 }: {
   connector: OrganizationConnector;
@@ -1049,6 +1245,9 @@ function ConnectorPage({
   onEditAvailability: () => void;
   onReplaceKey: () => void;
   onSetStatus: (status: OrganizationConnector["status"]) => Promise<void>;
+  onTestAutoConnect: () => Promise<TestOrganizationConnectorAutoConnectResponse>;
+  /** A client ID the app gave Opengeni, or null for Opengeni's own document. */
+  onChangeAutoConnectClientId: (clientId: string | null) => Promise<void>;
   onRemove: () => Promise<void>;
 }) {
   const [removing, setRemoving] = useState(false);
@@ -1057,15 +1256,17 @@ function ConnectorPage({
   const on = connector.status === "active";
   const api = connector.apiIntegration;
   const signIn =
-    connector.login === "each_person"
-      ? api
-        ? "Each person adds their own key or account, under a workspace's Custom APIs."
-        : "Each person connects their own account from a workspace's Connectors page."
-      : connector.login === "organization_key"
+    connector.login === "auto_connect"
+      ? `Each person is connected with their own account the first time they use it. If ${connector.name} refuses, they sign in instead.`
+      : connector.login === "each_person"
         ? api
-          ? `The organization's key. ${apiKeyDestination(api.auth)}`
-          : `The organization's key, sent as ${connector.headerNames.join(", ") || "a header"}.`
-        : "Needs no account or key.";
+          ? "Each person adds their own key or account, under a workspace's Custom APIs."
+          : "Each person connects their own account from a workspace's Connectors page."
+        : connector.login === "organization_key"
+          ? api
+            ? `The organization's key. ${apiKeyDestination(api.auth)}`
+            : `The organization's key, sent as ${connector.headerNames.join(", ") || "a header"}.`
+          : "Needs no account or key.";
   return (
     <DetailPage
       back={{ label: "Integrations", onClick: onBack }}
@@ -1156,6 +1357,15 @@ function ConnectorPage({
             ) : null}
           </SettingRowGroup>
         </DetailSection>
+        {connector.login === "auto_connect" && connector.autoConnect ? (
+          <AutoConnectSetup
+            name={connector.name}
+            setup={connector.autoConnect}
+            organizationName={organizationName}
+            onTest={onTestAutoConnect}
+            onChangeClientId={onChangeAutoConnectClientId}
+          />
+        ) : null}
         <DetailSection title="In each workspace">
           <p className="m-0 max-w-prose text-sm leading-5 text-fg-muted">
             {api
@@ -1170,7 +1380,7 @@ function ConnectorPage({
         title={`Remove ${connector.name}?`}
         consequences={[
           "Every workspace stops getting it at once.",
-          ...(connector.login === "each_person"
+          ...(connector.login === "each_person" || connector.login === "auto_connect"
             ? [
                 api
                   ? "People's own keys and accounts stay, and work again if it's added back."
@@ -1192,6 +1402,172 @@ function ConnectorPage({
         }}
       />
     </DetailPage>
+  );
+}
+
+/**
+ * An auto-connect connector's setup: what to paste into the app's trusted
+ * issuers, and a test as the admin. The status says what is missing.
+ */
+export function AutoConnectSetup({
+  name,
+  setup,
+  organizationName,
+  onTest,
+  onChangeClientId,
+}: {
+  name: string;
+  setup: NonNullable<OrganizationConnector["autoConnect"]>;
+  organizationName: string;
+  onTest: () => Promise<TestOrganizationConnectorAutoConnectResponse>;
+  onChangeClientId: (clientId: string | null) => Promise<void>;
+}) {
+  const [testing, setTesting] = useState(false);
+  const [testError, setTestError] = useState<string | null>(null);
+  /** The client ID being typed, or null while it isn't being changed. */
+  const [editingClientId, setEditingClientId] = useState<string | null>(null);
+  const [clientIdError, setClientIdError] = useState<string | null>(null);
+  const [savingClientId, setSavingClientId] = useState(false);
+  const saveClientId = () => {
+    const next = editingClientId?.trim() ?? "";
+    if (next.length > 512) {
+      setClientIdError("That client ID is too long.");
+      return;
+    }
+    if (next === setup.clientId) {
+      setEditingClientId(null);
+      return;
+    }
+    setSavingClientId(true);
+    setClientIdError(null);
+    onChangeClientId(next || null)
+      .then(() => setEditingClientId(null))
+      .catch((caught: unknown) => setClientIdError(userErrorText(caught)))
+      .finally(() => setSavingClientId(false));
+  };
+  const failedAt = setup.lastError ? Date.parse(setup.lastError.at) : null;
+  const verifiedAt = setup.verifiedAt ? Date.parse(setup.verifiedAt) : null;
+  const state =
+    failedAt !== null && (verifiedAt === null || failedAt > verifiedAt)
+      ? "refused"
+      : verifiedAt !== null
+        ? "working"
+        : "waiting";
+  return (
+    <DetailSection
+      title="Auto-connect"
+      description={`Add ${organizationName} as a trusted issuer in ${name}, then test it.`}
+    >
+      <div className="flex min-w-0 flex-col gap-6">
+        {state === "working" ? (
+          <Notice tone="success" title="Working">
+            Last test passed <RelativeTime date={setup.verifiedAt!} />. People are connected the
+            first time they use it.
+          </Notice>
+        ) : state === "refused" ? (
+          <Notice tone="failed" title={`${name} refused`}>
+            {setup.lastError!.message}
+          </Notice>
+        ) : (
+          <Notice tone="waiting" title={`Waiting for ${name}`}>
+            Until {name} trusts your organization, people sign in themselves.
+          </Notice>
+        )}
+        <FieldStack>
+          <Field label="Issuer URL" hint={`Paste this into ${name}'s trusted issuer setting.`}>
+            <CopyField value={setup.issuer} label="issuer URL" variant="field" size="md" />
+          </Field>
+          {editingClientId === null ? (
+            <Field
+              label="Client ID"
+              hint={
+                <>
+                  Opengeni's client ID at {name}, if it asks for one.{" "}
+                  <Button
+                    type="button"
+                    variant="link"
+                    size="sm"
+                    className="h-auto px-0 text-xs font-medium underline underline-offset-4"
+                    onClick={() => {
+                      setClientIdError(null);
+                      setEditingClientId(setup.clientId);
+                    }}
+                  >
+                    Change
+                  </Button>
+                </>
+              }
+            >
+              <CopyField value={setup.clientId} label="client ID" variant="field" size="md" />
+            </Field>
+          ) : (
+            <div className="flex min-w-0 flex-col gap-3">
+              <Field
+                label="Client ID"
+                hint={`The client ID ${name} gave Opengeni. Leave it empty to use Opengeni's own.`}
+                error={clientIdError ?? undefined}
+              >
+                <TextInput
+                  value={editingClientId}
+                  onChange={(event) => {
+                    setEditingClientId(event.target.value);
+                    setClientIdError(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      saveClientId();
+                    }
+                  }}
+                  mono
+                  suppressAutofill
+                  spellCheck={false}
+                  autoFocus
+                />
+              </Field>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button type="button" size="sm" disabled={savingClientId} onClick={saveClientId}>
+                  {savingClientId ? "Saving…" : "Save"}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={savingClientId}
+                  onClick={() => setEditingClientId(null)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+        </FieldStack>
+        {testError ? (
+          <ErrorMessage variant="inline" title="Couldn't run the test." announce>
+            {testError}
+          </ErrorMessage>
+        ) : null}
+        <div className="flex min-w-0 flex-wrap items-center gap-3">
+          <Button
+            type="button"
+            variant="outline"
+            disabled={testing}
+            onClick={() => {
+              setTesting(true);
+              setTestError(null);
+              onTest()
+                .catch((caught: unknown) => setTestError(userErrorText(caught)))
+                .finally(() => setTesting(false));
+            }}
+          >
+            {testing ? "Testing…" : "Test as you"}
+          </Button>
+          <span className="text-sm leading-5 text-fg-muted">
+            Checks that {name} accepts your organization. Nothing is saved.
+          </span>
+        </div>
+      </div>
+    </DetailSection>
   );
 }
 

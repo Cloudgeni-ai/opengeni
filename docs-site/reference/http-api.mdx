@@ -6,6 +6,10 @@ icon: "globe"
 
 Opengeni's public API is a workspace-scoped HTTP API. Most integrations should use [`@opengeni/sdk`](/reference/sdk), which wraps these routes with types, retries, and stream recovery. Every request authenticates first (see [Authentication](/reference/authentication)).
 
+## Billing
+
+API and embedded-product usage spends credits, not plan credit. Connected AI subscriptions are available only in the Opengeni apps on Pro ($20/month), Max, or Enterprise; API requests that explicitly select one return `403` with `subscription_api_unavailable`. A self-hosted deployment can allow them for API requests with `OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED=true`; see [Self-host](/guides/self-host#connected-subscriptions-over-the-api). See [Going to production](/integrate/production) for billing and model selection.
+
 ## Discovery
 
 | Route                   | Returns                                                         |
@@ -39,6 +43,6 @@ The event stream is Server-Sent Events. Every event has a sequence number, so a 
 
 ## Compatibility
 
-Within a major version the API only grows: clients ignore unknown fields and event types, and servers ignore unknown request fields. See [Going to production](/integrate/production#keep-sdk-and-server-compatible).
+The API only grows, and server updates don't break existing integrations: servers accept every request a published SDK sends, and clients ignore unknown fields and event types. Rare exceptions (an emergency security fix or an explicit product-owner decision) are announced with migration notes. See [Going to production](/integrate/production#keep-sdk-and-server-compatible).
 
 The full route list is in the repository's [HTTP API overview](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/http-api.md).

@@ -547,12 +547,12 @@
                                 {
                                   "check": "min_length",
                                   "minimum": 1,
-                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                  "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                 },
                                 {
                                   "check": "max_length",
                                   "maximum": 64,
-                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                  "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                 }
                               ],
                               "type": "string"
@@ -569,12 +569,12 @@
                                 {
                                   "check": "min_length",
                                   "minimum": 1,
-                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                  "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                 },
                                 {
                                   "check": "max_length",
                                   "maximum": 32,
-                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                  "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                 }
                               ],
                               "type": "string"
@@ -594,12 +594,12 @@
                                       {
                                         "check": "min_length",
                                         "minimum": 1,
-                                        "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                        "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                       },
                                       {
                                         "check": "max_length",
                                         "maximum": 64,
-                                        "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                        "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                       }
                                     ],
                                     "type": "string"
@@ -647,7 +647,7 @@
                                 {
                                   "check": "max_length",
                                   "maximum": 20,
-                                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                                  "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                                 }
                               ],
                               "element": "<schema>",
@@ -712,7 +712,7 @@
                           {
                             "check": "max_length",
                             "maximum": 20,
-                            "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                            "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                           }
                         ],
                         "element": "<schema>",
@@ -875,7 +875,7 @@
                 {
                   "check": "max_length",
                   "maximum": 20,
-                  "when": "(payload) => {\n    const val = payload.value;\n    return !util.nullish(val) && val.length !== void 0;\n  }"
+                  "when": "(payload) => {\n  const val = payload.value;\n  return !util.nullish(val) && val.length !== void 0;\n}"
                 }
               ],
               "element": "<schema>",
@@ -1239,6 +1239,11 @@
               "checks": [],
               "innerType": "<schema>",
               "type": "nullable"
+            },
+            {
+              "checks": [],
+              "innerType": "<schema>",
+              "type": "optional"
             }
           ]
         },
@@ -1258,6 +1263,34 @@
                 "xai": "xai"
               },
               "type": "enum"
+            }
+          ]
+        },
+        "resetsAt": {
+          "anyOf": [
+            {
+              "type": "string",
+              "x-opengeni-defs": [
+                {
+                  "checks": [],
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-opengeni-defs": [
+            {
+              "checks": [],
+              "innerType": "<schema>",
+              "type": "nullable"
+            },
+            {
+              "checks": [],
+              "innerType": "<schema>",
+              "type": "optional"
             }
           ]
         },
@@ -1292,6 +1325,7 @@
             "childTurnId": "<schema>",
             "nextCheckAt": "<schema>",
             "provider": "<schema>",
+            "resetsAt": "<schema>",
             "type": "<schema>"
           },
           "type": "object"
@@ -1299,12 +1333,12 @@
       ]
     }
   },
-  "revision": 2,
+  "revision": 3,
   "wakeClasses": {
     "child_paused": "deferred",
     "child_progress": "deferred",
     "child_requires_action": "immediate",
     "child_requires_action_resolved": "deferred",
-    "child_waiting_capacity": "deferred"
+    "child_waiting_capacity": "immediate"
   }
 }

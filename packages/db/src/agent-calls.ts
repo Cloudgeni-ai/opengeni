@@ -1,7 +1,8 @@
 import { and, eq, sql } from "drizzle-orm";
 import { rawRows, withRlsContext, type Database } from "./database";
-import { agentCallRoutinesGranted } from "./native-push";
 import { agentCallHostPhones, agentCalls } from "./schema";
+import { lockSessionEventWriteRows } from "./session-control";
+import { endSessionRealtimePreparationsInTransaction } from "./session-realtime-preparation";
 
 // Agents calling people (1107, docs/design/agent-calls.md). A call rings the
 // callee's opted-in phones until its deadline; the first answer wins, and a
@@ -171,13 +172,12 @@ async function hostPhoneCount(
 
 /**
  * How many of a person's Opengeni app phones an agent may ring (for their
- * own agents, or a teammate's). None until the agent call routines are granted.
+ * own agents, or a teammate's).
  */
 export async function countAgentCallDevices(
   db: Database,
   input: { calleeSubjectId: string; member: boolean },
 ): Promise<number> {
-  if (!(await agentCallRoutinesGranted(db))) return 0;
   const [row] = await rawRows<{ devices: number }>(
     db,
     sql`select opengeni_private.agent_call_device_count_v1(
@@ -212,10 +212,6 @@ export async function placeAgentCall(
       await scoped.execute(
         sql`select pg_advisory_xact_lock(hashtextextended(${`opengeni:agent-call:${input.calleeSubjectId}`}::text, 0))`,
       );
-      // Calls need the call routines granted, wherever the phones ring.
-      if (!(await agentCallRoutinesGranted(scoped))) {
-        return { placed: false, refusal: "no_phone" };
-      }
       const hostPhones = await hostPhoneCount(scoped, input);
       if (hostPhones === 0 && (await countAgentCallDevices(scoped, input)) === 0) {
         return { placed: false, refusal: "no_phone" };
@@ -312,6 +308,18 @@ export async function settleAgentCall(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scoped) => {
+      const [target] = await scoped
+        .select({ sessionId: agentCalls.sessionId })
+        .from(agentCalls)
+        .where(and(eq(agentCalls.workspaceId, input.workspaceId), eq(agentCalls.id, input.callId)))
+        .limit(1);
+      if (!target) return null;
+      // Match realtime promotion's session -> mode -> call lock order.
+      await lockSessionEventWriteRows(scoped, {
+        workspaceId: input.workspaceId,
+        controlLock: "share",
+        sessionIds: [target.sessionId],
+      });
       const conditions = [
         eq(agentCalls.workspaceId, input.workspaceId),
         eq(agentCalls.id, input.callId),
@@ -340,9 +348,41 @@ export async function settleAgentCall(
         })
         .where(and(...conditions))
         .returning();
-      return row ? mapCall(row) : null;
+      if (!row) return null;
+      await endSessionRealtimePreparationsInTransaction(scoped, {
+        workspaceId: input.workspaceId,
+        sessionId: row.sessionId,
+        callId: row.id,
+        ...(input.outcome === "answered" && row.answeredBy ? { exceptDevice: row.answeredBy } : {}),
+        reason: input.outcome === "missed" ? "lease_expired" : "browser_unload",
+        now: row.endedAt!,
+      });
+      if (row.state === "answered" || row.state === "declined" || row.state === "cancelled") {
+        await endAgentCallRingsInTransaction(scoped, row.id);
+      }
+      return mapCall(row);
     },
   );
+}
+
+const END_RINGS_ROUTINE = "opengeni_private.end_agent_call_rings_v1(uuid)";
+
+/**
+ * Stop a settled call's ring on the callee's other phones (1344): withdraw
+ * rings not sent yet and queue an `ended` push to Android phones that rang.
+ * Does nothing while the deployment's database still withholds the routine
+ * from the runtime; those phones then ring out as before.
+ */
+async function endAgentCallRingsInTransaction(scoped: Database, callId: string): Promise<void> {
+  // A separate statement: EXECUTE is checked when a statement starts, so a
+  // guard inside the calling statement would not avoid the permission error.
+  const [granted] = await rawRows<{ granted: boolean | null }>(
+    scoped,
+    sql`select has_function_privilege(to_regprocedure(${END_RINGS_ROUTINE})::oid, 'EXECUTE')
+      as granted`,
+  );
+  if (granted?.granted !== true) return;
+  await rawRows(scoped, sql`select opengeni_private.end_agent_call_rings_v1(${callId}::uuid)`);
 }
 
 /**
@@ -356,6 +396,7 @@ export async function claimAnsweredAgentCallForRealtimeInTransaction(
     sessionId: string;
     calleeSubjectId: string;
     realtimeId: string;
+    callId?: string | undefined;
     withinSeconds?: number;
   },
 ): Promise<AgentCallRow | null> {
@@ -368,6 +409,7 @@ export async function claimAnsweredAgentCallForRealtimeInTransaction(
           and session_id = ${input.sessionId}::uuid
           and callee_subject_id = ${input.calleeSubjectId}::text
           and state = 'answered' and realtime_id is null
+          and (${input.callId ?? null}::uuid is null or id = ${input.callId ?? null}::uuid)
           and ended_at > now() - make_interval(secs => ${input.withinSeconds ?? 120}::integer)
         order by ended_at desc limit 1
         for update

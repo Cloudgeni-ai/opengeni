@@ -16,7 +16,7 @@ describe("runtime failures dashboard", () => {
       "Recovery exhausted",
       "Firing Opengeni alerts",
       "Turn outcomes",
-      "Turn failure and recovery ratios",
+      "Platform failures, customer provider failures and recoveries",
       "MCP lifecycle operations",
       "MCP tool calls by outcome",
       "MCP tool-call p95 by outcome and tool",
@@ -49,8 +49,6 @@ describe("runtime failures dashboard", () => {
       "opengeni_session_event_publish_seconds_bucket",
       "opengeni_model_calls_total",
       "opengeni_model_invalid_requests_total",
-      "opengeni_model_tool_name_repairs_total",
-      "opengeni_model_tool_name_retries_total",
       "alertmanager_notifications_failed_total",
       "kube_deployment_status_replicas_available",
       "kube_cronjob_status_last_successful_time",
@@ -82,8 +80,10 @@ describe("runtime failures dashboard", () => {
     expect(scrapeHealth).not.toContain('environment="$environment"');
     expect(panels.get("Probe age")?.targets?.[0]?.expr).not.toContain("or vector(0)");
 
-    const ratio = panels.get("Turn failure and recovery ratios");
-    expect(ratio?.targets).toHaveLength(2);
+    const ratio = panels.get("Platform failures, customer provider failures and recoveries");
+    expect(ratio?.targets).toHaveLength(3);
+    expect(ratio?.targets?.[0]?.expr).toContain('failure_origin!="customer_provider"');
+    expect(ratio?.targets?.[2]?.expr).toContain('failure_origin="customer_provider"');
     for (const target of ratio?.targets ?? []) {
       expect(target.expr).toContain("or vector(0)");
       expect(target.expr).toContain("clamp_min");

@@ -1,5 +1,4 @@
 import { beginMcpPhase, traceparent } from "@opengeni/observability";
-import type { Settings } from "@opengeni/config";
 import { CODEMODE_ARGUMENTS_MAX_BYTES, MCP_MAX_CATALOG_TOOL_ENTRIES } from "@opengeni/contracts";
 import {
   isNonPublicAddress,
@@ -7,6 +6,7 @@ import {
   resolvePinnedDestination,
   type DnsLookup,
   type FetchLike,
+  type OutboundNetworkSettings,
 } from "@opengeni/network";
 
 export { undiciFetch } from "@opengeni/network";
@@ -35,6 +35,8 @@ export const MCP_MAX_CONCURRENT_SERVER_OPERATIONS = 8;
 // transport timeout before that server finishes its own handshake.
 export const MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS = 10_000;
 export const MCP_MAX_AGGREGATE_TOOL_LIST_BYTES = 16 * 1024 * 1024;
+// Ordered tool admission never waits longer than this on an earlier server.
+export const MCP_ORDERED_ADMISSION_MAX_WAIT_MS = 120_000;
 
 export const MCP_REPLAY_SAFE_METHODS = [
   "initialize",
@@ -407,6 +409,21 @@ export class McpPayloadTooLargeError extends Error {
   }
 }
 
+/** A size-limit refusal anywhere in an error's cause chain, across SDK copies. */
+export function isMcpPayloadTooLargeError(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 8 && current !== null && typeof current === "object"; depth += 1) {
+    if (
+      current instanceof McpPayloadTooLargeError ||
+      (current as { name?: unknown }).name === "McpPayloadTooLargeError"
+    ) {
+      return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export function mcpSerializedSizeBytes(value: unknown): number {
   let serialized: string;
   try {
@@ -465,6 +482,139 @@ export function assertMcpServerSelectionWithinBounds<T>(servers: readonly T[]): 
   return servers;
 }
 
+/** Why one listed tool was left out of a server's tool list for this attempt. */
+export type McpToolListDropReason =
+  | "definition_unreadable"
+  | "definition_too_large"
+  | "list_entry_limit"
+  | "list_byte_limit"
+  | "aggregate_entry_limit"
+  | "aggregate_byte_limit"
+  | "model_name_taken";
+
+export type McpToolListDrop = {
+  /** The listed name, bounded; empty when the listing had none. */
+  name: string;
+  reason: McpToolListDropReason;
+};
+
+export type McpToolListFit<T> = {
+  tools: T[];
+  dropped: McpToolListDrop[];
+  /** Exact serialized size of `tools` as one JSON array. */
+  bytes: number;
+};
+
+export type McpToolListFitOptions<T> = {
+  /** Tools to admit before all others (harness control, eager tools). */
+  keepFirst?: (tool: T) => boolean;
+  maxEntries?: number;
+  maxBytes?: number;
+  /** Reasons recorded for tools that do not fit; list limits by default. */
+  limitReasons?: { entries: McpToolListDropReason; bytes: McpToolListDropReason };
+  /** Serialized size of one tool; lets a caller measure each tool only once. */
+  sizeOf?: (tool: T) => number;
+};
+
+function listedToolName(tool: unknown): string {
+  const name = (tool as { name?: unknown } | null)?.name;
+  return typeof name === "string" ? name.slice(0, 256) : "";
+}
+
+/**
+ * Fit one tools/list inside the safety limits without failing it: a
+ * definition over the per-tool limit is left out, then tools are admitted
+ * `keepFirst` tools first and otherwise by name while the list stays within
+ * its entry and serialized-byte limits. The result keeps the listing order and
+ * names every tool left out, so the caller can warn and tell the model.
+ */
+export function fitMcpToolListWithinBounds<T>(
+  tools: readonly T[],
+  options: McpToolListFitOptions<T> = {},
+): McpToolListFit<T> {
+  const maxEntries = options.maxEntries ?? MCP_MAX_TOOL_LIST_ENTRIES;
+  const maxBytes = options.maxBytes ?? MCP_MAX_TOOL_LIST_BYTES;
+  const reasons = options.limitReasons ?? {
+    entries: "list_entry_limit" as const,
+    bytes: "list_byte_limit" as const,
+  };
+  const dropped: McpToolListDrop[] = [];
+  const sizes = new Array<number>(tools.length);
+  const candidates: number[] = [];
+  tools.forEach((tool, index) => {
+    let size: number;
+    try {
+      size = options.sizeOf ? options.sizeOf(tool) : mcpSerializedSizeBytes(tool);
+    } catch {
+      dropped.push({ name: listedToolName(tool), reason: "definition_unreadable" });
+      return;
+    }
+    if (size > MCP_MAX_TOOL_DEFINITION_BYTES) {
+      dropped.push({ name: listedToolName(tool), reason: "definition_too_large" });
+      return;
+    }
+    sizes[index] = size;
+    candidates.push(index);
+  });
+  // Choose what to keep by stable names, not listing order: a provider can
+  // list the same tools in a different order (or page) on another turn, and
+  // the kept set must stay the same for the same tools.
+  const keepFirst = options.keepFirst;
+  const pins = new Map(candidates.map((index) => [index, keepFirst?.(tools[index]!) ? 0 : 1]));
+  const names = new Map(candidates.map((index) => [index, listedToolName(tools[index])]));
+  const order = [...candidates].sort((left, right) => {
+    const byPin = pins.get(left)! - pins.get(right)!;
+    if (byPin !== 0) return byPin;
+    const leftName = names.get(left)!;
+    const rightName = names.get(right)!;
+    return leftName < rightName ? -1 : leftName > rightName ? 1 : left - right;
+  });
+  const accepted = new Set<number>();
+  // A JSON array serializes as "[" + items joined by "," + "]", so this is the
+  // exact serialized size of the accepted list, not an estimate.
+  let bytes = 2;
+  for (const index of order) {
+    const added = sizes[index]! + (accepted.size > 0 ? 1 : 0);
+    if (accepted.size + 1 > maxEntries) {
+      dropped.push({ name: listedToolName(tools[index]), reason: reasons.entries });
+    } else if (bytes + added > maxBytes) {
+      dropped.push({ name: listedToolName(tools[index]), reason: reasons.bytes });
+    } else {
+      accepted.add(index);
+      bytes += added;
+    }
+  }
+  return {
+    tools: tools.filter((_, index) => accepted.has(index)),
+    dropped,
+    bytes,
+  };
+}
+
+/** One plain sentence for the model about tools left out of one server's list. */
+export function describeMcpToolListDrops(dropped: readonly McpToolListDrop[]): string {
+  const counts = new Map<string, number>();
+  for (const { reason } of dropped) {
+    const why =
+      reason === "model_name_taken"
+        ? "their names clash with another integration's tools"
+        : reason === "definition_too_large" || reason === "definition_unreadable"
+          ? "their definitions are too large or unreadable"
+          : "the integration lists more tools than one turn can hold";
+    counts.set(why, (counts.get(why) ?? 0) + 1);
+  }
+  const parts = [...counts].map(([why, count]) => `${count} because ${why}`);
+  const names = dropped
+    .map(({ name }) => name)
+    .filter(Boolean)
+    .slice(0, 5);
+  return (
+    `connected, but ${dropped.length} of its tools are unavailable this turn (${parts.join("; ")})` +
+    (names.length ? `, for example ${names.join(", ")}` : "") +
+    ". Its other tools work."
+  ).slice(0, 1_000);
+}
+
 export function mcpOuterConnectTimeoutMs(
   configuredTimeouts: readonly (number | undefined)[],
 ): number {
@@ -487,6 +637,16 @@ type McpToolListContribution = {
  */
 export class McpAggregateToolListBudget {
   private readonly contributions = new Map<string, McpToolListContribution>();
+  /** Model name -> the source that listed it first this run. */
+  private readonly modelNameClaims = new Map<string, string>();
+  /** Admission order: a source admits only after every source before it. */
+  private readonly order: string[] = [];
+  /** Starts a source's own listing, so a later source never waits on idle work. */
+  private readonly starters = new Map<string, () => unknown>();
+  private readonly settled = new Map<
+    string,
+    { done: boolean; promise: Promise<void>; resolve: () => void }
+  >();
   private totalEntries = 0;
   private totalBytes = 0;
 
@@ -520,7 +680,157 @@ export class McpAggregateToolListBudget {
     return tools;
   }
 
+  /**
+   * Admit one source's list without failing it: tools whose model name another
+   * source already listed are left out (first listing wins), then the list is
+   * fitted to the per-list limits and to what is left of the aggregate budget.
+   * This keeps every server's listing disjoint by model name, so one connector
+   * can never take another's name or fail the run with a duplicate. Like
+   * `replace`, a relist replaces this source's earlier contribution and claims.
+   */
+  admit<T>(
+    sourceId: string,
+    tools: readonly T[],
+    options: Pick<McpToolListFitOptions<T>, "keepFirst"> = {},
+  ): McpToolListFit<T> {
+    const dropped: McpToolListDrop[] = [];
+    const unclaimed = tools.filter((tool) => {
+      const name = (tool as { name?: unknown } | null)?.name;
+      if (typeof name !== "string") return true;
+      const owner = this.modelNameClaims.get(name);
+      if (owner === undefined || owner === sourceId) return true;
+      dropped.push({ name: name.slice(0, 256), reason: "model_name_taken" });
+      return false;
+    });
+    // Measure each tool once for both fits; a thrown measurement is reported
+    // by the fit as an unreadable definition.
+    const sizes = new Map<unknown, number>();
+    const sizeOf = (tool: T) => {
+      let size = sizes.get(tool);
+      if (size === undefined) {
+        size = mcpSerializedSizeBytes(tool);
+        sizes.set(tool, size);
+      }
+      return size;
+    };
+    const listed = fitMcpToolListWithinBounds(unclaimed, { ...options, sizeOf });
+    const previous = this.contributions.get(sourceId) ?? { entries: 0, bytes: 0 };
+    const fitted = fitMcpToolListWithinBounds(listed.tools, {
+      ...options,
+      sizeOf,
+      maxEntries: this.maxEntries - (this.totalEntries - previous.entries),
+      maxBytes: this.maxBytes - (this.totalBytes - previous.bytes),
+      limitReasons: { entries: "aggregate_entry_limit", bytes: "aggregate_byte_limit" },
+    });
+    this.remove(sourceId);
+    const contribution = {
+      entries: fitted.tools.length,
+      bytes: fitted.tools.length > 0 ? fitted.bytes : 0,
+    };
+    this.contributions.set(sourceId, contribution);
+    this.totalEntries += contribution.entries;
+    this.totalBytes += contribution.bytes;
+    for (const tool of fitted.tools) {
+      const name = (tool as { name?: unknown } | null)?.name;
+      if (typeof name === "string") this.modelNameClaims.set(name, sourceId);
+    }
+    this.settlement(sourceId).resolve();
+    return {
+      tools: fitted.tools,
+      dropped: [...dropped, ...listed.dropped, ...fitted.dropped],
+      bytes: fitted.bytes,
+    };
+  }
+
+  /**
+   * Fix the admission order of these sources (appended after any already
+   * ordered). Servers list concurrently, so first-come admission would make
+   * the kept set depend on network timing; ordered admission makes the same
+   * selection keep the same tools on every turn and replica.
+   */
+  sequence(sources: readonly (string | { sourceId: string; start: () => unknown })[]): void {
+    for (const source of sources) {
+      const sourceId = typeof source === "string" ? source : source.sourceId;
+      if (!this.order.includes(sourceId)) this.order.push(sourceId);
+      if (typeof source !== "string" && !this.starters.has(sourceId)) {
+        this.starters.set(sourceId, source.start);
+      }
+    }
+  }
+
+  /**
+   * `admit` once every source ordered before this one has admitted or been
+   * removed. Waiting starts each unsettled predecessor's own listing (listing
+   * is idempotent), so progress never depends on another caller listing it.
+   * A predecessor that still never settles delays this one by at most
+   * `maxWaitMs`, after which it admits anyway rather than hang the turn.
+   */
+  async admitInOrder<T>(
+    sourceId: string,
+    tools: readonly T[],
+    options: Pick<McpToolListFitOptions<T>, "keepFirst"> = {},
+    maxWaitMs = MCP_ORDERED_ADMISSION_MAX_WAIT_MS,
+  ): Promise<McpToolListFit<T>> {
+    const index = this.order.indexOf(sourceId);
+    if (index > 0) {
+      const predecessors = Promise.all(
+        this.order.slice(0, index).map((id) => {
+          const settlement = this.settlement(id);
+          if (!settlement.done) {
+            try {
+              void Promise.resolve(this.starters.get(id)?.()).catch(() => undefined);
+            } catch {
+              // A failed start settles through the source's own failure path.
+            }
+          }
+          return settlement.promise;
+        }),
+      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = await Promise.race([
+        predecessors.then(() => false),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(true), maxWaitMs);
+          (timer as { unref?: () => void }).unref?.();
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+      if (timedOut) {
+        console.warn("[mcp] ordered tool admission waited too long; admitting now", {
+          event: "tool_catalog_degraded",
+          code: "admission_order_timeout",
+          sourceId: sourceId.slice(0, 256),
+        });
+      }
+    }
+    return this.admit(sourceId, tools, options);
+  }
+
+  private settlement(sourceId: string) {
+    let entry = this.settled.get(sourceId);
+    if (!entry) {
+      const created = { done: false } as {
+        done: boolean;
+        promise: Promise<void>;
+        resolve: () => void;
+      };
+      created.promise = new Promise<void>((done) => {
+        created.resolve = () => {
+          created.done = true;
+          done();
+        };
+      });
+      entry = created;
+      this.settled.set(sourceId, entry);
+    }
+    return entry;
+  }
+
   remove(sourceId: string): void {
+    this.settlement(sourceId).resolve();
+    for (const [name, owner] of this.modelNameClaims) {
+      if (owner === sourceId) this.modelNameClaims.delete(name);
+    }
     const previous = this.contributions.get(sourceId);
     if (!previous) return;
     this.contributions.delete(sourceId);
@@ -581,7 +891,7 @@ export async function boundedParallelMap<T, R>(
  * `@opengeni/runtime/mcp-network` leaf rather than the runtime root barrel.
  */
 export function guardedMcpFetch<TInput extends string | URL | Request>(
-  settings: Pick<Settings, "environment" | "integrationsAllowPrivateNetworkTargets">,
+  settings: OutboundNetworkSettings,
   fetchImpl: (input: TInput, init?: RequestInit) => Promise<Response>,
   options: {
     maxResponseBytes?: number;
@@ -589,6 +899,12 @@ export function guardedMcpFetch<TInput extends string | URL | Request>(
     pinResolvedDestination?: boolean;
     requireHttpsOutsideLocalTest?: boolean;
     usePinnedRequestTransport?: boolean;
+    /**
+     * Told when a response is refused for size, with its JSON-RPC method. SDK
+     * layers can replace the refusal error (a continuation page, an SSE
+     * disconnect), so the caller keeps its own record.
+     */
+    onSizeRefusal?: (rpcMethod: string | undefined) => void;
   } = {},
 ): (input: TInput, init?: RequestInit) => Promise<Response> {
   return async (input: TInput, init?: RequestInit) => {
@@ -637,18 +953,32 @@ export function guardedMcpFetch<TInput extends string | URL | Request>(
       });
       throw error;
     }
+    const onRefusal = options.onSizeRefusal
+      ? () => {
+          try {
+            options.onSizeRefusal!(rpcMethod);
+          } catch {
+            // Reporting never changes the transport outcome.
+          }
+        }
+      : undefined;
     return observation.run(() =>
-      boundMcpResponseBody(response, options.maxResponseBytes ?? MCP_MAX_RESPONSE_BYTES),
+      boundMcpResponseBody(response, options.maxResponseBytes ?? MCP_MAX_RESPONSE_BYTES, onRefusal),
     );
   };
 }
 
-export function boundMcpResponseBody(response: Response, maxBytes: number): Response {
+export function boundMcpResponseBody(
+  response: Response,
+  maxBytes: number,
+  onRefusal?: () => void,
+): Response {
   const observation = beginMcpPhase("network_body");
   const declaredLength = Number(response.headers.get("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
     observation.end("rejected");
     void response.body?.cancel().catch(() => undefined);
+    onRefusal?.();
     throw new McpPayloadTooLargeError("MCP response", declaredLength, maxBytes);
   }
   if (!response.body) {
@@ -677,6 +1007,7 @@ export function boundMcpResponseBody(response: Response, maxBytes: number): Resp
         if (receivedBytes > maxBytes) {
           observation.end("rejected");
           await reader.cancel().catch(() => undefined);
+          onRefusal?.();
           controller.error(new McpPayloadTooLargeError("MCP response", receivedBytes, maxBytes));
           return;
         }
@@ -760,7 +1091,7 @@ export async function boundedMcpRequest(
 
 export async function assertMcpDestinationAllowed(
   rawUrl: string,
-  settings: Pick<Settings, "environment" | "integrationsAllowPrivateNetworkTargets">,
+  settings: OutboundNetworkSettings,
   options: { dnsLookup?: DnsLookup } = {},
 ): Promise<void> {
   await resolvePinnedDestination(rawUrl, settings, {

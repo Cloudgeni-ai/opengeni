@@ -195,6 +195,78 @@ describe("organization Azure OpenAI provider routes", () => {
     expect(upsert.mock.calls.at(-1)![1]).not.toHaveProperty("endpoint");
   });
 
+  test("Azure saved with its first deployment checks it with the new key before saving", async () => {
+    const saved = await put("azure_openai", {
+      apiKey: KEY,
+      endpoint: "https://contoso.openai.azure.com",
+      models: ["gpt-6-sol"],
+    });
+    expect(saved.status).toBe(200);
+    expect(upstream).toHaveLength(1);
+    expect(upstream[0]!.url).toBe(`${ENDPOINT}/responses`);
+    expect(upstream[0]!.headers.get("api-key")).toBe(KEY);
+    expect(upstream[0]!.body).toMatchObject({ model: "gpt-6-sol", store: false });
+    // The saved key isn't read back: the check uses the key in this request.
+    expect(credential).not.toHaveBeenCalled();
+    expect(upsert.mock.calls.at(-1)![1]).toMatchObject({
+      providerKind: "azure_openai",
+      endpoint: ENDPOINT,
+      models: ["gpt-6-sol"],
+    });
+  });
+
+  test("a first deployment that fails its check is a safe 422 and saves nothing", async () => {
+    upstreamStatus = 404;
+    const response = await put("azure_openai", {
+      apiKey: KEY,
+      endpoint: "https://contoso.openai.azure.com",
+      models: ["missing-deployment"],
+    });
+    expect(response.status).toBe(422);
+    const text = await response.text();
+    expect(text).toContain("deployment");
+    expect(text).not.toContain(KEY);
+    expect(text).not.toContain("upstream detail");
+    expect(upsert).not.toHaveBeenCalled();
+  });
+
+  test("Entra sign-in checks the first deployment with its token", async () => {
+    const saved = await put("azure_openai", {
+      endpoint: "https://contoso.openai.azure.com",
+      authentication: {
+        method: "entra_client_secret",
+        tenantId: TENANT,
+        clientId: CLIENT,
+        clientSecret: CLIENT_SECRET,
+      },
+      models: ["gpt-6-sol"],
+    });
+    expect(saved.status).toBe(200);
+    expect(tokenRequests).toHaveLength(1);
+    expect(upstream).toHaveLength(1);
+    expect(upstream[0]!.headers.get("authorization")).toBe("Bearer fake-entra-access-token");
+    expect(upstream[0]!.headers.get("api-key")).toBeNull();
+    expect(upsert.mock.calls.at(-1)![1]).toMatchObject({ models: ["gpt-6-sol"] });
+  });
+
+  test("only OpenAI and Azure OpenAI save models with the key", async () => {
+    const refused = await put("openrouter", { apiKey: "sk-or-v1-key", models: ["vendor/model"] });
+    expect(refused.status).toBe(422);
+    const invalid = await put("openai", { apiKey: "sk-openai-key", models: ["bad model"] });
+    expect(invalid.status).toBe(422);
+    expect(upstream).toHaveLength(0);
+    expect(upsert).not.toHaveBeenCalled();
+    const saved = await put("openai", { apiKey: "sk-openai-key", models: ["gpt-6-sol"] });
+    expect(saved.status).toBe(200);
+    expect(upstream).toHaveLength(1);
+    expect(upstream[0]!.url).toBe("https://api.openai.com/v1/responses");
+    expect(upstream[0]!.body).toMatchObject({ model: "gpt-6-sol" });
+    expect(upsert.mock.calls.at(-1)![1]).toMatchObject({
+      providerKind: "openai",
+      models: ["gpt-6-sol"],
+    });
+  });
+
   const addDeployment = async (upstreamModelId: string) =>
     await app.request(`${BASE}/azure_openai/custom-models`, {
       method: "POST",

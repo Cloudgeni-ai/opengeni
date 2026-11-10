@@ -14,7 +14,10 @@ import {
 import { isModelCallFetch } from "../src/model-provider-transport";
 import { projectHistoryForProvider } from "../src/provider-history-adapter";
 import { MultiProviderModelProvider } from "../src/model-provider-routing";
-import { buildCompactionReplacementHistory } from "../src/context-compaction";
+import {
+  buildCompactionReplacementHistory,
+  EmptyCompactionSummaryError,
+} from "../src/context-compaction";
 
 setTracingDisabled(true);
 const provider: ResolvedModelProvider = {
@@ -53,9 +56,14 @@ const response = (content: unknown[], stop = "end_turn") => ({
 });
 
 test.each(["low", "medium", "high", "xhigh", "max"] as const)(
-  "native effort %s reaches the wire unchanged for both 5.5 models",
+  "native effort %s reaches the wire unchanged for Fable 5.2 and the 5.5 models",
   (effort) => {
-    for (const model of ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]) {
+    for (const model of [
+      "claude-fable-5-2",
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-haiku-5-5",
+    ]) {
       const req = request();
       req.modelSettings = { reasoning: { effort } };
       const body = buildAnthropicRequest(req, model, provider, false);
@@ -1306,13 +1314,15 @@ test("native title and compaction calls handle output limits without accepting i
       }),
     ).toBe("Fix native stream truncat");
     stop = "max_tokens";
+    // A summary cut off at the output limit is unusable, like a Chat
+    // Completions `length` finish, rather than a provider failure.
     await expect(
       summarizeForCompaction(testSettings(), history, {
         provider: native,
         client,
         model: "claude-test",
       }),
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
     const title = await generateSessionTitle(testSettings(), "Repair streaming", {
       provider: native,
       client,

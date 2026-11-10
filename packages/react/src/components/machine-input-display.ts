@@ -1,4 +1,5 @@
 import { isSessionId } from "../timeline/agent-identity";
+import { withoutInternalIds } from "../timeline/internal-ids";
 import { namedAgentTitle, type AgentTitleParts } from "../timeline/platform-activity-presentation";
 import type { MachineInputMember } from "../timeline/types";
 import { type OpenGeniText } from "../messages/runtime";
@@ -163,17 +164,58 @@ function namedAgentBatchLabel(
   return `${agentPart} · ${rest}`;
 }
 
-/** Strip protocol prefixes and worker/session UUIDs from display summaries. */
+/**
+ * Strip protocol prefixes and worker/session UUIDs from display summaries. An
+ * ID goes with its label ("Organisation: <id>"), so nothing dangles.
+ */
 export function cleanMachineInputSummary(summary: string): string {
-  return summary
-    .replace(/^\[[A-Z][A-Z _-]*(?:\s+\d+\/\d+)?\]\s*/, "")
-    .replace(/\bWorker session id:\s*[0-9a-f]{8}-[0-9a-f-]{27,}\b/gi, "")
-    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "")
-    .replace(/\(\s*\)/g, "")
+  return withoutInternalIds(
+    summary
+      .replace(/^\[[A-Z][A-Z _-]*(?:\s+\d+\/\d+)?\]\s*/, "")
+      .replace(/\bWorker session id:\s*[0-9a-f]{8}-[0-9a-f-]{27,}\b\.?/gi, ""),
+  )
     .replace(/\s*[·|]\s*$/g, "")
     .replace(/\s{2,}/g, " ")
     .replace(/\s+([.,;:])/g, "$1")
     .trim();
+}
+
+/** True when every member is an automation run, so the batch reads as one plain line. */
+export function isAutomationRunBatch(members: readonly MachineInputMember[]): boolean {
+  return members.length > 0 && members.every((member) => member.kind === "scheduled_occurrence");
+}
+
+/**
+ * The one plain line a chat shows when an automation acted in it: what
+ * happened, never the automation's instructions. The automation's name, then
+ * what the event that started it says ("New task assigned: Replace the
+ * gutter", "…: Replace the gutter and 2 more"); the name alone for a scheduled
+ * run; "Automation run" for a run delivered before Opengeni recorded its name.
+ */
+export function automationRunLine(
+  t: OpenGeniText,
+  members: readonly Pick<MachineInputMember, "automation">[],
+): string {
+  const named = members.flatMap((member) => (member.automation ? [member.automation] : []));
+  const name = named[0]?.name;
+  if (!name || named.length !== members.length || named.some((run) => run.name !== name)) {
+    return members.length === 1
+      ? t("machineInputDisplay.automationRun")
+      : t("machineInputDisplay.automationRunsCount", { count: members.length });
+  }
+  // What an event says can carry an internal ID; it goes with its label.
+  const what = named.flatMap((run) =>
+    run.eventSummaries.map(withoutInternalIds).filter((text) => text.length > 0),
+  );
+  if (what.length === 0) return name;
+  const total = named.reduce(
+    (sum, run) => sum + Math.max(run.eventCount, run.eventSummaries.length),
+    0,
+  );
+  const more = total - 1;
+  return more > 0
+    ? t("machineInputDisplay.automationRunWhatAndMore", { name, what: what[0]!, count: more })
+    : t("machineInputDisplay.automationRunWhat", { name, what: what[0]! });
 }
 
 export function readableMachineInputSource(sourceId: string): string | null {

@@ -63,6 +63,32 @@ restore depend on every earlier link.
   means the base is unknown, and the next save writes every page. The
   file is never synced: it means anything only beside the live process it
   names, which a power loss ends.
+- Memory the guest frees and reports to the host reads as zeros in its
+  image, as it does in the guest. The VMM discards a reported range without
+  counting it as a change, so a diff leaves it out, and an image merged
+  from diffs would otherwise go on holding whatever the guest last kept
+  there: an idle sandbox's image would hold nearly every page it ever
+  used, and each checkpoint would store again every chunk the guest
+  touched, stale bytes and all. So after a diff snapshot, while the VM is
+  still paused, the engine names the ranges that read as zeros
+  (`Engine::freed_memory`), and the merged image holds zeros there, as a
+  hole, so its chunks are the zero chunk or hold only what the guest
+  wrote. Firecracker discards a range of memory mapped from an image file
+  by mapping fresh anonymous memory over it, so those ranges are the
+  anonymous mappings inside the file's mapping whose pages are neither
+  present nor swapped, read from `/proc/<pid>/maps` and `pagemap`. Memory
+  a pager served is anonymous; once the pager has put every page in place
+  and let go, a page of it neither present nor swapped reads as zeros.
+  Where that memory is, only the VMM's handshake with the pager says, so
+  the pager writes those regions into its done file with its launch's
+  tag (a starting pager first removes any done file an earlier one left),
+  and the host uses them only for the launch the sandbox's paged marker
+  names; until the pager has finished, nothing is named. A VM
+  booted fresh is not covered: Firecracker reports nowhere where its
+  memory is, and finding it by the shape of the process's mappings would
+  be a guess. Its image keeps what freed pages held until the sandbox is
+  next woken from an image. A full snapshot reads discarded pages as
+  zeros already.
 - Reflinks make the copy nearly free on file systems that support them (XFS,
   Btrfs); elsewhere the copy costs real disk writes.
 - A disk's file gives back what its guest frees. Writable drives take the
@@ -96,5 +122,8 @@ restore depend on every earlier link.
   read that way books its whole length for that reading. A pause has the
   guest trim first and holds the VM, so no reading of its disk comes while
   it runs: from a pause's start until a reading measures the disk again,
-  the sandbox books its disk's whole length, also for a wake that comes
-  before that reading.
+  the sandbox books its disk's whole length. Once the pause succeeds, the
+  agent can measure the quiescent file immediately, and again at local
+  wake admission, without a concurrent-write allowance. Missing readings
+  keep the whole bound. ADR 14's disk-book amendment counts fetching and
+  guest writes against this one disk file, not two copies.

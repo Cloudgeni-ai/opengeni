@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -39,7 +40,7 @@ for (const status of ["connect", "reconnect", "unavailable"] as const) {
     const recover = mock();
     const client = {
       listOwnConnectionAccounts: async () => [],
-    } as unknown as OpenGeniBrowserClient;
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const catalog = [
       {
         enabled: true,
@@ -265,7 +266,7 @@ test("revoked account access shows ask-admin guidance without Retry in both comp
         },
       ] as unknown as ConnectionMetadata[];
     },
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const catalog = [
     {
       enabled: true,
@@ -335,7 +336,7 @@ test("live grant removal hides open account labels and choices; Send remains ava
         metadata: { email: "alex@example.com" },
       },
     ],
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   const catalog = [
     {
       enabled: true,

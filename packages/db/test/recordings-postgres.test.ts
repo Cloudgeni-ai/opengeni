@@ -26,6 +26,7 @@ import {
   ensureManagedAccessForUser,
   failBrowserRecordingVideo,
   failRecordingTranscriptVersion,
+  fillRecordingUnrecordedStretches,
   finalizeRecording,
   findBrowserRecording,
   forgetRecordingPersonVoice,
@@ -237,6 +238,88 @@ describe("recordings", () => {
       ["microphone", 2, 10_000],
       ["system", 2, 10_000],
     ]);
+  });
+
+  test("finalizing keeps where a track has no audio: a lost microphone, and after it stopped", async () => {
+    if (!client) return;
+    const db = client.db;
+    const scope = await workspace();
+    const recordingId = crypto.randomUUID();
+    const actor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    await createRecording(db, {
+      ...actor,
+      accountId: scope.accountId,
+      recordingId,
+      tracks: [
+        { trackNumber: 0, source: "microphone", mimeType: "audio/webm" },
+        { trackNumber: 1, source: "system", mimeType: "audio/webm" },
+      ],
+    });
+    // The microphone records 0-10 s, is unplugged, comes back for 14-19 s
+    // and is never heard again; the shared audio runs for 30 s. A reopened
+    // microphone's moment of setup (19-20.5 s) is not missing audio.
+    const pieces: Record<number, Array<[number, number]>> = {
+      0: [
+        [0, 5_000],
+        [5_000, 5_000],
+        [14_000, 5_000],
+      ],
+      1: [0, 1, 2, 3, 4, 5].map((index) => [index * 5_000, 5_000] as [number, number]),
+    };
+    for (const [trackNumber, chunks] of Object.entries(pieces).map(
+      ([key, value]) => [Number(key), value] as const,
+    )) {
+      await reserveRecordingChunks(db, {
+        ...actor,
+        recordingId,
+        trackNumber,
+        chunks: chunks.map(([startMilliseconds, durationMilliseconds], chunkNumber) => ({
+          chunkNumber,
+          byteLength: 100,
+          sha256: sha(`${trackNumber}${chunkNumber}`),
+          startMilliseconds,
+          durationMilliseconds,
+        })),
+      });
+      await markRecordingChunksUploaded(db, {
+        ...actor,
+        recordingId,
+        trackNumber,
+        chunkNumbers: chunks.map((_, chunkNumber) => chunkNumber),
+      });
+    }
+    const finalized = await finalizeRecording(db, {
+      ...actor,
+      recordingId,
+      tracks: [
+        { trackNumber: 0, chunkCount: 3 },
+        { trackNumber: 1, chunkCount: 6 },
+      ],
+      transcription,
+      versionId: crypto.randomUUID(),
+    });
+    const expected = [
+      [
+        { startMilliseconds: 10_000, endMilliseconds: 14_000 },
+        { startMilliseconds: 19_000, endMilliseconds: null },
+      ],
+      [],
+    ];
+    expect(finalized.recording.tracks.map((track) => track.unrecorded)).toEqual(expected);
+    const view = await getRecording(db, { ...actor, recordingId });
+    expect(view.tracks.map((track) => track.unrecorded)).toEqual(expected);
+
+    // A meeting finalized before tracks kept this gets it when next transcribed.
+    await shared!
+      .admin`update recording_tracks set unrecorded = null where recording_id = ${recordingId}`;
+    expect(
+      (await getRecording(db, { ...actor, recordingId })).tracks.map((track) => track.unrecorded),
+    ).toEqual([[], []]);
+    expect(await fillRecordingUnrecordedStretches(db, { ...actor, recordingId })).toBe(true);
+    expect(
+      (await getRecording(db, { ...actor, recordingId })).tracks.map((track) => track.unrecorded),
+    ).toEqual(expected);
+    expect(await fillRecordingUnrecordedStretches(db, { ...actor, recordingId })).toBe(false);
   });
 
   test("creating, reserving and finalizing again are idempotent; a reused id is refused", async () => {
@@ -905,7 +988,16 @@ describe("recordings", () => {
       ...recording.actor,
       recordingId: recording.recordingId,
     });
-    expect(keys).toHaveLength(4);
+    // Two uploaded pieces per track, and each audio track's speaker scan.
+    expect(keys).toHaveLength(6);
+    expect(keys).toEqual(
+      expect.arrayContaining(
+        [0, 1].map(
+          (trackNumber) =>
+            `workspaces/${scope.workspaceId}/recordings/${recording.recordingId}/prepared/track-${trackNumber}.speakers`,
+        ),
+      ),
+    );
     expect(
       keys!.every((key) =>
         key.startsWith(`workspaces/${scope.workspaceId}/recordings/${recording.recordingId}/`),
@@ -1008,6 +1100,8 @@ describe("recordings", () => {
           select object_key from recording_chunks where recording_id = ${id}`
         ).map((row) => row.object_key),
         `workspaces/${scope.workspaceId}/recordings/${id}/prepared/0.ogg`,
+        `workspaces/${scope.workspaceId}/recordings/${id}/prepared/track-0.speakers`,
+        `workspaces/${scope.workspaceId}/recordings/${id}/prepared/track-1.speakers`,
       ].sort(),
     );
     // Stamped but interrupted before the objects were gone: offered again,
@@ -1230,6 +1324,123 @@ describe("recordings", () => {
         (select count(*)::int from recording_voice_rejections where workspace_id = ${scope.workspaceId}) as rejections,
         (select count(*)::int from recording_people where workspace_id = ${scope.workspaceId} and voice_consent is not null) as consents`;
     expect(afterOff).toEqual({ prints: 0, voices: 0, rejections: 0, consents: 0 });
+  });
+
+  test("deleting a recording takes the voices it taught back out of the voiceprints", async () => {
+    if (!client || !shared) return;
+    const db = client.db;
+    const scope = await workspace();
+    await updateWorkspaceSettings(db, scope.workspaceId, { recordings: { voiceprints: true } });
+    const ownerActor = { workspaceId: scope.workspaceId, subjectId: scope.owner };
+    const ingrid = (
+      await createRecordingPerson(db, {
+        ...ownerActor,
+        accountId: scope.accountId,
+        personId: crypto.randomUUID(),
+        displayName: "Ingrid",
+      })
+    ).person;
+    await rememberRecordingPersonVoice(db, {
+      ...ownerActor,
+      personId: ingrid.id,
+      consent: "attested",
+    });
+    const model = "test-model";
+    async function transcribe(
+      recording: { recordingId: string; versionId: string; actor: typeof ownerActor },
+      embedding: number[],
+    ) {
+      const lease = crypto.randomUUID();
+      await claimRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId: recording.versionId,
+        processingOwner: lease,
+        leaseSeconds: 600,
+      });
+      await completeRecordingTranscriptVersion(db, {
+        ...recording.actor,
+        versionId: recording.versionId,
+        processingOwner: lease,
+        languages: ["en"],
+        diarized: true,
+        diarization: "ours",
+        audioMilliseconds: 60_000,
+        segments: [
+          {
+            startMilliseconds: 0,
+            endMilliseconds: 9_000,
+            trackNumber: 1,
+            speakerLabel: "speaker_0",
+            text: "Line 0.",
+          },
+        ],
+        voices: [
+          { label: "speaker_0", channel: "call", model, embedding, speechMilliseconds: 30_000 },
+        ],
+      });
+      return (
+        await getRecordingTranscriptPage(db, {
+          ...recording.actor,
+          recordingId: recording.recordingId,
+          versionId: recording.versionId,
+        })
+      ).speakers;
+    }
+    async function teach(embedding: number[]) {
+      const recording = await finalizedRecording(scope, "workspace");
+      await transcribe(recording, embedding);
+      await updateRecordingSpeakers(db, {
+        ...ownerActor,
+        recordingId: recording.recordingId,
+        assignments: [{ label: "speaker_0", personId: ingrid.id }],
+      });
+      return recording;
+    }
+    const voiceprint = async () => [
+      ...(await shared!.admin<{ embedding: number[]; speech: number; samples: number }[]>`
+        select embedding, speech_milliseconds::int as speech, sample_count as samples
+        from recording_voiceprints where person_id = ${ingrid.id}`),
+    ];
+    const learned = async () =>
+      (await listRecordingPeople(db, ownerActor)).find((person) => person.id === ingrid.id)?.voice
+        ?.learned;
+
+    const first = await teach([0.9, 0.1, 0.05, 0]);
+    const second = await teach([0.8, 0.3, 0, 0.1]);
+    expect((await voiceprint())[0]?.samples).toBe(2);
+
+    // Without the first recording, the print is just the second voice.
+    await markRecordingDeleting(db, { ...first.actor, recordingId: first.recordingId });
+    const norm = Math.hypot(0.8, 0.3, 0, 0.1);
+    const [remaining] = await voiceprint();
+    expect(remaining).toMatchObject({ speech: 30_000, samples: 1 });
+    remaining!.embedding.forEach((value, index) =>
+      expect(value).toBeCloseTo([0.8, 0.3, 0, 0.1][index]! / norm, 5),
+    );
+    // A retried deletion subtracts nothing more.
+    await markRecordingDeleting(db, { ...first.actor, recordingId: first.recordingId });
+    expect(await voiceprint()).toEqual([remaining!]);
+    expect(await learned()).toBe(true);
+
+    // Deleting the only recording left that taught it forgets the voice.
+    await markRecordingDeleting(db, { ...second.actor, recordingId: second.recordingId });
+    expect(await voiceprint()).toEqual([]);
+    expect(await learned()).toBe(false);
+    const [left] = await shared.admin<{ voices: number }[]>`
+      select count(*)::int as voices from recording_speaker_voices
+      where recording_id in (${first.recordingId}, ${second.recordingId})`;
+    expect(left).toEqual({ voices: 0 });
+
+    // Agreeing again does not learn from deleted recordings, and nothing is suggested.
+    await rememberRecordingPersonVoice(db, {
+      ...ownerActor,
+      personId: ingrid.id,
+      consent: "attested",
+    });
+    expect(await voiceprint()).toEqual([]);
+    const third = await finalizedRecording(scope, "workspace");
+    const thirdSpeakers = await transcribe(third, [0.88, 0.12, 0.02, 0.01]);
+    expect(thirdSpeakers.filter((speaker) => speaker.source === "suggested")).toEqual([]);
   });
 
   test("notes: the notepad and the notes, revisions, conflicts and who can see them", async () => {

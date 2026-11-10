@@ -104,7 +104,13 @@ Rules that hold across the table:
   enters Git configuration or repository metadata. `gh`, `glab`, and `az`
   select direct provider credentials by an explicit binding, current `origin`,
   or an unambiguous sole binding. They never receive a smart-Git broker bearer
-  and instead direct the agent to configured provider MCP tools. Provider
+  and instead direct the agent to configured provider MCP tools. The exception
+  is `gh` on repositories mounted as the person (and outside any checkout in
+  such a session): it reaches GitHub through the personal GitHub gateway on
+  the API, which adds the person's token there; the sandbox keeps only the
+  bearer, read per request by a short-lived local proxy and never placed in
+  `gh`'s environment, config or arguments (see
+  [personal GitHub](personal-github.md#gh-in-managed-sandboxes)). Provider
   aliases exist only for a single direct binding. Renewal atomically replaces
   each binding file, so a multi-day turn sees current credentials without model
   action or manifest mutation and a failed sibling refresh cannot overwrite it;
@@ -122,9 +128,8 @@ Rules that hold across the table:
   `github.com`, and the provider CLI wrappers keep the profile's token. Host
   run credentials are applied after the profile and win for the same names.
   An entry that cannot be resolved is skipped with a note; it never fails the
-  command. Profile values are known secret values, so a command that prints
-  one shows its reference in the tool result instead, within the masking
-  limits ([`secrets.md`](secrets.md#masking)).
+  command. A command that prints a profile value shows it in its output like any
+  other output ([`secrets.md`](secrets.md#agent-visible-content)).
 - **The perimeter is not identity.** The deployment access key admits ordinary
   callers and deployment-only surfaces. A cryptographically valid first-party
   delegated bearer may instead enter `/v1`; the normal access resolver still

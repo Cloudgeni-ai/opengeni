@@ -473,6 +473,12 @@ export async function claimSessionRealtimeConnectionInTransaction(
     };
   }
   if (staleRotationError) throw staleRotationError;
+  if (mode.state === "preparing" && (promotionMode !== "staged" || input.rotate)) {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_NOT_ACTIVE",
+      "Ringing connections must wait for acceptance",
+    );
+  }
   if (mode.connectionEpoch !== input.expectedConnectionEpoch) {
     throw new SessionRealtimeConflictError(
       "REALTIME_CONNECTION_CHANGED",
@@ -648,7 +654,11 @@ async function lockConnectionFinalizationMode(
     )
     .for("update")
     .limit(1);
-  if (!mode || mode.state !== "active" || mode.leaseExpiresAt <= (input.now ?? new Date())) {
+  if (
+    !mode ||
+    !["active", "preparing"].includes(mode.state) ||
+    mode.leaseExpiresAt <= (input.now ?? new Date())
+  ) {
     throw new SessionRealtimeConflictError(
       "REALTIME_NOT_ACTIVE",
       "Realtime mode is no longer active",
@@ -760,6 +770,12 @@ export async function activateSessionRealtimeConnectionInTransaction(
       ...input,
       expectedVersion: input.expectedVersion + 1,
     });
+  }
+  if (mode.state !== "active") {
+    throw new SessionRealtimeConflictError(
+      "REALTIME_NOT_ACTIVE",
+      "Incoming call has not been accepted",
+    );
   }
 
   const [connection] = await db

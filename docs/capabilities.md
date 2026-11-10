@@ -190,6 +190,14 @@ turns sign in to it:
 - `each_person`: everyone connects their own account to the server's OAuth,
   as with a workspace connector enabled for personal accounts. Google's MCP
   servers only allow this.
+- `auto_connect`: everyone has their own account, but Opengeni connects them
+  the first time they use it, with no sign-in screen: the organization's
+  Opengeni issuer signs an ID-JAG for them and the app, which trusts that
+  issuer, issues their token. Only for MCP servers whose authorization server
+  accepts the JWT bearer grant, checked before adding
+  (`checkOrganizationConnectorAutoConnect`) and tested with
+  `testOrganizationConnectorAutoConnect`. See
+  [Integrations design § 5.5](integrations-design.md#55-auto-connect-opengeni-as-the-id-jag-issuer).
 - `organization_key`: request headers held by the organization, probed and
   then stored encrypted exactly like
   [credential headers](#credential-headers). The API returns header names only.
@@ -506,17 +514,14 @@ The projection reports only whether a provider cursor exists; page tokens,
 delta links, and other cursor contents remain private durable state.
 Integration definition upgrades migrate same-key facets without losing
 configuration, cursor, lifecycle status, evidence timestamps, or owner edges,
-and reject an upgrade that would silently remove a configured facet. The one
-exception is a retired Knowledge Source facet: a configured binding keeps its
-historical definition when a new revision no longer publishes it.
+and reject an upgrade that would silently remove a configured facet.
 
 The Knowledge Source facet kind (`knowledge_source`, for example the former
-Drive and OneDrive `drive-content` facets) is retired. No integration publishes
-it, configuring one returns 410, and its browse and source routes return 410.
-Existing bindings stay listed as retired with Remove only; unconfigured ones are
-hidden. Stored selections, imported records and run history remain available
-as evidence. New recurring Drive or OneDrive work uses an ordinary agent
-schedule with the account's tools. See [Google Drive](google-drive.md) for the
+Drive and OneDrive `drive-content` facets) was removed with integration
+Knowledge sync; migration 1275 deleted its stored definitions and bindings. The
+kind stays in the public SDK enum until the next major, and the facet browse
+and source routes answer 410. Recurring Drive or OneDrive work uses an ordinary
+agent schedule with the account's tools. See [Google Drive](google-drive.md) for the
 Drive MCP connection and its access limits.
 Generic browser editing refuses required object or array fields unless a
 provider-specific flow owns them, so OneDrive and future rich schemas cannot be
@@ -810,12 +815,11 @@ surfaces of their own.
 **Integrations** are built and run by Opengeni: Slack, GitHub, Outlook Mail,
 Outlook Calendar, Outlook Contacts, OneDrive, SharePoint, and Microsoft Teams. These integrations receive
 events, post as Opengeni, or hold their own identity in the other product.
-Previous Google Drive and Atlassian connections retain historical cleanup
-surfaces; their native source setup is retired. Every integration's page renders through the same component
+Google Drive and Atlassian connect only through their hosted MCP servers; the
+removed native source connections are not shown. Every integration's page renders through the same component
 (`apps/web/src/components/capabilities/integration-page.tsx`) fed by one plain view-model
 (`integration-view-model.ts`); one adapter hook per provider
 (`use-slack-integration.tsx`, `use-github-integration.tsx`,
-`use-google-drive-integration.tsx`, `use-atlassian-integration.tsx`,
 `use-outlook-mail-integration.tsx`, `use-outlook-calendar-integration.tsx`,
 `use-outlook-contacts-integration.tsx`, `use-onedrive-integration.tsx`,
 `use-sharepoint-integration.tsx`) maps
@@ -1394,8 +1398,15 @@ OAuth start uses to find an operator client in
 `@opengeni/config`). When it is `false`, the web Connectors page (Featured,
 Popular, Browse) and the embedded `ConnectionDiscovery` do not offer the row.
 A row stays reachable when it is already enabled, the workspace has a
-connection for it, or the connection list could not be read. To offer such a
-connector, register an OAuth client with the provider using the redirect URI
+connection for it, or the connection list could not be read. The agent
+follows the same rule (`deploymentCannotConnect` in
+`@opengeni/contracts/personal-integration-setup`, also set by the Google
+connector setup gate): for a row that is not enabled, `capability_catalog_search`
+reports `setup.status: "unavailable"` with no `nextAction` and the catalog note,
+`capability_authorization_request` posts no card, tool search does not name it
+as connectable, and a card already in a chat says it can't be connected here.
+To offer such a connector, register an OAuth client with the provider using the
+redirect URI
 `<OPENGENI_PUBLIC_BASE_URL>/v1/integrations/oauth/callback`, then add it to
 `OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON` under the listed issuer. No catalog
 change is needed. Gmail and the hosted Slack MCP are not listed because their
@@ -1417,7 +1428,8 @@ The importer copies a vendored asset into object storage under the same
 `catalog-assets/...` key a fetched logo would use, in every mode: `--skip-logos`
 suppresses only network fetches for the uncurated long tail, because a
 vendored copy adds no third-party dependency. A curated `logoSourceUrl: null`
-(currently Gmail and Mobbin, which publish no reusable logo licence) always
+(currently Gmail, Google Drive and Google Calendar, whose marks ship with the
+product UI instead) always
 wins: no asset is vendored for such a row and a stray vendored file for it is
 ignored. A vendored entry whose recorded source no longer matches the row's
 effective source, or whose bytes no longer match its digest, is not served;

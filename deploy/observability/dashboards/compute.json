@@ -488,8 +488,8 @@
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Disk free per host",
-      "description": "Disk free for sandboxes on each host, as a share of what it gives them.",
+      "title": "Filesystem space and booking headroom",
+      "description": "Available state-filesystem space before reservations, versus headroom for additional worst-case sandbox writes after reservations. Both are shares of the state filesystem. Missing filesystem readings from older hosts are unknown, not zero. Total size is sampled at host-agent startup: restart the agent after a filesystem resize. This does not measure a separate backing filesystem.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -519,8 +519,15 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (host_name) (compute_fleet_host_disk_free_bytes{namespace=\"$namespace\",release=\"$release\",host_name=~\"$host\"}) / max by (host_name) (compute_fleet_host_disk_bytes{namespace=\"$namespace\",release=\"$release\",host_name=~\"$host\"} > 0)",
-          "legendFormat": "{{host_name}}",
+          "expr": "max by (host_name) (compute_fleet_host_disk_available_bytes{namespace=\"$namespace\",release=\"$release\",host_name=~\"$host\"}) / max by (host_name) (compute_fleet_host_disk_bytes{namespace=\"$namespace\",release=\"$release\",host_name=~\"$host\"} > 0)",
+          "legendFormat": "{{host_name}} · filesystem available",
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "max by (host_name) (compute_fleet_host_disk_booking_headroom_bytes{namespace=\"$namespace\",release=\"$release\",host_name=~\"$host\"}) / max by (host_name) (compute_fleet_host_disk_bytes{namespace=\"$namespace\",release=\"$release\",host_name=~\"$host\"} > 0)",
+          "legendFormat": "{{host_name}} · booking headroom",
           "editorMode": "code",
           "range": true
         }

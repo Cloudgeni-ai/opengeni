@@ -1,4 +1,10 @@
-import type { SessionEvent, SessionLineageResponse } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
+import type {
+  SessionEvent,
+  ChatSessionLineageResponse as SessionLineageResponse,
+  SessionLineageResponse as FullSessionLineageResponse,
+  OpenGeniClient,
+} from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 import {
   useEmbeddedSessionLineage,
@@ -12,23 +18,25 @@ import {
   useSessionEventTrigger,
 } from "./internal";
 
-export type UseSessionLineageOptions = EmbeddedSessionLineageClientOverride & {
-  events?: SessionEvent[] | undefined;
-  /** Refresh interval (ms). Off by default. */
-  pollIntervalMs?: number | undefined;
-  enabled?: boolean | undefined;
-  /** Optional shared causal clock invoked when each network read starts. */
-  beginRead?: (() => number) | undefined;
-};
+export type UseSessionLineageOptions<Client extends ChatClient = OpenGeniClient> =
+  EmbeddedSessionLineageClientOverride<Client> & {
+    events?: SessionEvent[] | undefined;
+    /** Refresh interval (ms). Off by default. */
+    pollIntervalMs?: number | undefined;
+    enabled?: boolean | undefined;
+    /** Optional shared causal clock invoked when each network read starts. */
+    beginRead?: (() => number) | undefined;
+  };
 
-export type UseSessionLineageResult = {
-  lineage: SessionLineageResponse | null;
-  loading: boolean;
-  error: Error | null;
-  /** Causal generation captured when the accepted lineage read started. */
-  readGeneration: number;
-  refresh: () => Promise<void>;
-};
+export type UseSessionLineageResult<L extends SessionLineageResponse = FullSessionLineageResponse> =
+  {
+    lineage: L | null;
+    loading: boolean;
+    error: Error | null;
+    /** Causal generation captured when the accepted lineage read started. */
+    readGeneration: number;
+    refresh: () => Promise<void>;
+  };
 
 export function isLineageRefreshEvent(event: SessionEvent): boolean {
   if (event.type === "session.status.changed" || event.type === "session.created") {
@@ -68,8 +76,16 @@ function isSessionCreateToolCallCreated(event: SessionEvent): boolean {
 /** Read the ancestors + descendant tree for one session. Data-only; no UI state. */
 export function useSessionLineage(
   sessionId: string | null | undefined,
-  options: UseSessionLineageOptions = {},
-): UseSessionLineageResult {
+  options?: UseSessionLineageOptions,
+): UseSessionLineageResult;
+export function useSessionLineage(
+  sessionId: string | null | undefined,
+  options: UseSessionLineageOptions<ChatClient>,
+): UseSessionLineageResult<SessionLineageResponse>;
+export function useSessionLineage(
+  sessionId: string | null | undefined,
+  options: UseSessionLineageOptions<ChatClient> = {},
+): UseSessionLineageResult<SessionLineageResponse> {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSessionLineage(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);

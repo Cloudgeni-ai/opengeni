@@ -90,6 +90,14 @@ impl Process {
         *self.exit.borrow() == Exit::Running
     }
 
+    /// This process's procfs files, to be read off the async runtime.
+    pub(crate) fn procfs(&self) -> Procfs {
+        Procfs {
+            pid: self.pid,
+            pidfd: Arc::clone(&self.pidfd),
+        }
+    }
+
     /// Lowers what the out-of-memory killer counts against this process by
     /// `adj` thousandths of what it counts against (`oom_score_adj`), such
     /// as [`OOM_SCORE_ADJ`]. The file is opened by number, then written
@@ -126,20 +134,7 @@ impl Process {
     /// Fails if the pinned process has exited, so its number may name
     /// another process by now.
     fn still_running(&self) -> io::Result<()> {
-        let mut ready = [rustix::event::PollFd::new(
-            self.pidfd.get_ref(),
-            rustix::event::PollFlags::IN,
-        )];
-        let zero = rustix::event::Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        if rustix::event::poll(&mut ready, Some(&zero))? > 0 {
-            return Err(io::Error::from_raw_os_error(
-                rustix::io::Errno::SRCH.raw_os_error(),
-            ));
-        }
-        Ok(())
+        still_running(&self.pidfd)
     }
 
     /// Kills the process. Succeeds if it has already exited.
@@ -155,6 +150,45 @@ impl Process {
         let mut exit = self.exit.clone();
         let _ = exit.wait_for(|exit| *exit == Exit::Exited).await;
     }
+}
+
+/// The procfs files of a pinned [`Process`], each opened by number and
+/// handed out only if the process has not exited since, as in
+/// [`Process::protect_from_oom`]: a file names the process that had the
+/// number when it was opened, so one handed out is the pinned process's
+/// for good.
+#[derive(Clone, Debug)]
+pub(crate) struct Procfs {
+    pid: Pid,
+    pidfd: Arc<AsyncFd<OwnedFd>>,
+}
+
+impl Procfs {
+    /// Opens `/proc/<pid>/<name>` for reading.
+    pub(crate) fn open(&self, name: &str) -> io::Result<fs::File> {
+        let file = fs::File::open(format!("/proc/{}/{name}", self.pid.as_raw_pid()))?;
+        still_running(&self.pidfd)?;
+        Ok(file)
+    }
+}
+
+/// Fails if the process `pidfd` pins has exited, so its number may name
+/// another process by now.
+fn still_running(pidfd: &AsyncFd<OwnedFd>) -> io::Result<()> {
+    let mut ready = [rustix::event::PollFd::new(
+        pidfd.get_ref(),
+        rustix::event::PollFlags::IN,
+    )];
+    let zero = rustix::event::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if rustix::event::poll(&mut ready, Some(&zero))? > 0 {
+        return Err(io::Error::from_raw_os_error(
+            rustix::io::Errno::SRCH.raw_os_error(),
+        ));
+    }
+    Ok(())
 }
 
 /// Makes `command` start its process in a process group of its own, so
@@ -302,11 +336,19 @@ mod tests {
         assert_ne!(two.identity().unwrap(), identity);
         let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
         assert!(identity.starts_with(&format!("{}/{}/", boot.trim(), first.id())));
+        let files = one.procfs();
+        assert!(files.open("maps").is_ok());
         for (process, child) in [(&one, &mut first), (&two, &mut second)] {
             process.kill().unwrap();
             process.exited().await;
+            // Not yet reaped, so its number still has procfs files.
+            assert!(
+                process.procfs().open("maps").is_err(),
+                "the files of a process that exited are not handed out"
+            );
             let _ = child.wait();
         }
+        assert!(files.open("maps").is_err());
         assert!(
             one.identity().is_err(),
             "a process that exited is named no more"

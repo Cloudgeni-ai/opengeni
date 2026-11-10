@@ -6,6 +6,7 @@ import {
 import { connectionAccountIdentityLabel } from "@opengeni/contracts/connection-account-label";
 import { and, eq, isNull, or, sql, type AnyColumn } from "drizzle-orm";
 import {
+  rawRows,
   setSubjectRlsContext,
   withAccountRls,
   withRlsContext,
@@ -1032,38 +1033,47 @@ const webhookLookup: Lookup = async (where) => {
 function named(
   kind: string,
   permission: string,
-  table:
-    | typeof schema.channels
-    | typeof schema.documentBases
-    | typeof schema.botTemplates
-    | typeof schema.automationTemplates,
+  table: typeof schema.channels | typeof schema.documentBases | typeof schema.automationTemplates,
 ): Lookup {
   return workspaceRow(
     kind,
     permission,
-    async (db, workspaceId, id, where) =>
+    async (db, workspaceId, id) =>
       (
         await db
           .select({ name: table.name, createdAt: table.createdAt })
           .from(table)
-          .where(
-            and(
-              eq(table.id, id),
-              eq(table.workspaceId, workspaceId),
-              // A private bot template is its creator's alone.
-              table === schema.botTemplates
-                ? or(
-                    eq(schema.botTemplates.visibility, "workspace"),
-                    eq(schema.botTemplates.createdBySubjectId, where.subjectId),
-                  )
-                : undefined,
-            ),
-          )
+          .where(and(eq(table.id, id), eq(table.workspaceId, workspaceId)))
           .limit(1)
       )[0],
     (row) => ({ kind, name: row.name, facts: facts(["Created", targetDay(row.createdAt)]) }),
   );
 }
+
+/**
+ * An agent (bot templates are agents too): an Only me agent is its owner's
+ * alone.
+ */
+const agentLookup = (kind: string): Lookup =>
+  workspaceRow(
+    kind,
+    "sessions:read",
+    async (db, workspaceId, id, where) =>
+      (
+        await rawRows<{ name: string; created_at: Date | string }>(
+          db,
+          sql`select name, created_at from agents
+            where id = ${id}::uuid and workspace_id = ${workspaceId}::uuid
+              and (visibility = 'workspace' or owner_subject_id = ${where.subjectId})
+            limit 1`,
+        )
+      )[0],
+    (row) => ({
+      kind,
+      name: row.name,
+      facts: facts(["Created", targetDay(row.created_at)]),
+    }),
+  );
 
 /** A rig through the rig routes' own read, which applies its scope and status. */
 const rigLookup: Lookup = async (where) => {
@@ -1480,7 +1490,8 @@ const LOOKUPS: Record<string, Lookup> = {
   "document-bases/:baseId": named("document collection", "documents:search", schema.documentBases),
   "documents/:documentId": documentLookup,
   "event-sources/:sourceId": eventSourceLookup,
-  "bot-templates/:templateId": named("bot template", "sessions:read", schema.botTemplates),
+  "bot-templates/:templateId": agentLookup("bot template"),
+  "agents/:agentId": agentLookup("agent"),
   "automation-templates/:templateId": named(
     "automation template",
     "scheduled_tasks:run",

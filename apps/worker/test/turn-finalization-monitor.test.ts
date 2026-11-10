@@ -177,4 +177,40 @@ describe("turn finalization diagnostics", () => {
       warning.mockRestore();
     }
   });
+
+  test("a contained stage holds the host containment until the finalizer moves on", async () => {
+    const output = spyOn(console, "error").mockImplementation(() => {});
+    const warning = spyOn(console, "warn").mockImplementation(() => {});
+    let held = 0;
+    const monitor = startTurnFinalizationMonitor({
+      observability: observability(),
+      details: { opAcks: {} },
+      heartbeat() {},
+      timeoutMs: 10,
+      slowAfterMs: 1,
+      requestWorkerDrain() {
+        held++;
+        return () => {
+          held--;
+        };
+      },
+    });
+    try {
+      monitor.enter("tool_writers");
+      await Bun.sleep(20);
+      expect(held).toBe(1);
+      // The stalled stage recovered: its hold is released, and the next stage
+      // only holds again if it stalls in turn.
+      monitor.enter("workspace_snapshot");
+      expect(held).toBe(0);
+      await Bun.sleep(20);
+      expect(held).toBe(1);
+      monitor.stop();
+      expect(held).toBe(0);
+    } finally {
+      monitor.stop();
+      output.mockRestore();
+      warning.mockRestore();
+    }
+  });
 });

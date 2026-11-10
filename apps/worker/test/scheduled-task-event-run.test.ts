@@ -11,6 +11,7 @@ import {
   createScheduledTask,
   eventOccurrenceProducerKey,
   listScheduledTaskRuns,
+  listSessionEvents,
   markEventOccurrenceStarted,
   recordEventDelivery,
   setScheduledTaskEvents,
@@ -183,6 +184,14 @@ describe("event runs", () => {
     expect(result).toMatchObject({ action: "start" });
     const [run] = await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 1);
     expect(run).toMatchObject({ triggerType: "event" });
+    // The chat is told the automation's name; only the agent reads its instructions.
+    const pending = (await listSessionEvents(client.db, grant.workspaceId, run!.sessionId!)).find(
+      (event) => event.type === "system.update.pending",
+    );
+    expect(pending?.payload).toMatchObject({
+      kind: "scheduled_occurrence",
+      summary: "When a deploy finishes",
+    });
 
     const [update] = await shared!.admin<
       { payload: { text: string; events?: ScheduledOccurrenceEvents } }[]

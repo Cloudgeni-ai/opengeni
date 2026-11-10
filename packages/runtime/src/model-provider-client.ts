@@ -66,7 +66,6 @@ import {
 } from "./model-provider-request-policy";
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
-import type { ToolNameObservers } from "./provider-request-tool-names";
 import {
   recordModelTransportDispatched,
   recordModelTransportStarted,
@@ -77,6 +76,8 @@ import { observePromptCacheRequestBody } from "./prompt-cache-fingerprint";
 import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import { invalidRequestSignatureOfResponse } from "./provider-invalid-request";
+import { classifyProviderAccountRefusalResponse } from "./provider-quota";
+import type { ProviderAccountRefusal } from "@opengeni/observability";
 import {
   captureClaudeRequestToken,
   prepareClaudeSubscriptionRequest,
@@ -87,16 +88,6 @@ let runtimeMetricsHooks: RuntimeMetricsHooks | null = null;
 
 export function configureRuntimeMetricsHooks(hooks: RuntimeMetricsHooks | null | undefined): void {
   runtimeMetricsHooks = hooks ?? null;
-}
-
-/** The outbound tool-name guard's observations for one provider, as metrics. */
-export function modelToolNameObservers(provider: string): ToolNameObservers {
-  return {
-    onToolNameRepair: ({ api, field }) =>
-      runtimeMetricsHooks?.onModelToolNameRepair?.({ provider, api, field }),
-    onToolNameRetry: ({ api, outcome }) =>
-      runtimeMetricsHooks?.onModelToolNameRetry?.({ provider, api, outcome }),
-  };
 }
 
 export function recordRuntimeMcpToolCallMetric(
@@ -187,7 +178,6 @@ export function buildOpenAIClientFromSettings(
         ),
       },
       {
-        ...modelToolNameObservers(providerId),
         modelRequestPolicy: (request) =>
           chatModelRequestPolicy(request) ?? azureModelRequestPolicy(request),
       },
@@ -213,7 +203,6 @@ export function buildOpenAIClientFromSettings(
       ),
     },
     {
-      ...modelToolNameObservers(providerId),
       // Only the OpenAI platform; a compatible server keeps its own contract.
       modelRequestPolicy: isDirectOpenAiApiBaseUrl(settings.openaiBaseUrl)
         ? withStorelessResponses(chatModelRequestPolicy)
@@ -572,6 +561,10 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   ) {
     throw new Error("This workspace's model connection key is unavailable");
   }
+  // A disconnected organization endpoint fails closed like its other accounts.
+  if (provider.kind === "direct-compatible-organization" && !provider.apiKey?.trim()) {
+    throw new Error("This organization's model endpoint key is unavailable");
+  }
   // A missing or revoked organization connection fails closed; it never
   // falls back to the deployment's own Azure or OpenAI credentials.
   if (provider.kind === "direct-openai-organization" && !provider.apiKey?.trim()) {
@@ -601,9 +594,12 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
     provider.kind === "opper-managed" ||
     provider.kind === "opper-workspace" ||
     provider.kind === "opper-organization";
-  // A workspace's own OpenAI-compatible server is an arbitrary URL: every
-  // request is DNS-pinned to public addresses and refuses redirects.
-  const compatibleEndpoint = provider.kind === "direct-compatible-workspace";
+  // A workspace's or organization's own OpenAI-compatible server is an
+  // arbitrary URL: every request is DNS-pinned to public addresses and
+  // refuses redirects.
+  const compatibleEndpoint =
+    provider.kind === "direct-compatible-workspace" ||
+    provider.kind === "direct-compatible-organization";
   // Opper reuses the exact-upstream lookup so an unknown slug fails before
   // network I/O; its entries carry no Gateway route policy.
   const gatewayPolicies =
@@ -692,7 +688,6 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
             ),
           },
           {
-            ...modelToolNameObservers(provider.id),
             modelRequestPolicy: modelRequestPolicyForProvider(
               provider,
               gatewayPolicies,
@@ -719,7 +714,6 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ),
             },
             {
-              ...modelToolNameObservers(provider.id),
               modelRequestPolicy: modelRequestPolicyForProvider(
                 provider,
                 gatewayPolicies,
@@ -803,7 +797,6 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
               ),
             },
             {
-              ...modelToolNameObservers(provider.id),
               modelRequestPolicy: modelRequestPolicyForProvider(
                 provider,
                 gatewayPolicies,
@@ -916,7 +909,19 @@ export function instrumentedModelFetch(
           });
         }
       }
-      recordModelCallMetric(provider, response.ok ? "completed" : "failed", started);
+      if (response.status === 404) {
+        // Only the provider's body tells an account restriction (for example
+        // an OpenRouter account limited to its own keys) from any other 404.
+        // Read a bounded clone off-path; the call never waits for it.
+        recordModelCallMetricAfterAccountRefusalCheck(provider, response, started);
+      } else {
+        recordModelCallMetric(
+          provider,
+          response.ok ? "completed" : "failed",
+          started,
+          response.status,
+        );
+      }
       if (response.status === 400) recordModelInvalidRequestMetric(provider, response);
       return response;
     } catch (error) {
@@ -945,13 +950,66 @@ function recordModelCallMetric(
   provider: string,
   outcome: "completed" | "failed",
   started: number,
+  httpStatus?: number,
+  providerAccountRefusal?: ProviderAccountRefusal,
 ): void {
-  const durationSeconds = Math.max(0, (performance.now() - started) / 1000);
+  recordModelCallMetricWithDuration(
+    provider,
+    outcome,
+    Math.max(0, (performance.now() - started) / 1000),
+    httpStatus,
+    providerAccountRefusal,
+  );
+}
+
+function recordModelCallMetricWithDuration(
+  provider: string,
+  outcome: "completed" | "failed",
+  durationSeconds: number,
+  httpStatus?: number,
+  providerAccountRefusal?: ProviderAccountRefusal,
+): void {
   try {
-    runtimeMetricsHooks?.onModelCall?.({ provider, outcome, durationSeconds });
+    runtimeMetricsHooks?.onModelCall?.({
+      provider,
+      outcome,
+      durationSeconds,
+      ...(httpStatus !== undefined ? { httpStatus } : {}),
+      ...(providerAccountRefusal ? { providerAccountRefusal } : {}),
+    });
   } catch {
     // Metrics emission must never affect a model call.
   }
+}
+
+/**
+ * Record a failed 404 call once its bounded body clone has been classified.
+ * The duration is the response time, not the classification time, and a
+ * failed classification still records the call (as an unclassified 404).
+ */
+function recordModelCallMetricAfterAccountRefusalCheck(
+  provider: string,
+  response: Response,
+  started: number,
+): void {
+  const durationSeconds = Math.max(0, (performance.now() - started) / 1000);
+  let classification: Promise<ProviderAccountRefusal | null>;
+  try {
+    classification = classifyProviderAccountRefusalResponse(response);
+  } catch {
+    classification = Promise.resolve(null);
+  }
+  void classification
+    .catch(() => null)
+    .then((refusal) =>
+      recordModelCallMetricWithDuration(
+        provider,
+        "failed",
+        durationSeconds,
+        response.status,
+        refusal ?? undefined,
+      ),
+    );
 }
 
 /**

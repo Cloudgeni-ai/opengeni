@@ -96,6 +96,10 @@ describe("turn startup dashboard", () => {
       .join("\n");
 
     expect(latencyExpressions).toContain("opengeni_turn_startup_milestone_duration_seconds_bucket");
+    // The alerting signal, from the attempt start, sits next to the cumulative one.
+    expect(latencyExpressions).toContain(
+      "opengeni_turn_startup_since_attempt_start_seconds_bucket",
+    );
     expect(latencyExpressions).toContain('outcome="completed"');
     expect(latencyExpressions).not.toContain("opengeni_model_request_phases_total");
     expect(availabilityExpressions).toContain(

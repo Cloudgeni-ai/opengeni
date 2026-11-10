@@ -173,8 +173,19 @@ RUN set -eux; \
   install -D -m 0444 /tmp/alignment-tokens.txt /out/models/alignment-tokens.txt; \
   install -D -m 0444 /tmp/alignment-LICENSE /out/models/alignment-LICENSE
 
+# The pinned rg builds the worker delivers to managed sandboxes, with the static
+# musl jq committed under agent/vendor/jq/. Pins equal
+# packages/runtime/src/sandbox/shell-tools-manifest.ts (checked by
+# scripts/fetch-shell-tools.test.ts); the cache is keyed by checksum.
+FROM scratch AS shell-tools-linux
+ADD --checksum=sha256:33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz /cache/33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+ADD --checksum=sha256:800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz /cache/800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
+
 FROM source-base AS worker-build
-RUN bun scripts/build-runtime-processes.ts worker \
+COPY --from=shell-tools-linux --chown=bun:bun /cache/ /tmp/shell-tools-cache/
+RUN OPENGENI_SHELL_TOOLS_CACHE=/tmp/shell-tools-cache bun scripts/fetch-shell-tools.ts --offline \
+    --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl --out /tmp/shell-tools \
+  && OPENGENI_SHELL_TOOLS_DIR=/tmp/shell-tools bun scripts/build-runtime-processes.ts worker \
   && bun scripts/assemble-server-runtime.ts worker
 
 FROM oven/bun:${BUN_VERSION}-slim AS worker

@@ -2,6 +2,7 @@
 // handed a sub-session's question: the question, then what the agent chose
 // once the sub-session's request settles. Polling stops once it is settled.
 import type { OpenGeniClient, SessionHumanInputRequest } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import { CheckIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
@@ -11,7 +12,10 @@ import { useOpenGeniText, type OpenGeniText } from "../../../messages/runtime";
 import type { UserMessageItem } from "../../../timeline/types";
 import { cn } from "../../lib/utils";
 
-export type HumanInputDelegationRecordClient = Pick<OpenGeniClient, "getHumanInputRequest">;
+export type HumanInputDelegationRecordClient = Pick<
+  ChatClient<OpenGeniClient>,
+  "getHumanInputRequest"
+>;
 
 export const HUMAN_INPUT_DELEGATION_POLL_MS = 10_000;
 

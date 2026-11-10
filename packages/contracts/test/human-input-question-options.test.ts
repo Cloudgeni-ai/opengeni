@@ -53,6 +53,8 @@ describe("richer human-input questions", () => {
       label: canonical.label,
       confirm: false,
       validation: null,
+      // Sent whenever the secret kind is on the wire.
+      secret: null,
       options: canonical.options.map((option) => ({
         ...option,
         description: null,

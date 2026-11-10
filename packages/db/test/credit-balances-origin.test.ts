@@ -4,7 +4,6 @@ import {
   apiSpendableCreditMicros,
   chargeBillingOrigin,
   VOICE_CREDIT_USAGE,
-  planCreditDebit,
   planPostUseCreditAllocations,
   spendableCreditMicros,
   toolCreditUsage,
@@ -38,13 +37,11 @@ test("API work can spend credits only", () => {
   expect(apiSpendableCreditMicros({ ...balance, creditsMicros: -5 * M })).toBe(0);
 });
 
-test("API debits are capped at credits and never allocate promotional grants", () => {
-  expect(planCreditDebit(balance, 50 * M, "model-a", "api")).toEqual({
-    debitedMicros: 20 * M,
-    allocations: [],
-  });
-  expect(planCreditDebit(balance, 50 * M, "model-a").debitedMicros).toBe(50 * M);
+test("API debits never allocate promotional grants", () => {
   expect(planPostUseCreditAllocations(balance, 50 * M, "model-a", "api")).toEqual([]);
+  expect(planPostUseCreditAllocations(balance, 50 * M, "model-a")).toEqual([
+    { grantEntryId: "00000000-0000-4000-8000-000000000002", amountMicros: 30 * M },
+  ]);
 });
 
 test("the charge origin is explicit, else the trusted scope's, else app", async () => {
@@ -76,7 +73,7 @@ test("the Free plan's monthly credit pays for app tools, not for other models or
   // Search, sandbox time, video (no model) and voice.
   expect(spendableCreditMicros(free, undefined)).toBe(10 * M);
   expect(spendableCreditMicros(free, VOICE_CREDIT_USAGE)).toBe(10 * M);
-  expect(planCreditDebit(free, 2 * M).allocations).toEqual([
+  expect(planPostUseCreditAllocations(free, 2 * M, undefined)).toEqual([
     { grantEntryId: "00000000-0000-4000-8000-000000000003", amountMicros: 2 * M },
   ]);
   // Its model scope still holds for models, and API work never spends it.

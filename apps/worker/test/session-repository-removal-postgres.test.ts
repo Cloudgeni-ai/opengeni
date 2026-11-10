@@ -6,8 +6,10 @@ import {
   createDb,
   createSession,
   getSession,
+  getSessionRepositoryMembershipForAuthority,
   initializeSessionStartAtomically,
   listSandboxGroupRepositoryResources,
+  sessionRepositoryRemoved,
   settleSessionRepositoryCleanup,
   type DbClient,
 } from "@opengeni/db";
@@ -199,6 +201,68 @@ describe("removed repositories and credential minting (real PostgreSQL)", () => 
       expect(after.isError).toBe(true);
       expect(after.content[0].text).toBe("Cloudgeni-ai/grocery-bot was removed from this chat");
     }
+  });
+
+  // All my repositories does not limit a chat to its attached repositories;
+  // the git broker and the REST bridge still refuse a removed one with this check.
+  test("the All my repositories membership check refuses a removed repository in the chat and its child", async () => {
+    if (!client) return;
+    const { grant, parent, child, removeGroceryBot } = await chatWithChild(client.db);
+    const removedIn = async (sessionId: string, uri: string) => {
+      const membership = await getSessionRepositoryMembershipForAuthority(
+        client!.db,
+        grant.workspaceId,
+        sessionId,
+      );
+      expect(membership).not.toBeNull();
+      return sessionRepositoryRemoved(membership!, { uris: [uri] });
+    };
+    for (const session of [parent, child]) {
+      expect(await removedIn(session.id, groceryBot.uri)).toBe(false);
+    }
+    await removeGroceryBot();
+    for (const session of [parent, child]) {
+      // Any spelling of the removed repository matches; an unrelated
+      // repository the chat never attached is not refused.
+      expect(await removedIn(session.id, "https://github.com/cloudgeni-ai/GROCERY-BOT")).toBe(true);
+      expect(await removedIn(session.id, docs.uri)).toBe(false);
+      expect(await removedIn(session.id, "https://github.com/Cloudgeni-ai/other")).toBe(false);
+    }
+    expect(
+      await getSessionRepositoryMembershipForAuthority(
+        client.db,
+        grant.workspaceId,
+        crypto.randomUUID(),
+      ),
+    ).toBeNull();
+  });
+
+  test("a removal record that outlived a re-attach does not refuse the repository", () => {
+    const record = {
+      id: crypto.randomUUID(),
+      resource: groceryBot,
+      removedAt: new Date().toISOString(),
+      sandboxCleanupPending: false,
+    } as Parameters<typeof sessionRepositoryRemoved>[0]["removedRepositories"][number];
+    const removed = (
+      resources: ResourceRef[],
+      repository: { uris: string[]; githubRepositoryId?: string },
+    ) => sessionRepositoryRemoved({ resources, removedRepositories: [record] }, repository);
+    expect(removed([docs], { uris: [groceryBot.uri] })).toBe(true);
+    expect(removed([groceryBot], { uris: [groceryBot.uri] })).toBe(false);
+    // A renamed or transferred repository is still the removed one by id.
+    expect(
+      removed([docs], { uris: ["https://github.com/acme/renamed"], githubRepositoryId: "72" }),
+    ).toBe(true);
+    expect(
+      removed([docs], { uris: ["https://github.com/acme/renamed"], githubRepositoryId: "73" }),
+    ).toBe(false);
+    expect(
+      removed([{ ...groceryBot, uri: "https://github.com/acme/renamed.git" }], {
+        uris: ["https://github.com/acme/renamed"],
+        githubRepositoryId: "72",
+      }),
+    ).toBe(false);
   });
 
   test("a child's cleanup keeps what its parent still uses in the shared box", async () => {

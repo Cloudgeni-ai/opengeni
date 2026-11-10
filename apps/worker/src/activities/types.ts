@@ -6,7 +6,6 @@ import type {
   ScheduledTaskTriggerType,
   TurnInitiator,
 } from "@opengeni/contracts";
-import type { KnowledgeSourceSyncRetirementReason } from "@opengeni/contracts/knowledge-source-sync-retirement";
 import type {
   Database,
   SessionWorkflowWakeDeliveryResult,
@@ -185,8 +184,9 @@ export type ControlActivityServices = SharedActivityServices;
 /** Turn workers own the model loop and never construct document parsers. */
 export type TurnActivityServices = SharedActivityServices & {
   /** Host-owned containment: stop polling and checkpoint peer turns before exit.
-   * Bare activity embedders must provide their own worker lifecycle edge. */
-  requestWorkerDrain: () => void;
+   * Bare activity embedders must provide their own worker lifecycle edge. It may
+   * return a release that the caller invokes if its stalled cleanup recovers. */
+  requestWorkerDrain: () => void | (() => void);
   /** Deterministic test clock for the cleanup-only monitor. */
   turnFinalizationTimeoutMs?: number | undefined;
   runtime: OpenGeniRuntime;
@@ -312,6 +312,8 @@ export type FailSessionAttemptInput = {
    * attempt instead of terminally failing it. */
   preClaimFailure?: PreClaimFailureDetail;
   admissionFence?: SessionAdmissionFence;
+  /** Wake revision observed with `admissionFence`; omitted by older histories. */
+  admissionWakeRevision?: number;
   /** Added in v4. A claimed attempt that lost operational database access
    * before turn-start completion carries its exact immutable turn identity so
    * the DB-only control lane can recover it instead of terminally failing it. */
@@ -560,7 +562,6 @@ export type DispatchScheduledTaskRunResult =
         | "machine_enrollment_inactive"
         | "rig_version_unavailable"
         | "scheduled_model_unavailable"
-        | KnowledgeSourceSyncRetirementReason
         | "incident_preflight_metadata_missing"
         | "incident_responder_under_capable"
         | "incident_data_source_unsuitable";

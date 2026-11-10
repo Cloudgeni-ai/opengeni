@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import {
+  CLIENT_ERROR_DETAIL_FIELDS,
+  CLIENT_ERROR_DETAIL_MAX_BYTES,
+} from "@opengeni/contracts/client-error-report";
 import { createObservability } from "@opengeni/observability";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -102,6 +106,22 @@ describe("client error report contract", () => {
       }),
     ];
     for (const body of rejected) expect(parseClientErrorReport(body)).toBeNull();
+  });
+
+  test("refuses a diagnostic field over twice its projected bound before scrubbing it", () => {
+    for (const field of CLIENT_ERROR_DETAIL_FIELDS) {
+      const limit = CLIENT_ERROR_DETAIL_MAX_BYTES[field] * 2;
+      const report = (value: string) =>
+        parseClientErrorReport(JSON.stringify({ ...validReport, error: { [field]: value } }));
+      expect(report("x".repeat(limit))?.error?.[field]?.startsWith("x")).toBe(true);
+      expect(report("x".repeat(limit + 1))).toBeNull();
+    }
+    // A body-sized run of URL prefixes is refused by length, never scrubbed.
+    expect(
+      parseClientErrorReport(
+        JSON.stringify({ ...validReport, error: { stack: "http://".repeat(2_900) } }),
+      ),
+    ).toBeNull();
   });
 
   test("re-projects error diagnostics: scrubbed, bounded, and dropped when empty", () => {

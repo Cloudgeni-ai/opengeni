@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import * as core from "@opengeni/core";
 import { ModelCallError } from "@opengeni/core";
+import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
 import * as runtimeModelCall from "@opengeni/runtime/model-call";
 import { testSettings } from "@opengeni/testing/settings";
@@ -39,27 +40,49 @@ const ROUTES = {
   },
 } as const;
 
-function harness(route: keyof typeof ROUTES, admission: Record<string, unknown>) {
-  const settings = testSettings({ billingMode: "stripe", subscriptionPlansEnabled: true });
+function harness(
+  route: keyof typeof ROUTES,
+  admission?: Record<string, unknown>,
+  origin: "app" | "api" = "app",
+  overrides: Parameters<typeof testSettings>[0] = {},
+) {
+  const settings = testSettings({
+    billingMode: "stripe",
+    subscriptionPlansEnabled: true,
+    ...overrides,
+  });
   const selection = {
     model: {
       id: "own-model",
       label: "Own",
       providerLabel: "Own",
       ...ROUTES[route],
-      capabilities: { inputModalities: ["text"], structuredOutput: { runnable: true } },
+      capabilities: {
+        inputModalities: ["text"],
+        outputModalities: ["text"],
+        transports: { sse: { runnable: true } },
+        structuredOutput: { runnable: true },
+      },
     },
+    policyAllowed: true,
+    credentialReadiness: { status: "ready" },
   };
   spy(
     rls,
     "withAccessGrantSessionRlsContext",
     async (_d: unknown, _g: unknown, fn: () => unknown) => fn(),
   );
-  spy(rls, "billingOriginForAccessGrant", async () => "app");
+  spy(rls, "billingOriginForAccessGrant", async () => origin);
   spy(core, "resolveWorkspaceCatalogSettings", async () => ({ settings }));
   spy(core, "resolveCallerWorkspaceModelSelections", async () => [selection]);
   spy(core, "admissibleWorkspaceModel", () => selection);
-  const admit = spy(core, "admitModelCall", async () => admission);
+  const realAdmission = core.admitModelCall;
+  const admit = spy(
+    core,
+    "admitModelCall",
+    async (...args: Parameters<typeof realAdmission>) =>
+      admission ?? (await realAdmission(...args)),
+  );
   const provider = spy(runtimeModelCall, "runSingleModelCall", async () => {
     throw new Error("must not dispatch");
   });
@@ -86,10 +109,53 @@ function harness(route: keyof typeof ROUTES, admission: Record<string, unknown>)
         requestId: "req-own",
       } as never)
       .catch((caught: unknown) => caught);
-  return { admit, provider, call };
+  const listModels = async () =>
+    (
+      await service.listModels({
+        grant: {
+          accountId: ACCOUNT,
+          workspaceId: WORKSPACE,
+          subjectId: "user:alice",
+          permissions: [],
+          principalKind: "human_session",
+        },
+        accountId: ACCOUNT,
+        workspaceId: WORKSPACE,
+        subjectId: "user:alice",
+      } as never)
+    ).map(({ id }) => id);
+  return { admit, provider, call, listModels };
 }
 
 describe("single model calls on the person's own model", () => {
+  test("API callers receive a clear refusal before a subscription credential or provider is used", async () => {
+    const h = harness("subscription", undefined, "api");
+    expect(await h.call()).toMatchObject({
+      status: 403,
+      type: "invalid_request_error",
+      code: "subscription_api_unavailable",
+      message:
+        "Connected subscriptions are only available in the Opengeni apps. Choose a credit-billed model for API use.",
+    });
+    expect(h.provider).not.toHaveBeenCalled();
+    expect(await h.listModels()).toEqual([]);
+  });
+  test("with the operator opt-in, API callers see and reach a connected subscription", async () => {
+    const h = harness("subscription", undefined, "api", {
+      billingMode: "disabled",
+      subscriptionPlansEnabled: false,
+      apiConnectedSubscriptionsEnabled: true,
+    });
+    spy(opengeniDb, "checkWorkspaceAllowance", async () => null);
+    expect(await h.listModels()).toEqual(["own-model"]);
+    const result = await h.call();
+    expect(h.admit.mock.calls.at(-1)?.[1]).toMatchObject({
+      billingOrigin: "api",
+      ownSubscription: true,
+    });
+    expect(await h.admit.mock.results.at(-1)?.value).toMatchObject({ allowed: true });
+    expect(result).not.toMatchObject({ code: "subscription_api_unavailable" });
+  });
   test("an own subscription is admitted as a subscription, never byok, and Free is refused with the upgrade code", async () => {
     const h = harness("subscription", {
       allowed: false,

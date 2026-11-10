@@ -13,6 +13,7 @@ import {
   previewLoadingDocument,
   type SiteSnapshotReadClient,
 } from "@opengeni/react/native-previews";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   parseRetainedFileReference,
   type OpenGeniClient,
@@ -40,7 +41,7 @@ import type { NativeInteractiveBlock } from "./markdown";
 import { fontStyle, useNativeTimelineTheme, type NativeTimelineTheme } from "./theme";
 
 export type NativePreviewClient = Pick<
-  OpenGeniClient,
+  ChatClient<OpenGeniClient>,
   "getRetainedArtifact" | "createRetainedArtifactDownloadUrl"
 > &
   SiteSnapshotReadClient;

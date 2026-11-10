@@ -112,7 +112,7 @@ never change the arguments merely to get past a stale-write error.
 
 The same Skills Learning setting and personal/workspace authority as `skill_save`
 apply. Automatic deletes; Review first retains an explicitly labeled deletion
-proposal in Knowledge > Needs review; Off refuses. Report the actual receipt:
+proposal in Knowledge > Review; Off refuses. Report the actual receipt:
 pending does not mean removed. Built-in, repository and inline session Skills
 cannot be removed through this tool. Another distribution owner's Skill is
 refused until that owner is released; do not bypass this protection. Conversations
@@ -123,9 +123,12 @@ Do not encode binary files as text to bypass the text-only boundary. Unsupported
 files and size limits are explicit errors, not permission to drop files silently.
 ## Nonblocking review
 
-A pending save, publish, or install is retained in Knowledge > Needs review.
-Continue the task and link the pending revision. Do not call request_human_input
-or a second activation tool to turn a pending receipt into a chat interruption.
+A save, publish, or install pending approval has no effect until someone who
+can manage it approves it, in Knowledge > Review or from its card in the chat
+where one is shown; an edited Skill keeps its current version until then. Say
+so in your reply, continue the task and link the pending revision.
+Do not call request_human_input or a second activation tool to turn a pending
+receipt into a chat interruption.
 The human reviews the exact revision in the shared review surface. Approval
 publishes it; rejection leaves any previously published revision in place. A
 stale review cannot overwrite a newer revision. Automatic receipts are available

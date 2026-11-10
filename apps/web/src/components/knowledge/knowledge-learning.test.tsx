@@ -221,7 +221,7 @@ test("points per-chat changes at the chat's Agent tab and opens Review from the 
   try {
     await act(async () => root.render(<Harness canManageWorkspace waiting={3} />));
     await settle();
-    expect(container.textContent).toContain("Change them in the chat's Agent tab");
+    expect(container.textContent).toContain("Change them in the chat's Settings tab");
     const reviewRow = [
       ...container.querySelectorAll<HTMLElement>("[data-slot=setting-nav-row]"),
     ].find((row) => row.textContent?.includes("Waiting for review"));

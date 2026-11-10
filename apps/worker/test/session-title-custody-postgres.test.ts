@@ -61,6 +61,72 @@ afterAll(async () => {
 });
 
 describe.skipIf(!enabled)("independent title native request custody", () => {
+  for (const origin of ["app", "api"] as const) {
+    test(`delayed subscription title refuses ${origin === "app" ? "an ineligible plan" : "API-origin work"} before dispatch`, async () => {
+      const org = await fixture.organization();
+      const connectionId = await fixture.connection(org, providers[0]!);
+      const work = await fixture.turn(org, { model: models[0]! });
+      expect(
+        await subscriptionCoreTurns(providers[0]!).placeSubscriptionCoreTurn(
+          fixture.client.db,
+          work,
+        ),
+      ).toMatchObject({ kind: "run", connectionId });
+      const [turn] = await shared.admin<{ metadata: Record<string, unknown> }[]>`
+        select metadata from session_turns where id = ${work.identity.turnId}::uuid`;
+      const policy = TurnExecutionPolicyV1.parse(turn!.metadata.turnExecutionPolicyV1);
+      const request = SessionTitleRequest.parse({
+        version: 1,
+        prompt: "Name this conversation",
+        policy,
+        providerId: policy.providerId,
+        modelId: policy.productModelId,
+        upstreamModelId: policy.upstreamModelId,
+        definitionVersion: "fixture-definition",
+        apiConnectionId: null,
+        expectedTitle: { title: null, source: null },
+        externallyBilled: true,
+        chargesOpenGeniCredits: false,
+        countsTowardTokenCap: false,
+        pricingJson: "{}",
+      });
+      const job = await admitSessionTitleOperation(fixture.client.db, {
+        ...work,
+        provider: "codex",
+        connectionId,
+        requestEncrypted: encryptEnvironmentValue(key, JSON.stringify(request)),
+      });
+      await fixture.finish(work);
+      const readOrigin = spyOn(titleDb, "readTurnBillingOrigin").mockResolvedValue(origin);
+      let generated = 0;
+      const service = {
+        db: fixture.client.db,
+        settings: { ...settings, billingMode: "stripe", subscriptionPlansEnabled: true },
+        observability: createObservability(settings, { component: "worker" }),
+        runtime: {
+          generateSessionTitle: () => {
+            generated++;
+            throw new Error("must not dispatch");
+          },
+        },
+      } as unknown as TurnActivityServices;
+      const input = {
+        accountId: org.accountId,
+        workspaceId: org.workspaceId,
+        operationId: job!.id,
+      };
+      try {
+        expect(await reconcileSessionTitleOperation(service, input)).toEqual({
+          action: "terminal",
+        });
+        expect((await getSessionTitleOperation(fixture.client.db, input))?.state).toBe("failed");
+        expect(generated).toBe(0);
+        expect(readOrigin).toHaveBeenCalledTimes(1);
+      } finally {
+        readOrigin.mockRestore();
+      }
+    });
+  }
   for (const scenario of [
     "permanent",
     "busy",

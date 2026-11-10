@@ -198,6 +198,7 @@ export const SANDBOX_LIFECYCLE_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS",
   "OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS",
   "OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS",
+  "OPENGENI_SANDBOX_DRAIN_PROVIDER_SNAPSHOT_TIMEOUT_MS",
   "OPENGENI_SANDBOX_VIEWER_HOLDER_TTL_MS",
   "OPENGENI_SANDBOX_INTERACTION_HOLDER_TTL_MS",
   "OPENGENI_SANDBOX_WARMING_TIMEOUT_MS",
@@ -339,6 +340,11 @@ export const CREDIT_MARGIN_BPS_PASSTHROUGH_ENV: readonly string[] = [
 /** Optional switch for credit billing of provider-hosted tools (default on). */
 export const PAID_HOSTED_TOOLS_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_PAID_HOSTED_TOOLS_CREDIT_BILLING",
+];
+
+/** Operator opt-in for API-origin use of connected subscriptions (default off). */
+export const API_CONNECTED_SUBSCRIPTIONS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED",
 ];
 
 /** Public workspace MCP OAuth rollout settings. The enable switch is
@@ -1669,6 +1675,9 @@ export function requiredRuntimeEnvVars(
         "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
         "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET",
       );
+      if (env.OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED !== undefined) {
+        vars.push("OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED");
+      }
     }
     for (const key of [
       "OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID",
@@ -2596,6 +2605,10 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_TEAMS_BOT_ENABLED", env.OPENGENI_TEAMS_BOT_ENABLED ?? "false"),
     valueEnv("OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS", env.OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS),
     valueEnv("OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS", env.OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS),
+    valueEnv(
+      "OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED",
+      env.OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED ?? "false",
+    ),
     valueEnv("OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS", env.OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS),
     valueEnv(
       "OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS",
@@ -2604,6 +2617,7 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_TEAMS_BOT_CLIENT_ID", env.OPENGENI_TEAMS_BOT_CLIENT_ID),
     valueEnv("OPENGENI_TEAMS_BOT_CLIENT_SECRET", env.OPENGENI_TEAMS_BOT_CLIENT_SECRET),
     valueEnv("OPENGENI_TEAMS_BOT_TENANT_ID", env.OPENGENI_TEAMS_BOT_TENANT_ID),
+    valueEnv("OPENGENI_TEAMS_APP_NAME", env.OPENGENI_TEAMS_APP_NAME),
     ...(mcpOauthEnabled
       ? [requiredEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)]
       : publicBaseUrl
@@ -2683,6 +2697,10 @@ function runtimeEnvValues(
           valueEnv(
             "OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED",
             env.OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED,
+          ),
+          valueEnv(
+            "OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED",
+            env.OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED,
           ),
           valueEnv(
             "OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID",
@@ -2976,6 +2994,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of PAID_HOSTED_TOOLS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of API_CONNECTED_SUBSCRIPTIONS_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 

@@ -136,7 +136,7 @@ describe("catalog import persistence", () => {
       },
       metadata: {
         scopesHint: ["openid"],
-        logoSource: "generic_monogram",
+        logoSource: "integrations.sh",
         documentationUrl: "https://docs.mobbin.com/mcp/introduction",
         officialMcpRegistry: {
           name: "com.mobbin/mobbin",

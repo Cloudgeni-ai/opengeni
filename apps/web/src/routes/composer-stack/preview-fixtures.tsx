@@ -3,7 +3,7 @@ import { ChatComposer, type ComposerState, type UseFileAttachmentsResult } from 
 import { ComposerMobilePlus } from "@opengeni/react/app/components/composer-mobile-plus";
 import { ModelPicker } from "@opengeni/react/app/components/pickers";
 import type { IntelligenceEffort } from "@opengeni/react/app/lib/session-tools";
-import type { ClientVoiceInputConfig, Session } from "@opengeni/sdk";
+import type { ClientVoiceInputConfig, ChatSession as Session } from "@opengeni/sdk";
 import { useLayoutEffect, useState } from "react";
 
 import {

@@ -297,6 +297,46 @@ describe("workspace-capture — repository read authority", () => {
     expect(result).toEqual({ complete: true, status, diff, branchDiff: diff });
   });
 
+  test("working-tree failure joins a started branch capture before returning", async () => {
+    let failWorking!: (error: Error) => void;
+    let finishBranch!: (value: { files: never[]; revision: number }) => void;
+    let branchStarted!: () => void;
+    const working = new Promise<never>((_, reject) => {
+      failWorking = reject;
+    });
+    const branch = new Promise<{ files: never[]; revision: number }>((resolve) => {
+      finishBranch = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      branchStarted = resolve;
+    });
+    let returned = false;
+    const capture = readCaptureRepository(
+      {
+        gitStatus: async () => status,
+        gitDiff: (request) => {
+          if (request.fromRef === "origin/HEAD") {
+            branchStarted();
+            return branch;
+          }
+          return working;
+        },
+      },
+      "api",
+    ).then((value) => {
+      returned = true;
+      return value;
+    });
+    await started;
+    failWorking(new Error("working-tree transport failed"));
+    await Bun.sleep(0);
+    const returnedBeforeBranchSettled = returned;
+    finishBranch({ files: [], revision: 4 });
+    const result = await capture;
+    expect(result).toEqual({ complete: false, degradedReason: "repository_read_unavailable" });
+    expect(returnedBeforeBranchSettled).toBe(false);
+  });
+
   test("branch comparison failure remains additive to an authoritative working-tree capture", async () => {
     const diff = { files: [], revision: 4 };
     const fromRefs: Array<string | undefined> = [];

@@ -30,6 +30,13 @@ export type ConnectWindowHost = {
    * browser's session storage.
    */
   hints?: ConnectAttemptHints | undefined;
+  /**
+   * Where a card remembers a sign-in the person never came back from, so a
+   * later visit to the same connection, in any chat, can offer organization
+   * approval help. It must outlive the page; defaults to the browser's local
+   * storage, and `null` turns it off.
+   */
+  signInMemory?: ConnectAttemptHints | null | undefined;
 };
 
 /**

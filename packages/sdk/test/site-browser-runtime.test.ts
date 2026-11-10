@@ -116,6 +116,9 @@ describe.each(["console", "preview"] as const)("shipped Site runtime via %s", (t
           [filter]: boundSite,
         });
         expect(f.requests).toHaveLength(1);
+        // The checked-in host bridge is not an installed npm client. Keep it
+        // independent of Version PR bumps rather than reporting a stale version.
+        expect(f.requests[0]!.headers.has("x-opengeni-sdk-version")).toBe(false);
         const url = new URL(f.requests[0]!.path, "https://host.invalid");
         expect(url.pathname).toBe("/v1/workspaces/workspace/sessions");
         expect([...url.searchParams]).toEqual([

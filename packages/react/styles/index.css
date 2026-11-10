@@ -856,7 +856,7 @@
 .og-cm-editor .cm-editor .cm-cursor,
 .og-cm-editor .cm-editor .cm-dropCursor { border-left-color: var(--og-color-fg); }
 .og-cm-editor .cm-editor .cm-selectionLayer .cm-selectionBackground,
-.og-cm-editor .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground { background-color: color-mix(in srgb, var(--og-color-accent) 30%, transparent); }
+.og-cm-editor .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground { background-color: var(--og-color-text-selection); }
 .og-cm-editor .cm-editor .cm-selectionMatch { background-color: color-mix(in srgb, var(--og-color-accent) 18%, transparent); }
 .og-cm-editor .cm-editor .cm-panels { background-color: var(--og-color-surface-2); color: var(--og-color-fg); }
 

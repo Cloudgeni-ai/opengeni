@@ -35,7 +35,9 @@ export type ComposerSendBlocker =
   | "updating"
   | "account_choice"
   | "resources"
-  | "compute";
+  | "compute"
+  /** The chosen agent can't start a chat here; its chip and the setup strip say why. */
+  | "agent";
 
 export function getComposerSendBlocker(input: {
   uploadPending: boolean;
@@ -103,6 +105,10 @@ export type NewSessionSendState = {
   uploadPending: boolean;
   computeLoading: boolean;
   computeReady: boolean;
+  /** The chosen agent is still loading: Send waits, never starting an ordinary chat instead. */
+  agentLoading?: boolean | undefined;
+  /** The chosen agent can't start a chat here. */
+  agentBlocked?: boolean | undefined;
 };
 
 /**
@@ -127,6 +133,8 @@ export function getNewSessionSendBlocker(input: NewSessionSendState): ComposerSe
   // A session already created by a failed attempt keeps its accounts,
   // environment, files and compute: only the checks above still apply.
   if (input.created) return null;
+  if (input.agentLoading) return "loading";
+  if (input.agentBlocked) return "agent";
   if (!input.voice) {
     if (input.accountsLoading) return "loading";
     if (input.accountsFailed) return "accounts";

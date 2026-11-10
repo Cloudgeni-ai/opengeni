@@ -7,7 +7,7 @@ import type {
   MediaGenerationResult,
   ResourceRef,
   SessionStatus,
-  Session,
+  ChatSession as Session,
   TimelineAnnotation,
   TimelineAnnotationSource,
   ToolAuthNeededPayload,
@@ -303,6 +303,8 @@ export type StartupPhaseItem = {
   durationMs: number | null;
   /** Sandbox origin and rig marker outcomes refine the settled label only. */
   outcome: "created" | "restored" | "resumed" | "skipped" | null;
+  /** The Sandbox Environment a setup step sets up, by name, when its events say. */
+  subject?: string | undefined;
   blockedReason?:
     | "capture_in_progress"
     | "rotation_in_progress"
@@ -438,6 +440,11 @@ export type SessionStatusItem = {
    * is asked of the person, so it reads as stuck, not "waiting on you".
    */
   blocked?: true;
+  /**
+   * The `cancelled` status archiving a chat recorded when it stopped the
+   * chat's work: it reads as archived, never as "cancelled".
+   */
+  archived?: true;
   /** Presentation-only evidence that this historical attention state resumed. */
   resolvedAt?: string;
   occurredAt: string;
@@ -548,15 +555,27 @@ export type ContextCompactionItem = {
   skipReason: string | null;
   /**
    * Present only for a `summarization_failed` skip where the provider
-   * definitively rejected the compaction request. Content-free identifiers.
+   * definitively rejected the compaction request, or a trimmed checkpoint
+   * (`implementation: "deterministic_trim"`) whose summary request was
+   * rejected that way. Content-free identifiers.
    */
   providerRejection: ContextCompactionProviderRejection | null;
+  /**
+   * The provider's own error message for a failed summary request, bounded,
+   * when it sent one: on a `summarization_failed` skip, or on a trimmed
+   * checkpoint. Diagnostics shown behind Details only.
+   */
+  providerMessage?: string;
   /**
    * The same turn's recorded failure text, when that turn failed because this
    * compaction did. Diagnostics shown behind Details only.
    */
   failureDetail?: string;
-  /** Provider implementation id for debug disclosure only. */
+  /**
+   * Provider implementation id. `deterministic_trim` marks a checkpoint that
+   * trimmed older messages because the chat's model could not summarize them;
+   * other values are for debug disclosure only.
+   */
   implementation: string | null;
   occurredAt: string;
 };
@@ -591,6 +610,21 @@ export type MachineInputMember = {
   sourceId: string;
   summary: string;
   result?: MediaGenerationResult | undefined;
+  /**
+   * An automation run's plain description: the automation's name and what
+   * the events that started it say happened. Never its instructions. Absent
+   * on runs delivered before Opengeni recorded it; the chat then says only
+   * that an automation ran.
+   */
+  automation?: AutomationRunPresentation | undefined;
+};
+
+export type AutomationRunPresentation = {
+  name: string;
+  /** What the first few events that started the run say, oldest first. */
+  eventSummaries: string[];
+  /** How many events started the run; 0 for a scheduled run. */
+  eventCount: number;
 };
 
 /**

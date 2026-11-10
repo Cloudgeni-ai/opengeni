@@ -1,7 +1,8 @@
 //! What a sweep lists and deletes a piece at a time, and the records it
 //! keeps of its own work under [`RECORDS`] (see [`crate::sweep`]).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::stream::BoxStream;
@@ -15,6 +16,9 @@ use crate::{Error, Result};
 /// writer of chunks, manifests or pointers uses, which a sweep never takes
 /// for a chunk or manifest.
 pub const RECORDS: &str = "sweep";
+
+/// How many deletes a sweep has in flight at once, each of one key.
+pub(crate) const DELETES: usize = 16;
 
 impl ChunkStore {
     /// Every object stored under `under`, a key prefix of whole segments
@@ -56,7 +60,7 @@ impl ChunkStore {
     /// their period: one listing by delimiter, which names each period
     /// once however many objects it holds.
     pub async fn periods(&self, area: Area) -> Result<Vec<u32>> {
-        let prefix = self.path(&format!("{}/v2", area.prefix()));
+        let prefix = self.path(area.periodic());
         let listed = self.backend.list_with_delimiter(Some(&prefix)).await?;
         Ok(listed
             .common_prefixes
@@ -66,8 +70,8 @@ impl ChunkStore {
     }
 
     /// Deletes the chunks and manifests at `keys` (as a listing gives
-    /// them) as [`Self::delete`] does each, up to a thousand to a request
-    /// where the store deletes in bulk: the keys it deleted or found gone.
+    /// them) as [`Self::delete`] does each, [`DELETES`] at a time: the
+    /// keys it deleted or found gone.
     /// A key missing from the answer was not deleted, as far as anyone can
     /// tell, and may be tried again.
     pub async fn delete_all(&self, keys: &[String]) -> Result<HashSet<String>> {
@@ -129,32 +133,50 @@ impl ChunkStore {
         Ok(self.path(&format!("{RECORDS}/{key}")))
     }
 
-    /// Deletes `keys` with no condition, in bulk where the store can: the
-    /// keys deleted or found gone.
+    /// Deletes `keys` with no condition, a request to each and at most
+    /// [`DELETES`] at once, each retried as any request is: the keys
+    /// deleted or found gone.
+    ///
+    /// Not in bulk. A store may work through a bulk request's keys one
+    /// after another, as Garage does with S3's `DeleteObjects`, so a request
+    /// of a thousand keys can outlast the request timeout on a slow store
+    /// and delete nothing however often it is tried. A request of one key
+    /// fits within it. Deletes cost nothing on S3 or Cloud Storage.
     async fn delete_paths(&self, keys: &[String]) -> HashSet<String> {
-        let by_path: HashMap<String, &String> = keys
-            .iter()
-            .map(|key| (self.path(key).to_string(), key))
-            .collect();
-        let paths = keys
-            .iter()
-            .map(|key| Ok(self.path(key)))
-            .collect::<Vec<_>>();
-        self.backend
-            .delete_stream(stream::iter(paths).boxed())
-            .filter_map(|deleted| {
-                let path = match deleted {
-                    Ok(path) => Some(path.to_string()),
-                    Err(object_store::Error::NotFound { path, .. }) => Some(path),
-                    Err(error) => {
-                        tracing::warn!(%error, "a sweep's delete failed; it is tried again");
-                        None
-                    }
-                };
-                let key = path.and_then(|path| by_path.get(&path).map(|key| (*key).clone()));
-                std::future::ready(key)
-            })
+        let requests = keys.iter().cloned().map(|key| {
+            let path = self.path(&key);
+            let backend = Arc::clone(&self.backend);
+            async move {
+                let answer = backend.delete(&path).await;
+                (key, answer)
+            }
+        });
+        let outcomes: Vec<_> = stream::iter(requests)
+            .buffer_unordered(DELETES)
             .collect()
-            .await
+            .await;
+        let mut deleted = HashSet::new();
+        let mut failed = 0_usize;
+        let mut first = None;
+        for (key, answer) in outcomes {
+            match answer {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {
+                    deleted.insert(key);
+                }
+                Err(error) => {
+                    failed += 1;
+                    first.get_or_insert(error);
+                }
+            }
+        }
+        if let Some(error) = first {
+            tracing::warn!(
+                %error,
+                failed,
+                of = keys.len(),
+                "a sweep's deletes failed; they are tried again"
+            );
+        }
+        deleted
     }
 }

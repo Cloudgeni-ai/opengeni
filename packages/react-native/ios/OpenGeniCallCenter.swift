@@ -46,6 +46,8 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
   private var incoming: [UUID: IncomingCall] = [:]
   private var pendingStart: [String: Any]?
   private var routeObserver: NSObjectProtocol?
+  /// Loudspeaker or receiver for the current call. Every call starts on the
+  /// loudspeaker; the person's choice during it replaces that.
   private var speaker = true
   private(set) var voipToken: String?
 
@@ -73,10 +75,16 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
     let created = CXProvider(configuration: configuration)
     created.setDelegate(self, queue: nil)
     provider = created
+    // Before any call audio starts, so WebRTC never reconfigures a live call.
+    OpenGeniCallAudio.matchWebRTC(speaker: speaker)
     routeObserver = NotificationCenter.default.addObserver(
       forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
-    ) { [weak self] _ in
-      self?.send(["type": "routeChanged", "route": Self.currentRoute()])
+    ) { [weak self] note in
+      let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+      let reason = raw.flatMap(AVAudioSession.RouteChangeReason.init(rawValue:)) ?? .unknown
+      self?.send([
+        "type": "routeChanged", "route": Self.currentRoute(), "reason": Self.routeReason(reason),
+      ])
     }
   }
 
@@ -92,6 +100,11 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
           userInfo: [NSLocalizedDescriptionKey: "CallKit does not run in the Simulator."]))
     }
     if provider == nil { configure(includeInRecents: true) }
+    speaker = true
+    OpenGeniCallAudio.matchWebRTC(speaker: speaker)
+    // CallKit owns the call's audio from here; the microphone opens when it
+    // activates the session.
+    OpenGeniCallAudio.setSystemCall(true)
     let handle = CXHandle(type: .generic, value: target ?? "opengeni")
     let action = CXStartCallAction(call: id, handle: handle)
     action.contactIdentifier = title
@@ -109,6 +122,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
           update.supportsDTMF = false
           self?.provider?.reportCall(with: id, updated: update)
         }
+        self?.refreshAudioGate()
         completion(error)
       }
     }
@@ -126,6 +140,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
     if failed {
       activeCalls.remove(id)
       provider?.reportCall(with: id, endedAt: Date(), reason: .failed)
+      refreshAudioGate()
       return completion()
     }
     controller.request(CXTransaction(action: CXEndCallAction(call: id))) { [weak self] error in
@@ -134,6 +149,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
           self?.activeCalls.remove(id)
           self?.provider?.reportCall(with: id, endedAt: Date(), reason: .remoteEnded)
         }
+        self?.refreshAudioGate()
         completion()
       }
     }
@@ -148,9 +164,9 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
 
   func setSpeaker(_ on: Bool) throws {
     speaker = on
-    let session = AVAudioSession.sharedInstance()
-    try session.setCategory(.playAndRecord, mode: .voiceChat, options: Self.options(speaker: on))
-    try session.overrideOutputAudioPort(on ? .speaker : .none)
+    try OpenGeniCallAudio.configureSession(speaker: on)
+    // The loudspeaker wins over a connected headset when the person picks it.
+    try AVAudioSession.sharedInstance().overrideOutputAudioPort(on ? .speaker : .none)
   }
 
   // MARK: Start requests from outside the app
@@ -182,6 +198,12 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
   func reportIncoming(_ payload: [String: Any], completion: @escaping () -> Void) {
     if provider == nil { configure(includeInRecents: true) }
     guard let provider else { return completion() }
+    if activeCalls.isEmpty {
+      speaker = true
+      OpenGeniCallAudio.matchWebRTC(speaker: speaker)
+    }
+    // A ringing call keeps the microphone closed until it is answered.
+    OpenGeniCallAudio.setSystemCall(true)
     let id = (payload["callId"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
     let sessionId = payload["sessionId"] as? String ?? ""
     let ringUntil = (payload["ringUntil"] as? String).flatMap(Self.parseDate)
@@ -208,6 +230,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
     provider.reportNewIncomingCall(with: id, update: update) { [weak self] error in
       DispatchQueue.main.async {
         defer { completion() }
+        defer { self?.refreshAudioGate() }
         // Focus, Do Not Disturb, another call: iOS did not ring it.
         guard error == nil, let self else { return }
         let remaining = ringUntil.map { $0.timeIntervalSinceNow } ?? 40
@@ -221,6 +244,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
           guard let self, self.incoming[id]?.state == "ringing" else { return }
           self.incoming.removeValue(forKey: id)
           self.provider?.reportCall(with: id, endedAt: Date(), reason: .unanswered)
+          self.refreshAudioGate()
           self.send(["type": "incomingEnded", "callId": id.uuidString.lowercased(), "reason": "unanswered"])
         }
       }
@@ -241,6 +265,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
       }
     if call.state == "answered" { activeCalls.remove(id) }
     provider?.reportCall(with: id, endedAt: Date(), reason: ended)
+    refreshAudioGate()
   }
 
   /// Calls JavaScript should act on: every ringing call (watching one twice is
@@ -257,6 +282,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
       }
       if call.state == "declined" { incoming.removeValue(forKey: id) }
     }
+    refreshAudioGate()
     return calls
   }
 
@@ -274,13 +300,13 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
     for id in activeCalls { send(["type": "ended", "callId": id.uuidString.lowercased()]) }
     activeCalls.removeAll()
     incoming.removeAll()
+    refreshAudioGate()
   }
 
   func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
     // CallKit activates this configuration; WebRTC's voice processing then
     // provides echo cancellation for hands-free use.
-    let session = AVAudioSession.sharedInstance()
-    try? session.setCategory(.playAndRecord, mode: .voiceChat, options: Self.options(speaker: speaker))
+    try? OpenGeniCallAudio.configureSession(speaker: speaker)
     provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: Date())
     action.fulfill()
   }
@@ -292,12 +318,14 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
       incoming[action.callUUID] = call
       deliver(action.callUUID, "incomingDeclined")
       action.fulfill()
+      refreshAudioGate()
       return
     }
     incoming.removeValue(forKey: action.callUUID)
     activeCalls.remove(action.callUUID)
     send(["type": "ended", "callId": action.callUUID.uuidString.lowercased()])
     action.fulfill()
+    refreshAudioGate()
   }
 
   func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
@@ -305,8 +333,7 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
       return action.fail()
     }
     // CallKit activates this configuration; voice then runs as on any call.
-    let session = AVAudioSession.sharedInstance()
-    try? session.setCategory(.playAndRecord, mode: .voiceChat, options: Self.options(speaker: speaker))
+    try? OpenGeniCallAudio.configureSession(speaker: speaker)
     call.state = "answered"
     incoming[action.callUUID] = call
     activeCalls.insert(action.callUUID)
@@ -323,15 +350,24 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
   }
 
   func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
+    OpenGeniCallAudio.setSystemCallActivated(true)
     send(["type": "audioSessionActivated"])
-    send(["type": "routeChanged", "route": Self.currentRoute()])
+    send(["type": "routeChanged", "route": Self.currentRoute(), "reason": "activated"])
   }
 
   func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
+    OpenGeniCallAudio.setSystemCallActivated(false)
     send(["type": "audioSessionDeactivated"])
   }
 
   // MARK: Helpers
+
+  /// Whether a system call still owns the audio: one placed or answered here,
+  /// or one ringing. A declined call no longer does.
+  private func refreshAudioGate() {
+    OpenGeniCallAudio.setSystemCall(
+      !activeCalls.isEmpty || incoming.values.contains { $0.state != "declined" })
+  }
 
   private static var callKitRuns: Bool {
     #if targetEnvironment(simulator)
@@ -357,8 +393,17 @@ final class OpenGeniCallCenter: NSObject, CXProviderDelegate {
     DispatchQueue.main.async { [weak self] in self?.emit?(event) }
   }
 
-  private static func options(speaker: Bool) -> AVAudioSession.CategoryOptions {
-    speaker ? [.allowBluetooth, .defaultToSpeaker] : [.allowBluetooth]
+  /// Why the route changed. "categoryChange" is the session being configured;
+  /// the others are the person or a device.
+  private static func routeReason(_ reason: AVAudioSession.RouteChangeReason) -> String {
+    switch reason {
+    case .categoryChange: return "categoryChange"
+    case .override: return "override"
+    case .newDeviceAvailable: return "newDevice"
+    case .oldDeviceUnavailable: return "oldDeviceUnavailable"
+    case .routeConfigurationChange: return "configurationChange"
+    default: return "other"
+    }
   }
 
   static func currentRoute() -> String {

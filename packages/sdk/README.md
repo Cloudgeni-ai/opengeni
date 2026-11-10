@@ -25,6 +25,15 @@ bearer design, but an organization API key belongs on the product server.
 Browser cookies are accepted cross-origin only from operator-configured trusted
 origins; arbitrary embedding origins never receive credentialed CORS responses.
 
+## Billing
+
+API and embedded-product usage spends credits, not plan credit. Connected AI
+subscriptions are available in the Opengeni apps on paid plans, not through the
+API. Omit the model to use an eligible credit-billed default; explicitly selecting
+a connected subscription returns `403` with `subscription_api_unavailable`.
+See [billing origin](../../docs/billing-origin.md) for the internal legacy-account
+exception.
+
 ## Task usage limits
 
 `createSession(workspaceId, { initialMessage, usageLimitMicros })` sets an
@@ -245,7 +254,13 @@ For navigation lists, `listSessionSummaryPage` uses the same filters, ordering,
 pin rules and cursors, returning `SessionListEntry` records. Entries include
 display/rename titles, creator, lifecycle, personal state, hierarchy counts and
 the model and reasoning effort shown with a row; prompts and the rest of the
-execution configuration remain on `getSession`. Older APIs return
+execution configuration remain available on the default `getSession` response.
+Chat clients explicitly select `client.withSessionResponse("chat")`; those clients
+return `ChatSession` and read
+configuration with `getSessionConfiguration` (requires `sessions:control` and session access).
+The console, mobile and packaged React chat opt in. Compact clients send
+`Accept: application/json; opengeni-session=chat` on JSON requests, without adding
+a CORS request header. Default SDK clients retain the full response and required types. Older APIs return
 full pages that the SDK projects locally. Unknown filters/cursors still fail
 explicitly rather than returning an unfiltered result.
 
@@ -1798,11 +1813,22 @@ reconsider — they can change with their counterpart, not with the SDK.
 
 ## Compatibility
 
-Clients and servers are compatible within the same **major** version of this
-SDK; evolution is additive within a major and both sides are tolerant readers.
-Official server builds expose `serverVersion` on `/healthz` and
-`/v1/config/client`. A breaking change ships only in a new major, announced in
-the changelog. Full policy: `docs/design/api-compatibility-policy.md`.
+Server updates do not break existing integrations. The API only grows: routes,
+fields, event types and documented behaviour that a published SDK uses keep
+working, so a pinned SDK version keeps working against the managed service.
+Upgrade when you want new features. Replacements for older designs ship beside
+them, and `@deprecated` members keep working. Clients should ignore unknown
+response fields, enum values and event types. Official server builds expose
+`serverVersion` on `/healthz` and `/v1/config/client`. Full policy:
+`docs/design/api-compatibility-policy.md`.
+Rare exceptions (an emergency security fix or an explicit product-owner decision) are announced with migration notes.
+
+The committed `test/integration/sdk-compatibility/versions.json` matrix tests
+pinned stable releases and known customer pins against the current API; it is
+not a limit on the compatibility promise. Requests include
+`x-opengeni-sdk-version` (`OPENGENI_SDK_VERSION_HEADER`) for server
+diagnostics; missing or unknown versions never change authorization or
+compatibility admission.
 
 ## Proxy through your own API
 
@@ -1835,6 +1861,30 @@ For custom layers, the pieces are exported individually:
 `sessionEventsToSseStream`, `sessionEventsToSseResponse`, `formatSseEvent`,
 `resumeSequenceFromRequest`, and `parseSseStream`.
 
+### Cross-origin proxies and CORS
+
+When your web app and the route that proxies Opengeni (the session proxy or
+your own) live on different origins, every browser request with an Opengeni
+header is preflighted. Allow every header the SDK's browser clients may send,
+or every preflight fails and the chat sits on "reconnecting".
+`OPENGENI_BROWSER_REQUEST_HEADERS` lists them, lower-cased, and grows when the
+SDK starts sending a new header, so build your allow-list from it rather than
+copying names:
+
+```ts
+import { OPENGENI_BROWSER_REQUEST_HEADERS } from "@opengeni/sdk";
+
+const allowHeaders = [...OPENGENI_BROWSER_REQUEST_HEADERS, "x-my-app-header"].join(", ");
+// Answer the OPTIONS preflight on your proxy route with:
+// Access-Control-Allow-Headers: <allowHeaders>
+```
+
+It covers `accept`, `authorization`, `content-type`, `range` and Opengeni's own
+`x-opengeni-*` request headers, including `x-opengeni-sdk-version`
+(`OPENGENI_SDK_VERSION_HEADER`), which every request carries. Add any header
+your app sets through the client's `headers` option. The `asUser` and
+`asService` attribution headers are server-only and not in the list.
+
 ## Types
 
 The SDK ships hand-written mirrors of the public wire shapes (sessions, turns,
@@ -1866,3 +1916,14 @@ hidden. A missing legacy snapshot may return 404; other authorization or transpo
 failures must not be interpreted as permission to execute. Responses are private
 and non-cacheable. Review states distinguish waiting, execution, cancellation,
 failure and uncertain outcome. Exact stored arguments are never client-editable.
+
+## Stateless decisions
+
+`client.decide(workspaceId, { input, questions, tenantLabel? }, { signal? })`
+returns typed predicate, choice or score answers (or typed refusals) from the
+deployment's configured decision model. It uses the same API key and
+`sessions:create` authority as chat completions. The deployment pays; customer
+agent allowances are not consulted or debited. The optional tenant label appears
+on usage receipts for reporting only.
+See [stateless decisions](../../docs/model-inference.md) for examples,
+configuration, receipt durability and residency requirements.

@@ -7,10 +7,21 @@
    `?theme=dark` puts the host in dark mode (`class="dark"` on <html> and a dark
    page background), `&host=navy` uses a tinted dark palette, and
    `&scenario=` selects the conversation state (approval, question, running,
-   steer-waiting, steered, waiting, long, empty, error). `&explicit=1` pins the legacy `data-og-theme` wrapper;
+   steer-waiting, steered, waiting, long, empty, error, and automation runs:
+   automation, automation-live, automation-quiet, and attachments: messages sent
+   with a screenshot and a PDF; `&draft=1` also puts them in the composer's
+   draft, to compare a sent message with how it looked before sending). `&legacy=1` delivers an
+   automation run the way Opengeni recorded it before runs had a plain
+   description; `&ids=1` puts internal IDs in what the run's event and an
+   earlier setup update say. `&explicit=1` pins the legacy `data-og-theme` wrapper;
    `&hostile=1` adds global host element CSS. `&send=one` mounts the chat with
    one Send (`busySend: "steer"`); `waiting` is a paused workstream with two
-   messages waiting. */
+   messages waiting. `&goal=paused` gives the chat a goal the agent paused, and
+   `&signals=off` mounts it with `agentSignals: false`, as a product for end
+   users would; `&signals=no-goal` hides only the goal (`{ goal: false }`).
+   `&agents=1` makes the host pass two helper agents in `chromeProps`.
+   `&mark=1` leads the live turn row with a host mark
+   (`turnSummary.renderLiveMark`). */
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import type { SendMessageInput, Session, SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
@@ -20,8 +31,9 @@ import {
   NewConversation,
   SessionConversationView,
   useSessionConversation,
+  type TurnSummaryLiveMarkState,
 } from "@opengeni/react";
-import { fakeClient, fakeTurn, WORKSPACE_ID } from "../test/fake-client";
+import { fakeClient, fakeGoal, fakeTurn, WORKSPACE_ID } from "../test/fake-client";
 import "@opengeni/react/compiled.css";
 
 const SELECTED = "5a1c0000-0000-4000-8000-000000000001";
@@ -34,6 +46,26 @@ const host = params.get("host") === "navy" ? "navy" : "plain";
 const scenario = params.get("scenario") ?? "approval";
 const explicit = params.get("explicit") === "1";
 const oneSend = params.get("send") === "one";
+const pausedGoal = params.get("goal") === "paused";
+const signalsParam = params.get("signals");
+const agentSignals =
+  signalsParam === "off" ? false : signalsParam === "no-goal" ? { goal: false } : true;
+// A host that shows the chat's helper agents above the composer.
+const hostAgents =
+  params.get("agents") === "1"
+    ? {
+        chromeProps: {
+          agentsSignal: { count: 2, detail: "1 running", tone: "running" as const },
+          agentsPanel: (
+            <ul style={{ margin: 0, paddingLeft: 16, fontSize: 13 }}>
+              <li>Check the payment provider's log · running</li>
+              <li>Draft the refund note · done</li>
+            </ul>
+          ),
+        },
+      }
+    : {};
+const liveMark = params.get("mark") === "1";
 // A host with global element CSS (as Django/Spectre-style apps ship): lists,
 // paragraphs, buttons and line-height must not leak into the chat.
 if (params.get("hostile") === "1") {
@@ -64,8 +96,13 @@ function chat(id: string, title: string, minutes: number, status = "idle"): Sess
 
 const STEER_TURN = "5a1c0000-0000-4000-8000-0000000000b1";
 const steering = scenario === "steer-waiting" || scenario === "steered";
+const RUN_TURN = "5a1c0000-0000-4000-8000-0000000000d1";
+const automationRun = scenario.startsWith("automation");
+const legacyRun = params.get("legacy") === "1";
+const withIds = params.get("ids") === "1";
+const ORGANISATION_ID = "3f2b8c1e-9a4d-4e7b-8c2a-1d5e6f7a8b9c";
 const selectedStatus =
-  scenario === "running" || scenario === "waiting" || steering
+  scenario === "running" || scenario === "waiting" || steering || scenario === "automation-live"
     ? "running"
     : scenario === "approval" || scenario === "question"
       ? "requires_action"
@@ -97,13 +134,82 @@ const text = (value: unknown) => ({
   content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
 });
 
+// Files the person attached in the attachments scenario.
+const STATEMENT_FILE = "5a1c0000-0000-4000-8000-0000000000f1";
+const INVOICE_FILE = "5a1c0000-0000-4000-8000-0000000000f2";
+const OCTOBER_FILE = "5a1c0000-0000-4000-8000-0000000000f3";
+
+function statementScreenshot(month: string, rows: Array<[string, string]>): string {
+  const lines = rows
+    .map(
+      ([label, amount], index) =>
+        `<text x="24" y="${112 + index * 34}" font-size="15" fill="#3b3b38">${label}</text>` +
+        `<text x="456" y="${112 + index * 34}" font-size="15" fill="#3b3b38" text-anchor="end">${amount}</text>` +
+        `<line x1="24" x2="456" y1="${124 + index * 34}" y2="${124 + index * 34}" stroke="#e4e2dc"/>`,
+    )
+    .join("");
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300" font-family="Inter, sans-serif">` +
+    `<rect width="480" height="300" fill="#fbfaf7"/>` +
+    `<rect width="480" height="52" fill="#1f5f8b"/>` +
+    `<text x="24" y="33" font-size="17" font-weight="600" fill="#ffffff">Card statement · ${month}</text>` +
+    lines +
+    `</svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+const attachedFiles = new Map([
+  [
+    STATEMENT_FILE,
+    {
+      filename: "statement-september.png",
+      contentType: "image/png",
+      sizeBytes: 184_320,
+      url: statementScreenshot("September 2026", [
+        ["Acme Support · INV-2026-09", "$490.00"],
+        ["Acme Support · INV-2026-09", "$490.00"],
+        ["Coffee Corner", "$4.20"],
+      ]),
+    },
+  ],
+  [
+    INVOICE_FILE,
+    {
+      filename: "INV-2026-09.pdf",
+      contentType: "application/pdf",
+      sizeBytes: 48_128,
+      url: "data:application/pdf;base64,JVBERi0xLjQKJSVFT0YK",
+    },
+  ],
+  [
+    OCTOBER_FILE,
+    {
+      filename: "statement-october.png",
+      contentType: "image/png",
+      sizeBytes: 152_064,
+      url: statementScreenshot("October 2026", [
+        ["Acme Support · INV-2026-10", "$490.00"],
+        ["Acme Support · INV-2026-10", "$490.00"],
+      ]),
+    },
+  ],
+]);
+
 function investigation() {
   push("session.created", {}, 8, null);
   push(
     "user.message",
-    {
-      text: "Customer on T-4821 says they were charged twice in September. Can you check?",
-    },
+    scenario === "attachments"
+      ? {
+          text: "Customer on T-4821 says they were charged twice in September. Here's their statement and the invoice. Can you check?",
+          resources: [
+            { kind: "file", fileId: STATEMENT_FILE },
+            { kind: "file", fileId: INVOICE_FILE },
+          ],
+        }
+      : {
+          text: "Customer on T-4821 says they were charged twice in September. Can you check?",
+        },
     8,
   );
   push("turn.started", {}, 8);
@@ -157,6 +263,119 @@ const finding = [
 ];
 
 const humanInputRequests: unknown[] = [];
+
+/**
+ * An event-triggered automation acting in this chat: a ticket was assigned to
+ * the person, and the agent looks it up and tells them about it.
+ */
+function automationRunEvents() {
+  const instructions =
+    "Continue this conversation when a ticket is assigned to the signed-in user. The recipient is the assignee (confirm through acme__list_my_tickets). Read the event, check that the ticket is still open, and tell the person what it is about and what to do first. If it is already closed, do nothing.";
+  if (withIds) {
+    push(
+      "system.update.delivered",
+      {
+        updateIds: ["5a1c0000-0000-4000-8000-0000000000f1"],
+        count: 1,
+        members: [
+          {
+            id: "5a1c0000-0000-4000-8000-0000000000f1",
+            kind: "capability_setup_completed",
+            classification: "info",
+            sourceId: "5a1c0000-0000-4000-8000-0000000000f2",
+            summary: `Acme Helpdesk is connected for the support team. Organisation: ${ORGANISATION_ID}.`,
+          },
+        ],
+      },
+      3,
+      null,
+    );
+  }
+  push(
+    "system.update.delivered",
+    {
+      updateIds: ["5a1c0000-0000-4000-8000-0000000000e1"],
+      count: 1,
+      members: [
+        {
+          id: "5a1c0000-0000-4000-8000-0000000000e1",
+          kind: "scheduled_occurrence",
+          classification: "info",
+          sourceId: "5a1c0000-0000-4000-8000-0000000000e2",
+          ...(legacyRun
+            ? { summary: instructions }
+            : {
+                summary: "Ticket assigned to you",
+                automation: {
+                  name: "Ticket assigned to you",
+                  eventSummaries: [
+                    withIds
+                      ? `T-4907 Refund request from Contoso (organisation ${ORGANISATION_ID})`
+                      : "T-4907 Refund request from Contoso",
+                  ],
+                  eventCount: 1,
+                },
+              }),
+        },
+      ],
+    },
+    2,
+    RUN_TURN,
+  );
+  push("turn.started", {}, 2, RUN_TURN);
+  push(
+    "agent.toolCall.created",
+    { id: "call-run-ticket", name: "acme__get_ticket", arguments: { ticketId: "T-4907" } },
+    2,
+    RUN_TURN,
+  );
+  push(
+    "agent.toolCall.output",
+    {
+      id: "call-run-ticket",
+      output: text({
+        id: "T-4907",
+        status: scenario === "automation-quiet" ? "closed" : "open",
+        customer: { name: "Contoso" },
+        subject: "Refund request for October invoice",
+      }),
+    },
+    1.8,
+    RUN_TURN,
+  );
+  push(
+    "agent.toolCall.created",
+    {
+      id: "call-run-history",
+      name: "acme__list_ticket_events",
+      arguments: { ticketId: "T-4907" },
+    },
+    1.6,
+    RUN_TURN,
+  );
+  if (scenario === "automation-live") return;
+  push(
+    "agent.toolCall.output",
+    { id: "call-run-history", output: text([{ type: "assigned" }, { type: "commented" }]) },
+    1.5,
+    RUN_TURN,
+  );
+  push(
+    "agent.message.completed",
+    {
+      phase: "final",
+      text:
+        scenario === "automation-quiet"
+          ? legacyRun
+            ? "The ticket was already closed, so I didn't notify anyone."
+            : "NO_REPLY"
+          : "Contoso is asking for a refund of their October invoice ($1,250). The ticket is open and now yours. Start by checking whether the October payment went through twice.",
+    },
+    1.4,
+    RUN_TURN,
+  );
+  push("turn.completed", {}, 1.4, RUN_TURN);
+}
 
 if (scenario === "approval") {
   investigation();
@@ -281,6 +500,43 @@ if (scenario === "approval") {
       STEER_TURN,
     );
   }
+} else if (automationRun) {
+  investigation();
+  push(
+    "agent.message.completed",
+    {
+      phase: "final",
+      text: [...finding, "", "I refunded the duplicate and noted it on the ticket."].join("\n"),
+    },
+    6,
+  );
+  push("turn.completed", {}, 6);
+  automationRunEvents();
+} else if (scenario === "attachments") {
+  investigation();
+  push("agent.message.completed", { phase: "final", text: finding.join("\n") }, 6);
+  push("turn.completed", {}, 6);
+  // A message that only makes sense with its picture.
+  push(
+    "user.message",
+    {
+      text: "They sent this one for October too. Same problem?",
+      resources: [{ kind: "file", fileId: OCTOBER_FILE }],
+    },
+    2,
+    STEER_TURN,
+  );
+  push("turn.started", {}, 2, STEER_TURN);
+  push(
+    "agent.message.completed",
+    {
+      phase: "final",
+      text: "Yes. October's invoice **INV-2026-10** was also charged twice. I'll refund both duplicates once you approve.",
+    },
+    1,
+    STEER_TURN,
+  );
+  push("turn.completed", {}, 1, STEER_TURN);
 } else if (scenario === "long") {
   investigation();
   push(
@@ -348,7 +604,7 @@ const client = fakeClient({
     if (scenario === "error") throw new Error("Network request failed");
     return {
       ...(sessions.find((session) => session.id === id) ?? sessions[0]!),
-      activeTurnId: TURN,
+      activeTurnId: scenario === "automation-live" ? RUN_TURN : TURN,
       effectiveControl: control,
     } as never;
   },
@@ -364,6 +620,44 @@ const client = fakeClient({
       pendingInputAttachment: null,
     }) as never,
   getWorkspaceModelCatalog: async () => ({ models: [] }) as never,
+  ...(scenario === "attachments" && params.get("draft") === "1"
+    ? {
+        getComposerDraft: async () =>
+          ({
+            ...(await base.getComposerDraft(WORKSPACE_ID, SELECTED)),
+            revision: 1,
+            text: "Here's their statement and the invoice.",
+            resources: [
+              { kind: "file", fileId: STATEMENT_FILE },
+              { kind: "file", fileId: INVOICE_FILE },
+            ],
+            updatedAt: minutesAgo(0),
+          }) as never,
+      }
+    : {}),
+  getFile: async (workspace, fileId) => {
+    const file = attachedFiles.get(fileId);
+    if (!file) throw new Error("File not found");
+    return {
+      id: fileId,
+      workspaceId: workspace,
+      status: "ready",
+      filename: file.filename,
+      safeFilename: file.filename,
+      contentType: file.contentType,
+      sizeBytes: file.sizeBytes,
+      sha256: null,
+      bucket: "demo",
+      objectKey: fileId,
+      createdAt: minutesAgo(8),
+      updatedAt: minutesAgo(8),
+    } as never;
+  },
+  createFileDownloadUrl: async (_workspace, fileId) => {
+    const file = attachedFiles.get(fileId);
+    if (!file) throw new Error("File not found");
+    return { url: file.url, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } as never;
+  },
   listHumanInputRequests: async () => humanInputRequests as never,
   listEvents: async (_workspace, id) => {
     if (scenario === "error") throw new Error("Network request failed");
@@ -391,6 +685,21 @@ const client = fakeClient({
     yield* [];
   },
 });
+
+// A goal the agent paused to wait for a person's decision.
+if (pausedGoal) {
+  const goal = fakeGoal({
+    sessionId: SELECTED,
+    status: "paused",
+    pausedReason: "agent",
+    text: "Resolve the double charge on T-4821",
+  });
+  Object.assign(client, {
+    getGoal: async () => goal,
+    updateGoal: async () => goal,
+    deleteGoal: async () => undefined,
+  });
+}
 
 // The demo can hold the real default new-chat flow at a response boundary.
 // Browser checks edit the next draft, retry an uncertain outcome, then settle
@@ -485,6 +794,13 @@ function PersistentConversationDemo() {
 }
 
 /** A plain host product around the stock component, as a customer would ship it. */
+/** A stand-in for a host's animated mascot at the start of the live turn row. */
+function demoLiveMark(state: TurnSummaryLiveMarkState) {
+  return (
+    <span data-demo-mark={state.kind} className="size-4 animate-pulse rounded-full bg-og-accent" />
+  );
+}
+
 function HostApp() {
   const nav = ["Inbox", "Tickets", "Customers", "Billing"];
   const narrow = window.innerWidth < 640;
@@ -557,9 +873,21 @@ function HostApp() {
           ) : (
             <OpenGeniChat
               defaultSessionId={scenario === "empty" ? null : SELECTED}
-              {...(oneSend
-                ? { conversationProps: { composerOptions: { busySend: "steer" as const } } }
-                : {})}
+              conversationProps={{
+                agentSignals,
+                ...hostAgents,
+                ...(liveMark
+                  ? {
+                      timelineProps: {
+                        turnSummary: {
+                          rolling: true,
+                          renderLiveMark: demoLiveMark,
+                        },
+                      },
+                    }
+                  : {}),
+                ...(oneSend ? { composerOptions: { busySend: "steer" as const } } : {}),
+              }}
             />
           )}
         </OpenGeniProvider>

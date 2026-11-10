@@ -20,6 +20,7 @@ import {
   wakeMcpEventSubscription,
   type EventSourceRecord,
   type EventStatusReason,
+  type McpEventSubscriptionPollReason,
   type McpEventSubscriptionRecord,
   type StoredEventInput,
 } from "@opengeni/db";
@@ -37,6 +38,7 @@ import {
   mcpSourceEventTypes,
   mcpEventTypeUnavailableReason,
   mcpWebhookBaseUrl,
+  type McpEventTypesMemo,
 } from "./mcp-event-types";
 import { EventSourceBlockedError, eventStatusReason } from "./status-reason";
 import {
@@ -162,6 +164,7 @@ export function mcpDeliveryEvents(
 
 type StepOutcome = {
   mode?: "poll" | "webhook";
+  pollReason?: { reason: McpEventSubscriptionPollReason; since: Date } | null;
   cursor?: string | null;
   gapPending?: boolean;
   serverSubscriptionId?: string | null;
@@ -175,6 +178,8 @@ type StepContext = {
   subscription: McpEventSubscriptionRecord;
   client: McpStreamableHttpClient;
   server: McpServerConfig;
+  /** The event types the kept MCP session already read. */
+  eventTypes?: McpEventTypesMemo;
   now: Date;
 };
 
@@ -319,8 +324,16 @@ async function unsubscribeQuietly(context: StepContext, baseUrl: string | null):
 
 async function liveStep(context: StepContext): Promise<StepOutcome> {
   const { deps, source, subscription, client, server } = context;
-  const types = await mcpSourceEventTypes(client, source, mcpServerDisplayName(server));
-  const type = types.find((candidate) => candidate.name === subscription.eventName);
+  const readTypes = async (fresh: boolean) =>
+    await mcpSourceEventTypes(client, source, mcpServerDisplayName(server), {
+      fresh,
+      now: context.now.getTime(),
+      ...(context.eventTypes ? { memo: context.eventTypes } : {}),
+    });
+  const named = (types: Awaited<ReturnType<typeof readTypes>>) =>
+    types.find((candidate) => candidate.name === subscription.eventName);
+  // Types read earlier may predate this subscription's type: look again before giving up.
+  const type = named(await readTypes(false)) ?? named(await readTypes(true));
   if (!type) {
     throw new EventSourceBlockedError(
       eventStatusReason(
@@ -330,9 +343,16 @@ async function liveStep(context: StepContext): Promise<StepOutcome> {
     );
   }
   const baseUrl = mcpWebhookBaseUrl(deps.settings);
+  const webhookAvailable = baseUrl !== null;
+  const pollReason =
+    subscription.mode === "poll" && subscription.pollReason && subscription.pollReasonAt
+      ? { reason: subscription.pollReason, since: subscription.pollReasonAt }
+      : null;
   const mode = mcpDeliveryModeFor(type, {
-    webhookAvailable: baseUrl !== null,
+    webhookAvailable,
     current: subscription.mode,
+    pollReason,
+    now: context.now,
   });
   if (mode === null) {
     const unavailable = mcpEventTypeUnavailableReason(type, baseUrl !== null);
@@ -344,32 +364,66 @@ async function liveStep(context: StepContext): Promise<StepOutcome> {
     );
   }
   if (mode === "webhook") {
+    // A polling subscription moving to webhook subscribes from its last poll
+    // cursor, so the server replays what came after it (deduplicated by
+    // event id), and keeps polling until the server accepts the subscription.
+    // Its poll reason stays until then, so an attempt a crash cut short
+    // still counts as one.
+    const upgrading = subscription.mode === "poll" || subscription.pollReason !== null;
     try {
-      return await webhookStep(context, baseUrl!);
+      return { ...(await webhookStep(context, baseUrl!)), pollReason: null };
     } catch (error) {
       // The server can't reach our address (or won't use webhooks after
-      // all): poll instead when the type offers it. Polling sticks, so a
-      // later step does not try the webhook again.
+      // all): poll instead when the type offers it, and try the webhook
+      // again a day later. A polling subscription keeps polling whatever
+      // went wrong with its webhook, except a sign-in to renew or a refusal
+      // a person has to fix, which polling would meet as well.
       const failure = classifyMcpEventsError(error);
       const cannotDeliver =
         failure.kind === "callback_unreachable" || failure.kind === "delivery_mode_unsupported";
-      if (!cannotDeliver || !type.delivery.includes("poll")) throw error;
+      const keepPolling =
+        upgrading && !(error instanceof EventSourceBlockedError) && failure.kind !== "unauthorized";
+      if (!(cannotDeliver || keepPolling) || !type.delivery.includes("poll")) throw error;
       deps.observability?.warn("MCP server can't deliver events to Opengeni's webhook; polling", {
         subscriptionId: subscription.id,
         failure: failure.kind,
       });
-      await dropMcpEventSubscriptionWebhook(deps.db, subscription.workspaceId, subscription.id);
-      return await pollStep({
-        ...context,
-        subscription: { ...subscription, mode: "poll", serverSubscriptionId: null },
-      });
+      const failed = { reason: "callback_failed" as const, since: context.now };
+      // Webhook deliveries during the attempt may have moved the cursor on.
+      const current = await dropMcpEventSubscriptionWebhook(
+        deps.db,
+        subscription.workspaceId,
+        subscription.id,
+        failed,
+      );
+      if (!current) {
+        throw new Error("The subscription was removed while it was refreshed", { cause: error });
+      }
+      return { ...(await pollStep({ ...context, subscription: current })), pollReason: failed };
     }
   }
+  // Polling with a webhook on offer means a recent webhook failure; anything
+  // else polls because no webhook is on offer.
+  const reason =
+    type.delivery.includes("webhook") && webhookAvailable && pollReason
+      ? pollReason
+      : {
+          reason: "not_offered" as const,
+          since: pollReason?.reason === "not_offered" ? pollReason.since : context.now,
+        };
   if (subscription.mode === "webhook") {
     await unsubscribeQuietly(context, baseUrl);
-    await dropMcpEventSubscriptionWebhook(deps.db, subscription.workspaceId, subscription.id);
+    await dropMcpEventSubscriptionWebhook(
+      deps.db,
+      subscription.workspaceId,
+      subscription.id,
+      reason,
+    );
   }
-  return await pollStep({ ...context, subscription: { ...subscription, mode: "poll" } });
+  return {
+    ...(await pollStep({ ...context, subscription: { ...subscription, mode: "poll" } })),
+    pollReason: reason,
+  };
 }
 
 function blockedReason(
@@ -454,11 +508,15 @@ export async function runMcpEventSubscriptionStep(
   const now = deps.now?.() ?? new Date();
   if (!claimed.wanted || !source) {
     if (source && subscription.mode === "webhook") {
-      await withMcpEventSourceClient(deps, source, (client, { server }) =>
-        unsubscribeQuietly(
-          { deps, source, subscription, client, server, now },
-          mcpWebhookBaseUrl(deps.settings),
-        ),
+      await withMcpEventSourceClient(
+        deps,
+        source,
+        (client, { server }) =>
+          unsubscribeQuietly(
+            { deps, source, subscription, client, server, now },
+            mcpWebhookBaseUrl(deps.settings),
+          ),
+        { keepSession: true },
       ).catch(() => undefined);
     }
     await deleteMcpEventSubscription(deps.db, workspaceId, subscription.id);
@@ -466,10 +524,24 @@ export async function runMcpEventSubscriptionStep(
   }
   let serverName = source.name;
   try {
-    const outcome = await withMcpEventSourceClient(deps, source, async (client, { server }) => {
-      serverName = mcpServerDisplayName(server);
-      return await liveStep({ deps, source, subscription, client, server, now });
-    });
+    // The MCP session stays open for the next step of any subscription on this source.
+    const outcome = await withMcpEventSourceClient(
+      deps,
+      source,
+      async (client, { server, eventTypes }) => {
+        serverName = mcpServerDisplayName(server);
+        return await liveStep({
+          deps,
+          source,
+          subscription,
+          client,
+          server,
+          now,
+          ...(eventTypes ? { eventTypes } : {}),
+        });
+      },
+      { keepSession: true },
+    );
     await finishMcpEventSubscriptionStep(deps.db, workspaceId, subscription.id, {
       ...outcome,
       outcome: { kind: "success" },

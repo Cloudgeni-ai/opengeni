@@ -33,7 +33,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
-import { useAccount } from "@/account";
+import { useAccount, usePickAccount } from "@/account";
 import { useAgentCall } from "@/call";
 import {
   cachedLists,
@@ -42,7 +42,7 @@ import {
   subscribeLists,
 } from "@/session-list-cache";
 import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
-import { serverLabel } from "@/account-store";
+import { accountMenuTitle } from "@/account-switching";
 import { BrandMark } from "@/brand-mark";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
 import {
@@ -51,6 +51,7 @@ import {
   useNewSessionOptions,
 } from "@/new-session-options";
 import { useHomeDraftSync } from "@/new-session-draft-sync";
+import { createSessionFromDraft } from "@/new-session-create";
 import { SignInScreen } from "@/sign-in-screen";
 import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
@@ -68,13 +69,14 @@ export default function HomeScreen() {
 
 /* Signed out: the web sign-in. Signed in: the home canvas. */
 function Gate() {
-  const { status } = useAccount();
+  const { status, account } = useAccount();
   const theme = useNativeTimelineTheme();
   if (status === "signedOut") {
     return (
       <>
         <Stack.Screen options={{ headerShown: false }} />
-        <SignInScreen />
+        {/* Keyed by account: picking another account from its list starts over for it. */}
+        <SignInScreen key={account?.id ?? "new"} target={account} />
       </>
     );
   }
@@ -108,7 +110,6 @@ function Home() {
   const {
     account,
     accounts,
-    switchAccount,
     adapters,
     client,
     config,
@@ -119,6 +120,7 @@ function Home() {
     error,
     reload,
   } = useAccount();
+  const pickAccount = usePickAccount();
   const [lists, setLists] = useState<SessionLists>(
     () => cachedLists(workspaceId).home ?? EMPTY_SESSION_LISTS,
   );
@@ -262,20 +264,27 @@ function Home() {
       // The exact snapshot being sent; acknowledged once the session exists.
       const flushed = await draftSync.flushForSend().catch(() => null);
       const chosen = options.request();
-      const created = await client.createSession(workspaceId, {
-        // A file-only message still says what it carries, as the web composer does.
-        initialMessage: text || "See the attached files.",
-        ...(model ? { model } : {}),
-        ...(effort ? { reasoningEffort: effort } : {}),
-        ...(latencyMode !== "standard" ? { latencyMode } : {}),
-        ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
-        ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
-        ...(chosen.channelId ? { channelId: chosen.channelId } : {}),
-        ...(chosen.excludedMcpServerIds
-          ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
-          : {}),
-        resources: [...chosen.resources, ...attachments.readyResources],
-      });
+      // Names the draft this Send was composed in. Once the chat is accepted
+      // the server clears that draft, unless another device saved a newer one.
+      const created = await createSessionFromDraft(
+        client,
+        workspaceId,
+        {
+          // A file-only message still says what it carries, as the web composer does.
+          initialMessage: text || "See the attached files.",
+          ...(model ? { model } : {}),
+          ...(effort ? { reasoningEffort: effort } : {}),
+          ...(latencyMode !== "standard" ? { latencyMode } : {}),
+          ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
+          ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
+          ...(chosen.channelId ? { channelId: chosen.channelId } : {}),
+          ...(chosen.excludedMcpServerIds
+            ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
+            : {}),
+          resources: [...chosen.resources, ...attachments.readyResources],
+        },
+        flushed?.revision ?? null,
+      );
       rememberPendingPrompt(client, workspaceId, created.id, {
         text: text || "See the attached files.",
         sentAt,
@@ -392,12 +401,9 @@ function Home() {
                           inline: true,
                           items: accounts.map((each) => ({
                             type: "action" as const,
-                            label:
-                              servers > 1
-                                ? `${each.email} · ${serverLabel(each.baseUrl)}`
-                                : each.email,
+                            label: accountMenuTitle(each, servers),
                             state: each.id === account?.id ? ("on" as const) : ("off" as const),
-                            onPress: () => switchAccount(each.id),
+                            onPress: () => pickAccount(each.id),
                           })),
                         },
                         {
@@ -540,6 +546,7 @@ function Home() {
             <SessionRowList
               sessions={sections.pinned}
               models={models}
+              avatarClient={client}
               onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
               onTogglePin={(session) => void togglePin(session)}
             />
@@ -551,6 +558,7 @@ function Home() {
             <SessionRowList
               sessions={sections.recent}
               models={models}
+              avatarClient={client}
               onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
               onTogglePin={(session) => void togglePin(session)}
             />

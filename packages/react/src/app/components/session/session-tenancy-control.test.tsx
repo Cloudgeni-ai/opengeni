@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { OpenGeniApiError, type Session } from "@opengeni/sdk";
+import { OpenGeniApiError, type ChatSession as Session } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
@@ -211,7 +212,7 @@ describe("SessionTenancyControl", () => {
     document.body.append(container);
     const root = createRoot(container);
     const common = {
-      client: {} as OpenGeniBrowserClient,
+      client: {} as ChatClient<OpenGeniBrowserClient>,
       managedSession: true,
       canForkPrivately: true,
       scopeLabel: "Engineering",
@@ -262,7 +263,7 @@ describe("SessionTenancyControl", () => {
     await act(async () => {
       root.render(
         <SessionTenancyControl
-          client={{} as OpenGeniBrowserClient}
+          client={{} as ChatClient<OpenGeniBrowserClient>}
           managedSession
           canForkPrivately
           scopeLabel="Engineering"
@@ -297,7 +298,7 @@ describe("SessionTenancyControl", () => {
     await act(async () => {
       root.render(
         <SessionTenancyControl
-          client={{} as OpenGeniBrowserClient}
+          client={{} as ChatClient<OpenGeniBrowserClient>}
           managedSession={false}
           canForkPrivately
           scopeLabel="Engineering"
@@ -357,7 +358,10 @@ describe("SessionTenancyControl", () => {
             tenancy: { ...baseSession.tenancy!, visibility: "private" as const, authorityEpoch: 5 },
           };
     });
-    const client = { updateSessionVisibility, getSession } as unknown as OpenGeniBrowserClient;
+    const client = {
+      updateSessionVisibility,
+      getSession,
+    } as unknown as ChatClient<OpenGeniBrowserClient>;
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -434,7 +438,7 @@ describe("SessionTenancyControl", () => {
       root.render(
         <SessionTenancyControl
           session={privateSession}
-          client={{ forkSession, getSession } as unknown as OpenGeniBrowserClient}
+          client={{ forkSession, getSession } as unknown as ChatClient<OpenGeniBrowserClient>}
           managedSession
           canForkPrivately
           scopeLabel="Engineering"
@@ -506,7 +510,7 @@ describe("SessionTenancyControl", () => {
         <SessionTenancyControl
           sourceEventId="selected-message-event"
           session={privateSession}
-          client={{ forkSession, getSession } as unknown as OpenGeniBrowserClient}
+          client={{ forkSession, getSession } as unknown as ChatClient<OpenGeniBrowserClient>}
           managedSession
           canForkPrivately
           scopeLabel="Engineering"
@@ -573,7 +577,7 @@ describe("SessionTenancyControl", () => {
             ...baseSession,
             tenancy: { ...baseSession.tenancy!, visibility: "private", ownedByCurrentUser: true },
           }}
-          client={{ forkSession, getSession } as unknown as OpenGeniBrowserClient}
+          client={{ forkSession, getSession } as unknown as ChatClient<OpenGeniBrowserClient>}
           managedSession
           canForkPrivately={false}
           scopeLabel="Engineering"
@@ -645,7 +649,7 @@ describe("SessionTenancyControl", () => {
       root.render(
         <SessionTenancyControl
           session={baseSession}
-          client={{ forkSession, getSession } as unknown as OpenGeniBrowserClient}
+          client={{ forkSession, getSession } as unknown as ChatClient<OpenGeniBrowserClient>}
           managedSession
           canForkPrivately
           scopeLabel="Engineering"
@@ -711,7 +715,7 @@ describe("SessionTenancyControl", () => {
             {
               updateSessionVisibility,
               previewSessionVisibilityChange,
-            } as unknown as OpenGeniBrowserClient
+            } as unknown as ChatClient<OpenGeniBrowserClient>
           }
           managedSession
           canForkPrivately
@@ -810,7 +814,7 @@ describe("SessionTenancyControl", () => {
               updateSessionVisibility,
               previewSessionVisibilityChange,
               getSession,
-            } as unknown as OpenGeniBrowserClient
+            } as unknown as ChatClient<OpenGeniBrowserClient>
           }
           managedSession
           canForkPrivately
@@ -885,7 +889,7 @@ describe("SessionTenancyControl", () => {
             {
               updateSessionVisibility,
               previewSessionVisibilityChange,
-            } as unknown as OpenGeniBrowserClient
+            } as unknown as ChatClient<OpenGeniBrowserClient>
           }
           managedSession
           canForkPrivately
@@ -931,7 +935,9 @@ describe("SessionTenancyControl", () => {
       root.render(
         <SessionTenancyControl
           session={baseSession}
-          client={{ updateSessionVisibility, getSession } as unknown as OpenGeniBrowserClient}
+          client={
+            { updateSessionVisibility, getSession } as unknown as ChatClient<OpenGeniBrowserClient>
+          }
           managedSession
           canForkPrivately
           scopeLabel="Engineering"
@@ -981,7 +987,9 @@ describe("SessionTenancyControl", () => {
       root.render(
         <SessionTenancyControl
           session={baseSession}
-          client={{ updateSessionVisibility, getSession } as unknown as OpenGeniBrowserClient}
+          client={
+            { updateSessionVisibility, getSession } as unknown as ChatClient<OpenGeniBrowserClient>
+          }
           managedSession
           canForkPrivately
           scopeLabel="Engineering"
@@ -1029,7 +1037,9 @@ describe("SessionTenancyControl", () => {
       root.render(
         <SessionTenancyControl
           session={baseSession}
-          client={{ updateSessionVisibility, getSession } as unknown as OpenGeniBrowserClient}
+          client={
+            { updateSessionVisibility, getSession } as unknown as ChatClient<OpenGeniBrowserClient>
+          }
           managedSession
           canForkPrivately
           scopeLabel="Engineering"
@@ -1090,7 +1100,10 @@ describe("SessionTenancyControl", () => {
     });
     const props = {
       session: baseSession,
-      client: { updateSessionVisibility, getSession } as unknown as OpenGeniBrowserClient,
+      client: {
+        updateSessionVisibility,
+        getSession,
+      } as unknown as ChatClient<OpenGeniBrowserClient>,
       managedSession: true,
       canForkPrivately: true,
       scopeLabel: "Engineering",
@@ -1157,7 +1170,9 @@ describe("SessionTenancyControl", () => {
       root.render(
         <SessionTenancyControl
           session={baseSession}
-          client={{ updateSessionVisibility, getSession } as unknown as OpenGeniBrowserClient}
+          client={
+            { updateSessionVisibility, getSession } as unknown as ChatClient<OpenGeniBrowserClient>
+          }
           managedSession
           canForkPrivately
           scopeLabel="Engineering"
@@ -1208,7 +1223,7 @@ describe("SessionTenancyControl", () => {
         root.render(
           <SessionTenancyControl
             session={baseSession}
-            client={{ updateSessionVisibility } as unknown as OpenGeniBrowserClient}
+            client={{ updateSessionVisibility } as unknown as ChatClient<OpenGeniBrowserClient>}
             managedSession
             canForkPrivately
             scopeLabel="Engineering"

@@ -45,6 +45,10 @@ Custom React UIs can use `projectPendingApprovals` and `useHumanInputRequests` f
 
 Pass the approval's `id` from the `session.requiresAction` event to `sendApprovalDecision`. Fetch its portable facts with `getToolActionReview`, and paginated saved arguments with `getToolReviewDetails`. The shared `ToolActionReviewCard` and `ToolActionReviewDetails` components use the same data as the web console. Present the exact account, action and consequences before enabling approval; keep full details accessible without dumping large JSON into the primary view.
 
+To show your own words for an approval, such as a tool whose arguments are only identifiers, pass `loadReview` to the web `ApprovalSurface` or to the React Native `NativeSessionScreen` / `ApprovalStrip`. It returns a `ToolActionReview`: the server's from `getToolActionReview`, or one you write with a plain title and consequence. Return `null` to keep the standard card. The review changes only what the card says, never which approval is decided.
+
+When two or more approvals wait, the web `ApprovalSurface` also offers Approve all and Decline all. It calls your `onApprove` or `onReject` once per approval, one after another, so each decision is its own `sendApprovalDecision` with the server's usual checks. Approve all includes only approvals whose card offers Approve without more input (not a server's question, or one this person may only decline); one that fails stays waiting and is named with its error.
+
 The current Codemode client returns a durable pending handle for an action that needs review. After a decision, a current authorized attempt reads or resumes that handle. Preserve the operation ID; do not rebuild or resubmit its arguments. Older clients receive a safe approval-required error. External MCP clients without a supported human approval round trip cannot execute tools whose effective setting asks for review.
 
 If a user sends a normal message while a session waits, the pending approval or question is cancelled and the message runs as a Steer.

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { SendMessageInput } from "@opengeni/sdk";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { projectPendingApprovals } from "../approvals";
@@ -5,7 +6,11 @@ import { conversationTimeline } from "../conversation-timeline";
 import { useSessionStartupTimeline, type PendingPrompt } from "../lib/session-startup-timeline";
 import { admissionRecheckControl } from "../session-admission-model";
 import { useOpenGeni, type ClientOverride } from "../session-context";
-import { promptSendDestination, sessionTurnKeepsRunControl } from "../session-status-model";
+import {
+  promptSendDestination,
+  sessionArchived,
+  sessionTurnKeepsRunControl,
+} from "../session-status-model";
 import { useWorkspaceModelCatalog } from "./use-available-models";
 import { useClientConfigFlags } from "./use-client-config-flags";
 import { useComposer, type UseComposerOptions } from "./use-composer";
@@ -16,7 +21,7 @@ import { useSessionControl } from "./use-session-control";
 import { useSessionEvents } from "./use-session-events";
 import { useTurnQueue } from "./use-turn-queue";
 
-export type UseSessionConversationOptions = ClientOverride & {
+export type UseSessionConversationOptions = ClientOverride<ChatClient> & {
   /** Uploads remain subject to the client's capabilities. Defaults to true. */
   attachments?: boolean | undefined;
   /** Defaults to the client's model-selection offer. */
@@ -106,7 +111,9 @@ export function useSessionConversation(
   }, [clearFiles, sessionId]);
   const uploadsEnabled = (options.attachments ?? true) && config.uploads;
   const status = feed.sessionStatus ?? detail.session?.status;
-  const terminal = status === "cancelled";
+  // Cancelled, or archived (read-only even when its last run ended idle).
+  const terminal =
+    status === "cancelled" || (detail.session ? sessionArchived(detail.session) : false);
   const importedArchive = detail.session?.importedArchive?.readOnly === true;
   const host = options.composerOptions;
   const resolveExtras = () =>

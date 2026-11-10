@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   CreateNetworkRouteRequest,
   NetworkRoute,
@@ -12,7 +13,7 @@ import {
 } from "../session-context";
 import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
-export type UseNetworkRoutesOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseNetworkRoutesOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   enabled?: boolean | undefined;
   includeArchived?: boolean | undefined;
 };
@@ -211,4 +212,4 @@ function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
 }
 
-export type NetworkRoutesClient = EmbeddedBrowserInteractionClientLike;
+export type NetworkRoutesClient = EmbeddedBrowserInteractionClientLike<ChatClient>;
