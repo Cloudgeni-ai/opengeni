@@ -512,3 +512,50 @@ occurs before bounded flush and required exit(1). Session-event persistence
 capture occurs before failure-settlement DB recovery work, so a second DB error
 cannot prevent its enqueue. Startup failures before an observer is attached
 still have only the existing safe fallback diagnostic.
+
+
+### Platform versus customer-provider failures
+
+`opengeni_turns_total`, `opengeni_model_calls_total`, and the canonical startup
+milestone histogram carry bounded `failure_origin` values: `none`, `platform`,
+and `customer_provider`. Platform includes unclassified failures: missing
+labels from older workers also remain in platform alerts during rolling updates.
+
+Turn attribution uses the accepted execution policy's upstream payer identity
+and the typed failure committed by the winning settlement. It never infers
+ownership from a model name or from the failure's display text. Only known
+provider quota, rate, billing, plan and capacity refusals (including a failed
+compaction request's closed `quotaScope`) and the closed
+`providerAccountRefusal` marker are excluded. That marker is set from the
+provider's own response when the customer's provider account refused to serve:
+`byok_capacity_restricted` for an OpenRouter account restricted to its own
+provider keys with no key eligible for the request (a 404 whose body carries
+OpenRouter's restriction wording, since OpenRouter sends no structured code),
+`customer_verification_required` for a Vercel AI Gateway 403 with that
+structured type, and `key_limit_exceeded` for an OpenRouter 403 refusing the
+customer's own key at the credit or budget limit the customer set on it. Vercel AI Gateway credit and budget refusals (402) are already
+exhausted quota. Other 404s, including other "No endpoints found" refusals, stay
+platform failures. Generic provider-unavailable
+turn failures remain unclassified because they can also represent our transport
+or stream handling. Invalid tool
+names, malformed requests, internal lease errors, persistence failures and
+unknown errors remain platform failures even on a customer's connection.
+Transport-call attribution uses reserved connected-provider identities (including
+the workspace's direct and organization compatible connections) and
+provider HTTP responses (401/402/403/429/5xx, and a 404 whose bounded body clone
+carries the same account refusal); statusless failures remain unclassified. A
+404 call is counted once its body clone is classified, off the request path; a
+body that does not arrive within five seconds is counted as an unclassified 404. It
+does not change retries, copy, billing, history or session outcomes.
+
+The canonical turn-failure, model-call-failure and first-byte-availability alerts
+exclude `failure_origin="customer_provider"` from both sides of their ratios
+and their traffic gates. Runtime Failures keeps all outcomes and a separate
+customer-provider failure series. Customer connection problems still belong in
+the session and connection UI; they are not proof of a platform outage.
+
+Custom dashboards and locally installed alert rules must adopt the same filter
+only after deploying the instrumentation. Never subtract model-call counts from
+turn failures: several calls can belong to one turn. Synthetic subscription
+capacity checks should be reported separately from a platform-funded end-to-end
+probe; a quota-exhausted subscription does not establish platform unavailability.

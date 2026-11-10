@@ -1,3 +1,11 @@
+export {
+  failureOrigin,
+  isCustomerManagedMetricProvider,
+  isProviderAccountRefusal,
+  PROVIDER_ACCOUNT_REFUSALS,
+  type FailureOrigin,
+  type ProviderAccountRefusal,
+} from "./failure-attribution";
 import { createHash, randomUUID } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
