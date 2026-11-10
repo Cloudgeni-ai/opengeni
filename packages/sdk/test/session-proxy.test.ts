@@ -973,8 +973,8 @@ describe("createSessionProxyHandler", () => {
       expect(forwarded.body).toMatchObject({ filename: "a.txt", sizeBytes: 1 });
       return (forwarded.body as { scope?: unknown }).scope;
     };
-    // Private (the default) and isolated chats: an unscoped upload, as older
-    // or custom browsers send, stays with its uploader.
+    // Private chats (the default, and what isolated chats use): an unscoped
+    // upload, as older or custom browsers send, stays with its uploader.
     expect(await scopeSent({})).toBe("personal");
     expect(await scopeSent({ chats: "private" })).toBe("personal");
     // A server-owned create keeps the same default.
