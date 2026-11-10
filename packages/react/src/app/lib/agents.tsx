@@ -1,8 +1,7 @@
 /**
  * Agents as the app reads them. An agent is a name, an icon and what it helps
- * with, standing Instructions every one of its chats follows, an optional
- * First message the app puts in the composer when a chat starts here, and an
- * optional Memory. It lives in one workspace and is Only me or shared with
+ * with, standing Instructions every one of its chats follows, and an optional
+ * Memory. It lives in one workspace and is Only me or shared with
  * everyone there; it can also be available in Slack. Bot templates and Slack
  * agents became agents with the same ids, so `?botTemplateId=` links still
  * start a chat with one.
@@ -102,7 +101,7 @@ export type AgentState = {
   set: (agent: Agent) => void;
 };
 
-/** One agent with its Instructions and First message. */
+/** One agent with its Instructions. */
 export function useAgent(workspaceId: string, agentId: string | null): AgentState {
   const { client } = useAppContext();
   const [agent, setAgent] = useState<Agent | null | undefined>(undefined);
@@ -276,7 +275,6 @@ export type AgentFile = {
   description: string;
   avatar: CreateAgentRequest["avatar"];
   instructions: string;
-  firstMessage: string;
   memoryEnabled: boolean;
   /** Who can use it; an import keeps an Only me agent Only me where it can. */
   visibility: "private" | "workspace";
@@ -290,7 +288,6 @@ export function agentFile(agent: Agent): AgentFile {
     description: agent.description,
     avatar: agent.avatar && agent.avatar.kind !== "image" ? agent.avatar : null,
     instructions: agent.instructions,
-    firstMessage: agent.firstMessage,
     memoryEnabled: agent.memory.enabled,
     visibility: agent.visibility,
   };
@@ -331,7 +328,9 @@ function optionalText(value: unknown): string | undefined | null {
 
 /**
  * The create request in an `.agent.json` file, or in an older bot template's
- * `.bot.json` (its setup text becomes the First message), or why it isn't one.
+ * `.bot.json` (its setup text becomes the Instructions), or why it isn't one.
+ * An older file's First message is sent as is; the server joins it to the
+ * Instructions.
  * Lengths are left to the server, which says what it can't take.
  */
 export function parseAgentFile(
@@ -395,7 +394,7 @@ export function parseAgentFile(
       name: file.name,
       description: file.description,
       avatar: file.avatar,
-      firstMessage: file.setupInstructions,
+      instructions: file.setupInstructions,
     },
   };
 }

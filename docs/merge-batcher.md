@@ -143,7 +143,11 @@ and members of the running batch are never regenerated.
    lanes instead of waiting for the release-approval gate. A batch passes only
    when `Typecheck and unit tests`, `Deployment artifacts` and
    `Workload image builds` all passed, the same jobs canary admission requires
-   on a `main` SHA. Failed jobs are retried once to absorb flaky tests.
+   on a `main` SHA. Failed jobs are retried once to absorb flaky tests. A run
+   that failed before any job started (GitHub could not start the workflow)
+   has no failed job, so GitHub refuses that retry; it runs again in full
+   instead. A run GitHub will not run again at all fails the batch as a failed
+   retry would.
 4. **Land.** When every run on the batch tip passed and `main` has not moved,
    each PR lands as **one squash commit**, `<PR title> (#<n>)`, through GitHub's
    merge API, so the PR shows as merged. A Version PR lands as a true merge

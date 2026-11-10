@@ -2725,13 +2725,13 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "file upload reaper preserves activity order and replays both sides of patch retirement",
+    "file upload reaper preserves activity order and replays retired-patch histories",
     async () => {
       const legacyPath = new URL(
         "../../apps/worker/test/fixtures/legacy-file-upload-reaper-workflow.ts",
         import.meta.url,
       ).pathname;
-      const expected = [
+      const legacyExpected = [
         "reapExpiredFileUploads",
         "maintainRetainedScreenshots",
         "maintainBrowserStateArtifacts",
@@ -2741,7 +2741,9 @@ describe("Temporal workflow integration", () => {
         "applyRecordingRetention",
         "reconcileRecentModelCallFacts",
       ];
-      const execute = async (workflowsPath: string) => {
+      // The turn timing sweep is a patched step after the existing ones.
+      const currentExpected = [...legacyExpected, "recordRecentTurnTimingProfiles"];
+      const execute = async (workflowsPath: string, expected: string[]) => {
         const taskQueue = `reaper-retirement-${crypto.randomUUID()}`;
         const calls: string[] = [];
         const worker = await Worker.create({
@@ -2749,7 +2751,7 @@ describe("Temporal workflow integration", () => {
           taskQueue,
           workflowsPath,
           activities: Object.fromEntries(
-            expected.map((name) => [
+            currentExpected.map((name) => [
               name,
               async () => {
                 calls.push(name);
@@ -2773,18 +2775,21 @@ describe("Temporal workflow integration", () => {
           await run;
         }
       };
-      const legacy = await execute(legacyPath);
+      const legacy = await execute(legacyPath, legacyExpected);
       await Worker.runReplayHistory(
         { workflowsPath: workflowDefinitionsPath },
         legacy.history,
         legacy.workflowId,
       );
-      const current = await execute(workflowDefinitionsPath);
+      const current = await execute(workflowDefinitionsPath, currentExpected);
       await Worker.runReplayHistory(
-        { workflowsPath: legacyPath },
+        { workflowsPath: workflowDefinitionsPath },
         current.history,
         current.workflowId,
       );
+      // A run that reached the patched sweep needs a worker that has it; an
+      // older worker that picks up its next task fails it and Temporal retries
+      // it on a current worker. Each run is one short sweep.
     },
     temporalWorkflowTestTimeoutMs,
   );

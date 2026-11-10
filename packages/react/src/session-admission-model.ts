@@ -186,24 +186,27 @@ export function sessionAdmissionApprovedElsewhereCopy(
 
 /**
  * Start the saved message on a machine it was approved for: move the chat
- * there, then one fenced recheck. The control fence does not depend on the
- * machine, so the move cannot make the recheck run anything twice. Resolves
- * to an error to show, or null once it moved and was rechecked; a failed
- * recheck throws (see `recheckSessionAdmission`).
+ * there. The server starts the saved message by itself once the chat is on a
+ * machine it may use, so nothing is resent here; `refresh` only re-reads.
+ * Resolves to an error to show, or null once it moved.
  */
 export async function runSavedMessageOnMachine({
   sandboxId,
   attach,
+  refresh,
   recheck,
   failedMove,
 }: {
   sandboxId: string;
   attach: (sandboxId: string) => Promise<boolean>;
-  recheck: () => Promise<void>;
+  /** Re-read the chat after the move. */
+  refresh?: (() => Promise<void>) | undefined;
+  /** @deprecated The move starts the message by itself; pass `refresh`. */
+  recheck?: (() => Promise<void>) | undefined;
   failedMove: string;
 }): Promise<string | null> {
   if (!(await attach(sandboxId))) return failedMove;
-  await recheck();
+  await (refresh ?? recheck)?.();
   return null;
 }
 
@@ -211,11 +214,19 @@ export type SessionAdmissionCopy = {
   title: string;
   body: string;
   next: string;
-  /** The recheck button label. */
-  action: string;
+  /**
+   * The one action that fixes it here ("Try again", "Allow for this chat"),
+   * or null when the message starts by itself once someone else fixes it.
+   */
+  action: string | null;
 };
 
-/** Words for an admission block that is not (or not known to be) a machine-owner refusal. */
+/**
+ * Words for an admission block that is not (or not known to be) about a
+ * personal machine. Every block the server can lift by itself (access granted
+ * or restored, the chat moved) says so and offers no button; only an unknown
+ * failure, which nothing signals, offers Try again.
+ */
 export function sessionAdmissionCopy(
   t: OpenGeniText,
   { reason, permissionDenied }: SessionAdmissionReason,
@@ -226,14 +237,14 @@ export function sessionAdmissionCopy(
         title: t("sessionAdmission.membershipTitle"),
         body: t("sessionAdmission.membershipBody"),
         next: t("sessionAdmission.membershipNext"),
-        action: t("sessionAdmission.recheckAccess"),
+        action: null,
       };
     case "personal_resource_grant_required":
       return {
         title: t("sessionAdmission.grantTitle"),
         body: t("sessionAdmission.grantBody"),
         next: t("sessionAdmission.grantNext"),
-        action: t("sessionAdmission.recheckAccess"),
+        action: null,
       };
     case "database_claim_rejected":
       if (permissionDenied)
@@ -241,7 +252,7 @@ export function sessionAdmissionCopy(
           title: t("sessionAdmission.permissionTitle"),
           body: t("sessionAdmission.permissionBody"),
           next: t("sessionAdmission.permissionNext"),
-          action: t("sessionAdmission.recheckAccess"),
+          action: null,
         };
       // Other database rejections do not establish a permission problem.
       break;
@@ -256,14 +267,148 @@ export function sessionAdmissionCopy(
   };
 }
 
-/** After a refusal, the session moved to another machine: the saved message can be rechecked there. */
+/**
+ * The saved message is waiting for approval to use the personal machine the
+ * chat runs on: its approval is missing, used up, revoked or expired. Older
+ * servers report the same refusal as a bare permission check. Only the
+ * machine's owner can allow it; messages from other people that can never
+ * run there (`queuedTurnBlocked`) and ones approved for another machine keep
+ * their own notices.
+ */
+export function sessionAdmissionNeedsMachineAccess(
+  reason: SessionAdmissionReason | null,
+  access: SessionMachineAccess | null | undefined,
+): boolean {
+  if (!reason || !access || access.queuedTurnBlocked || access.queuedTurnNotApprovedHere)
+    return false;
+  return (
+    reason.reason === "personal_resource_grant_required" ||
+    (reason.reason === "database_claim_rejected" && reason.permissionDenied)
+  );
+}
+
+/**
+ * Words for a saved message waiting for approval to use the chat's personal
+ * machine. The owner gets "Allow for this chat", which starts it right away;
+ * everyone else learns who can allow it and that it then starts by itself.
+ */
+export function sessionAdmissionMachineAccessCopy(
+  t: OpenGeniText,
+  access: Pick<SessionMachineAccess, "machineName" | "ownerName" | "isOwner">,
+  options: { canAllowHere?: boolean } = {},
+): SessionAdmissionCopy {
+  const machine = access.machineName;
+  if (access.isOwner) {
+    // Without the button here, the owner allows it from the machine's settings.
+    const canAllowHere = options.canAllowHere ?? true;
+    return {
+      title: t("sessionAdmission.machineAccessTitle"),
+      body: t("sessionAdmission.machineAccessBody", { machine }),
+      next: canAllowHere
+        ? t("sessionAdmission.machineAccessOwnerNext")
+        : t("sessionAdmission.machineAccessOwnerSettingsNext"),
+      action: canAllowHere ? t("sessionAdmission.allowForThisChat") : null,
+    };
+  }
+  const owner = access.ownerName?.trim() || t("sessionAdmission.theMachineOwner");
+  return {
+    title: t("sessionAdmission.machineAccessTitle"),
+    body: t("sessionAdmission.machineAccessOthersBody", { owner, machine }),
+    next: t("sessionAdmission.machineAccessOthersNext", { owner }),
+    action: null,
+  };
+}
+
+/** After a refusal, the chat moved to another machine: the saved message starts there by itself. */
 export function sessionAdmissionMachineChangedCopy(t: OpenGeniText): SessionAdmissionCopy {
   return {
     title: t("sessionAdmission.machineChangedTitle"),
     body: t("sessionAdmission.machineChangedBody"),
     next: t("sessionAdmission.machineChangedNext"),
-    action: t("sessionAdmission.recheckAccess"),
+    action: null,
   };
+}
+
+/** The owner-only API calls "Allow for this chat" needs. */
+export type AllowMachineClient = {
+  listUserResourceAuthorities: (
+    workspaceId: string,
+    options: { resourceKind: "connected_machine"; cursor?: string; limit?: number },
+  ) => Promise<{
+    authorities: Array<{
+      authorityId: string;
+      resourceKind: string;
+      resourceId: string;
+      status: string;
+    }>;
+    nextCursor?: string | null | undefined;
+  }>;
+  issueUserResourceGrant: (
+    workspaceId: string,
+    authorityId: string,
+    request: {
+      scope: "user";
+      resourceKind: "connected_machine";
+      mode: "session";
+      context: "user_private" | "workspace_shared";
+      sessionId: string;
+      expectedAuthorityEpoch: number;
+      workspaceSharedAcknowledged: boolean;
+    },
+  ) => Promise<unknown>;
+};
+
+/**
+ * As the machine's owner, allow it for this one chat. The server starts the
+ * waiting message by itself once the approval is recorded, exactly once and
+ * only while the chat is not paused, so nothing is resent here. Resolves to
+ * false when the machine is not the caller's own (nothing was changed).
+ */
+export async function allowMachineForChat({
+  client,
+  workspaceId,
+  session,
+  enrollmentId,
+}: {
+  client: AllowMachineClient;
+  workspaceId: string;
+  session: Pick<Session, "id"> & {
+    tenancy?: { visibility?: string; authorityEpoch: number } | null | undefined;
+  };
+  enrollmentId: string;
+}): Promise<boolean> {
+  const epoch = session.tenancy?.authorityEpoch;
+  if (epoch === undefined) return false;
+  let cursor: string | undefined;
+  for (let page = 0; page < 20; page += 1) {
+    const listed = await client.listUserResourceAuthorities(workspaceId, {
+      resourceKind: "connected_machine",
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    });
+    const authority = listed.authorities.find(
+      (candidate) =>
+        candidate.resourceKind === "connected_machine" &&
+        candidate.resourceId === enrollmentId &&
+        candidate.status === "active",
+    );
+    if (authority) {
+      const shared = session.tenancy?.visibility === "workspace";
+      await client.issueUserResourceGrant(workspaceId, authority.authorityId, {
+        scope: "user",
+        resourceKind: "connected_machine",
+        mode: "session",
+        context: shared ? "workspace_shared" : "user_private",
+        sessionId: session.id,
+        expectedAuthorityEpoch: epoch,
+        workspaceSharedAcknowledged: shared,
+      });
+      return true;
+    }
+    if (!listed.nextCursor) return false;
+    cursor = listed.nextCursor;
+  }
+  return false;
 }
 
 export type PersonalMachineCopy = {
@@ -466,10 +611,11 @@ export function admissionControlNeedsRefresh(
 }
 
 /**
- * Recheck a blocked session: one fenced Resume (the server refuses it if the
- * session's control changed since `control` was read), then every read. A
- * rejected Resume refreshes the reads and is never replayed, so the saved
- * message cannot be sent twice.
+ * "Try again" for a block nothing else will lift (an unknown failure): one
+ * fenced Resume (the server refuses it if the session's control changed since
+ * `control` was read), then every read. A rejected Resume refreshes the reads
+ * and is never replayed, so the saved message cannot be sent twice. Blocks the
+ * server lifts by itself once access changes never need this.
  */
 export async function recheckSessionAdmission({
   control,

@@ -1,4 +1,4 @@
-import { deprecatePatch, proxyActivities } from "@temporalio/workflow";
+import { deprecatePatch, patched, proxyActivities } from "@temporalio/workflow";
 import type * as activities from "../activities";
 
 const reaperActivity = proxyActivities<
@@ -12,6 +12,7 @@ const reaperActivity = proxyActivities<
     | "recoverRecordingWorkflows"
     | "applyRecordingRetention"
     | "reconcileRecentModelCallFacts"
+    | "recordRecentTurnTimingProfiles"
   >
 >({
   startToCloseTimeout: "5 minutes",
@@ -34,4 +35,7 @@ export async function fileUploadReaperWorkflow(): Promise<void> {
   deprecatePatch("recording-retention-v1");
   await reaperActivity.applyRecordingRetention();
   await reaperActivity.reconcileRecentModelCallFacts();
+  if (patched("turn-timing-profiles-v1")) {
+    await reaperActivity.recordRecentTurnTimingProfiles();
+  }
 }

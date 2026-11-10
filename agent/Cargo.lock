@@ -207,7 +207,7 @@ dependencies = [
  "ring",
  "rustls-native-certs",
  "rustls-pki-types",
- "rustls-webpki 0.102.8",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "serde_nanos",
@@ -1971,7 +1971,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "opengeni-agent"
-version = "0.1.157"
+version = "0.1.158"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -2019,7 +2019,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-files-ffi"
-version = "0.1.157"
+version = "0.1.158"
 
 [[package]]
 name = "opengeni-agent-harness"
@@ -2044,7 +2044,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-linux-ffi"
-version = "0.1.157"
+version = "0.1.158"
 dependencies = [
  "libc",
  "signal-hook-registry",
@@ -2053,7 +2053,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-macos-ffi"
-version = "0.1.157"
+version = "0.1.158"
 dependencies = [
  "accessibility-sys",
  "block2",
@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-pipewire-ffi"
-version = "0.1.157"
+version = "0.1.158"
 dependencies = [
  "libc",
  "thiserror 2.0.20",
@@ -2080,7 +2080,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-platform"
-version = "0.1.157"
+version = "0.1.158"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2108,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-proto"
-version = "0.1.157"
+version = "0.1.158"
 dependencies = [
  "prost",
  "prost-build",
@@ -2117,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-stream"
-version = "0.1.157"
+version = "0.1.158"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2134,7 +2134,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-update"
-version = "0.1.157"
+version = "0.1.158"
 dependencies = [
  "blake3",
  "hex",
@@ -2154,7 +2154,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-agent-windows-ffi"
-version = "0.1.157"
+version = "0.1.158"
 dependencies = [
  "thiserror 2.0.20",
  "windows-sys 0.61.2",
@@ -2162,7 +2162,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-computer-native"
-version = "0.1.157"
+version = "0.1.158"
 dependencies = [
  "arboard",
  "async-lock",
@@ -2195,7 +2195,7 @@ dependencies = [
 
 [[package]]
 name = "opengeni-relay"
-version = "0.1.157"
+version = "0.1.158"
 dependencies = [
  "async-trait",
  "axum",
@@ -2831,7 +2831,7 @@ dependencies = [
  "once_cell",
  "ring",
  "rustls-pki-types",
- "rustls-webpki 0.103.13",
+ "rustls-webpki",
  "subtle",
  "zeroize",
 ]
@@ -2866,16 +2866,6 @@ checksum = "2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96"
 dependencies = [
  "web-time",
  "zeroize",
-]
-
-[[package]]
-name = "rustls-webpki"
-version = "0.102.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
-dependencies = [
- "rustls-pki-types",
- "untrusted",
 ]
 
 [[package]]

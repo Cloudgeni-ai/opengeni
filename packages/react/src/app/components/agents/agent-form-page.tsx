@@ -6,7 +6,6 @@
 import { useEffect, useState } from "react";
 import {
   AGENT_DESCRIPTION_MAX_LENGTH,
-  AGENT_FIRST_MESSAGE_MAX_LENGTH,
   AGENT_INSTRUCTIONS_MAX_LENGTH,
   AGENT_INSTRUCTIONS_SOFT_LIMIT,
   AGENT_NAME_MAX_LENGTH,
@@ -19,9 +18,11 @@ import type { SessionAvatar as SessionAvatarValue } from "@opengeni/sdk";
 import { apiErrorDetails, userErrorText } from "../../../ui/api-error";
 import { Button } from "../../../ui/button";
 import { ErrorMessage } from "../../../ui/error-message";
-import { CheckboxField, Field, FieldStack, TextArea, TextInput } from "../../../ui/field";
+import { Field, FieldStack, TextArea, TextInput } from "../../../ui/field";
 import { FormPage } from "../../../ui/form-dialog";
 import { SegmentedControl } from "../../../ui/segmented-control";
+import { SettingRow } from "../../../ui/setting-row";
+import { Switch } from "../../../ui/switch";
 import { useAppContext } from "../../app-context";
 import { agentErrorCode, useAgent } from "../../lib/agents";
 import { useNavigate } from "../../lib/navigation";
@@ -41,15 +42,14 @@ export const INSTRUCTIONS_HINT =
   "What it does and how. Applies in every chat. Put long reference material in Memory.";
 export const INSTRUCTIONS_LONG_HINT =
   "Long instructions slow every reply. Move reference material to Memory.";
-export const FIRST_MESSAGE_HINT =
-  "Put in the composer when someone starts a chat with it in the app. Use it for one-time setup or a first question.";
+/** An older agent whose First message joined its Instructions can be over the limit. */
+export const INSTRUCTIONS_OVER_LIMIT_HINT = `Over ${AGENT_INSTRUCTIONS_MAX_LENGTH.toLocaleString("en-US")} characters, so they stay as they are until you shorten them. Other changes save as usual.`;
 
 export type AgentFormValues = {
   name: string;
   description: string;
   avatar: SessionAvatarValue | null;
   instructions: string;
-  firstMessage: string;
   memoryEnabled: boolean;
   visibility: AgentVisibility;
 };
@@ -59,8 +59,8 @@ const EMPTY: AgentFormValues = {
   description: "",
   avatar: null,
   instructions: "",
-  firstMessage: "",
-  memoryEnabled: false,
+  // New agents remember by default; an existing agent keeps its own setting.
+  memoryEnabled: true,
   visibility: "workspace",
 };
 
@@ -87,7 +87,6 @@ type FormErrors = {
   name?: string;
   description?: string;
   instructions?: string;
-  firstMessage?: string;
   emoji?: string;
   letters?: string;
 };
@@ -115,9 +114,13 @@ export function agentChanges(agent: Agent, values: AgentFormValues): UpdateAgent
   if (JSON.stringify(values.avatar) !== JSON.stringify(agent.avatar)) change.avatar = values.avatar;
   if (values.instructions.trim() !== agent.instructions)
     change.instructions = values.instructions.trim();
-  if (values.firstMessage.trim() !== agent.firstMessage)
-    change.firstMessage = values.firstMessage.trim();
-  if (values.memoryEnabled !== agent.memory.enabled) change.memoryEnabled = values.memoryEnabled;
+  // Memory on with no collection yet (it couldn't be set up when the agent was
+  // made): saving sends it again, so the collection is set up now.
+  if (
+    values.memoryEnabled !== agent.memory.enabled ||
+    (values.memoryEnabled && agent.memory.collectionId === null)
+  )
+    change.memoryEnabled = values.memoryEnabled;
   if (values.visibility !== agent.visibility) change.visibility = values.visibility;
   return change;
 }
@@ -176,7 +179,6 @@ function AgentForm({
   const [name, setName] = useState(initial.name);
   const [description, setDescription] = useState(initial.description);
   const [instructions, setInstructions] = useState(initial.instructions);
-  const [firstMessage, setFirstMessage] = useState(initial.firstMessage);
   const [memoryEnabled, setMemoryEnabled] = useState(initial.memoryEnabled);
   const [visibility, setVisibility] = useState<AgentVisibility>(initial.visibility);
   const [draft, setDraft] = useState(() =>
@@ -192,13 +194,16 @@ function AgentForm({
     workspaces.find((row) => row.id === (agent?.workspaceId ?? workspaceId))?.name ?? null;
   const inSlack = (agent?.slack.length ?? 0) > 0;
   const long = instructions.length > AGENT_INSTRUCTIONS_SOFT_LIMIT;
+  // Unchanged Instructions are never sent, so only changed ones must fit.
+  const instructionsChanged = !agent || instructions.trim() !== agent.instructions;
+  const overLimitAsStored =
+    !instructionsChanged && lengthError(instructions, AGENT_INSTRUCTIONS_MAX_LENGTH) !== undefined;
 
   const values = (): AgentFormValues => ({
     name,
     description,
     avatar: sessionAvatarFromDraft(draft, name, null),
     instructions,
-    firstMessage,
     memoryEnabled,
     visibility,
   });
@@ -208,8 +213,9 @@ function AgentForm({
     const next: FormErrors = {
       ...(nameError ? { name: nameError } : {}),
       ...optionalError("description", lengthError(description, AGENT_DESCRIPTION_MAX_LENGTH)),
-      ...optionalError("instructions", lengthError(instructions, AGENT_INSTRUCTIONS_MAX_LENGTH)),
-      ...optionalError("firstMessage", lengthError(firstMessage, AGENT_FIRST_MESSAGE_MAX_LENGTH)),
+      ...(instructionsChanged
+        ? optionalError("instructions", lengthError(instructions, AGENT_INSTRUCTIONS_MAX_LENGTH))
+        : {}),
       ...sessionAvatarDraftErrors(draft, name, null),
     };
     setErrors(next);
@@ -236,7 +242,6 @@ function AgentForm({
           avatar: current.avatar,
           visibility: current.visibility,
           instructions: current.instructions.trim(),
-          firstMessage: current.firstMessage.trim(),
           memoryEnabled: current.memoryEnabled,
           sourceSessionId: sourceSessionId ?? null,
         }),
@@ -329,8 +334,16 @@ function AgentForm({
           error={errors.instructions}
           aside={lengthCount(instructions, AGENT_INSTRUCTIONS_MAX_LENGTH)}
           hint={
-            <span data-agent-instructions-hint={long ? "long" : undefined}>
-              {long ? INSTRUCTIONS_LONG_HINT : INSTRUCTIONS_HINT}
+            <span
+              data-agent-instructions-hint={
+                overLimitAsStored ? "over-limit" : long ? "long" : undefined
+              }
+            >
+              {overLimitAsStored
+                ? INSTRUCTIONS_OVER_LIMIT_HINT
+                : long
+                  ? INSTRUCTIONS_LONG_HINT
+                  : INSTRUCTIONS_HINT}
             </span>
           }
         >
@@ -344,28 +357,20 @@ function AgentForm({
             }}
           />
         </Field>
-        <Field
-          label="First message"
-          optional
-          hint={FIRST_MESSAGE_HINT}
-          error={errors.firstMessage}
-          aside={lengthCount(firstMessage, AGENT_FIRST_MESSAGE_MAX_LENGTH)}
-        >
-          <TextArea
-            value={firstMessage}
-            rows={4}
-            placeholder="Which repositories should I look after?"
-            onChange={(event) => {
-              setFirstMessage(event.target.value);
-              setErrors(({ firstMessage: _drop, ...rest }) => rest);
-            }}
-          />
-        </Field>
-        <CheckboxField
+        <SettingRow
           label="Remember across chats"
-          description="Its chats save what they learn to its Memory and read it in later chats."
-          checked={memoryEnabled}
-          onCheckedChange={setMemoryEnabled}
+          description={
+            memoryEnabled
+              ? "Its chats save what they learn to its Memory and read it in later chats."
+              : "Each chat starts fresh."
+          }
+          control={
+            <Switch
+              aria-label="Remember across chats"
+              checked={memoryEnabled}
+              onCheckedChange={setMemoryEnabled}
+            />
+          }
         />
         <Field label="Who can use it" group>
           <SegmentedControl
@@ -514,7 +519,6 @@ export function EditAgentPage({ workspaceId, agentId }: { workspaceId: string; a
         description: agent.description,
         avatar: agent.avatar,
         instructions: agent.instructions,
-        firstMessage: agent.firstMessage,
         memoryEnabled: agent.memory.enabled,
         visibility: agent.visibility,
       }}

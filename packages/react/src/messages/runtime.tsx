@@ -18,6 +18,10 @@ import { singleSendText } from "./single-send";
  *   other count `_other`.
  * - A key a host does not supply falls back to an outer provider, then English, never to a
  *   raw key.
+ * - A connectable service's name and short description come from
+ *   `connectService.<providerId>.name` and `connectService.<providerId>.description`
+ *   (`connectService.microsoft-outlook-calendar.name`). They have no English entry: without
+ *   them the service keeps its built-in name and shows no description.
  */
 type Catalog = typeof englishMessages;
 type CatalogKey = keyof Catalog & string;
@@ -67,11 +71,16 @@ export type OpenGeniText = (<K extends OpenGeniMessageKey>(
 
 /**
  * Host-supplied text. Any subset of keys; counted keys may add the plural forms their
- * language uses (`files.count_few`) even where English has none.
+ * language uses (`files.count_few`) even where English has none. Service names and
+ * descriptions use `connectService.<providerId>.name` and `.description`.
  */
 export type OpenGeniMessages = Partial<
   Record<SingularKey<CatalogKey> | `${PluralBaseKey}${PluralSuffix}`, string>
->;
+> &
+  Partial<Record<ConnectServiceMessageKey, string>>;
+
+/** A connectable service's own name or description, by its provider id. */
+export type ConnectServiceMessageKey = `connectService.${string}.${"name" | "description"}`;
 
 /** A complete catalog: declare yours with this type to be told about every new key. */
 export type OpenGeniMessageCatalog = Record<SingularKey<CatalogKey>, string> &

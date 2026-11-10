@@ -14,19 +14,19 @@ ADD --checksum=sha256:8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731
 ADD --checksum=sha256:a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058 https://github.com/lightpanda-io/browser/archive/refs/tags/0.3.5.tar.gz /lightpanda-0.3.5-source.tar.gz
 ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef https://raw.githubusercontent.com/lightpanda-io/browser/0.3.5/LICENSE /lightpanda-LICENSE
 
-# The pinned rg and jq builds the agent embeds and appends to every command's
-# PATH. Pins equal packages/runtime/src/sandbox/shell-tools-manifest.ts
-# (checked by scripts/fetch-shell-tools.test.ts); the cache is keyed by checksum.
+# The pinned rg builds the agent embeds and appends to every command's PATH,
+# with the static musl jq committed under agent/vendor/jq/. Pins equal
+# packages/runtime/src/sandbox/shell-tools-manifest.ts (checked by
+# scripts/fetch-shell-tools.test.ts); the cache is keyed by checksum.
 FROM scratch AS shell-tools-linux
 ADD --checksum=sha256:33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz /cache/33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
 ADD --checksum=sha256:800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-musl.tar.gz /cache/800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915
-ADD --checksum=sha256:b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-amd64 /cache/b1c22172dd303f3be49e935aa56aa48a8b7a46e0bc838b4997d3bb451495870f
-ADD --checksum=sha256:8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309 https://github.com/jqlang/jq/releases/download/jq-1.8.2/jq-linux-arm64 /cache/8b85c817833814ddca00a144c33705546355afccf0cf39b188f3cdb48b852309
 
 FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS shell-tools-fetch
 WORKDIR /src
 COPY scripts/fetch-shell-tools.ts scripts/
 COPY packages/runtime/src/sandbox/shell-tools-manifest.ts packages/runtime/src/sandbox/shell-tools-THIRD-PARTY-NOTICES.txt packages/runtime/src/sandbox/
+COPY agent/vendor/jq/ agent/vendor/jq/
 COPY --from=shell-tools-linux /cache/ /cache/
 RUN OPENGENI_SHELL_TOOLS_CACHE=/cache bun scripts/fetch-shell-tools.ts --offline \
     --target x86_64-unknown-linux-musl --target aarch64-unknown-linux-musl --out /out

@@ -1,4 +1,5 @@
 import { t } from "@opengeni/react/app/lib/console-text";
+import { ClaudeCodeApiIntro } from "./claude-code-api-intro";
 import { ConnectedSubscriptionUsagePool } from "./subscription-usage-pool";
 import { AccountGroupHeading } from "@/components/models/subscription-account-ui";
 import { ModelsRefreshControl } from "./models-refresh-control";
@@ -146,6 +147,7 @@ import {
 } from "@opengeni/react/app/lib/models-route";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
 import { useWorkspaceModelCatalog } from "@opengeni/react/app/lib/use-workspace-model-catalog";
+import { OwnSubscriptionPlanNote } from "@opengeni/react/app/components/credits/own-subscription-plan-notice";
 import { notifyModelConnectionsChanged } from "@opengeni/react/app/lib/shared-query";
 import { useOrganizationModelDefaults } from "./use-organization-model-defaults";
 import {
@@ -345,6 +347,7 @@ export function WorkspaceModelsPageBody({
 }) {
   const { client, clientConfig } = useAppContext();
   const claudeEnabled = clientConfig.claudeSubscriptionEnabled === true;
+  const claudeCodeApiEnabled = clientConfig.claudeCodeApiKeyEnabled === true;
   const scope = useMemo(
     () => ({
       anchorWorkspaceId,
@@ -468,6 +471,11 @@ export function WorkspaceModelsPageBody({
   const { orgCodex, orgGrok, orgClaude, orgGateways, orgCompatible, audiences, setAudiences } =
     organizationAccounts;
   const catalog = useWorkspaceModelCatalog(workspaceId);
+  // Connecting a subscription says when the organization's plan doesn't
+  // include using it, with the plan and price from the plan catalog.
+  const subscriptionPlanNote = catalog.ownSubscriptionPlan ? (
+    <OwnSubscriptionPlanNote plan={catalog.ownSubscriptionPlan} />
+  ) : null;
   const credits = useOpenGeniCredits(organizationId);
   // What every workspace follows until it changes it: owners and admins only.
   const organizationDefaults = useOrganizationModelDefaults(
@@ -841,6 +849,15 @@ export function WorkspaceModelsPageBody({
         <DetailPageHeader title="Claude subscriptions are not enabled" />
       </DetailPage>
     );
+  } else if (step?.claudeCodeApi && !claudeCodeApiEnabled) {
+    page = (
+      <DetailPage
+        back={{ label: "Models", onClick: backToList }}
+        className={FLUSH_DETAIL_PAGE_CLASS}
+      >
+        <DetailPageHeader title="Claude Code (API key) is not enabled" />
+      </DetailPage>
+    );
   } else if (legacyClaude && (legacyPool.loading || legacyPool.loadError || !legacyAccountId)) {
     page = (
       <DetailPage
@@ -922,6 +939,7 @@ export function WorkspaceModelsPageBody({
         }
         choices={connectChoices({
           subscriptions: { grokUnavailable: grok.unavailable, claudeEnabled },
+          claudeCodeApiEnabled,
           gateway: (id) => {
             if (id === "openai" || id === "azure_openai")
               return canConnectWorkspaceKeys ? "available" : API_KEYS_FOR_ADMINS;
@@ -946,6 +964,7 @@ export function WorkspaceModelsPageBody({
         subtitle={`Connect it once for ${organizationName}, then choose who can use it.`}
         choices={connectChoices({
           subscriptions: { grokUnavailable: orgGrok.unavailable, claudeEnabled },
+          claudeCodeApiEnabled,
           gateway: (id) =>
             orgGateways[id].hidden || !orgGateways[id].canManageConnection
               ? undefined
@@ -984,6 +1003,8 @@ export function WorkspaceModelsPageBody({
             : false;
     const fields = (
       <>
+        {subscriptionProvider(provider) ? subscriptionPlanNote : null}
+        {step.claudeCodeApi ? <ClaudeCodeApiIntro /> : null}
         <ConnectAudienceFields
           organizationName={organizationName}
           here={connectHere}
@@ -1136,6 +1157,16 @@ export function WorkspaceModelsPageBody({
         {`It will belong to ${workspaceName}: everyone here can use it. ${workspaceName}'s admins and ${organizationName}'s owners and admins can change or remove it.`}
       </p>
     ) : undefined;
+    // A subscription says what using it needs, above its sign-in.
+    const subscriptionFields =
+      subscriptionPlanNote && subscriptionProvider(provider) ? (
+        <>
+          {subscriptionPlanNote}
+          {note}
+        </>
+      ) : (
+        note
+      );
     // A workspace's own key is added, not replaced: it opens the list again.
     const keyConnected = () => {
       connectionChanged();
@@ -1173,7 +1204,7 @@ export function WorkspaceModelsPageBody({
           codex={codex}
           places={codexPlaces}
           onClose={backToList}
-          fields={note}
+          fields={subscriptionFields}
           scope={onlyMe || (key?.provider === "codex" && ownKey) ? "user" : undefined}
         />
       ) : provider === "supergrok" ? (
@@ -1181,7 +1212,7 @@ export function WorkspaceModelsPageBody({
           grok={grok}
           places={grokPlaces}
           onClose={backToList}
-          fields={note}
+          fields={subscriptionFields}
           // Your own in a Personal workspace, as a member, or signing your
           // own in again; a shared workspace's admin chooses.
           scope={
@@ -1201,7 +1232,7 @@ export function WorkspaceModelsPageBody({
           allowPrivate={!personal}
           onClose={account ? () => nav.openAccount(account) : backToList}
           onConnected={(id) => (id ? claudePlaces.openAccount(id) : backToList())}
-          fields={note}
+          fields={subscriptionFields}
         />
       ) : (
         <ProviderConnectPage
@@ -1209,7 +1240,16 @@ export function WorkspaceModelsPageBody({
           state={gateways[provider]}
           onClose={backToList}
           onConnected={() => nav.openAccount(accountKey("gateway", provider))}
-          fields={note}
+          fields={
+            step.claudeCodeApi ? (
+              <>
+                <ClaudeCodeApiIntro />
+                {note}
+              </>
+            ) : (
+              note
+            )
+          }
         />
       );
   } else if (view === "account-rule-locks" && !workspacePage && organizationAdmin) {
@@ -2087,6 +2127,7 @@ function WorkspaceDefaultsSection({
 type ConnectChoice =
   | "anthropic"
   | "claude_subscription"
+  | "claude_code_api"
   | "codex"
   | "supergrok"
   | "vercel"
@@ -2096,16 +2137,24 @@ type ConnectChoice =
   | "azure_openai"
   | "openai_compatible";
 
+/** Providers people connect with their own subscription, which needs a paid plan to use. */
+function subscriptionProvider(provider: string): boolean {
+  return provider === "codex" || provider === "supergrok" || provider === "claude_subscription";
+}
+
 /** API keys at a shared workspace are a setting, so its admins add them. */
 const API_KEYS_FOR_ADMINS: ConnectChoiceState = { unavailable: "Only admins can add API keys" };
 
 /** Connect provider's choices: the same providers for every page and viewer. */
 function connectChoices({
   subscriptions,
+  claudeCodeApiEnabled,
   gateway,
   compatible,
 }: {
   subscriptions: { grokUnavailable: boolean; claudeEnabled: boolean };
+  /** The "Claude Code (API key)" row is offered (a deployment flag). */
+  claudeCodeApiEnabled: boolean;
   gateway: (id: GatewayId) => ConnectChoiceState | undefined;
   compatible: ConnectChoiceState | undefined;
 }): Partial<Record<ConnectChoice, ConnectChoiceState>> {
@@ -2116,6 +2165,10 @@ function connectChoices({
       : "available",
   };
   if (subscriptions.claudeEnabled) choices.claude_subscription = "available";
+  // The same Anthropic API-key connection as the Anthropic row, so it is
+  // available, connected or unavailable exactly when that row is.
+  const claudeCodeApi = claudeCodeApiEnabled ? gateway("anthropic") : undefined;
+  if (claudeCodeApi) choices.claude_code_api = claudeCodeApi;
   for (const id of GATEWAYS) {
     const state = gateway(id);
     if (state) choices[id] = state;
@@ -2137,9 +2190,20 @@ export type ConnectChoiceState =
  * organization's Models page and on a workspace's. Subscriptions first, then
  * the cloud and API keys, then any OpenAI-compatible endpoint.
  */
-const CONNECT_CHOICES: readonly { id: ConnectChoice; title: string; summary: string }[] = [
+const CONNECT_CHOICES: readonly {
+  id: ConnectChoice;
+  title: string;
+  summary: string;
+  note?: string;
+}[] = [
   { id: "codex", title: "Codex", summary: providerPaymentSummary("codex", "Codex") },
   { id: "claude_subscription", title: "Claude subscription", summary: "Pay with your Claude plan" },
+  {
+    id: "claude_code_api",
+    title: "Claude Code (API key)",
+    summary: "Use the API credits your Claude plan includes",
+    note: "Max and Team plans",
+  },
   {
     id: "supergrok",
     title: "SuperGrok",
@@ -2167,6 +2231,7 @@ const OPENS_WHEN_CONNECTED: ReadonlySet<ConnectChoice> = new Set([
   "azure_openai",
   "anthropic",
   "claude_subscription",
+  "claude_code_api",
 ]);
 
 /**
@@ -2234,7 +2299,10 @@ export function ConnectPickerPage({
             choices={rows}
             onOpen={(choice) =>
               choice.connected && OPENS_WHEN_CONNECTED.has(choice.id as ConnectChoice)
-                ? onOpenConnected?.(choice.id as GatewayId)
+                ? // Claude Code (API key) is the Anthropic connection.
+                  onOpenConnected?.(
+                    (choice.id === "claude_code_api" ? "anthropic" : choice.id) as GatewayId,
+                  )
                 : onPick(choice.id as ConnectChoice)
             }
           />

@@ -94,7 +94,7 @@ describe("agents in the browser", () => {
     await page.close();
   }, 60_000);
 
-  test("choosing an agent in the composer fills in its First message, kept out of the saved draft", async () => {
+  test("choosing an agent in the composer selects it and leaves the composer empty", async () => {
     const page = await open("composer", 390);
     const main = page.locator("main");
     const composer = page.getByRole("textbox").first();
@@ -104,12 +104,9 @@ describe("agents in the browser", () => {
       await page.getByRole("menuitem", { name: /Browse agents/ }).waitFor();
       await page.getByRole("menuitem", { name }).click();
     };
-    await page.waitForFunction(() =>
-      document.querySelector("textarea")?.value.startsWith("Set me up"),
-    );
-    // Untouched, the First message isn't what the saved draft keeps.
+    await page.getByRole("button", { name: /^Chat with: Onboarding buddy/ }).waitFor();
+    expect(await composer.inputValue()).toBe("");
     expect(await main.getAttribute("data-draft-text")).toBe("");
-    expect(await main.getAttribute("data-can-send")).toBe("true");
 
     // An Only me agent: its chat is Only me, and Workspace says why it's off.
     await choose(/^Meeting notes/);
@@ -123,17 +120,14 @@ describe("agents in the browser", () => {
     await choose(/^Opengeni/);
     await page.getByRole("button", { name: "Visibility: Workspace" }).waitFor();
 
-    // Text the person changed is theirs: it is saved and stays.
+    // What the person typed is theirs: it is saved and stays across agents.
+    await composer.pressSequentially("Set up my laptop.");
     await choose(/^Onboarding buddy/);
-    await page.waitForFunction(() =>
-      document.querySelector("textarea")?.value.startsWith("Set me up"),
-    );
-    await composer.press("End");
-    await composer.pressSequentially(" Thanks.");
-    const edited = await composer.inputValue();
-    expect(await main.getAttribute("data-draft-text")).toBe(edited);
+    expect(await composer.inputValue()).toBe("Set up my laptop.");
+    expect(await main.getAttribute("data-draft-text")).toBe("Set up my laptop.");
+    expect(await main.getAttribute("data-can-send")).toBe("true");
     await choose(/^Opengeni/);
-    expect(await composer.inputValue()).toBe(edited);
+    expect(await composer.inputValue()).toBe("Set up my laptop.");
     await page.close();
   }, 60_000);
 

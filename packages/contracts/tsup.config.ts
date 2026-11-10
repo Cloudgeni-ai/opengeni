@@ -89,6 +89,7 @@ export default defineConfig({
     "src/automation-templates.ts",
     "src/mcp-elicitation.ts",
     "src/mcp-elicitation-model.ts",
+    "src/machine-access.ts",
   ],
   format: ["esm"],
   target: "es2022",

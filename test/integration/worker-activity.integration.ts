@@ -3997,9 +3997,9 @@ describe("worker activities integration", () => {
 
   test("scheduled dispatch and its retry skip without a chat while the workspace is paused", async () => {
     const grant = await testGrant(dbClient.db);
-    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+    await withWorkspaceSessionActivityRls(dbClient.db, grant.workspaceId, (db) =>
       db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as typeof db, {
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           actor: { type: "human", subjectId: grant.subjectId },
@@ -4768,9 +4768,9 @@ describe("worker activities integration", () => {
     });
     expect(turn.status).toBe("idle");
 
-    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+    await withWorkspaceSessionActivityRls(dbClient.db, grant.workspaceId, (db) =>
       db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as typeof db, {
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           actor: { type: "human", subjectId: grant.subjectId },
@@ -4795,9 +4795,9 @@ describe("worker activities integration", () => {
       status: "idle",
       effectiveControl: { state: "paused" },
     });
-    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+    await withWorkspaceSessionActivityRls(dbClient.db, grant.workspaceId, (db) =>
       db.transaction((tx) =>
-        mutateWorkspaceControlInTransaction(tx as typeof db, {
+        mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
           actor: { type: "human", subjectId: grant.subjectId },

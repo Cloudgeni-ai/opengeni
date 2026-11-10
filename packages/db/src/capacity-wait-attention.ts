@@ -10,6 +10,10 @@ import { subscriptionCapacityWaitNeedsAction } from "@opengeni/subscriptions";
  * `child_waiting_capacity` notice, and a top-level chat's person gets an inbox
  * notification. Both carry the reset time and say how to continue sooner
  * (switch the chat's model, which releases the waiting turn onto it).
+ * The person's notification never keeps promising a time that no longer
+ * holds: when a later check finds the reset later than it said (its time
+ * passed without capacity, or a longer limit binds) or unknown, the same
+ * notification is updated in place (`capacityWaitNoticeNeedsRestating`).
  */
 export const CAPACITY_WAIT_ATTENTION_AFTER_MS = 15 * 60_000;
 
@@ -76,15 +80,50 @@ export function capacityWaitNotificationPayload(input: {
   };
 }
 
-export type CapacityWaitNoticeMarker = { key: string };
+/**
+ * The open notification of a waiting turn: its key, and the reset it told
+ * the person (ISO, or null for "no reset time is known"). `resetsAt` is
+ * undefined for a marker written before the notice recorded it.
+ */
+export type CapacityWaitNoticeMarker = { key: string; resetsAt?: string | null };
 
 export function readCapacityWaitNotice(
   metadata: Record<string, unknown> | null | undefined,
 ): CapacityWaitNoticeMarker | null {
   const value = metadata?.[CAPACITY_WAIT_NOTICE_KEY];
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const key = (value as { key?: unknown }).key;
-  return typeof key === "string" && key.length > 0 ? { key } : null;
+  const { key, resetsAt } = value as { key?: unknown; resetsAt?: unknown };
+  if (typeof key !== "string" || key.length === 0) return null;
+  if (resetsAt === null) return { key, resetsAt: null };
+  return typeof resetsAt === "string" && Number.isFinite(Date.parse(resetsAt))
+    ? { key, resetsAt }
+    : { key };
+}
+
+/** The turn metadata marker of a notification that told the person `resetsAt`. */
+export function capacityWaitNoticeMarker(key: string, resetsAt: Date | null) {
+  return { key, resetsAt: resetsAt?.toISOString() ?? null } satisfies CapacityWaitNoticeMarker;
+}
+
+/**
+ * Whether the person's open notification, which told them `stated`, must be
+ * updated for a wait now expected to end at `next`. It must when the wait
+ * now ends later than it said (to the minute it shows), including after its
+ * time passed without capacity, when the reset became unknown or known, and
+ * when the marker does not record what it said. An earlier reset keeps it:
+ * the turn then continues before the time it named.
+ */
+export function capacityWaitNoticeNeedsRestating(
+  stated: CapacityWaitNoticeMarker,
+  next: Date | null,
+): boolean {
+  if (stated.resetsAt === undefined) return true;
+  if (stated.resetsAt === null || next === null)
+    return stated.resetsAt !== (next?.toISOString() ?? null);
+  return (
+    next.getTime() > Date.parse(stated.resetsAt) &&
+    capacityWaitResetText(next) !== capacityWaitResetText(stated.resetsAt)
+  );
 }
 
 export function withoutCapacityWaitNotice(

@@ -450,6 +450,7 @@ export async function parkCoreSubscriptionTurn(
     );
     if (evaluated?.action === "resumed") {
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "provider";
       control.activityStatus = "recovering";
       return { exit: claimedResult({ status: "recovering" }) };
     }
@@ -475,6 +476,7 @@ export async function parkCoreSubscriptionTurn(
         );
       }
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "provider";
       control.activityStatus = "waiting_capacity";
       return {
         exit: claimedResult({

@@ -452,6 +452,7 @@ export const FIRST_PARTY_MCP_TOOL_CAPABILITIES = {
 
   github_connect_link: "workspaceConnectors",
   github_repositories_list: "workspaceConnectors",
+  github_repository_attach: "workspaceConnectors",
   social_connections_list: "workspaceConnectors",
   social_posts_recent: "workspaceConnectors",
   social_daily_analysis_context: "workspaceConnectors",

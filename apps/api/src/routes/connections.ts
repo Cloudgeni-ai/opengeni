@@ -1412,10 +1412,20 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/integrations/oauth/callback", async (c) => {
     assertIntegrationsEnabled();
+    // An administrator returning from an approval link derived from a
+    // Microsoft sign-in that uses this callback, not a connect attempt.
+    if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
+      return microsoftAdminConsentResultPage({
+        adminConsent: c.req.query("admin_consent"),
+        error: c.req.query("error"),
+      });
     const input = {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
       ...(c.req.query("error") ? { error: c.req.query("error") } : {}),
+      ...(c.req.query("error_description")
+        ? { errorDescription: c.req.query("error_description") }
+        : {}),
       browser: await oauthCallbackBrowser(c, deps),
       requestUrl: c.req.url,
     };

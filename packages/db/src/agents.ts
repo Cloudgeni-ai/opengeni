@@ -20,7 +20,14 @@
  * from live grants. Reads filter Only me agents explicitly; nothing here
  * grants anything.
  */
-import { agentInitialsAvatar, slackAgentNameKey, type SessionAvatar } from "@opengeni/contracts";
+import {
+  AGENT_FIRST_MESSAGE_LEAD,
+  AGENT_INSTRUCTIONS_MAX_LENGTH,
+  agentInitialsAvatar,
+  agentInstructionsWithFirstMessage,
+  slackAgentNameKey,
+  type SessionAvatar,
+} from "@opengeni/contracts";
 import { sql, type SQL } from "drizzle-orm";
 
 import { rawRows, withRlsContext, withWorkspaceRls, type Database } from "./database";
@@ -32,11 +39,53 @@ export type AgentOriginValue = "slack_agent" | "bot_template" | "app" | "slack";
 
 /** The current revision's content, read from the agent's home workspace. */
 export type AgentContent = {
+  /** With any older First message joined (`agentInstructionsWithFirstMessage`). */
   instructions: string;
+  /** Always empty: agents have one text, their Instructions. Kept for older readers. */
   firstMessage: string;
+  /** The revision as stored, for writes. */
+  stored: { instructions: string; firstMessage: string };
   createdBySubjectId: string | null;
   createdAt: Date;
 };
+
+/**
+ * Agents have one text, their Instructions; a First message an older client,
+ * an older release or the legacy template API sends joins them
+ * (`agentInstructionsWithFirstMessage`). Stored that way, so the First message
+ * column ends up empty, unless together they pass the Instructions limit: then
+ * the revision keeps both as sent, and readers still see them joined.
+ */
+function storedAgentContent(
+  instructions: string,
+  firstMessage: string,
+): { instructions: string; firstMessage: string } {
+  const joined = agentInstructionsWithFirstMessage(instructions, firstMessage);
+  return joined.length <= AGENT_INSTRUCTIONS_MAX_LENGTH
+    ? { instructions: joined, firstMessage: "" }
+    : { instructions, firstMessage };
+}
+
+const SQL_TRIMMED = sql.raw(`E' \\t\\n\\r\\f\\v'`);
+/** `AGENT_FIRST_MESSAGE_LEAD` and its line break, as SQL. */
+const FIRST_MESSAGE_LEAD_SQL = sql`${`${AGENT_FIRST_MESSAGE_LEAD}\n`}::text`;
+
+/**
+ * A stored revision's Instructions as readers see them, with any First
+ * message joined: the SQL form of `agentInstructionsWithFirstMessage`, for
+ * reads that never map a whole agent (Slack routing, a chat's agent prompt).
+ * `revision` is the `agent_revisions` alias.
+ */
+export function agentInstructionsSql(revision: string): SQL {
+  const r = sql.raw(revision);
+  return sql`case
+      when ${r}.instructions is null then null
+      when btrim(${r}.first_message, ${SQL_TRIMMED}) = '' then ${r}.instructions
+      when strpos(${r}.instructions, btrim(${r}.first_message, ${SQL_TRIMMED})) > 0 then ${r}.instructions
+      when btrim(${r}.instructions, ${SQL_TRIMMED}) = '' then ${FIRST_MESSAGE_LEAD_SQL} || btrim(${r}.first_message, ${SQL_TRIMMED})
+      else btrim(${r}.instructions, ${SQL_TRIMMED}) || E'\\n\\n' || ${FIRST_MESSAGE_LEAD_SQL} || btrim(${r}.first_message, ${SQL_TRIMMED})
+    end`;
+}
 
 export type AgentRecord = {
   id: string;
@@ -112,7 +161,6 @@ type AgentRow = {
   version: number;
   created_at: Date | string;
   updated_at: Date | string;
-  has_first_message?: boolean | null;
   instructions?: string | null;
   first_message?: string | null;
   revision_created_by_subject_id?: string | null;
@@ -130,8 +178,9 @@ function mapAgent(row: AgentRow, withContent: boolean): AgentRecord {
     typeof row.first_message === "string" &&
     row.revision_created_at
       ? {
-          instructions: row.instructions,
-          firstMessage: row.first_message,
+          instructions: agentInstructionsWithFirstMessage(row.instructions, row.first_message),
+          firstMessage: "",
+          stored: { instructions: row.instructions, firstMessage: row.first_message },
           createdBySubjectId: row.revision_created_by_subject_id ?? null,
           createdAt: date(row.revision_created_at),
         }
@@ -154,7 +203,7 @@ function mapAgent(row: AgentRow, withContent: boolean): AgentRecord {
     version: Number(row.version),
     createdAt: date(row.created_at),
     updatedAt: date(row.updated_at),
-    hasFirstMessage: content ? content.firstMessage.length > 0 : row.has_first_message === true,
+    hasFirstMessage: false,
     content,
   };
 }
@@ -274,7 +323,7 @@ export async function listAgents(
   return await withRlsContext(db, home, async (tx) => {
     const rows = await rawRows<AgentRow>(
       tx,
-      sql`select ${AGENT_COLUMNS}, coalesce(r.first_message <> '', false) as has_first_message
+      sql`select ${AGENT_COLUMNS}
           ${
             input.withContent
               ? sql`, r.instructions, r.first_message,
@@ -438,7 +487,31 @@ function privateOwnerRefusal(error: unknown, visibility: AgentVisibilityValue | 
   throw error;
 }
 
+/**
+ * A legacy template's setup text, copied from the stored revision so an older
+ * release writing the row back loses nothing: the stored Instructions (the
+ * joined text) when the First message joined them, else the stored First
+ * message as it is, which an older release reads as the setup text.
+ */
+function legacyTemplateText(stored: { instructions: string; firstMessage: string }): string {
+  return stored.firstMessage ? stored.firstMessage : stored.instructions;
+}
+
+/**
+ * A legacy Slack agent row's Instructions: the joined text when it fits, else
+ * the stored Instructions as they are. An older release writing the row back
+ * keeps the stored First message, which the joined text already contains, so
+ * neither way loses or repeats text.
+ */
+function legacySlackInstructions(agent: Pick<AgentRecord, "content">): string {
+  const joined = agent.content?.instructions ?? "";
+  return joined.length <= AGENT_INSTRUCTIONS_MAX_LENGTH
+    ? joined
+    : (agent.content?.stored.instructions ?? "");
+}
+
 async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgentInput) {
+  const stored = storedAgentContent(input.instructions, input.firstMessage);
   const [row] = await rawRows<AgentRow>(
     tx,
     sql`insert into agents (${sql.raw(input.id ? "id, " : "")}account_id, workspace_id, visibility,
@@ -462,7 +535,7 @@ async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgent
     sql`insert into agent_revisions (agent_id, account_id, workspace_id, revision, name,
         description, instructions, first_message, created_by_subject_id)
       values (${row.id}::uuid, ${home.accountId}::uuid, ${home.workspaceId}::uuid, 1,
-        ${input.name}, ${input.description}, ${input.instructions}, ${input.firstMessage},
+        ${input.name}, ${input.description}, ${stored.instructions}, ${stored.firstMessage},
         ${input.createdBySubjectId})
       returning created_at`,
   );
@@ -472,14 +545,14 @@ async function insertAgentRows(tx: Database, home: AgentHome, input: CreateAgent
       values (${row.id}::uuid, ${home.accountId}::uuid, ${home.workspaceId}::uuid, ${input.name},
         ${input.description},
         ${input.avatar === null ? sql`null` : sql`${JSON.stringify(input.avatar)}::jsonb`},
-        ${input.firstMessage}, ${input.visibility}, ${input.sourceSessionId}::uuid,
+        ${legacyTemplateText(stored)}, ${input.visibility}, ${input.sourceSessionId}::uuid,
         ${input.visibility === "private" ? input.ownerSubjectId : input.createdBySubjectId})`);
   }
   return mapAgent(
     {
       ...row,
-      instructions: input.instructions,
-      first_message: input.firstMessage,
+      instructions: stored.instructions,
+      first_message: stored.firstMessage,
       revision_created_by_subject_id: input.createdBySubjectId,
       revision_created_at: revision?.created_at ?? new Date(),
     },
@@ -591,7 +664,7 @@ async function syncLegacySlackRows(
             name_key = ${install.nameKey},
             description = ${agent.description},
             avatar = ${JSON.stringify(legacySlackAgentAvatar(agent))}::jsonb,
-            instructions = ${agent.content?.instructions ?? ""},
+            instructions = ${legacySlackInstructions(agent)},
             knowledge_collection_id = ${agent.memoryEnabled ? agent.memoryCollectionId : null}::uuid,
             open = ${install.open},
             -- Never backwards: the legacy API shows the greater of the two
@@ -638,12 +711,17 @@ export async function updateAgent(
       }
       await markDualWrite(tx);
       const name = patch.name ?? current.name;
-      const instructions = patch.instructions ?? current.content?.instructions ?? "";
-      const firstMessage = patch.firstMessage ?? current.content?.firstMessage ?? "";
+      const was = current.content?.stored ?? { instructions: "", firstMessage: "" };
+      // New Instructions were written over the joined text the person saw, so
+      // they replace a stored First message; otherwise it joins now.
+      const { instructions, firstMessage } = storedAgentContent(
+        patch.instructions ?? was.instructions,
+        patch.firstMessage ?? (patch.instructions !== undefined ? "" : was.firstMessage),
+      );
       const revised =
         current.content === null ||
-        instructions !== current.content.instructions ||
-        firstMessage !== current.content.firstMessage;
+        instructions !== was.instructions ||
+        firstMessage !== was.firstMessage;
       const nextRevision = revised ? current.currentRevision + 1 : current.currentRevision;
       const visibility = patch.visibility ?? current.visibility;
       const ownerSubjectId =
@@ -690,13 +768,13 @@ export async function updateAgent(
       const updated = await getAgent(tx, home, current.id);
       if (!updated) throw new Error("Agent update lost its row");
       if (current.origin === "bot_template") {
-        // The legacy template: its setup text is the First message, and an
+        // The legacy template: its setup text is now the Instructions, and an
         // Only me template belongs to whoever saved it.
         await tx.execute(sql`update bot_templates set
             name = ${updated.name},
             description = ${updated.description},
             avatar = ${updated.avatar === null ? sql`null` : sql`${JSON.stringify(updated.avatar)}::jsonb`},
-            setup_instructions = ${firstMessage},
+            setup_instructions = ${legacyTemplateText({ instructions, firstMessage })},
             visibility = ${updated.visibility},
             created_by_subject_id = ${
               updated.visibility === "private" ? updated.ownerSubjectId : sql`created_by_subject_id`
@@ -914,7 +992,7 @@ export async function putAgentSlackInstall(
               ${input.connectionId}::uuid, ${input.slackTeamId}, ${home.accountId}::uuid,
               ${home.workspaceId}::uuid, ${agent.name}, ${nameKey}, ${agent.description},
               ${JSON.stringify(legacySlackAgentAvatar(agent))}::jsonb,
-              ${agent.content?.instructions ?? ""},
+              ${legacySlackInstructions(agent)},
               ${agent.memoryEnabled ? agent.memoryCollectionId : null}::uuid,
               ${input.open ?? false},
               ${agent.createdBySubjectId ?? input.actorSubjectId}, ${enabled.version}::integer)`);
@@ -1277,7 +1355,7 @@ async function withProjectionInstructions(
     const instructions = await withRlsContext(db, { accountId, workspaceId }, async (tx) => {
       const rows = await rawRows<{ agent_id: string; instructions: string }>(
         tx,
-        sql`select a.id::text as agent_id, r.instructions
+        sql`select a.id::text as agent_id, ${agentInstructionsSql("r")} as instructions
           from agents a
           join agent_revisions r on r.agent_id = a.id and r.revision = a.current_revision
           where a.workspace_id = ${workspaceId}::uuid
@@ -1308,7 +1386,7 @@ function projectionQuery(where: SQL): SQL {
       -- The legacy API's version during the rollout (see lockAgentLegacySlackVersion).
       greatest(a.version, coalesce(s.version, 0)) as agent_version,
       a.created_at as agent_created_at, a.updated_at as agent_updated_at,
-      r.instructions
+      ${agentInstructionsSql("r")} as instructions
     from agent_slack_installs i
     join agents a on a.id = i.agent_id and a.account_id = i.account_id
     left join agent_revisions r on r.agent_id = a.id and r.revision = a.current_revision

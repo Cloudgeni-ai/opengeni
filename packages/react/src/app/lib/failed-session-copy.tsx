@@ -1,3 +1,7 @@
+import {
+  MACHINE_ACCESS_REQUIRED_CODE,
+  machineAccessNeededMessage,
+} from "@opengeni/contracts/machine-access";
 import { t } from "./console-text";
 import {
   creditRefusalHeadline,
@@ -108,9 +112,8 @@ const CODEX_REQUEST_REJECTED = "Codex rejected this request.";
 const COMPACTION_FAILURE =
   "Couldn’t compact conversation history. If the next message fails too, start a new session.";
 /** The worker's code for a turn whose personal machine isn't allowed in this chat. */
-export const MACHINE_ACCESS_REQUIRED_CODE = "machine_access_required";
-const MACHINE_ACCESS_REQUIRED =
-  "Machine access needed: this chat isn’t allowed to use its machine right now.";
+export { MACHINE_ACCESS_REQUIRED_CODE };
+const MACHINE_ACCESS_REQUIRED = machineAccessNeededMessage();
 
 /** The worker's closed quota marker, on a quota turn failure or a compaction failure. */
 function quotaScopeFailure(scope: string | null | undefined): KnownFailure | null {

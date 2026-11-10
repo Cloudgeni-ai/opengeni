@@ -233,10 +233,10 @@ function usageQuery(c: Context, own: boolean) {
 }
 
 function requireAllowanceProducersEnabled(deps: ApiRouteDeps): void {
-  if (!deps.settings.usageAllowancesEnabled) {
+  if (deps.settings.usageAllowancesEnabled === false) {
     throw new HTTPException(409, {
       message:
-        "Usage allowance changes are not enabled. Upgrade every API and worker before enabling usage allowances.",
+        "Usage allowance changes are not enabled on this deployment (OPENGENI_USAGE_ALLOWANCES_ENABLED=false).",
     });
   }
 }

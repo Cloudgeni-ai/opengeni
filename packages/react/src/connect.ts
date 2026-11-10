@@ -45,7 +45,9 @@ export type {
 } from "@opengeni/connect";
 
 export {
+  attentionFirst,
   ConnectionCatalog,
+  connectionOptionNeedsAttention,
   ConnectionServiceRow,
   ConnectionOptionRow,
   type ConnectionCatalogProps,

@@ -588,6 +588,58 @@ export async function readSessionArchiveTranscriptEvents(
   );
 }
 
+/** The `session_events` columns of a row the bundle export rendered with row_to_json. */
+type SessionEventExportRow = {
+  id: string;
+  workspace_id: string;
+  session_id: string;
+  sequence: number;
+  type: string;
+  payload: unknown;
+  payload_codec_version: number | null;
+  occurred_at: string;
+  client_event_id: string | null;
+  turn_id: string | null;
+  turn_generation: number | null;
+  turn_attempt_id: string | null;
+  turn_association: string | null;
+  duplicate_of_event_id: string | null;
+  duplicate_reason: string | null;
+};
+
+const SESSION_ARCHIVE_PURGED_EVENT_TYPE_SET: ReadonlySet<string> = new Set(
+  SESSION_ARCHIVE_PURGED_EVENT_TYPES,
+);
+
+/**
+ * The transcript event for one exported `session_events` row (its exact
+ * row_to_json text, as the bundle carries it), or null when the type is purged
+ * and so not part of the transcript. Equal to what
+ * {@link readSessionArchiveTranscriptEvents} returns for the same row, so the
+ * archive writes the transcript from the rows the bundle already read.
+ */
+export function sessionArchiveTranscriptEvent(row: string): SessionEvent | null {
+  const event = JSON.parse(row) as SessionEventExportRow;
+  if (SESSION_ARCHIVE_PURGED_EVENT_TYPE_SET.has(event.type)) return null;
+  return {
+    id: event.id,
+    workspaceId: event.workspace_id,
+    sessionId: event.session_id,
+    sequence: event.sequence,
+    type: event.type as SessionEventType,
+    payload: fromPostgresLosslessJson(event.payload, event.payload_codec_version),
+    // The same instant, truncated to milliseconds, as the driver's Date.
+    occurredAt: new Date(event.occurred_at).toISOString(),
+    clientEventId: event.client_event_id,
+    turnId: event.turn_id,
+    turnGeneration: event.turn_generation,
+    turnAttemptId: event.turn_attempt_id,
+    turnAssociation: event.turn_association as SessionEvent["turnAssociation"],
+    duplicateOfEventId: event.duplicate_of_event_id,
+    duplicateReason: event.duplicate_reason,
+  };
+}
+
 export async function readSessionArchiveSessionRow(
   db: Database,
   scope: SessionArchiveScope,

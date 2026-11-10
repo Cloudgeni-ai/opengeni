@@ -6,11 +6,11 @@
   "workflows": [
     {
       "path": ".github/workflows/agent-ci.yml",
-      "sha256": "ad34a9de238ee57b91291ce8792acb5e10e86300aebf63a2841f3f8ab6283fb5"
+      "sha256": "15db952b6aa60b27e7bc157d4f2d95549e8161b33d3305c4a5fed5be685d6eda"
     },
     {
       "path": ".github/workflows/agent-release.yml",
-      "sha256": "98a2bef7fc68945f6ecbd3bfbfbc8828658e4d2e1001cd1c1a1169c33572357c"
+      "sha256": "d9161919730e91b5a7ae4520e1ee3f6ef974f28364bfd505993278718e622882"
     },
     {
       "path": ".github/workflows/artifact-runtime.yml",
@@ -335,7 +335,7 @@
       "workflow": ".github/workflows/agent-ci.yml",
       "job": "test",
       "step": "Prove embedded helper selection with synthetic payloads",
-      "sha256": "e14c6ebdd17f2911c39e20957c04770eb211407641552ca915db928d55fdc7a5"
+      "sha256": "723959b19c219405fefd8d526bdd7ffb45dd2f2670745ba25c5135549bbe078f"
     },
     {
       "workflow": ".github/workflows/agent-ci.yml",
@@ -473,7 +473,7 @@
       "workflow": ".github/workflows/agent-release.yml",
       "job": "guard",
       "step": "Resolve + verify the version",
-      "sha256": "0e03cb9a6c1d0a47d59984b9b1b5ec0bf32fa53e18389e77aa6e7bee4dadbc28"
+      "sha256": "db89639dea4393c74505f66d256b22643d6172ed7b3f09957f95664a77e66e39"
     },
     {
       "workflow": ".github/workflows/agent-release.yml",

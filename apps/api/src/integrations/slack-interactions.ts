@@ -177,6 +177,7 @@ import {
   getActorNewSessionStartChoices,
   hasPermission,
   recordSlackEvent,
+  releaseAdmissionBlocksAfterAccessChange,
   requireAccessContext,
   requireAccessGrant,
   requireSessionAuthorizationListScope,
@@ -1231,6 +1232,15 @@ export function registerSlackInteractionRoutes(app: Hono, deps: ApiRouteDeps): v
             : {}),
           ...(payload.role !== undefined ? { role: payload.role } : {}),
         });
+        // The new membership may be what that person's saved messages wait for.
+        await releaseAdmissionBlocksAfterAccessChange(
+          {
+            db: deps.db,
+            requestSessionWorkflowWakeDispatch: () =>
+              deps.workflowClient.requestSessionWorkflowWakeDispatch(),
+          },
+          { accountId: grant.accountId, workspaceId, change: "membership" },
+        );
         const workspace = await getWorkspace(deps.db, workspaceId);
         return c.json(
           SlackUserLinkAccessRequest.parse({

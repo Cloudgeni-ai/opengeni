@@ -69,6 +69,7 @@ import type { UserPresenceRecorder } from "../user-presence";
 import { MissingPermissionRefusal } from "./permission-refusal";
 import { serviceInitiatorFromHeaders } from "./service-initiator";
 import { rethrowExternalWorkspaceOperation } from "./external-membership-refusal";
+import { releaseAdmissionBlocksAfterAccessChange } from "../application/admission-release";
 
 export * from "./permission-refusal";
 import { sha256Hex } from "@opengeni/contracts/values";
@@ -1567,6 +1568,13 @@ async function provisionExternalMemberOnFirstUse(
         revocationWatermark: external.revocationWatermark,
       },
     );
+    if (outcome === "created") {
+      // A returning external member's saved messages may wait for this.
+      await releaseAdmissionBlocksAfterAccessChange(
+        { db: deps.db },
+        { accountId: external.identity.accountId, workspaceId, change: "membership" },
+      );
+    }
     // Removed after this request authenticated: the removal wins.
     return outcome !== "superseded";
   } catch (error) {
@@ -1656,7 +1664,7 @@ async function applyStatedMembership(
       )
         return;
       try {
-        await applyStatedExternalWorkspaceMembership(
+        const outcome = await applyStatedExternalWorkspaceMembership(
           deps.db,
           {
             organizationId: external.identity.accountId,
@@ -1669,6 +1677,13 @@ async function applyStatedMembership(
             revocationWatermark: stated.revocationWatermark,
           },
         );
+        if (outcome === "created") {
+          // The host stated a membership back: saved messages waiting for it start.
+          await releaseAdmissionBlocksAfterAccessChange(
+            { db: deps.db },
+            { accountId: external.identity.accountId, workspaceId, change: "membership" },
+          );
+        }
       } catch (error) {
         if (error instanceof StatedExternalMembershipLastAdminError)
           throw new HTTPException(409, { message: error.message, cause: error });

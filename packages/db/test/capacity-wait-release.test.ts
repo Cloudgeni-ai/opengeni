@@ -14,6 +14,7 @@ import {
   initializeSessionStartAtomically,
   listSessionEvents,
   mutateSessionControlInTransaction,
+  mutateWorkspaceControlInTransaction,
   reconcileSubscriptionCoreCapacityWait,
   setSessionModelInTransaction,
   withWorkspaceSessionActivityRls,
@@ -166,6 +167,51 @@ async function control(grant: Grant, sessionId: string, action: "pause" | "resum
   );
 }
 
+async function workspaceControl(grant: Grant, action: "pause" | "resume") {
+  return await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
+    db.transaction((tx) =>
+      mutateWorkspaceControlInTransaction(tx as unknown as typeof db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        actor: { type: "human", subjectId: grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action,
+      }),
+    ),
+  );
+}
+
+/** The run after Resume finds no capacity again and parks the same turn. */
+async function rearm(grant: Grant, chat: Awaited<ReturnType<typeof waitingChat>>) {
+  const { claimed, attemptId } = await claim(grant, chat.session.id);
+  if (claimed.action !== "claimed") throw new Error(`not claimed: ${claimed.action}`);
+  expect(claimed.turn.id).toBe(chat.turn.id);
+  const armed = await armSubscriptionCoreCapacityWait(client.db, "codex", {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId: chat.session.id,
+    turnId: chat.turn.id,
+    attemptId,
+    waitReason: "no_eligible_capacity",
+    earliestResetAt: chat.resetsAt,
+    failurePayload: { error: "No Codex subscription has capacity for this turn right now." },
+  });
+  expect(armed.action).toBe("waiting");
+}
+
+/** The person's capacity-wait notices for this chat, in order: posted or withdrawn. */
+async function notices(grant: Grant, chat: Awaited<ReturnType<typeof waitingChat>>) {
+  const key = capacityWaitNotificationKey(chat.turn.id);
+  return (await eventsOf(grant, chat.session.id))
+    .filter(
+      (event) =>
+        (event.type === "session.notification.posted" ||
+          event.type === "session.notification.withdrawn") &&
+        (event.payload as { key?: string }).key === key,
+    )
+    .map((event) => event.type.replace("session.notification.", ""));
+}
+
 /** What the workflow's capacity sleep does when it wakes: reconcile its waiter. */
 async function reconcile(
   grant: Grant,
@@ -278,5 +324,41 @@ describe("long subscription capacity waits", () => {
     if (claimed.action !== "claimed") throw new Error(`not claimed: ${claimed.action}`);
     expect(claimed.turn.id).toBe(chat.turn.id);
     expect(claimed.turn.model).toBe("other-model");
+  });
+
+  test("Pause withdraws the person's notice; Resume announces a wait that still holds", async () => {
+    const grant = await workspace();
+    const chat = await waitingChat(grant);
+    expect(await notices(grant, chat)).toEqual(["posted"]);
+
+    await control(grant, chat.session.id, "pause");
+    expect(await notices(grant, chat)).toEqual(["posted", "withdrawn"]);
+
+    await control(grant, chat.session.id, "resume");
+    await rearm(grant, chat);
+    expect(await notices(grant, chat)).toEqual(["posted", "withdrawn", "posted"]);
+  });
+
+  test("pausing the whole workspace stops the wait and withdraws the notice too", async () => {
+    const grant = await workspace();
+    const chat = await waitingChat(grant);
+
+    const paused = await workspaceControl(grant, "pause");
+    expect(paused.outcome).toBe("changed");
+    expect(paused.affectedSessionEvents.map((entry) => entry.sessionId)).toEqual([chat.session.id]);
+    expect(await notices(grant, chat)).toEqual(["posted", "withdrawn"]);
+    // The waiter is gone, so nothing will claim the paused turn when capacity returns.
+    expect(await reconcile(grant, chat)).toBe("stale");
+    expect((await getSessionTurn(client.db, grant.workspaceId, chat.turn.id))?.status).toBe(
+      "recovering",
+    );
+    expect((await getSession(client.db, grant.workspaceId, chat.session.id))?.status).toBe("idle");
+    expect((await claim(grant, chat.session.id)).claimed.action).not.toBe("claimed");
+    // Pausing again changes nothing more.
+    expect((await workspaceControl(grant, "pause")).outcome).toBe("unchanged");
+
+    await workspaceControl(grant, "resume");
+    await rearm(grant, chat);
+    expect(await notices(grant, chat)).toEqual(["posted", "withdrawn", "posted"]);
   });
 });

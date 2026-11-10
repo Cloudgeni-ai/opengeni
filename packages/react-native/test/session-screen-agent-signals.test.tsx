@@ -181,7 +181,12 @@ const client = new Proxy({} as Record<string, unknown>, {
 });
 
 const noop = async () => {};
-function Screen(props: { agentSignals?: unknown; loadReview?: unknown }) {
+function Screen(props: {
+  agentSignals?: unknown;
+  loadReview?: unknown;
+  approvals?: unknown[];
+  fullClient?: unknown;
+}) {
   const control = useSessionControl("session-a", {
     client: client as never,
     workspaceId: "workspace-a",
@@ -223,7 +228,9 @@ function Screen(props: { agentSignals?: unknown; loadReview?: unknown }) {
       optimisticMessages: [],
     },
     attachments: { pickImages: noop, addFiles: noop, attachments: [] },
-    approvals: [{ id: "call-1", name: "deploy", arguments: { environment: "test" } }],
+    approvals: props.approvals ?? [
+      { id: "call-1", name: "deploy", arguments: { environment: "test" } },
+    ],
     control,
     humanInput: { requests: [question], respondingRequestId: null, respond: noop },
     goal: { goal: fakeGoal({ status: "paused", pausedReason: "agent" }) },
@@ -242,6 +249,7 @@ function Screen(props: { agentSignals?: unknown; loadReview?: unknown }) {
       createElement("div", { "data-testid": "above-composer" }, composer.above),
     ...(props.agentSignals === undefined ? {} : { agentSignals: props.agentSignals }),
     ...(props.loadReview === undefined ? {} : { loadReview: props.loadReview }),
+    ...(props.fullClient === undefined ? {} : { client: props.fullClient }),
   } as never);
 }
 
@@ -350,5 +358,46 @@ test("the host's loadReview reaches the approval card", async () => {
   expect(text).toContain("Deploy the test site?");
   expect(text).toContain("People using the test site see the new version.");
   expect(text).not.toContain("Environment");
+  await view.unmount();
+});
+
+test("with the full client, a Code Mode approval the host leaves alone shows its saved review", async () => {
+  // A programmatic call pauses with no arguments; they stay in the saved review.
+  const approvals = [{ id: "operation-1", name: "calendar_delete_event" }];
+  const hostReads: string[] = [];
+  const savedReads: string[] = [];
+  const fullClient = {
+    getToolActionReview: async (workspaceId: string, sessionId: string, approvalId: string) => {
+      savedReads.push(`${workspaceId}/${sessionId}/${approvalId}`);
+      return {
+        version: 1,
+        id: approvalId,
+        actionDigest: "a".repeat(64),
+        revision: "revision-1",
+        status: "pending",
+        title: "Delete a calendar event",
+        effects: [],
+        fields: [],
+        moreFields: 0,
+        reason: "",
+        createdAt: "",
+        updatedAt: "",
+        approveLabel: "Approve action",
+        availableActions: ["approve", "reject"],
+        detailsAvailable: true,
+      };
+    },
+  };
+  const loadReview = async (approval: { id: string }) => {
+    hostReads.push(approval.id);
+    return null;
+  };
+  const view = await renderComponent(createElement(Screen, { approvals, loadReview, fullClient }));
+  await flush();
+  expect(hostReads).toEqual(["operation-1"]);
+  expect(savedReads).toEqual(["workspace-a/session-a/operation-1"]);
+  const text = view.container.textContent ?? "";
+  expect(text).toContain("Delete a calendar event");
+  expect(text).not.toContain("couldn't be recovered");
   await view.unmount();
 });

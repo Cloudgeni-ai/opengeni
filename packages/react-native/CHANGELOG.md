@@ -1,5 +1,88 @@
 # @opengeni/react-native
 
+## 6.13.0
+
+### Minor Changes
+
+- 1c7aa2a: People on a plan that doesn't include their own subscriptions (Codex, Claude, SuperGrok) now hear it before Send instead of after it. The workspace model catalog returns `ownSubscriptionPlan` (`{ key, label, monthlyPriceMicros }`) and the same `requiredPlan` on each own-subscription model while the organization's plan doesn't include them. The plan is the cheapest self-service plan that does, from the plan catalog (`ownSubscriptionUpgradePlan` in `@opengeni/contracts/billing-origin`). Connect pages and onboarding say "Using your own subscription needs Pro ($20/month).". The web and React Native model pickers label those models "Needs Pro" (`requiredPlanHint`) and keep them selectable. The new-chat page shows a notice with one action when one is chosen, and a one-time dismissible heads-up to people who connected one earlier.
+
+### Patch Changes
+
+- b15212e: A message that couldn't start because of access now starts by itself once that is fixed. When its machine is allowed for the chat, the sender's workspace access is restored, or the chat moves to a machine it may use, the saved message is released and started exactly once. A paused, cancelled or edited chat is left alone, and a claim that raced the change is re-read instead of parked. The "Recheck access" button is gone. The notice says what is blocking the message and offers the one action that fixes it: the machine's owner gets "Allow for this chat", others learn who can allow it, and lost membership names a workspace admin. Only an unknown failure offers "Try again". A claim refused because a personal machine isn't approved now reads as "Machine access needed", not as a generic permission check. `useSessionStart` adds `allowMachine`, `needsMachineAccess` and `refresh`, and `@opengeni/react` exports `allowMachineForChat`, `sessionAdmissionNeedsMachineAccess` and `sessionAdmissionMachineAccessCopy`.
+- Updated dependencies [460102f]
+- Updated dependencies [b15212e]
+- Updated dependencies [1c7aa2a]
+  - @opengeni/react@6.13.0
+  - @opengeni/contracts@6.13.0
+  - @opengeni/sdk@6.13.0
+
+## 6.12.0
+
+### Minor Changes
+
+- 6ba27af: Android voice calls can be system calls, and agents can ring Android phones. With the config plugin's new `call.androidSystemCall: true`, a call is a self-managed Telecom call with a call notification and a phone-call foreground service, so it keeps going with the screen off, a cellular call holds it, and headsets and watches answer and hang up. It starts on the loudspeaker (or a connected headset) before voice starts, so the route does not change under a live call. When the app uses expo-notifications, an agent's call push rings the phone with the incoming-call notification and a full-screen ring screen on the lock screen, and answering or declining reaches JavaScript through the same `incoming` adapter and events as on iOS.
+- b742c7d: An optional iOS call audio device for WebRTC (config plugin option `call.iosAudioDevice`), so a call can connect while the phone rings without opening the microphone. With it, WebRTC's audio runs through Opengeni's device instead of its built-in one: while a CallKit call rings it sends silent audio frames and drops whatever the far end plays, so the connection is live and the far end hears a silent line; once CallKit activates the audio session on answer (at once for a call placed in the app, or without CallKit) it runs Apple's voice-processing I/O unit, as WebRTC's own device does, so echo cancellation, noise suppression and gain control are unchanged. It falls back to silence and recovers through audio interruptions, rebuilds itself after a media-services reset or a route change that alters the sample rate, and leaves loudspeaker toggles alone. Off by default; it needs react-native-webrtc.
+- 906407a: Chat and agent avatars now show in native apps as they do on the web. `@opengeni/react-native/timeline` adds `SessionAvatar` (emoji, letters, icon or image avatars on their hue; image avatars load with the person's own access and fall back to the chat's initials) and `useNativeSessionIdentity`. Session rows show a chat's avatar beside its title when given an `avatarClient`, and `SessionHeaderTitle` takes `avatar` and `agentName`, so an agent's chat shows the agent's current icon and name. The shared rules (initials, fallback colours, tile colours, the agent behind a chat) are in the new `@opengeni/react/session-avatar-model` entry point.
+- fcdf7de: Keep operator instructions, skill bodies and the full tool catalog out of default
+  chat session responses through the explicit typed `client.withSessionResponse("chat")` opt-in
+  and JSON content negotiation on the existing Accept header. SDK defaults and
+  required Session fields stay unchanged. Console, mobile and packaged chat clients
+  opt into the compact type. Settings and server-side integrations can explicitly read
+  the full configuration with `getSessionConfiguration` and session-control authority.
+  Server-owned session relays refuse browser configuration and model-context reads.
+
+  Export `OPENGENI_BROWSER_RESPONSE_HEADERS`, share it between API CORS and the
+  packaged relay, and warn once when required history response metadata is unreadable.
+  Cross-origin hosts should use the export for `Access-Control-Expose-Headers`.
+
+### Patch Changes
+
+- 2e7c01e: Voice calls on Android now set up the phone's call audio, and a call that is silent on one side says so.
+
+  - Android: `createExpoCallAdapter` no longer returns null. The package's call module now ships an Android side that, while a call runs, takes audio focus for voice communication, switches the phone into communication mode and routes the call to a connected headset or the loudspeaker (every call starts on the loudspeaker, as on iOS), then restores the previous audio state when the call ends. Before, WebRTC recorded and played as if no call were running, and on some phones the microphone handed the call nothing but silence, so the voice never heard the person. There is no system call screen on Android: the adapter reports `showsSystemCall: false`, `systemCall` stays false, and agent calls (`incoming`) remain iOS-only. The package's Android manifest adds `MODIFY_AUDIO_SETTINGS`, a normal permission with no prompt. Native Android builds need a rebuild to include the module.
+  - SDK: while a call is live, the realtime controller reads the peer connection's audio statistics once a second. An unmuted microphone that delivers no sound at all for 8 seconds raises the recoverable `no_input_audio` diagnostic, and a finished reply whose audio never played raises `output_silent`; both set `error` with a plain message and clear once audio flows. Platforms whose statistics lack audio energy report nothing.
+  - React Native: `useNativeRealtimeCall` returns a `notice` for these, and `OpenGeniNativeCallView` shows it under the call status.
+  - React: the voice control shows "No sound from your microphone" or "Reply not played" beside the button, with the detail in its menu.
+
+- f83dc50: iOS voice calls keep their audio route when voice starts. WebRTC used to apply its own audio session configuration (without the loudspeaker option) once call audio came up, which moved a loudspeaker call to the receiver a few seconds in. The call module now gives WebRTC the call's own configuration (and updates it when the person switches the speaker), so WebRTC finds the session already set up and changes nothing. The JavaScript workaround that switched the speaker back afterwards is removed; the call screen shows the actual route.
+- fccf354: Keep native chat responsive on long or crafted messages: bound Markdown input to
+  8,192 characters and show longer messages in selectable plain-text pages, with
+  every character still available. Bound math normalization too. The mobile app
+  pins patched Markdown/linkification and URI-decoding dependencies.
+- 98938f0: Prepare native call data and microphone-free WebRTC offers while ringing, reuse the workspace voice selection, and overlap outgoing setup with admission. Keep provider calls and microphone capture behind Answer, release abandoned preparation, and expose server setup phase timings.
+- 3929153: Prepare incoming voice connections while ringing only on phones with a native audio device that guarantees silence until Answer. Hold context delivery until the answering phone wins, release unused preparations silently, and retain connect-on-answer behavior on other hosts.
+- 8099970: A subscription speech service that is out of credit now says so. Subscription transcription reads the provider's refusal instead of discarding it, so xAI's "run out of credits" answer becomes an out-of-credit error rather than a generic failure; a failed dictation keeps that reason, and the composer and phone dictation tell you the speech-to-text service is out of credit. Phone dictation no longer says to retry when you're back online after the speech service itself failed.
+- bee1e4c: With `busySend: "steer"`, a message sent while a turn runs now always reaches that turn, even when the client's copy of the session is a few seconds behind. The composer used to pick Steer or Send from its own view of the session, so a Send right after a turn started could be queued and answered only after the turn finished. It now submits the new `delivery: "steer_or_send"` (accepted by `steerMessage` and draft submits), and the server resolves it under the same locks that start and settle turns: it steers a running or just-starting turn, starts a turn when the session is idle, and queues without resuming when it is paused. Only the resolved `steer` or `send` is recorded, so nothing the model sees changes. Exact retries replay the first decision. Plain `send` and explicit Queue are unchanged, and the composer falls back to its own choice against a server without `steer_or_send`.
+- Updated dependencies [64fd53f]
+- Updated dependencies [7332869]
+- Updated dependencies [2e7c01e]
+- Updated dependencies [b01c6c8]
+- Updated dependencies [3c94d65]
+- Updated dependencies [6c69279]
+- Updated dependencies [81642f5]
+- Updated dependencies [281af3a]
+- Updated dependencies [2117a2d]
+- Updated dependencies [b2c6c04]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [fccf354]
+- Updated dependencies [906407a]
+- Updated dependencies [c63eeb2]
+- Updated dependencies [98938f0]
+- Updated dependencies [3929153]
+- Updated dependencies [60ed55d]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [8099970]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [65e1fb9]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+  - @opengeni/react@6.12.0
+  - @opengeni/sdk@6.12.0
+
 ## 6.11.0
 
 ### Minor Changes

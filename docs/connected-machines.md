@@ -628,10 +628,11 @@ turn, and the next run discovers again.
 
 ### Bundled rg and jq
 
-Release agents embed official, SHA-256-pinned builds of ripgrep and jq for
-their own platform (Linux x86_64 and aarch64, macOS x86_64 and arm64, Windows
-x64 and arm64). At start the agent writes them to
-`/var/lib/opengeni/shell-tools/<generation>` when it runs as root on Linux
+Release agents embed SHA-256-pinned builds of ripgrep and jq for their own
+platform (Linux x86_64 and aarch64, macOS x86_64 and arm64, Windows x64 and
+arm64): the official release builds, except on Linux, where jq is a static musl
+build of the official jq source, so it runs on any Linux distribution. At start
+the agent writes them to `/var/lib/opengeni/shell-tools/<generation>` when it runs as root on Linux
 (so `run_as` users can use them), otherwise to `<config dir>/shell-tools/<generation>`,
 and appends that directory to the end of every command's PATH, including the
 PATH a request sets. A machine's own `rg` or `jq` therefore always wins.
@@ -1853,6 +1854,12 @@ Two refusals are registered today:
   attempt get no card. Only these API tools emit it today; the worker poster
   passes no requested machine, so an interaction tool that emitted it would get
   a machine card that names no machine.
+  `machine_access_required` is also a plain refusal: the move or `run_on` got
+  past admission, but the check right before the machine is used found this
+  turn's approval used up, revoked or expired. Its reason starts with the same
+  "Machine access needed" sentence a failed turn shows
+  (`machineAccessNeededMessage`, `packages/contracts`), and the chat stays
+  where it was.
 - `attached_browser_unavailable`: `browser_open` with
   `placement: {kind: "attached_device"}` found no connected Chrome profile. The
   **Chrome setup card**, the machine card with `purpose: "chrome"`

@@ -2897,6 +2897,7 @@ export const SESSION_EVENT_TYPES = [
   "session.agent.updated",
   "session.skills.updated",
   "session.resources.removed",
+  "session.resources.added",
   "session.model_settings.updated",
   // An authorized person or host changed the task root's usage limit.
   "session.usage_limit.updated",
@@ -4435,6 +4436,7 @@ export type FirstPartyMcpToolName =
   | "custom_mcp_setup_request"
   | "github_connect_link"
   | "github_repositories_list"
+  | "github_repository_attach"
   | "social_connections_list"
   | "social_posts_recent"
   | "social_daily_analysis_context"
@@ -4712,6 +4714,12 @@ export type WorkspaceModelCatalogModel = ClientModel & {
   credentialReadiness: ModelCredentialReadinessV1;
   creditFunding?: "promotional" | "general" | "unavailable" | undefined;
   /**
+   * Set on the person's own subscription models while the organization's plan
+   * doesn't include them: the plan they need. Absent when the model can run,
+   * and from older servers.
+   */
+  requiredPlan?: OwnSubscriptionPlan | undefined;
+  /**
    * Exact verdict of the policy the workspace runs with (its own lists within
    * its organization's, and its credit switch), without exposing provider
    * identity.
@@ -4724,6 +4732,17 @@ export type WorkspaceModelCatalogModel = ClientModel & {
    */
   organizationAllowed?: boolean | undefined;
   availability: ModelAvailabilityV1;
+};
+
+/**
+ * The plan an organization needs before its own subscriptions run, from the
+ * plan catalog: its key, name and monthly USD price in micros (null when
+ * custom-priced).
+ */
+export type OwnSubscriptionPlan = {
+  key: string;
+  label: string;
+  monthlyPriceMicros: number | null;
 };
 
 /** Why a new chat or scheduled task without an explicit model gets its default. */
@@ -4749,6 +4768,12 @@ export type WorkspaceModelCatalogResponse = {
    * Opengeni credit balance. Null when the deployment does not bill credits.
    */
   creditsSelection?: DefaultModelSelection | null | undefined;
+  /**
+   * Present while the organization's plan doesn't include its own
+   * subscriptions: the plan that does. Absent when they can run, and from
+   * older servers.
+   */
+  ownSubscriptionPlan?: OwnSubscriptionPlan | undefined;
 };
 
 export type WorkspaceGatewayCustomModel = {
@@ -5966,6 +5991,8 @@ export type ClientConfig = {
   apiContractRevision: string;
   serverVersion?: string | undefined;
   claudeSubscriptionEnabled?: boolean | undefined;
+  /** Connect provider offers "Claude Code (API key)". Absent when not offered. */
+  claudeCodeApiKeyEnabled?: boolean | undefined;
   /**
    * Organization admins may connect Azure OpenAI as this deployment's own
    * Microsoft Entra identity (the operator offers it). Absent otherwise.
@@ -11529,6 +11556,7 @@ export type SwapActiveSandboxResponse = {
     | "concurrent_swap"
     | "personal_machine_permission_required"
     | "personal_machine_not_permitted"
+    | "machine_access_required"
     | "recovery_in_progress"
     | "recovery_degraded"
     | "recovery_unrecoverable";

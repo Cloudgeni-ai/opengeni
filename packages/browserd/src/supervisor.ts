@@ -102,8 +102,10 @@ import {
   assertDirectory,
   assertWorkingRuntimeReceipt,
   boundedFailureCode,
+  currentBootId,
   isAbandonedLaunchReceipt,
   isInterruptedLaunchReceipt,
+  sameRecordedProfile,
   unavailable as workingRuntimeUnavailable,
   BrowserWorkingRuntimeUnavailableError,
   type BrowserWorkingRuntimeAuthority,
@@ -1325,8 +1327,10 @@ export class BrowserSupervisor {
       receipt !== null && JSON.stringify(receipt.authority) === JSON.stringify(input.authority);
     const identityMatches =
       receipt !== null &&
-      receipt.profile.device === profile.device &&
-      receipt.profile.inode === profile.inode;
+      sameRecordedProfile(receipt, profile, {
+        profileDirectory,
+        bootId: await currentBootId(),
+      });
     const refusal: BrowserWorkingCopyRefusal | null = !receipt
       ? "receipt_not_adoptable"
       : !adoptableSourceReceipt(receipt) ||
@@ -2245,6 +2249,8 @@ export class BrowserSupervisor {
         const profile = await assertDirectory(profileDirectory).catch(() => {
           throw workingRuntimeUnavailable("working_copy_invalid");
         });
+        // Lets the same directory through after a reboot renumbered its device.
+        const restart = { profileDirectory, bootId: await currentBootId() };
         const reader = await SqliteBrowserWorkingRuntimeJournal.open(
           { ...options, sessionDirectory },
           true,
@@ -2262,8 +2268,7 @@ export class BrowserSupervisor {
           receipt &&
           JSON.stringify(receipt.authority) === JSON.stringify(options.workingRuntimeAuthority) &&
           receipt.launchDigest === workingLaunchDigest(options) &&
-          receipt.profile.device === profile.device &&
-          receipt.profile.inode === profile.inode
+          sameRecordedProfile(receipt, profile, restart)
         ) {
           // An earlier recovery of this browser was cut short, by a controller
           // restart or a failure whose cleanup could not reinstate it. The
@@ -2301,8 +2306,7 @@ export class BrowserSupervisor {
           adoptedCopyNeedsResettle(receipt) &&
           JSON.stringify(receipt.authority) === JSON.stringify(options.workingRuntimeAuthority) &&
           receipt.launchDigest === workingLaunchDigest(options) &&
-          receipt.profile.device === profile.device &&
-          receipt.profile.inode === profile.inode
+          sameRecordedProfile(receipt, profile, restart)
         ) {
           // A launch from an adopted copy was cut short by a controller
           // restart. Once no process provably uses the profile, the same
@@ -2326,6 +2330,7 @@ export class BrowserSupervisor {
           options.workingRuntimeAuthority!,
           workingLaunchDigest(options),
           profile,
+          restart,
         );
         if (receipt.process.profileDirectory !== resolve(profileDirectory))
           throw workingRuntimeUnavailable("profile_identity_changed");

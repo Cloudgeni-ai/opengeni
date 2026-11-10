@@ -2,8 +2,8 @@ import type { OrganizationPrivacySettings } from "@opengeni/react/app/types";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 
-import { errorMessage } from "@opengeni/contracts/values";
 import { useAppContext } from "@opengeni/react/app/app-context";
+import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
 import { TextInput } from "@opengeni/react/ui/field";
 import { RowButton } from "@opengeni/react/ui/page-actions";
 import { Section } from "@opengeni/react/ui/section";
@@ -13,6 +13,20 @@ import { isForbidden } from "./use-workspace-budget";
 
 const DESCRIPTION =
   "What each person can spend from the organization's credits in their own Personal workspace each month. Their own model plans and keys don't count.";
+
+/**
+ * One sentence for a failed load or save, never the raw "API 409: ..." text.
+ * A server that still has usage allowances switched off refuses a new limit
+ * with 409 "... not enabled"; that is something only its operator can change.
+ */
+export function personalLimitErrorText(error: unknown): string {
+  const { status, serverMessage } = apiErrorFacts(error);
+  if (status === 409 && /\bnot enabled\b/iu.test(serverMessage ?? "")) {
+    return "Monthly limits aren't turned on for this deployment yet. Ask whoever runs it to turn them on.";
+  }
+  if (status === 403) return "Only organization owners and admins can change this limit.";
+  return userErrorText(error, "The limit couldn't be saved. Try again.");
+}
 
 /**
  * Organization settings > Billing: the optional per-person monthly limit on
@@ -41,7 +55,7 @@ export function PersonalWorkspaceLimitSection({ organizationId }: { organization
         if (!active) return;
         // Members without the setting see nothing here; other failures say so.
         if (isForbidden(loadError)) setHidden(true);
-        else setError(errorMessage(loadError));
+        else setError(personalLimitErrorText(loadError));
       });
     return () => {
       active = false;
@@ -68,7 +82,7 @@ export function PersonalWorkspaceLimitSection({ organizationId }: { organization
             : `Each person can spend up to ${formatBudget(next)} a month in their Personal workspace`,
         );
       } catch (saveError) {
-        setError(errorMessage(saveError));
+        setError(personalLimitErrorText(saveError));
       } finally {
         setSaving(false);
       }

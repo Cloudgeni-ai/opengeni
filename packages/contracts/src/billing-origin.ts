@@ -89,3 +89,31 @@ export function planIncludesOwnSubscriptions(plan: {
       plan.monthlyPriceMicros >= OWN_SUBSCRIPTION_MIN_PLAN_PRICE_MICROS)
   );
 }
+
+/** The catalog fields the own-subscription upgrade choice reads. */
+export type OwnSubscriptionUpgradeCandidate = {
+  key: string;
+  label: string;
+  monthlyPriceMicros: number | null;
+  selfService: boolean;
+};
+
+/**
+ * The plan to name when an organization's own subscriptions need a paid plan:
+ * the cheapest self-service catalog plan that includes them (Pro in the
+ * launch catalog). Null when the catalog sells none, so nothing is invented.
+ */
+export function ownSubscriptionUpgradePlan<T extends OwnSubscriptionUpgradeCandidate>(
+  plans: readonly T[],
+): T | null {
+  return (
+    plans
+      .filter(
+        (plan) =>
+          plan.selfService &&
+          plan.monthlyPriceMicros !== null &&
+          planIncludesOwnSubscriptions(plan),
+      )
+      .sort((a, b) => (a.monthlyPriceMicros ?? 0) - (b.monthlyPriceMicros ?? 0))[0] ?? null
+  );
+}

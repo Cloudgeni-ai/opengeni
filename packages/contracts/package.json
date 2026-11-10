@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "6.11.0",
+  "version": "6.13.0",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -18,6 +18,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./machine-access": {
+      "types": "./src/machine-access.ts",
+      "default": "./src/machine-access.ts"
+    },
     "./browser-response-headers": {
       "types": "./src/browser-response-headers.ts",
       "default": "./src/browser-response-headers.ts"
