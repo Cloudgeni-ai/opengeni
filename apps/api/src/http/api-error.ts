@@ -23,6 +23,7 @@ import {
   WorkspaceContentFlowRefusedError,
 } from "@opengeni/db";
 import {
+  AuthenticationRequiredRefusal,
   ConnectionAccountSelectionError,
   MissingPermissionRefusal,
   SessionUsageLimitHttpError,
@@ -63,6 +64,18 @@ export function missingPermissionHttpError(error: unknown): ApiHttpError | null 
   if (!(error instanceof MissingPermissionRefusal)) return null;
   return new ApiHttpError(403, {
     code: "forbidden",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: error.details,
+  });
+}
+
+/** A request that signs no one in says why in `details.code` (missing or lapsed sign-in). */
+export function authenticationRequiredHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof AuthenticationRequiredRefusal)) return null;
+  return new ApiHttpError(401, {
+    code: "unauthenticated",
     message: error.message,
     retryable: false,
     outcomeUnknown: false,

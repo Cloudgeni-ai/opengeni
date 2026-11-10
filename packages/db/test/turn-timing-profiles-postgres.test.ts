@@ -69,9 +69,12 @@ function withContent(type: string, payload: Record<string, unknown>): Record<str
   if (type === "agent.toolCall.created") {
     const args = payload.arguments;
     out.arguments =
-      args && typeof args === "object" && !Array.isArray(args)
-        ? { ...args, query: bulky }
-        : { query: bulky };
+      typeof args === "string"
+        ? // Streamed arguments stay a JSON string, as the model sent them.
+          JSON.stringify({ ...(JSON.parse(args) as Record<string, unknown>), query: bulky })
+        : args && typeof args === "object" && !Array.isArray(args)
+          ? { ...args, query: bulky }
+          : { query: bulky };
   }
   if (
     type === "agent.model.request" &&
@@ -89,10 +92,15 @@ function withContent(type: string, payload: Record<string, unknown>): Record<str
 async function seedTurn(
   workspace: { accountId: string; workspaceId: string },
   fixtureName: string,
-  options: { archived?: boolean; shiftMs?: number } = {},
+  options: {
+    archived?: boolean;
+    shiftMs?: number;
+    extraEvents?: TurnTimingFixture["events"];
+  } = {},
 ): Promise<SeededTurn> {
   if (!appClient) throw new Error("PostgreSQL fixture unavailable");
   const fixture = await loadTurnTimingFixture(fixtureName);
+  fixture.events.push(...(options.extraEvents ?? []));
   const shift = options.shiftMs ?? 0;
   const iso = (value: string) => new Date(Date.parse(value) + shift).toISOString();
   const { accountId, workspaceId } = workspace;
@@ -387,5 +395,60 @@ describe("turn timing profiles in PostgreSQL", () => {
     });
     expect(backfill).toEqual({ turns: 1, inserted: 1, updated: 0, failed: 0 });
     expect(outside.finishedAt < inside.finishedAt).toBe(true);
+  }, 120_000);
+
+  test("a router call with string arguments is read and attributed to the tool it invoked", async () => {
+    if (!shared || !appClient) return;
+    const db = appClient.db;
+    const workspace = await seedWorkspace("router");
+    const fixture = await loadTurnTimingFixture("messages-provider-no-server-timing");
+    const attemptId = fixture.attempts[0]!.id;
+    const startMs = Date.parse(fixture.turn.finishedAt) - 3_000;
+    const at = (ms: number) => new Date(startMs + ms).toISOString();
+    const extraEvents: TurnTimingFixture["events"] = [
+      {
+        type: "agent.toolCall.created",
+        sequence: 1_000,
+        occurredAt: at(0),
+        attemptId,
+        payload: {
+          id: "call_router",
+          name: "tool_invoke",
+          toolFamily: "opengeni",
+          // Arguments as the model streamed them: a JSON string.
+          arguments: '{"name": "mcp_000000000000000000000009__search", "arguments": {"q": "x"}}',
+        },
+      },
+      {
+        type: "agent.toolCall.output",
+        sequence: 1_001,
+        occurredAt: at(400),
+        attemptId,
+        payload: { id: "call_router", output: "ok" },
+      },
+    ];
+    const turn = await seedTurn(workspace, "messages-provider-no-server-timing", { extraEvents });
+    const pass = await recordMissingTurnTimingProfiles(db, {
+      workspaceId: workspace.workspaceId,
+      ...WINDOW,
+      onError: (error) => {
+        throw error;
+      },
+    });
+    expect(pass).toEqual({ turns: 1, inserted: 1, updated: 0, failed: 0 });
+    const context = await rlsContextForWorkspace(db, workspace.workspaceId);
+    const [row] = await withRlsContext(db, context, (scoped) =>
+      rawRows<{ steps: Array<Record<string, unknown>> }>(
+        scoped,
+        sql`select steps from turn_timing_profiles where turn_id = ${turn.id}::uuid`,
+      ),
+    );
+    expect(row!.steps.find((step) => step.callId === "call_router")).toMatchObject({
+      kind: "tool",
+      name: "mcp_000000000000000000000009__search",
+      category: "mcp_tool",
+      ms: 400,
+      outcome: "ok",
+    });
   }, 120_000);
 });

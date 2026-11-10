@@ -5,7 +5,10 @@
  * The app's main process owns the shortcuts, the small window that shows a
  * dictation's progress and where the text goes (`@opengeni/desktop/dictation`).
  * Mount {@link DesktopDictationHost} once on the signed-in pages: it records
- * and transcribes with the account's workspace, the way the composer does.
+ * and transcribes with one workspace, the way the composer does. Mount it
+ * above the workspace pages, so moving between workspaces never stops a
+ * dictation, and give it {@link dictationWorkspace}'s answer: the workspace
+ * chosen in the dictation settings, or the person's default one.
  * Show {@link DesktopDictationSettings} where the app's settings are, or build
  * your own on {@link useDesktopDictation}.
  */
@@ -22,8 +25,14 @@ export {
 export type {
   DesktopDictationSettingsProps,
   DictationModelChoice,
+  DictationWorkspaces,
   UseDesktopDictationResult,
 } from "./components/desktop-dictation/settings";
+export { dictationWorkspace } from "./components/desktop-dictation/workspace";
+export type {
+  DictationWorkspace,
+  DictationWorkspaceChoice,
+} from "./components/desktop-dictation/workspace";
 export {
   acceleratorFromKey,
   desktopShortcutLabel,

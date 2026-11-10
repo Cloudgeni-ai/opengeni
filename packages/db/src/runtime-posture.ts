@@ -126,8 +126,11 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * get no names (as before).
  * 1153 withholds the Slack agent update sweeper's inventory; until it is
  * granted, the sweeper finds nothing and sends no update messages.
- * 1240 withheld the inventory of meeting tracks not yet kept compact and
- * 1282 granted it.
+ * 1240 withheld the inventory of meeting tracks not yet kept compact, 1282
+ * granted it and 1283 withholds it again: the binary then in production
+ * (6327db2c) did not know the routine and rejects its runtime grant. Until a
+ * later migration grants it, existing meetings keep their audio as it is and
+ * only new transcripts keep it compact.
  * 1344 withholds the end of a call's ring on the other phones; until it is
  * granted, settling a call sends no ended push and those phones ring out.
  */
@@ -137,6 +140,7 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
   "end_agent_call_rings_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 

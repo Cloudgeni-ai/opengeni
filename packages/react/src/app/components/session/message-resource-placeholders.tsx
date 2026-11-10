@@ -2,21 +2,6 @@ import { GitBranchIcon } from "lucide-react";
 import { repositoryDisplayName } from "../../lib/session-tools";
 import type { ResourceRef } from "../../types";
 
-export function MessageFileSkeletons({ resources }: { resources: ResourceRef[] }) {
-  return (
-    <div className="mb-2 flex flex-wrap gap-1.5">
-      {resources.map((resource) =>
-        resource.kind === "file" ? (
-          <span
-            key={resource.fileId}
-            className="h-7 w-28 animate-pulse rounded-md border border-border bg-surface-2"
-          />
-        ) : null,
-      )}
-    </div>
-  );
-}
-
 export function MessageRepositoryChips({ resources }: { resources: ResourceRef[] }) {
   return resources.map((resource) =>
     resource.kind === "repository" ? (

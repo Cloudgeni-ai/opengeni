@@ -36,7 +36,12 @@ export type ConnectInstallationTarget = {
   expectedInstanceVersion?: number;
 };
 export type ConnectNextAction =
-  | { type: "authorize"; url: string }
+  | {
+      type: "authorize";
+      url: string;
+      /** Where the person's organization approves the app once for everyone (Microsoft work accounts). */
+      organizationApprovalUrl?: string;
+    }
   | {
       type: "credentials";
       fields: Array<{

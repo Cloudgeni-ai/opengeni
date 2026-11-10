@@ -87,6 +87,7 @@ import {
 } from "../op-correlation";
 import {
   isOpTombstone,
+  isReleasedOpError,
   OpStreamExecClient,
   OpTombstonedError,
   runnerFailureToControlError,
@@ -1564,9 +1565,18 @@ export class SelfhostedSession {
               });
               adoptedCommandId = adopted.commandId;
               this.ownedCommandReaders.set(adopted.commandId, async () => {
-                const replay = await client.readExisting(opId, 250, async (frames) => {
-                  await this.captureBackgroundCommandOutput?.(adopted.commandId, frames);
-                });
+                let replay: Awaited<ReturnType<OpStreamExecClient["readExisting"]>>;
+                try {
+                  replay = await client.readExisting(opId, 250, async (frames) => {
+                    await this.captureBackgroundCommandOutput?.(adopted.commandId, frames);
+                  });
+                } catch (error) {
+                  // Its collection already stored and released the result:
+                  // the command record answers the read, not the runner.
+                  if (!isReleasedOpError(error)) throw error;
+                  this.ownedCommandReaders.delete(adopted.commandId);
+                  return;
+                }
                 const terminal = replay.status === "completed" ? replay : replay.terminal;
                 const outputReceipt =
                   replay.outputReceipt ??

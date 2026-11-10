@@ -1186,6 +1186,8 @@ export const englishMessages = {
   "composerMessages.messageTheAgent2": "Message the agent",
   "composerMessages.messageTheAgentItWill": "Message the agent — it will wait in the queue…",
   "composerMessages.model": "Model",
+  "composerMessages.openFailed": "Couldn't open it. Select to try again.",
+  "composerMessages.openName": "Open {name}",
   "composerMessages.pausedBy": "Paused by",
   "composerMessages.pausedByDisplayname": "Paused by {displayName}",
   "composerMessages.pausedHere": "Paused here",
@@ -1247,6 +1249,7 @@ export const englishMessages = {
   "composerMessages.thisSessionWillBeAble": "This session will be able to run",
   "composerMessages.thisWorkstreamWasPausedWhile":
     "This workstream was paused while you were sending. Nothing was sent, and your draft is still here.",
+  "composerMessages.unavailable": "Unavailable",
   "composerMessages.uploadFailed": "Upload failed",
   "composerMessages.uploading": "Uploading",
   "composerMessages.useOtherDraft": "Use other draft",
@@ -1518,6 +1521,7 @@ export const englishMessages = {
     "Connection setup could not continue. Refresh its status before trying again.",
   "connectSetup.continue": "Continue",
   "connectSetup.copyAdminApprovalLink": "Copy approval link",
+  "connectSetup.copyMessageForIt": "Copy message for IT",
   "connectSetup.couldNotVerifyThisConnection":
     "Could not verify this connection. Check the key and server, then submit again. Nothing was connected.",
   "connectSetup.donTSeeYourOrganization":
@@ -1525,17 +1529,28 @@ export const englishMessages = {
   "connectSetup.enterConnectionDetails": "Enter connection details",
   "connectSetup.enterTheRequestedKey": "Enter the requested key",
   "connectSetup.microsoftAdminApprovalMaybe":
-    "Microsoft didn't grant access. If it asked for admin approval, send this link to your Microsoft 365 admin.",
+    "If Microsoft said an admin has to approve {product}, send your IT the message with the approval link. Otherwise, sign in again.",
   "connectSetup.microsoftAdminApprovalRequired":
-    "Send this link to your Microsoft 365 admin to approve access, then sign in again.",
+    "Your organization lets only an admin approve apps like this. Send your IT the message with the approval link. They approve it once for everyone, then you sign in again.",
+  "connectSetup.itMessageWithAppId":
+    "Hi! I'd like to connect {service} to {product}, but our organization only allows apps an admin has approved. Could you allow it? Its app (client) ID is {appId}.",
+  "connectSetup.itMessageWithLink":
+    "Hi! I'd like to connect {service} to {product}, but our organization requires an admin to approve the app first. Could you approve it with this link? You sign in with an admin account and can review what it asks for. It only has to be done once for everyone here.\n\n{link}",
+  "connectSetup.myWorkAccount": "my work account",
   "connectSetup.moreResourcesAreAvailableReview":
     "More resources are available. Review all pages before submitting a selection.",
   "connectSetup.noAccountPublicService": "No account (public service)",
   "connectSetup.nothingIsConnectedUntilThen":
     "Nothing is connected until then. You can close this and keep working.",
   "connectSetup.onlyYourWorkCanUse": "Only your work can use this connection.",
+  "connectSetup.openApprovalLinkAsAdmin": "Open approval link",
   "connectSetup.openProviderVerificationPageNew": "Open the sign-in page",
   "connectSetup.opensInNewTab": "(opens in a new tab)",
+  "connectSetup.organizationApprovalPossibleTitle": "Microsoft didn't give access",
+  "connectSetup.organizationApprovalRequiredTitle": "Your IT needs to approve {product} first",
+  "connectSetup.organizationApprovalUnfinished":
+    "If the sign-in page said an admin has to approve {product}, send your IT the message with the approval details. After they approve, sign in again.",
+  "connectSetup.organizationApprovalUnfinishedTitle": "Didn't get to finish signing in?",
   "connectSetup.personalConnection": "Personal connection",
   "connectSetup.readyToConnect": "Ready to connect",
   "connectSetup.sendTheApprovalLinkTo": "Send the admin approval link to your Microsoft 365 admin.",
@@ -1544,6 +1559,7 @@ export const englishMessages = {
   "connectSetup.setupCouldNotContinueTryAgain": "Setup couldn't continue. You can try again.",
   "connectSetup.setupExpired": "Setup expired",
   "connectSetup.setupOutcomeNeedsChecking": "Setup outcome needs checking",
+  "connectSetup.showMessageForIt": "Show the message",
   "connectSetup.signInWindowClosed": "Sign-in window closed. You can try connecting again.",
   "connectSetup.theIntegrationSourceChangedReview":
     "The integration source changed. Review the updated tools before adding them.",
@@ -1596,6 +1612,13 @@ export const englishMessages = {
   "desktopDictation.host.cantRecord": "This computer can't record audio.",
   "desktopDictation.host.couldNotStart": "Dictation couldn't start. Try again.",
   "desktopDictation.host.microphoneBlocked": "{product} isn't allowed to use the microphone.",
+  "desktopDictation.host.modelUnavailable":
+    "This shortcut's model isn't available. Choose another in Settings.",
+  "desktopDictation.host.modelUnavailableBrief": "This shortcut's model isn't available.",
+  "desktopDictation.host.modelUnavailableIn":
+    "{workspace} doesn't offer this shortcut's model. Choose another in Settings.",
+  "desktopDictation.host.modelUnavailableInBrief":
+    "{workspace} doesn't offer this shortcut's model.",
   "desktopDictation.host.needsCredits": "Voice input needs credits. Your speech is saved.",
   "desktopDictation.host.notAllowed": "Voice input isn't allowed in this workspace.",
   "desktopDictation.host.notSaved": "The audio couldn't be saved. Try again.",
@@ -1605,6 +1628,12 @@ export const englishMessages = {
   "desktopDictation.host.unreadable": "The audio couldn't be read. Try again.",
   "desktopDictation.host.usageLimit": "Usage limit reached. Your speech is saved.",
   "desktopDictation.host.voiceInputOff": "Voice input is off for this workspace.",
+  "desktopDictation.host.voiceInputOffIn":
+    "Voice input is off in {workspace}. Choose another workspace in Settings.",
+  "desktopDictation.host.voiceInputOffInBrief": "Voice input is off in {workspace}.",
+  "desktopDictation.host.workspaceGone":
+    "You're no longer in {workspace}. Choose a workspace in Settings.",
+  "desktopDictation.host.workspaceGoneBrief": "You're no longer in {workspace}.",
   "desktopDictation.settings.accessibilityDescription":
     "Lets {product} type the text into other apps. Without it, the text is only copied.",
   "desktopDictation.settings.accessibilityLabel": "Accessibility",
@@ -1637,11 +1666,17 @@ export const englishMessages = {
   "desktopDictation.settings.keyCombinationDescription": "Press the keys you want to use.",
   "desktopDictation.settings.languageDescription": "The language you speak with this shortcut.",
   "desktopDictation.settings.languageLabel": "Language",
-  "desktopDictation.settings.modelDescription":
-    "The speech-to-text model that hears this shortcut.",
+  "desktopDictation.settings.modelDescription": "Which model listens for this shortcut.",
   "desktopDictation.settings.modelLabel": "Model",
+  "desktopDictation.settings.modelNotOffered":
+    "This workspace doesn't offer this model. Choose another.",
+  "desktopDictation.settings.modelNotOfferedIn":
+    "{workspace} doesn't offer this model. Choose another.",
   "desktopDictation.settings.modelUnavailable": "Not available in this workspace now.",
+  "desktopDictation.settings.modelUnavailableIn": "Not offered in {workspace}.",
   "desktopDictation.settings.workspaceModel": "Workspace default",
+  "desktopDictation.settings.workspaceModelIn": "Default for {workspace}",
+  "desktopDictation.settings.workspaceModelPersonal": "Default for your Personal workspace",
   "desktopDictation.settings.modeHold": "Hold while speaking",
   "desktopDictation.settings.modeHoldDescription": "Dictates while you hold the keys down.",
   "desktopDictation.settings.modeLabel": "How the keys work",
@@ -1700,6 +1735,17 @@ export const englishMessages = {
   "desktopDictation.settings.vocabularyTermTooLong":
     "“{term}” is too long. Keep each to {max} characters.",
   "desktopDictation.settings.vocabularyTooMany": "Keep the list to {max} names and words.",
+  "desktopDictation.settings.workspaceDescription":
+    "Shortcut dictations go to this workspace and are billed to it, even when another one is open.",
+  "desktopDictation.settings.workspaceGone":
+    "You're no longer in {workspace}. Choose a workspace to keep dictating.",
+  "desktopDictation.settings.workspaceLabel": "Workspace",
+  "desktopDictation.settings.workspacePrivate": "Private",
+  "desktopDictation.settings.workspacePlaceholder": "Choose a workspace",
+  "desktopDictation.settings.workspaceSearch": "Search workspaces",
+  "desktopDictation.settings.workspaceVoiceOff":
+    "Voice input is off in {workspace}. Choose another workspace.",
+  "desktopDictation.settings.workspaceVoiceOffOption": "Voice input is turned off.",
   "desktopViewer.clickReturnControlOrCtrl": "· click Return control (or Ctrl+Alt+Shift)",
   "desktopViewer.connectingToTheDesktop": "Connecting to the desktop…",
   "desktopViewer.couldnTConnect": "Couldn’t connect",
@@ -2809,6 +2855,7 @@ export const englishMessages = {
   "meetings.player.playbackSpeedRate": "Playback speed {rate}×",
   "meetings.player.position": "Position",
   "meetings.player.rate": "{rate}×",
+  "meetings.recorderPanel.allowMicrophone": "Allow microphone",
   "meetings.recorderPanel.allowMicrophoneAccessForThis":
     "Allow microphone access for this site in your browser's address bar or settings, then start again.",
   "meetings.recorderPanel.allowThisAppToUse":
@@ -2822,6 +2869,8 @@ export const englishMessages = {
   "meetings.recorderPanel.canTRecordComputerAudio": "Can't record computer audio",
   "meetings.recorderPanel.capturingwhatValue": "{capturingWhat} {value}",
   "meetings.recorderPanel.computerAudio": "Computer audio",
+  "meetings.recorderPanel.computerAudioInSentence": "computer audio",
+  "meetings.recorderPanel.couldNotReconnect": "Couldn't start that audio again",
   "meetings.recorderPanel.computerAudioDidnTStart":
     "Computer audio didn't start. Start again, or record without computer audio.",
   "meetings.recorderPanel.computerAudioIsnTAllowed": "Computer audio isn't allowed",
@@ -2837,6 +2886,20 @@ export const englishMessages = {
   "meetings.recorderPanel.liveTextIsnTAvailable":
     "No live text this time.{value} You still get the transcript after you stop.",
   "meetings.recorderPanel.liveTranscript": "Live transcript",
+  "meetings.recorderPanel.lostComputerAudio":
+    "Computer audio stopped, so the call isn't being recorded.",
+  "meetings.recorderPanel.lostMicrophoneOff":
+    "Your voice isn't being recorded: microphone access was turned off.",
+  "meetings.recorderPanel.lostMicrophoneWaiting":
+    "Your voice isn't being recorded: no microphone is connected. Recording picks up again as soon as one is.",
+  "meetings.recorderPanel.lostReasonComputerAudio": "computer audio stopped",
+  "meetings.recorderPanel.lostReasonJoin": ", and ",
+  "meetings.recorderPanel.lostReasonMicrophoneOff": "microphone access is off",
+  "meetings.recorderPanel.lostReasonMicrophoneWaiting":
+    "no microphone is connected (it comes back by itself when one is)",
+  "meetings.recorderPanel.lostReasonTabAudio": "tab sharing ended",
+  "meetings.recorderPanel.lostTabAudio": "Tab sharing ended, so the call isn't being recorded.",
+  "meetings.recorderPanel.lostTrackStillRecording": "{lost} {track} is still recording.",
   "meetings.recorderPanel.meetingLanguage": "Meeting language",
   "meetings.recorderPanel.meetingTitle": "Meeting title",
   "meetings.recorderPanel.microphone": "Microphone",
@@ -2844,6 +2907,8 @@ export const englishMessages = {
   "meetings.recorderPanel.microphoneOnlySoPeopleOn":
     "Microphone only: other people on a call won't be heard.",
   "meetings.recorderPanel.nameIt": "Name it",
+  "meetings.recorderPanel.nothingRecordingReasons": "Nothing is being recorded. {reasons}.",
+  "meetings.recorderPanel.notRecording": "Not recording",
   "meetings.recorderPanel.nameThisMeeting": "Name this meeting",
   "meetings.recorderPanel.nameThisMeetingOptional": "Name this meeting, or it's named for you",
   "meetings.recorderPanel.namedForYou": "Named for you",
@@ -2861,7 +2926,18 @@ export const englishMessages = {
     "Offline. The audio uploads when you're back online.",
   "meetings.recorderPanel.pause": "Pause",
   "meetings.recorderPanel.paused": "Paused",
+  "meetings.recorderPanel.pausedComputerAudio":
+    "Paused. Computer audio stopped, so after you resume only {track} will be recorded.",
+  "meetings.recorderPanel.pausedLostReasons":
+    "Paused. {reasons}. Until one is back, nothing will be recorded when you resume.",
+  "meetings.recorderPanel.pausedMicrophoneOff":
+    "Paused. Microphone access is off, so after you resume only {track} will be recorded.",
+  "meetings.recorderPanel.pausedMicrophoneWaiting":
+    "Paused. No microphone is connected. Connect one before you resume, or only {track} will be recorded.",
+  "meetings.recorderPanel.pausedTabAudio":
+    "Paused. Tab sharing ended, so after you resume only {track} will be recorded.",
   "meetings.recorderPanel.pausedNothingIsHeardUntil": "Paused.",
+  "meetings.recorderPanel.recordComputerAudioAgain": "Record computer audio",
   "meetings.recorderPanel.recording": "Recording.",
   "meetings.recorderPanel.recording2": "Recording",
   "meetings.recorderPanel.recordingNotUploading": "Recording · not uploading",
@@ -2897,7 +2973,9 @@ export const englishMessages = {
     "Starting… Allow the microphone if asked.",
   "meetings.recorderPanel.startRecording": "Start recording",
   "meetings.recorderPanel.stop": "Stop",
+  "meetings.recorderPanel.shareTabAgain": "Share tab again",
   "meetings.recorderPanel.tabAudio": "Tab audio",
+  "meetings.recorderPanel.tabAudioInSentence": "tab audio",
   "meetings.recorderPanel.takeNotes": "Take notes",
   "meetings.recorderPanel.theLiveTranscriptAddsAbout": "About ${value} per hour.",
   "meetings.recorderPanel.theLiveTranscriptionAccountHas":
@@ -2916,6 +2994,11 @@ export const englishMessages = {
     "This browser can't share a tab's audio. Record with the microphone only, or use Chrome or Edge on a computer.",
   "meetings.recorderPanel.thisComputerCanTRecordItsOwnAudio":
     "This computer can't record its own audio. Record without computer audio instead.",
+  "meetings.recorderPanel.trackAccessOff": "Access off",
+  "meetings.recorderPanel.trackDisconnected": "Disconnected",
+  "meetings.recorderPanel.trackRecordingAgain": "{track} is recording again.",
+  "meetings.recorderPanel.trackSharingEnded": "Sharing ended",
+  "meetings.recorderPanel.trackStopped": "Stopped",
   "meetings.recorderPanel.uploaded": "Uploaded",
   "meetings.recorderPanel.uploadFailedMessage": "Upload failed: {message}",
   "meetings.recorderPanel.uploadfailurereasonTheRecordingIsSaved":
@@ -2927,6 +3010,7 @@ export const englishMessages = {
     "Use a current version of Chrome, Edge, Safari or Firefox to record meetings.",
   "meetings.recorderPanel.whenYourBrowserAsksWhat":
     "When your browser asks what to share, pick the meeting tab and turn on Share tab audio. Or record without it.",
+  "meetings.recorderPanel.yourMicrophone": "your microphone",
   "meetings.recorderPanel.youCanUseOtherPages": "Closing this tab stops the recording.",
   "meetings.recorderPanel.youNoLongerHavePermission":
     "You no longer have permission to add recordings to this workspace.",
@@ -3154,9 +3238,23 @@ export const englishMessages = {
   "meetings.transcript.name": "Name",
   "meetings.transcript.nameChangeWhoThisIs": "{name}, change who this is",
   "meetings.transcript.nameNameThisSpeaker": "{name}, name this speaker",
+  /**
+   * Quiet lines in a meeting transcript where audio is missing: a microphone
+   * was unplugged or turned off, or tab sharing ended. {from} and {to} are
+   * times in the recording, like 17:39; {name} is the one person heard on
+   * that microphone.
+   */
+  "meetings.transcript.nameSMicrophoneWasnTRecordingFromTo":
+    "{name}'s microphone wasn't recording from {from} to {to}.",
+  /** As above, when every other track kept recording. */
+  "meetings.transcript.nameSMicrophoneWasnTRecordingFromToEveryoneElse":
+    "{name}'s microphone wasn't recording from {from} to {to}. Everyone else was still recorded.",
   "meetings.transcript.nameSuggestedFromTheirVoice":
     "{name}, suggested from their voice. Confirm or correct",
+  "meetings.transcript.nothingWasRecordedFromTo": "Nothing was recorded from {from} to {to}.",
   "meetings.transcript.noLeaveUnnamed": "No, leave unnamed",
+  "meetings.transcript.otherPeopleWerenTRecordedFromTo":
+    "Other people weren't recorded from {from} to {to}.",
   "meetings.transcript.orPickWhoItIs": "Or pick who it is",
   "meetings.transcript.playFromFormatclock": "Play from {formatClock}",
   "meetings.transcript.rememberDisplaynameSVoice": "Remember {displayName}'s voice…",
@@ -3171,6 +3269,11 @@ export const englishMessages = {
   "meetings.transcript.suggested": "Suggested",
   "meetings.transcript.suggestedBecauseTheVoiceSounds": "Sounds like them ({suggestionMatch})",
   "meetings.transcript.suggestedBecauseTheVoiceSounds2": "Sounds like them",
+  "meetings.transcript.theMicrophoneWasnTRecordingFromTo":
+    "The microphone wasn't recording from {from} to {to}.",
+  /** As above, when every other track kept recording. */
+  "meetings.transcript.theMicrophoneWasnTRecordingFromToOtherPeople":
+    "The microphone wasn't recording from {from} to {to}. Other people were still recorded.",
   "meetings.transcript.theNameIsAddedTo": "Anyone in the workspace can pick this name later.",
   "meetings.transcript.transcript": "Transcript",
   "meetings.transcript.usedToSuggestNamesIn": "Remembered voice",

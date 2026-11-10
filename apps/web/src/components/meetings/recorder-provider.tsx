@@ -3,11 +3,15 @@
 // workspaces, and while a dropped connection or an update reconnects. It ends
 // at once when they sign out or someone else signs in. With the console's
 // routes for where a desktop call notification's choice opens.
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 // The light entry: the capture code loads only when Meetings is first opened.
-import { MeetingRecorderProvider } from "@opengeni/react/meetings-recorder";
+import {
+  MeetingRecorderProvider,
+  useMeetingRecorderLostTrack,
+  type MeetingRecorderLostTrack,
+} from "@opengeni/react/meetings-recorder";
 
 /**
  * Who is signed in, for the recorder: their id, null when nobody is, or
@@ -63,6 +67,38 @@ export function ConsoleMeetingRecorderProvider({
       }
     >
       {children}
+      <LostTrackTabTitle />
     </MeetingRecorderProvider>
   );
+}
+
+/** What the tab's title starts with while a track records nothing. */
+export function lostTrackTitlePrefix(lost: MeetingRecorderLostTrack): string {
+  if (lost.source === "microphone") return "Microphone off · ";
+  return lost.systemAudioKind === "desktop" ? "Computer audio off · " : "Tab audio off · ";
+}
+
+/**
+ * Marks the tab's title while a recording has lost a source, since during a
+ * call the person is usually looking at the call's tab, not this one. Pages
+ * set their own titles, so the mark is put back when one does.
+ */
+export function LostTrackTabTitle() {
+  const lost = useMeetingRecorderLostTrack();
+  const prefix = lost ? lostTrackTitlePrefix(lost) : null;
+  useEffect(() => {
+    if (!prefix) return;
+    const mark = () => {
+      // Another mark (a chat that needs attention) may sit in front of it.
+      if (!document.title.includes(prefix)) document.title = `${prefix}${document.title}`;
+    };
+    mark();
+    const observer = new MutationObserver(mark);
+    observer.observe(document.head, { subtree: true, childList: true, characterData: true });
+    return () => {
+      observer.disconnect();
+      document.title = document.title.replace(prefix, "");
+    };
+  }, [prefix]);
+  return null;
 }

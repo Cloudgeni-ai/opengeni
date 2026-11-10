@@ -88,6 +88,7 @@ export type TurnControlState = {
   turnMetricOutcome: TurnOutcome | null;
   /** Set with turnMetricOutcome "recovering"; labels opengeni_turn_recoveries_total. */
   turnRecoveryCause?: TurnRecoveryCause;
+  turnFailureOrigin?: import("@opengeni/observability").FailureOrigin;
   activityError: unknown;
   acknowledgeQuiescence: boolean;
 };

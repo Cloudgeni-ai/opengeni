@@ -8,7 +8,9 @@
    page background), `&host=navy` uses a tinted dark palette, and
    `&scenario=` selects the conversation state (approval, question, running,
    steer-waiting, steered, waiting, long, empty, error, and automation runs:
-   automation, automation-live, automation-quiet). `&legacy=1` delivers an
+   automation, automation-live, automation-quiet, and attachments: messages sent
+   with a screenshot and a PDF; `&draft=1` also puts them in the composer's
+   draft, to compare a sent message with how it looked before sending). `&legacy=1` delivers an
    automation run the way Opengeni recorded it before runs had a plain
    description; `&ids=1` puts internal IDs in what the run's event and an
    earlier setup update say. `&explicit=1` pins the legacy `data-og-theme` wrapper;
@@ -132,13 +134,82 @@ const text = (value: unknown) => ({
   content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
 });
 
+// Files the person attached in the attachments scenario.
+const STATEMENT_FILE = "5a1c0000-0000-4000-8000-0000000000f1";
+const INVOICE_FILE = "5a1c0000-0000-4000-8000-0000000000f2";
+const OCTOBER_FILE = "5a1c0000-0000-4000-8000-0000000000f3";
+
+function statementScreenshot(month: string, rows: Array<[string, string]>): string {
+  const lines = rows
+    .map(
+      ([label, amount], index) =>
+        `<text x="24" y="${112 + index * 34}" font-size="15" fill="#3b3b38">${label}</text>` +
+        `<text x="456" y="${112 + index * 34}" font-size="15" fill="#3b3b38" text-anchor="end">${amount}</text>` +
+        `<line x1="24" x2="456" y1="${124 + index * 34}" y2="${124 + index * 34}" stroke="#e4e2dc"/>`,
+    )
+    .join("");
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300" viewBox="0 0 480 300" font-family="Inter, sans-serif">` +
+    `<rect width="480" height="300" fill="#fbfaf7"/>` +
+    `<rect width="480" height="52" fill="#1f5f8b"/>` +
+    `<text x="24" y="33" font-size="17" font-weight="600" fill="#ffffff">Card statement · ${month}</text>` +
+    lines +
+    `</svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+const attachedFiles = new Map([
+  [
+    STATEMENT_FILE,
+    {
+      filename: "statement-september.png",
+      contentType: "image/png",
+      sizeBytes: 184_320,
+      url: statementScreenshot("September 2026", [
+        ["Acme Support · INV-2026-09", "$490.00"],
+        ["Acme Support · INV-2026-09", "$490.00"],
+        ["Coffee Corner", "$4.20"],
+      ]),
+    },
+  ],
+  [
+    INVOICE_FILE,
+    {
+      filename: "INV-2026-09.pdf",
+      contentType: "application/pdf",
+      sizeBytes: 48_128,
+      url: "data:application/pdf;base64,JVBERi0xLjQKJSVFT0YK",
+    },
+  ],
+  [
+    OCTOBER_FILE,
+    {
+      filename: "statement-october.png",
+      contentType: "image/png",
+      sizeBytes: 152_064,
+      url: statementScreenshot("October 2026", [
+        ["Acme Support · INV-2026-10", "$490.00"],
+        ["Acme Support · INV-2026-10", "$490.00"],
+      ]),
+    },
+  ],
+]);
+
 function investigation() {
   push("session.created", {}, 8, null);
   push(
     "user.message",
-    {
-      text: "Customer on T-4821 says they were charged twice in September. Can you check?",
-    },
+    scenario === "attachments"
+      ? {
+          text: "Customer on T-4821 says they were charged twice in September. Here's their statement and the invoice. Can you check?",
+          resources: [
+            { kind: "file", fileId: STATEMENT_FILE },
+            { kind: "file", fileId: INVOICE_FILE },
+          ],
+        }
+      : {
+          text: "Customer on T-4821 says they were charged twice in September. Can you check?",
+        },
     8,
   );
   push("turn.started", {}, 8);
@@ -441,6 +512,31 @@ if (scenario === "approval") {
   );
   push("turn.completed", {}, 6);
   automationRunEvents();
+} else if (scenario === "attachments") {
+  investigation();
+  push("agent.message.completed", { phase: "final", text: finding.join("\n") }, 6);
+  push("turn.completed", {}, 6);
+  // A message that only makes sense with its picture.
+  push(
+    "user.message",
+    {
+      text: "They sent this one for October too. Same problem?",
+      resources: [{ kind: "file", fileId: OCTOBER_FILE }],
+    },
+    2,
+    STEER_TURN,
+  );
+  push("turn.started", {}, 2, STEER_TURN);
+  push(
+    "agent.message.completed",
+    {
+      phase: "final",
+      text: "Yes. October's invoice **INV-2026-10** was also charged twice. I'll refund both duplicates once you approve.",
+    },
+    1,
+    STEER_TURN,
+  );
+  push("turn.completed", {}, 1, STEER_TURN);
 } else if (scenario === "long") {
   investigation();
   push(
@@ -524,6 +620,44 @@ const client = fakeClient({
       pendingInputAttachment: null,
     }) as never,
   getWorkspaceModelCatalog: async () => ({ models: [] }) as never,
+  ...(scenario === "attachments" && params.get("draft") === "1"
+    ? {
+        getComposerDraft: async () =>
+          ({
+            ...(await base.getComposerDraft(WORKSPACE_ID, SELECTED)),
+            revision: 1,
+            text: "Here's their statement and the invoice.",
+            resources: [
+              { kind: "file", fileId: STATEMENT_FILE },
+              { kind: "file", fileId: INVOICE_FILE },
+            ],
+            updatedAt: minutesAgo(0),
+          }) as never,
+      }
+    : {}),
+  getFile: async (workspace, fileId) => {
+    const file = attachedFiles.get(fileId);
+    if (!file) throw new Error("File not found");
+    return {
+      id: fileId,
+      workspaceId: workspace,
+      status: "ready",
+      filename: file.filename,
+      safeFilename: file.filename,
+      contentType: file.contentType,
+      sizeBytes: file.sizeBytes,
+      sha256: null,
+      bucket: "demo",
+      objectKey: fileId,
+      createdAt: minutesAgo(8),
+      updatedAt: minutesAgo(8),
+    } as never;
+  },
+  createFileDownloadUrl: async (_workspace, fileId) => {
+    const file = attachedFiles.get(fileId);
+    if (!file) throw new Error("File not found");
+    return { url: file.url, expiresAt: new Date(Date.now() + 3_600_000).toISOString() } as never;
+  },
   listHumanInputRequests: async () => humanInputRequests as never,
   listEvents: async (_workspace, id) => {
     if (scenario === "error") throw new Error("Network request failed");

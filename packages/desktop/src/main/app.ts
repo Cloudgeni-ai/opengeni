@@ -1226,11 +1226,21 @@ export class DesktopShell {
     return this.sdk;
   }
 
-  private clientOptions(baseUrl: string, token?: string) {
+  private clientOptions(baseUrl: string, token?: string, accountId?: string) {
+    // An account's own requests go with its window's cookies, so when one of
+    // them renews the device session the window's sign-in cookie is renewed
+    // too; otherwise the window would be signed out a week after its cookie
+    // was last set, although the app stays signed in.
+    const fetch = accountId
+      ? (input: string, init?: RequestInit) =>
+          session
+            .fromPartition(`persist:account-${accountId}`)
+            .fetch(input, { ...init, credentials: init?.credentials ?? "include" })
+      : (input: string, init?: RequestInit) => net.fetch(input, init);
     return {
       baseUrl,
       ...(token ? { apiKey: token } : {}),
-      fetch: ((input: string, init?: RequestInit) => net.fetch(input, init)) as never,
+      fetch: fetch as never,
       apiContract: "compatible" as const,
     };
   }
@@ -1242,7 +1252,8 @@ export class DesktopShell {
     const cached = this.clients.get(accountId);
     if (cached?.token === token) return await cached.client;
     const client = this.loadSdk().then(
-      ({ OpenGeniClient }) => new OpenGeniClient(this.clientOptions(account.baseUrl, token)),
+      ({ OpenGeniClient }) =>
+        new OpenGeniClient(this.clientOptions(account.baseUrl, token, accountId)),
     );
     this.clients.set(accountId, { token, client });
     return await client;

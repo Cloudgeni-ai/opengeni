@@ -3,6 +3,8 @@ import type { App } from "@microsoft/teams.apps";
 import {
   teamsAiGeneratedEntity,
   teamsCommand,
+  teamsConnectText,
+  teamsAppOffInConversationText,
   teamsEventUuid,
   teamsHelp,
   teamsMarkdown,
@@ -13,7 +15,6 @@ import {
   teamsNotLinkedReply,
   teamsWelcome,
   TEAMS_CONNECT_REMINDER_TEXT,
-  TEAMS_CONNECT_TEXT,
   TEAMS_SHARED_CONNECT_TEXT,
   TEAMS_WORK_ACCOUNT_TEXT,
   type TeamsExperienceState,
@@ -88,6 +89,37 @@ describe("Teams welcome and help", () => {
     expect(teamsHelp(shared).text).toContain("Mention me in this conversation");
     expect(teamsHelp(shared).text).not.toContain(tip);
   });
+  test("the welcome, help and notices name the bot by the configured app name", () => {
+    const appName = "Opengeni Assistant";
+    const state = { personal: true, installation: "active", linked: false, appName } as const;
+    const welcome = teamsWelcome(state).text;
+    expect(welcome.startsWith(`**Welcome to ${appName}**\n\n${appName} is an AI agent`)).toBe(true);
+    const help = teamsHelp({ ...state, sharedConversations: true }).text;
+    expect(help.startsWith(`**${appName} help**\n\n${appName} is an AI agent`)).toBe(true);
+    expect(help).toContain(`In a group chat or channel where ${appName} is enabled`);
+    // The service and accounts keep their own name.
+    for (const text of [welcome, help]) {
+      expect(text).toContain("You need an Opengeni account");
+      expect(text).toContain("Link your Opengeni account to start.");
+    }
+    expect(
+      teamsHelp({
+        personal: true,
+        installation: "unavailable",
+        linked: false,
+        setup: "connect",
+        appName,
+      }).text,
+    ).toContain(`ask your admin to message ${appName} in Teams and connect it.`);
+    expect(teamsConnectText()).toContain("ask your admin to message Opengeni in Teams");
+    expect(teamsAppOffInConversationText(appName)).toBe(
+      `${appName} isn't turned on in this conversation. Send me a direct message to give me a task instead.`,
+    );
+    expect(
+      teamsWelcome({ personal: true, installation: "active", linked: false }).text,
+    ).toStartWith("**Welcome to Opengeni**");
+    expect(teamsAppOffInConversationText()).toStartWith("Opengeni isn't turned on");
+  });
   test("only an unlinked person in a connected organization's 1:1 chat gets a link button", () => {
     for (const state of states) {
       const action = teamsHelp(state).action;
@@ -116,10 +148,10 @@ describe("Teams welcome and help", () => {
   test("in an organization that isn't connected, help and unlink carry the way to connect it", () => {
     const unconnected = { personal: true, installation: "unavailable", linked: false } as const;
     const connect = { ...unconnected, setup: "connect" } as const;
-    expect(teamsHelp(connect).text).toContain(TEAMS_CONNECT_TEXT);
+    expect(teamsHelp(connect).text).toContain(teamsConnectText());
     expect(teamsHelp(connect).action).toEqual({ kind: "link", title: "Connect your organization" });
     expect(teamsNotLinkedReply(connect)).toEqual({
-      text: `Your Teams account isn't linked to Opengeni.\n\n${TEAMS_CONNECT_TEXT}`,
+      text: `Your Teams account isn't linked to Opengeni.\n\n${teamsConnectText()}`,
       action: { kind: "link", title: "Connect your organization" },
     });
     // A welcome may be read much later, so it points to help for a fresh link.

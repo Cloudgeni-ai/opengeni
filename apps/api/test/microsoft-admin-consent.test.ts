@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION } from "@opengeni/capabilities";
+import {
+  MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+  MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+} from "@opengeni/capabilities";
 import {
   MICROSOFT_ADMIN_CONSENT_STATE,
   microsoftAdminConsentResultPage,
@@ -15,7 +18,7 @@ describe("Microsoft admin consent", () => {
       microsoftAdminConsentUrl({
         clientId: "client-1",
         redirectUri: callback,
-        definition: MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+        definitions: [MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION],
       }),
     );
     expect(url.origin + url.pathname).toBe(
@@ -30,6 +33,25 @@ describe("Microsoft admin consent", () => {
       "https://graph.microsoft.com/Mail.Send",
       "https://graph.microsoft.com/MailboxSettings.ReadWrite",
     ]);
+  });
+
+  test("one approval link covers several services, each permission once", () => {
+    const url = new URL(
+      microsoftAdminConsentUrl({
+        clientId: "client-1",
+        redirectUri: callback,
+        definitions: [
+          MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+          MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+        ],
+      }),
+    );
+    const scopes = url.searchParams.get("scope")!.split(" ");
+    expect(scopes).toContain("https://graph.microsoft.com/Mail.ReadWrite");
+    expect(scopes).toContain("https://graph.microsoft.com/Calendars.ReadWrite");
+    expect(
+      scopes.filter((scope) => scope === "https://graph.microsoft.com/User.Read"),
+    ).toHaveLength(1);
   });
 
   test("names admin approval when Microsoft says only an administrator can grant access", () => {

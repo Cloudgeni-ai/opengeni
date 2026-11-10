@@ -84,7 +84,8 @@ function forViewer(viewer: BotTemplateViewer, agent: AgentRecord): WorkspaceBotT
     name: agent.name,
     description: agent.description,
     avatar: avatar.success ? avatar.data : null,
-    setupInstructions: agent.content?.firstMessage ?? "",
+    // Agents have one text now: a template's setup text is its Instructions.
+    setupInstructions: agent.content?.instructions ?? "",
     visibility: agent.visibility,
     sourceSessionId: agent.sourceSessionId,
     // An Only me template belongs to whoever saved it.
@@ -144,10 +145,9 @@ export async function listBotTemplatesForViewer(
 ): Promise<WorkspaceBotTemplate[]> {
   const home = await homeOf(db, workspaceId);
   // The old gallery opens a template as composer text, in a chat not bound to
-  // the agent, so it lists only agents with a First message (or made as
-  // templates); the others' Instructions would silently not apply.
+  // the agent, so it lists only agents made as templates.
   return (await listAgents(db, home, { viewerSubjectId: viewer.subjectId, withContent: true }))
-    .filter((agent) => agent.origin === "bot_template" || Boolean(agent.content?.firstMessage))
+    .filter((agent) => agent.origin === "bot_template")
     .map((agent) => forViewer(viewer, agent));
 }
 
@@ -179,9 +179,9 @@ export async function createBotTemplateForViewer(input: {
         name: request.name,
         description: request.description,
         avatar: request.avatar,
-        // A bot template is text for the composer: a First message, no Instructions.
-        instructions: "",
-        firstMessage: request.setupInstructions,
+        // A template's setup text is its Instructions.
+        instructions: request.setupInstructions,
+        firstMessage: "",
         memoryEnabled: false,
         origin: "bot_template",
         sourceSessionId: request.sourceSessionId,
@@ -252,7 +252,7 @@ export async function updateBotTemplateForViewer(input: {
       ...(request.description !== undefined ? { description: request.description } : {}),
       ...(request.avatar !== undefined ? { avatar: request.avatar } : {}),
       ...(request.setupInstructions !== undefined
-        ? { firstMessage: request.setupInstructions }
+        ? { instructions: request.setupInstructions }
         : {}),
       ...(changesVisibility && request.visibility !== undefined
         ? {
