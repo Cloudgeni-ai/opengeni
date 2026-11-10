@@ -20,6 +20,8 @@ export interface DictationWords {
   allow: string;
   /** Opens the app's window. */
   open: string;
+  /** Opens the dictation settings, where a failed dictation is fixed. English when absent. */
+  settings?: string;
   /** No signed-in page to record with. `{product}` is the app's name. */
   signIn: string;
   /** The page that was recording closed or went to another page. */
@@ -49,6 +51,7 @@ export const ENGLISH_DICTATION_WORDS: DictationWords = {
   retry: "Try again",
   allow: "Allow",
   open: "Open",
+  settings: "Open settings",
   signIn: "Open {product} and sign in to dictate.",
   pageClosed: "Dictation stopped because the page closed. Try again.",
   noStart: "{product} didn't start recording. Try again.",

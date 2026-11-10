@@ -23,8 +23,6 @@ import { RailProvider } from "@opengeni/react/app/components/rail/rail-context";
 import { ActionsProvider } from "@opengeni/react/app/lib/actions/actions-provider";
 import { DesktopThisComputerProvider } from "@opengeni/react/app/components/desktop/this-computer";
 import { AppShotCoordinator } from "@opengeni/react/app/components/desktop/app-shots";
-import { desktopCapability } from "@opengeni/react/app/lib/desktop";
-import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/contracts";
 import { RailShell } from "@/components/rail/rail-shell";
 import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
 import { workspaceManagementLocation } from "@opengeni/react/app/lib/workspace-management-location";
@@ -53,12 +51,6 @@ import type { SlackUserLinkAccessRequest } from "@opengeni/react/app/types";
 const LazyWorkspaceManagementShell = lazy(() =>
   import("@/components/settings/workspace-settings-shell").then((module) => ({
     default: module.WorkspaceManagementShell,
-  })),
-);
-// Only the desktop app has a dictation shortcut, so other pages never load it.
-const LazyDesktopDictationHost = lazy(() =>
-  import("@opengeni/react/desktop-dictation").then((module) => ({
-    default: module.DesktopDictationHost,
   })),
 );
 function WorkspaceManagementShell(props: ComponentProps<typeof LazyWorkspaceManagementShell>) {
@@ -765,17 +757,8 @@ function AuthorizedWorkspaceShell({
       <SecretsUiProvider value={webSecretsUi}>
         <DesktopThisComputerProvider workspaceId={workspaceId}>
           <AppShotCoordinator workspaceId={workspaceId} />
-          {/* In the desktop app, the dictation shortcut records here and the
-          app types the text into whatever app has the cursor. */}
-          {desktopCapability("dictation") ? (
-            <Suspense fallback={null}>
-              <LazyDesktopDictationHost
-                client={context.client}
-                workspaceId={workspaceId}
-                enabled={resolveWorkspaceVoiceInputEnabled(activeWorkspace?.settings) ?? true}
-              />
-            </Suspense>
-          ) : null}
+          {/* The desktop app's dictation shortcut records above the workspace
+          pages (in the root), so switching workspace never stops it. */}
           {/* Settings mode swaps the rail: workspace and organization settings
           share one settings shell that draws the settings rail, and "Back to
           sessions" returns to the main rail. */}

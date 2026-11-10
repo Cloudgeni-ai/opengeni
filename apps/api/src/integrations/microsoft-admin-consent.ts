@@ -20,16 +20,22 @@ export { MICROSOFT_ADMIN_CONSENT_STATE };
 // permissions and an administrator has to.
 const ADMIN_REQUIRED_CODES = /AADSTS(65001|90093|90094|90095)\b/;
 
-/** Organization-wide approval link an administrator opens to approve the app. */
+/**
+ * Organization-wide approval link an administrator opens to approve the app,
+ * for the Graph permissions of every given definition at once, so approving
+ * mail also covers calendar and a person adding it later needs no new approval.
+ */
 export function microsoftAdminConsentUrl(input: {
   clientId: string;
   redirectUri: string;
-  definition: IntegrationDefinition;
+  definitions: readonly IntegrationDefinition[];
 }): string {
   return adminConsentUrl({
     clientId: input.clientId,
     redirectUri: input.redirectUri,
-    scopes: input.definition.authentication.scopes,
+    scopes: [
+      ...new Set(input.definitions.flatMap((definition) => definition.authentication.scopes)),
+    ],
   });
 }
 

@@ -21,7 +21,14 @@ export type DictationHudState =
     };
 
 /** A button in the dictation window. */
-export type DictationHudAction = "stop" | "cancel" | "retry" | "dismiss" | "allow" | "open";
+export type DictationHudAction =
+  | "stop"
+  | "cancel"
+  | "retry"
+  | "dismiss"
+  | "allow"
+  | "open"
+  | "settings";
 
 export const DICTATION_HUD_ACTIONS: readonly DictationHudAction[] = [
   "stop",
@@ -30,4 +37,5 @@ export const DICTATION_HUD_ACTIONS: readonly DictationHudAction[] = [
   "dismiss",
   "allow",
   "open",
+  "settings",
 ];

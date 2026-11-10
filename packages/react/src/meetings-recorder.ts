@@ -11,11 +11,13 @@ export {
   MeetingRecorderProvider,
   MeetingRecorderStoreProvider,
   useMeetingRecorder,
+  useMeetingRecorderLostTrack,
   useMeetingRecorderState,
   usePendingMeetingStart,
 } from "./meetings/recorder-context";
 export type {
   MeetingRecorder,
+  MeetingRecorderLostTrack,
   MeetingRecorderStore,
   MeetingStartRequest,
 } from "./meetings/recorder-context";

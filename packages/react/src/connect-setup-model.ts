@@ -229,7 +229,9 @@ export function organizationApprovalFor(
   }
   if (!unfinished || attempt.error || attempt.nextAction.type !== "authorize") return null;
   // The attempt's own sign-in names the app the person is about to approve.
-  const current = organizationAppApproval(attempt.nextAction.url) ?? unfinished;
+  const current =
+    organizationAppApproval(attempt.nextAction.url, attempt.nextAction.organizationApprovalUrl) ??
+    unfinished;
   return { reason: "unfinished", url: current.approvalUrl, appId: current.appId };
 }
 
@@ -414,7 +416,10 @@ export function useConnectSetupFlow(
   // "needs admin approval" page ends, so it offers the same help right away.
   const unfinished =
     attempt && signInClosed && attempt.nextAction.type === "authorize"
-      ? (organizationAppApproval(attempt.nextAction.url) ?? unreturned)
+      ? (organizationAppApproval(
+          attempt.nextAction.url,
+          attempt.nextAction.organizationApprovalUrl,
+        ) ?? unreturned)
       : unreturned;
   const organizationApproval = attempt ? organizationApprovalFor(attempt, unfinished) : null;
   const terminal = !!attempt && ["complete", "cancelled", "expired"].includes(attempt.state);
