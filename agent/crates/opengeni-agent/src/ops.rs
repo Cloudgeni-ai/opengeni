@@ -449,15 +449,22 @@ pub(crate) fn inventory_event(page: v1::OperationInventory) -> v1::AgentEvent {
 /// Multi-connection output acknowledgement, independent of notification receipts.
 pub fn handle_op_ack_scoped(engine: &Arc<Engine>, scope: &str, ack: &v1::OpAck) {
     let op_id = scoped_op_id(scope, &ack.op_id);
-    let routed = engine.route_command(
-        &op_id,
+    // A detaching consumer's credit is only for runners that cannot stop
+    // sending; honoring it here would replay output to nobody.
+    let command = if ack.detach && !ack.r#final {
+        JobCommand::Unfollow {
+            generation: ack.attach_generation,
+            acked_seq: ack.acked_seq,
+        }
+    } else {
         JobCommand::Ack {
             generation: ack.attach_generation,
             acked_seq: ack.acked_seq,
             credit_bytes: ack.credit_bytes,
             final_ack: ack.r#final,
-        },
-    );
+        }
+    };
+    let routed = engine.route_command(&op_id, command);
     if !routed {
         debug!(op = %op_id, "ack for an op with no live pump (already collected or gone)");
     }
@@ -1212,6 +1219,71 @@ mod tests {
         assert!(exit.cancelled);
     }
 
+    /// A detaching consumer's ack carries the full credit range for runners
+    /// that cannot stop sending; this runner stops instead, so nothing is
+    /// published to the departed consumer, and a later attach collects it all.
+    #[tokio::test]
+    async fn a_detach_ack_stops_publication_until_the_next_attach() {
+        let rig = rig();
+        let resp = rig
+            .start_exec("op-detach", "printf early; sleep 0.3; printf late", 1 << 20)
+            .await;
+        assert!(started_status(&resp).0);
+        for _ in 0..500 {
+            if rig.stdout_bytes() == b"early" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(rig.stdout_bytes(), b"early");
+        handle_op_ack(
+            &rig.engine,
+            &v1::OpAck {
+                op_id: "op-detach".to_string(),
+                acked_seq: 0,
+                credit_bytes: u64::MAX,
+                r#final: false,
+                attach_generation: 1,
+                detach: true,
+            },
+        );
+        for _ in 0..500 {
+            if !rig.engine.retained_completions("default").is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(rig.engine.retained_completions("default").len(), 1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            rig.stdout_bytes(),
+            b"early",
+            "nothing reaches a detached consumer"
+        );
+        assert!(
+            !rig.frames
+                .lock()
+                .expect("frames")
+                .iter()
+                .any(|f| matches!(f.body, Some(v1::op_frame::Body::Exit(_)))),
+            "the exit frame waits for a consumer"
+        );
+
+        serve_op_attach(
+            &rig.engine,
+            "a-detach".to_string(),
+            &v1::OpAttach {
+                op_id: "op-detach".to_string(),
+                from_seq: 0,
+                attach_generation: 2,
+                window_bytes: 0,
+            },
+        );
+        let exit = rig.wait_for_exit_frame().await;
+        assert_eq!(exit.exit_code, 0);
+        assert_eq!(rig.stdout_bytes(), b"earlylate");
+    }
+
     #[tokio::test]
     async fn post_exit_attach_replays_and_final_ack_releases_the_op() {
         let rig = rig();
@@ -1264,6 +1336,7 @@ mod tests {
                 credit_bytes: 1 << 20,
                 r#final: true,
                 attach_generation: 2,
+                detach: false,
             },
         );
         let op = scoped_op_id("default", "op-replay");
