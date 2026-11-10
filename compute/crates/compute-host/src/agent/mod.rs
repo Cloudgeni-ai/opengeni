@@ -584,10 +584,11 @@ struct Slot<V> {
     /// see [`HostAgent::tell_clocks`].
     runs_since: Option<Instant>,
     op: Option<Running>,
-    /// Steps started for it since the agent started. A reading of its
-    /// disk at rest taken before the last one started may be stale (see
+    /// Counts what may have changed its disk since the agent started:
+    /// steps started, captures and every measurement fed to the core. A
+    /// reading of its disk at rest taken before the last is stale (see
     /// [`HostAgent::resting_measured`]).
-    steps: u64,
+    disk_epoch: u64,
     destroy: bool,
     removers: Vec<Reply<()>>,
     /// Requests waiting for the sandbox to run.
@@ -857,9 +858,9 @@ pub struct HostAgent<E: Engine, S: Store> {
     /// Readings given in place of the agent's own; see
     /// [`HostConfig::disk_reading`].
     disk_gauge: Option<DiskGauge>,
-    /// When the measurement of disks at rest under way began, if one is (see
+    /// The measurements of disks at rest (see
     /// [`HostAgent::measure_resting`]).
-    measuring_resting: Option<Instant>,
+    resting: disk::Resting,
     /// The VMs' processor share, read again every few seconds; see
     /// [`HostConfig::processor_share`].
     processor_share: Option<ShareCheck>,
@@ -1056,7 +1057,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             sample_every: config.sample_every,
             first_wake_within: config.first_wake_within,
             disk_gauge: config.disk_reading,
-            measuring_resting: None,
+            resting: disk::Resting::default(),
             processor_share: ShareCheck::of(config.processor_share, config.policy.cpu_budget),
             guest_ports: config.guest_ports.into(),
             restore_notice_port: config.restore_notice_port,
@@ -1204,7 +1205,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 link_clock,
                 runs_since: None,
                 op: None,
-                steps: 0,
+                disk_epoch: 0,
                 destroy: false,
                 removers: Vec::new(),
                 waiters: Vec::new(),
@@ -1329,17 +1330,23 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         let mut actions = std::mem::take(&mut self.actions);
         // The inputs after which a sandbox may be at another level.
         let mut moved = Vec::new();
-        let inputs = self
-            .disk_inputs(inputs)
-            .into_iter()
-            .inspect(|input| match input {
+        let inputs = self.disk_inputs(inputs);
+        for input in &inputs {
+            match input {
                 Input::Add { sandbox, .. }
                 | Input::Finished { sandbox, .. }
                 | Input::Lost { sandbox } => {
                     moved.push(*sandbox);
                 }
+                // Readings of its disk taken before this one are stale.
+                Input::DiskGrowth { sandbox, .. } => {
+                    if let Some(slot) = self.slots.get_mut(sandbox) {
+                        slot.disk_epoch += 1;
+                    }
+                }
                 _ => {}
-            });
+            }
+        }
         self.core.handle_all(now, inputs, &mut actions);
         for sandbox in moved {
             self.tell_link(Id(sandbox));

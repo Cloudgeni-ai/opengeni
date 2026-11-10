@@ -642,8 +642,9 @@ async fn read_free(gauge: &DiskGauge, lab: &Lab, change: Option<Box<dyn FnOnce()
 }
 
 /// Waits until `done` holds of `gauge`, saying `what` if it never does.
+/// Measurements of disks at rest are ten samples apart.
 async fn gauge_until(gauge: &DiskGauge, what: &str, done: impl Fn(&DiskGauge) -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while !done(gauge) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         sleep(Duration::from_millis(5)).await;
@@ -660,27 +661,47 @@ async fn saved_with_written_disk(gauge: &DiskGauge) -> (Lab, PathBuf) {
     (lab, disk)
 }
 
+/// Holds back the next measurement of disks at rest of `gauge` once it
+/// has read them.
+async fn hold_next(gauge: &DiskGauge) {
+    gauge.hold_resting();
+    gauge_until(gauge, "a measurement held back", |gauge| {
+        gauge.resting_held() == 1
+    })
+    .await;
+}
+
+/// Hands the agent the measurement held back, asserting it still was, and
+/// tells how many of its readings the agent took in.
+async fn let_through(gauge: &DiskGauge) -> usize {
+    assert_eq!(gauge.resting_held(), 1, "the measurement was still held");
+    let (delivered, taken) = (gauge.resting_delivered(), gauge.resting_taken());
+    gauge.let_resting_through();
+    gauge_until(gauge, "the held measurement handed over", |gauge| {
+        gauge.resting_delivered() > delivered
+    })
+    .await;
+    gauge.resting_taken() - taken
+}
+
 /// Measuring the disks at rest, which under memory and I/O pressure takes
 /// tens of seconds on a host with many, never holds up a request: the
 /// host's status still comes at once. Nor does another measurement start
-/// while one is under way, so slow ones never pile up.
+/// while one is under way, so slow ones never pile up. Its reading of a
+/// disk unchanged since is taken in.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_slow_measurement_of_disks_at_rest_holds_up_no_request() {
     let gauge = DiskGauge::default();
     let (lab, _disk) = saved_with_written_disk(&gauge).await;
 
-    gauge.hold_resting();
-    gauge_until(&gauge, "a measurement held back", |gauge| {
-        gauge.resting_held() == 1
-    })
-    .await;
+    hold_next(&gauge).await;
     let started = gauge.resting_started();
     // Several samples apart, each of which would have read the disk. The
     // measurement is let through before anything is asserted, so an agent
     // that waits for it fails here rather than hanging.
     let mut unanswered = 0;
     for _ in 0..5 {
-        if tokio::time::timeout(Duration::from_secs(1), lab.status())
+        if tokio::time::timeout(Duration::from_secs(3), lab.status())
             .await
             .is_err()
         {
@@ -689,12 +710,13 @@ async fn a_slow_measurement_of_disks_at_rest_holds_up_no_request() {
         sleep(Duration::from_millis(500)).await;
     }
     let again = gauge.resting_started() - started;
-    gauge.let_resting_through();
+    let taken = let_through(&gauge).await;
     assert_eq!(
         unanswered, 0,
         "the status did not come while disks at rest were measured"
     );
     assert_eq!(again, 0, "no second measurement while one is under way");
+    assert_eq!(taken, 1, "the reading of the unchanged disk is taken in");
     gauge_until(&gauge, "the next measurement", |gauge| {
         gauge.resting_started() > started
     })
@@ -713,11 +735,7 @@ async fn a_measurement_of_a_disk_at_rest_that_woke_meanwhile_is_ignored() {
 
     let away = disk.with_extension("away");
     std::fs::rename(&disk, &away).unwrap();
-    gauge.hold_resting();
-    gauge_until(&gauge, "a measurement held back", |gauge| {
-        gauge.resting_held() == 1
-    })
-    .await;
+    hold_next(&gauge).await;
     std::fs::rename(&away, &disk).unwrap();
     let woken = lab.wake(id(1)).await;
     assert!(
@@ -727,17 +745,53 @@ async fn a_measurement_of_a_disk_at_rest_that_woke_meanwhile_is_ignored() {
     lab.wait_level(id(1), LevelName::Running).await;
     let running = read_free(&gauge, &lab, None).await;
 
-    let delivered = gauge.resting_delivered();
-    gauge.let_resting_through();
-    gauge_until(&gauge, "the held measurement handed over", |gauge| {
-        gauge.resting_delivered() > delivered
-    })
-    .await;
+    assert_eq!(let_through(&gauge).await, 0, "the stale reading is ignored");
     // Handed over before the status is asked for, so taken in first.
     let after = lab.status().await.disk.expect("a disk policy").free;
     assert!(
         running.saturating_sub(after) < WRITTEN / 2,
         "a stale measurement booked the running disk whole: {running} then {after}"
     );
+    lab.assert_clean();
+}
+
+/// A measurement of a disk at rest whose sandbox woke and went back to
+/// rest before it ended is ignored too: the disk was measured again as it
+/// came to rest, and may have changed between.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_measurement_of_a_disk_that_rested_again_meanwhile_is_ignored() {
+    let gauge = DiskGauge::default();
+    let (lab, _disk) = saved_with_written_disk(&gauge).await;
+
+    hold_next(&gauge).await;
+    let woken = lab.wake(id(1)).await;
+    assert!(
+        matches!(woken, compute_host::protocol::Reply::Woken { .. }),
+        "{woken:?}"
+    );
+    lab.wait_level(id(1), LevelName::Running).await;
+    lab.sleep_to(id(1), LevelName::Saved).await;
+    lab.wait_level(id(1), LevelName::Saved).await;
+
+    assert_eq!(let_through(&gauge).await, 0, "the stale reading is ignored");
+    lab.assert_clean();
+}
+
+/// A measurement of a disk at rest whose sandbox was removed and made
+/// again under the same id before it ended is ignored: it read the old
+/// sandbox's disk.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_measurement_of_a_sandbox_made_again_meanwhile_is_ignored() {
+    let gauge = DiskGauge::default();
+    let (lab, _disk) = saved_with_written_disk(&gauge).await;
+
+    hold_next(&gauge).await;
+    lab.remove(id(1)).await;
+    read_free(&gauge, &lab, None).await;
+    lab.create(id(1), NEVER).await;
+    lab.sleep_to(id(1), LevelName::Saved).await;
+    lab.wait_level(id(1), LevelName::Saved).await;
+
+    assert_eq!(let_through(&gauge).await, 0, "the stale reading is ignored");
     lab.assert_clean();
 }

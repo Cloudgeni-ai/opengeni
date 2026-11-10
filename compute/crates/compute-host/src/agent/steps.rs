@@ -549,7 +549,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         // What the VM does from here is the step's work, not the guest's,
         // unless it is a checkpoint, whose guest runs on while it reads it.
         slot.usage.step_started(step == Step::Checkpoint);
-        slot.steps += 1;
+        slot.disk_epoch += 1;
         slot.op = Some(Running {
             op,
             step,

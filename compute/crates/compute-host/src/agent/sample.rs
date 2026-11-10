@@ -21,7 +21,7 @@ use super::{BusyRule, HostAgent};
 const SHARE_EVERY: Duration = Duration::from_secs(5);
 
 /// The longest a [`DiskGauge`] holds back a measurement of disks at rest.
-const HELD_AT_MOST: Duration = Duration::from_secs(10);
+const HELD_AT_MOST: Duration = Duration::from_secs(20);
 
 /// The VMs' processor share and the processor time the host last told
 /// its core it guarantees with it (see [`crate::cpu_share`]).
@@ -112,6 +112,8 @@ struct Resting {
     started: usize,
     /// Measurements whose result was handed to the agent.
     delivered: usize,
+    /// Readings of them the agent told its core of.
+    taken: usize,
 }
 
 /// A reading given to a [`DiskGauge`], and what changes just before it.
@@ -196,6 +198,18 @@ impl DiskGauge {
     #[must_use]
     pub fn resting_delivered(&self) -> usize {
         self.resting_lock().delivered
+    }
+
+    /// How many readings of disks at rest from those measurements the
+    /// agent told its core of: those of disks unchanged since read.
+    #[must_use]
+    pub fn resting_taken(&self) -> usize {
+        self.resting_lock().taken
+    }
+
+    /// Counts `readings` of disks at rest told to the core.
+    pub(super) fn readings_taken(&self, readings: usize) {
+        self.resting_lock().taken += readings;
     }
 
     /// Counts a measurement of disks at rest starting, and says whether it

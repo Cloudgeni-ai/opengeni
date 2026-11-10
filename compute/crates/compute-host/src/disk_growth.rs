@@ -94,11 +94,14 @@ pub(crate) struct Headroom {
 /// its [`disk_bound`] less what it holds alone. `shares` says whether the
 /// filesystem shares extents between files (see
 /// [`crate::layout::shares_extents`]): then only blocks no other file
-/// holds count, otherwise every allocated block does.
+/// holds count, otherwise every allocated block does. The disk is in its
+/// VM's jail, so it is opened as [`crate::layout::open_jailed`] opens it:
+/// a pipe or a link its VMM left in its place is refused, never waited on
+/// or followed.
 pub(crate) fn headroom(path: &Path, unit: u64, shares: bool) -> io::Result<Headroom> {
     use std::os::unix::fs::MetadataExt;
 
-    let file = std::fs::File::open(path)?;
+    let file = crate::layout::open_jailed(path)?;
     let metadata = file.metadata()?;
     let held = if copies_every_write(&file)? {
         0

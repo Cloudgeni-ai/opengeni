@@ -129,7 +129,14 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 into,
                 reply,
             } => {
-                let _ = reply.send(self.capture(id, generation, &into));
+                let captured = self.capture(id, generation, &into);
+                // Its blocks are shared with the copy now, so it may grow
+                // by more than any reading taken before said: it is read
+                // again at once, which makes those stale.
+                if captured.is_ok() {
+                    self.disk_captured(id.0);
+                }
+                let _ = reply.send(captured);
             }
             command @ (Command::Hold { .. }
             | Command::Unhold { .. }
