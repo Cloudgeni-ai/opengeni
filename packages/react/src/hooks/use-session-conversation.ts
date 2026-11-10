@@ -14,7 +14,7 @@ import {
 import { useWorkspaceModelCatalog } from "./use-available-models";
 import { useClientConfigFlags } from "./use-client-config-flags";
 import { useComposer, type UseComposerOptions } from "./use-composer";
-import { useFileAttachments } from "./use-file-attachments";
+import { uploadScopeForSession, useFileAttachments } from "./use-file-attachments";
 import { useHumanInputRequests } from "./use-human-input";
 import { useSession } from "./use-session";
 import { useSessionControl } from "./use-session-control";
@@ -95,7 +95,9 @@ export function useSessionConversation(
   const human = useHumanInputRequests(sessionId, eventOptions);
   const control = useSessionControl(sessionId, scope);
   const approvals = useMemo(() => projectPendingApprovals(feed.events), [feed.events]);
-  const files = useFileAttachments(scope);
+  // As in the web app: a private chat's attachments are its owner's alone.
+  const uploadScope = uploadScopeForSession(detail.session);
+  const files = useFileAttachments({ ...scope, ...(uploadScope ? { scope: uploadScope } : {}) });
   const clearFiles = files.clear;
   const attachmentSession = useRef(sessionId);
   useLayoutEffect(() => {

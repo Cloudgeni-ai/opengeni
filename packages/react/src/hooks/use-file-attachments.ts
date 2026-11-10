@@ -116,6 +116,27 @@ export type UseFileAttachmentsResult = {
 
 const isImage = (file: File): boolean => file.type.startsWith("image/");
 
+/**
+ * Where an attachment for this chat is stored: Only me (`personal`) in a private
+ * chat or one with personal memory, otherwise the workspace. `undefined` while
+ * the chat is unknown, so the server (or a session proxy's `chats` setting)
+ * decides instead of the browser guessing.
+ */
+export function uploadScopeForSession(
+  session:
+    | {
+        tenancy?: { visibility?: string | undefined } | null | undefined;
+        memoryScope?: string | null | undefined;
+      }
+    | null
+    | undefined,
+): "workspace" | "personal" | undefined {
+  if (!session) return undefined;
+  return session.tenancy?.visibility === "private" || session.memoryScope === "user"
+    ? "personal"
+    : "workspace";
+}
+
 let fallbackAttachmentId = 0;
 
 function createAttachmentId(): string {

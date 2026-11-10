@@ -1010,6 +1010,24 @@ export function createSessionProxyHandler(
         return response;
       }
 
+      if (
+        method === "POST" &&
+        route.length === 2 &&
+        route[0] === "files" &&
+        route[1] === "uploads"
+      ) {
+        // An upload that names no scope follows this relay's chats, as in the
+        // web app: Only me when chats are private, so an older or custom client
+        // that omits it never shares a private chat's file with the workspace.
+        // An explicit scope is the uploader's own choice and passes through.
+        const body = (await readJsonBody(request, maxBodyBytes))!;
+        return await forward(
+          body.scope === undefined && defaults.visibility === "private"
+            ? { ...body, scope: "personal" }
+            : body,
+        );
+      }
+
       if (inSession && sessionId) {
         switch (op) {
           case "POST events": {
