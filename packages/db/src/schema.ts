@@ -9701,7 +9701,7 @@ export const sessionSystemUpdateOutbox = pgTable(
     ),
     pending: index("session_system_update_outbox_pending_idx").on(table.status, table.createdAt),
     // The newest terminal notice a child wrote for its parent, which decides
-    // whether that child's failure is already the parent agent's (migration 1355).
+    // whether that child's failure is already the parent agent's (migration 1360).
     childTerminalSource: index("session_system_update_outbox_child_terminal_source_idx")
       .on(
         table.workspaceId,
