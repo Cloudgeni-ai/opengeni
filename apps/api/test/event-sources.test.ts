@@ -1772,13 +1772,13 @@ describe("MCP event sources", () => {
       inputSchema: argumentsSchema,
       payloadSchema,
     }));
-    const shared = startFakeMcpEventsServer({ eventTypes: catalog });
+    const sharedShape = startFakeMcpEventsServer({ eventTypes: catalog });
     const mixed = startFakeMcpEventsServer({ eventTypes: [TICKET_CREATED, TICKET_CLOSED] });
-    fakes.push(shared, mixed);
+    fakes.push(sharedShape, mixed);
     const f = await fixture({
       enabled: true,
       mcpServers: [
-        { id: "shared-fixture", name: "Shared Fixture", url: shared.url },
+        { id: "shared-fixture", name: "Shared Fixture", url: sharedShape.url },
         { id: "mixed-fixture", name: "Mixed Fixture", url: mixed.url },
       ],
     });
