@@ -20,7 +20,17 @@ import {
   type DesktopDictationStatus,
   type DesktopPlatform,
 } from "@opengeni/sdk/desktop-bridge";
-import { CheckIcon, CopyIcon, PlayIcon, RotateCcwIcon, SquareIcon, Trash2Icon } from "lucide-react";
+import {
+  Building2Icon,
+  CheckIcon,
+  CopyIcon,
+  LockIcon,
+  MicOffIcon,
+  PlayIcon,
+  RotateCcwIcon,
+  SquareIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { copyTextToClipboard } from "../../lib/clipboard";
 import { MEETING_LANGUAGES } from "../../meetings/meeting-languages";
@@ -34,6 +44,7 @@ import { SettingRow } from "../../ui/setting-row";
 import { Switch } from "../../ui/switch";
 import { WordListRow } from "../../ui/word-list-row";
 import { acceleratorFromKey, desktopShortcutLabel, sameDesktopShortcut } from "./shortcuts";
+import { dictationWorkspace, type DictationWorkspaceChoice } from "./workspace";
 
 /** At most this many shortcuts, as the app keeps them. */
 const PROFILES_MAX = 8;
@@ -175,7 +186,22 @@ export type DesktopDictationSettingsProps = {
    * workspace's voice input model and no model is offered.
    */
   models?: readonly DictationModelChoice[] | undefined;
+  /** `models` are being read, such as after the workspace changed: the rows wait for them. */
+  modelsLoading?: boolean | undefined;
+  /**
+   * The person's workspaces, and their default one. With more than one, in an
+   * app that keeps the choice, the person picks the workspace every shortcut
+   * dictation belongs to, whichever one the app shows; `models` are then that
+   * workspace's (`dictationWorkspace` says which it is).
+   */
+  workspaces?: DictationWorkspaces | undefined;
   className?: string | undefined;
+};
+
+/** The workspaces dictation can belong to. */
+export type DictationWorkspaces = {
+  choices: readonly DictationWorkspaceChoice[];
+  defaultWorkspaceId: string | null;
 };
 
 /** A model a dictation shortcut can pick, as the workspace's voice input lists it. */
@@ -194,6 +220,8 @@ export function DesktopDictationSettings({
   dictation: given,
   languages = MEETING_LANGUAGES,
   models = NO_MODELS,
+  modelsLoading = false,
+  workspaces,
   className,
 }: DesktopDictationSettingsProps) {
   const t = useOpenGeniText();
@@ -264,6 +292,24 @@ export function DesktopDictationSettings({
   const modifierShortcuts = profiles.some((profile) => profile.shortcut.kind !== "accelerator");
   const accessibility = status.permissions.find((permission) => permission.id === "accessibility");
   const first = profiles[0]!;
+  // Kept only by apps that keep it (older ones always use the default workspace).
+  const home =
+    workspaces && settings.workspace !== undefined
+      ? dictationWorkspace(settings, workspaces.choices, workspaces.defaultWorkspaceId)
+      : null;
+  const homeChoice = workspaces?.choices.find((choice) => choice.id === home?.workspaceId);
+  const voiceOff = homeChoice?.voiceInputOff === true;
+  const offerWorkspaces =
+    home !== null &&
+    workspaces !== undefined &&
+    (workspaces.choices.length > 1 || home.gone || voiceOff);
+  // The workspace the models are of, to name in their rows.
+  const modelsOf = home && !home.gone ? home.name : null;
+  const workspaceError = home?.gone
+    ? t("desktopDictation.settings.workspaceGone", { workspace: home.name ?? "" })
+    : voiceOff
+      ? t("desktopDictation.settings.workspaceVoiceOff", { workspace: homeChoice.name })
+      : null;
 
   const languageOptions = (current: string | null): SelectOption[] => {
     const codes: string[] = [...languages];
@@ -284,21 +330,28 @@ export function DesktopDictationSettings({
   };
 
   const modelOptions = (current: DesktopDictationModel | null | undefined): SelectOption[] => [
-    { value: WORKSPACE_MODEL, label: t("desktopDictation.settings.workspaceModel") },
+    {
+      value: WORKSPACE_MODEL,
+      label: home?.personal
+        ? t("desktopDictation.settings.workspaceModelPersonal")
+        : modelsOf
+          ? t("desktopDictation.settings.workspaceModelIn", { workspace: modelsOf })
+          : t("desktopDictation.settings.workspaceModel"),
+    },
     ...(current && !models.some((entry) => sameModel(entry, current))
       ? [
           {
             value: modelValue(current),
-            label: current.model,
+            // Named as it was when picked; older settings kept only its id.
+            label: current.name ?? current.model,
             disabled: true,
-            disabledReason: t("desktopDictation.settings.modelUnavailable"),
+            disabledReason: modelsOf
+              ? t("desktopDictation.settings.modelUnavailableIn", { workspace: modelsOf })
+              : t("desktopDictation.settings.modelUnavailable"),
           },
         ]
       : []),
-    ...models.map((entry) => ({
-      value: modelValue(entry),
-      label: `${entry.providerName} · ${entry.name}`,
-    })),
+    ...models.map((entry) => ({ value: modelValue(entry), label: modelLabel(entry) })),
   ];
 
   const setModel = (id: string, value: string) => {
@@ -308,14 +361,29 @@ export function DesktopDictationSettings({
         profile.id === id
           ? {
               ...profile,
-              model: chosen ? { providerId: chosen.providerId, model: chosen.model } : null,
+              model: chosen
+                ? {
+                    providerId: chosen.providerId,
+                    model: chosen.model,
+                    name: modelLabel(chosen),
+                  }
+                : null,
             }
           : profile,
       ),
     );
   };
   // Offered once there is a choice, and always while a shortcut has one picked.
-  const offerModels = models.length > 0 || profiles.some((profile) => profile.model);
+  const offerModels =
+    modelsLoading || models.length > 0 || profiles.some((profile) => profile.model);
+  // A shortcut's own model the workspace doesn't offer: every press fails until
+  // another is picked, so its row says so. (With no list, the server takes any.)
+  const modelProblem = (model: DesktopDictationModel | null | undefined): string | null =>
+    model && !modelsLoading && models.length > 0 && !models.some((entry) => sameModel(entry, model))
+      ? modelsOf
+        ? t("desktopDictation.settings.modelNotOfferedIn", { workspace: modelsOf })
+        : t("desktopDictation.settings.modelNotOffered")
+      : null;
 
   const addProfile = () => {
     const used = new Set(profiles.map((profile) => profile.language));
@@ -376,187 +444,215 @@ export function DesktopDictationSettings({
               onCheckedChange={onToggle}
             />
           }
-        >
-          {settings.enabled ? (
-            <>
-              {profiles.map((profile) => (
-                <ProfileRows
-                  key={profile.id}
-                  profile={profile}
-                  profiles={profiles}
-                  status={status}
-                  single={single}
-                  saving={saving}
-                  recording={recordingFor === profile.id}
-                  error={
-                    (keysError?.profileId === profile.id ? keysError.message : null) ??
-                    shortcutProblemMessage(
-                      status.shortcutErrors.find((item) => item.profileId === profile.id)?.problem,
-                      t,
-                    )
-                  }
-                  languageOptions={languageOptions(profile.language)}
-                  modelOptions={offerModels ? modelOptions(profile.model) : null}
-                  onModel={(value) => setModel(profile.id, value)}
-                  onRecord={(recording) => {
-                    setKeysError(null);
-                    setRecordingFor(recording ? profile.id : null);
-                  }}
-                  onShortcut={(shortcut) =>
-                    saveProfiles(
-                      profiles.map((item) =>
-                        item.id === profile.id ? { ...item, shortcut } : item,
-                      ),
-                    )
-                  }
-                  onLanguage={(value) => setLanguage(profile.id, value)}
-                  onRemove={() => saveProfiles(profiles.filter((item) => item.id !== profile.id))}
-                />
-              ))}
-              {profiles.length < PROFILES_MAX && freeShortcut(profiles, status) ? (
-                <SettingRow
-                  label={t("desktopDictation.settings.addLabel")}
-                  description={t("desktopDictation.settings.addDescription")}
-                  control={
-                    <Button size="sm" variant="outline" disabled={saving} onClick={addProfile}>
-                      {t("desktopDictation.settings.add")}
-                    </Button>
-                  }
-                />
-              ) : null}
-              {modifierShortcuts ? (
-                <SettingRow
-                  label={t("desktopDictation.settings.modeLabel")}
-                  controlWidth="select"
-                  control={
-                    <SelectMenu
-                      size="sm"
-                      className="w-56"
-                      align="end"
-                      disabled={saving}
-                      aria-label={t("desktopDictation.settings.modeLabel")}
-                      value={settings.mode}
-                      options={[
-                        {
-                          value: "toggle",
-                          label: t("desktopDictation.settings.modeToggle"),
-                          description: t("desktopDictation.settings.modeToggleDescription"),
-                        },
-                        {
-                          value: "hold",
-                          label: t("desktopDictation.settings.modeHold"),
-                          description: t("desktopDictation.settings.modeHoldDescription"),
-                        },
-                      ]}
-                      onValueChange={(mode) => void update({ mode })}
-                    />
-                  }
-                />
-              ) : null}
+        />
+        {settings.enabled ? (
+          // Rows of their own, split by hairlines: the workspace every shortcut
+          // uses, each shortcut with its language and model, then the rest.
+          <>
+            {offerWorkspaces ? (
               <SettingRow
-                label={t("desktopDictation.settings.outputLabel")}
-                description={
-                  status.paste.available
-                    ? t("desktopDictation.settings.outputDescription")
-                    : pasteBlockedMessage(status.paste.blocker, t)
-                }
+                label={t("desktopDictation.settings.workspaceLabel")}
+                description={t("desktopDictation.settings.workspaceDescription")}
+                error={workspaceError}
                 controlWidth="select"
                 control={
-                  <SelectMenu<DesktopDictationOutput>
+                  <SelectMenu
+                    size="sm"
+                    className="w-56"
+                    align="end"
+                    variant={workspaces.choices.length > 8 ? "combobox" : "menu"}
+                    disabled={saving}
+                    aria-label={t("desktopDictation.settings.workspaceLabel")}
+                    invalid={workspaceError !== null}
+                    placeholder={t("desktopDictation.settings.workspacePlaceholder")}
+                    searchPlaceholder={t("desktopDictation.settings.workspaceSearch")}
+                    value={home.workspaceId}
+                    options={workspaceOptions(workspaces, t)}
+                    onValueChange={(id) => {
+                      const chosen = workspaces.choices.find((choice) => choice.id === id);
+                      if (chosen) void update({ workspace: { id, name: chosen.name } });
+                    }}
+                  />
+                }
+              />
+            ) : null}
+            {profiles.map((profile) => (
+              <ProfileRows
+                key={profile.id}
+                profile={profile}
+                profiles={profiles}
+                status={status}
+                single={single}
+                saving={saving}
+                recording={recordingFor === profile.id}
+                error={
+                  (keysError?.profileId === profile.id ? keysError.message : null) ??
+                  shortcutProblemMessage(
+                    status.shortcutErrors.find((item) => item.profileId === profile.id)?.problem,
+                    t,
+                  )
+                }
+                languageOptions={languageOptions(profile.language)}
+                modelOptions={offerModels ? modelOptions(profile.model) : null}
+                modelsLoading={modelsLoading}
+                modelError={modelProblem(profile.model)}
+                onModel={(value) => setModel(profile.id, value)}
+                onRecord={(recording) => {
+                  setKeysError(null);
+                  setRecordingFor(recording ? profile.id : null);
+                }}
+                onShortcut={(shortcut) =>
+                  saveProfiles(
+                    profiles.map((item) => (item.id === profile.id ? { ...item, shortcut } : item)),
+                  )
+                }
+                onLanguage={(value) => setLanguage(profile.id, value)}
+                onRemove={() => saveProfiles(profiles.filter((item) => item.id !== profile.id))}
+              />
+            ))}
+            {profiles.length < PROFILES_MAX && freeShortcut(profiles, status) ? (
+              <SettingRow
+                label={t("desktopDictation.settings.addLabel")}
+                description={t("desktopDictation.settings.addDescription")}
+                control={
+                  <Button size="sm" variant="outline" disabled={saving} onClick={addProfile}>
+                    {t("desktopDictation.settings.add")}
+                  </Button>
+                }
+              />
+            ) : null}
+            {modifierShortcuts ? (
+              <SettingRow
+                label={t("desktopDictation.settings.modeLabel")}
+                controlWidth="select"
+                control={
+                  <SelectMenu
                     size="sm"
                     className="w-56"
                     align="end"
                     disabled={saving}
-                    aria-label={t("desktopDictation.settings.outputLabel")}
-                    value={settings.output}
+                    aria-label={t("desktopDictation.settings.modeLabel")}
+                    value={settings.mode}
                     options={[
                       {
-                        value: "paste",
-                        label: t("desktopDictation.settings.outputPaste"),
-                        description: t("desktopDictation.settings.outputPasteDescription"),
+                        value: "toggle",
+                        label: t("desktopDictation.settings.modeToggle"),
+                        description: t("desktopDictation.settings.modeToggleDescription"),
                       },
                       {
-                        value: "pasteAndCopy",
-                        label: t("desktopDictation.settings.outputPasteAndCopy"),
-                        description: t("desktopDictation.settings.outputPasteAndCopyDescription"),
-                      },
-                      {
-                        value: "copy",
-                        label: t("desktopDictation.settings.outputCopy"),
-                        description: t("desktopDictation.settings.outputCopyDescription"),
+                        value: "hold",
+                        label: t("desktopDictation.settings.modeHold"),
+                        description: t("desktopDictation.settings.modeHoldDescription"),
                       },
                     ]}
-                    onValueChange={(output) => void update({ output })}
+                    onValueChange={(mode) => void update({ mode })}
                   />
                 }
               />
-              {accessibility && settings.output !== "copy" ? (
-                <SettingRow
-                  label={t("desktopDictation.settings.accessibilityLabel")}
-                  description={t("desktopDictation.settings.accessibilityDescription")}
-                  control={
-                    accessibility.granted ? (
-                      <span className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
-                        <CheckIcon className="size-4 text-status-success" aria-hidden />
-                        {t("desktopDictation.settings.allowed")}
-                      </span>
-                    ) : (
-                      <Button size="sm" onClick={() => requestPermission("accessibility")}>
-                        {t("desktopDictation.settings.allow")}
-                      </Button>
-                    )
-                  }
+            ) : null}
+            <SettingRow
+              label={t("desktopDictation.settings.outputLabel")}
+              description={
+                status.paste.available
+                  ? t("desktopDictation.settings.outputDescription")
+                  : pasteBlockedMessage(status.paste.blocker, t)
+              }
+              controlWidth="select"
+              control={
+                <SelectMenu<DesktopDictationOutput>
+                  size="sm"
+                  className="w-56"
+                  align="end"
+                  disabled={saving}
+                  aria-label={t("desktopDictation.settings.outputLabel")}
+                  value={settings.output}
+                  options={[
+                    {
+                      value: "paste",
+                      label: t("desktopDictation.settings.outputPaste"),
+                      description: t("desktopDictation.settings.outputPasteDescription"),
+                    },
+                    {
+                      value: "pasteAndCopy",
+                      label: t("desktopDictation.settings.outputPasteAndCopy"),
+                      description: t("desktopDictation.settings.outputPasteAndCopyDescription"),
+                    },
+                    {
+                      value: "copy",
+                      label: t("desktopDictation.settings.outputCopy"),
+                      description: t("desktopDictation.settings.outputCopyDescription"),
+                    },
+                  ]}
+                  onValueChange={(output) => void update({ output })}
                 />
-              ) : null}
-              {settings.retryShortcut !== undefined
-                ? (["retry", "cancel"] as const).map((action) => (
-                    <ActionShortcutRow
-                      key={action}
-                      action={action}
-                      keys={settings[actionKey(action)] ?? null}
-                      platform={platform}
-                      saving={saving}
-                      recording={recordingFor === `${ACTION_PREFIX}${action}`}
-                      error={
-                        (keysError?.profileId === `${ACTION_PREFIX}${action}`
-                          ? keysError.message
-                          : null) ??
-                        shortcutProblemMessage(
-                          status.actionShortcutErrors?.find((item) => item.action === action)
-                            ?.problem,
-                          t,
-                        )
-                      }
-                      onRecord={(recording) => {
-                        setKeysError(null);
-                        setRecordingFor(recording ? `${ACTION_PREFIX}${action}` : null);
-                      }}
-                      onClear={() => void update({ [actionKey(action)]: null })}
-                    />
-                  ))
-                : null}
-              {settings.vocabulary !== undefined ? (
-                <WordListRow
-                  words={settings.vocabulary}
-                  saving={saving}
-                  text={{
-                    label: t("desktopDictation.settings.vocabularyLabel"),
-                    description: t("desktopDictation.settings.vocabularyDescription"),
-                    placeholder: t("desktopDictation.settings.vocabularyPlaceholder"),
-                    termTooLong: (term, max) =>
-                      t("desktopDictation.settings.vocabularyTermTooLong", {
-                        term,
-                        max: String(max),
-                      }),
-                    tooMany: (max) =>
-                      t("desktopDictation.settings.vocabularyTooMany", { max: String(max) }),
-                  }}
-                  onChange={(vocabulary) => void update({ vocabulary })}
-                />
-              ) : null}
-            </>
-          ) : null}
-        </SettingRow>
+              }
+            />
+            {accessibility && settings.output !== "copy" ? (
+              <SettingRow
+                label={t("desktopDictation.settings.accessibilityLabel")}
+                description={t("desktopDictation.settings.accessibilityDescription")}
+                control={
+                  accessibility.granted ? (
+                    <span className="inline-flex items-center gap-1.5 text-sm text-fg-muted">
+                      <CheckIcon className="size-4 text-status-success" aria-hidden />
+                      {t("desktopDictation.settings.allowed")}
+                    </span>
+                  ) : (
+                    <Button size="sm" onClick={() => requestPermission("accessibility")}>
+                      {t("desktopDictation.settings.allow")}
+                    </Button>
+                  )
+                }
+              />
+            ) : null}
+            {settings.retryShortcut !== undefined
+              ? (["retry", "cancel"] as const).map((action) => (
+                  <ActionShortcutRow
+                    key={action}
+                    action={action}
+                    keys={settings[actionKey(action)] ?? null}
+                    platform={platform}
+                    saving={saving}
+                    recording={recordingFor === `${ACTION_PREFIX}${action}`}
+                    error={
+                      (keysError?.profileId === `${ACTION_PREFIX}${action}`
+                        ? keysError.message
+                        : null) ??
+                      shortcutProblemMessage(
+                        status.actionShortcutErrors?.find((item) => item.action === action)
+                          ?.problem,
+                        t,
+                      )
+                    }
+                    onRecord={(recording) => {
+                      setKeysError(null);
+                      setRecordingFor(recording ? `${ACTION_PREFIX}${action}` : null);
+                    }}
+                    onClear={() => void update({ [actionKey(action)]: null })}
+                  />
+                ))
+              : null}
+            {settings.vocabulary !== undefined ? (
+              <WordListRow
+                words={settings.vocabulary}
+                saving={saving}
+                text={{
+                  label: t("desktopDictation.settings.vocabularyLabel"),
+                  description: t("desktopDictation.settings.vocabularyDescription"),
+                  placeholder: t("desktopDictation.settings.vocabularyPlaceholder"),
+                  termTooLong: (term, max) =>
+                    t("desktopDictation.settings.vocabularyTermTooLong", {
+                      term,
+                      max: String(max),
+                    }),
+                  tooMany: (max) =>
+                    t("desktopDictation.settings.vocabularyTooMany", { max: String(max) }),
+                }}
+                onChange={(vocabulary) => void update({ vocabulary })}
+              />
+            ) : null}
+          </>
+        ) : null}
       </Section>
       {history.length > 0 ? (
         <Section
@@ -809,6 +905,8 @@ function ProfileRows({
   error,
   languageOptions,
   modelOptions,
+  modelsLoading,
+  modelError,
   onRecord,
   onShortcut,
   onLanguage,
@@ -825,6 +923,9 @@ function ProfileRows({
   languageOptions: SelectOption[];
   /** Null when there is no model to pick. */
   modelOptions: SelectOption[] | null;
+  modelsLoading: boolean;
+  /** Why the shortcut's model can't be used, when it can't. */
+  modelError: string | null;
   onRecord: (recording: boolean) => void;
   onShortcut: (shortcut: DesktopDictationShortcut) => void;
   onLanguage: (value: string) => void;
@@ -843,52 +944,51 @@ function ProfileRows({
         ? t(hold ? "desktopDictation.settings.pairHold" : "desktopDictation.settings.pairToggle")
         : t("desktopDictation.settings.acceleratorToggle");
   return (
-    <>
-      <SettingRow
-        label={single ? t("desktopDictation.settings.shortcutLabel") : profile.name}
-        description={description}
-        error={error}
-        controlWidth="select"
-        control={
-          recording ? (
-            <Button size="sm" variant="outline" onClick={() => onRecord(false)}>
-              {t("desktopDictation.settings.cancelRecording")}
-            </Button>
-          ) : (
-            <div className="flex w-full items-center gap-1">
-              <SelectMenu
-                size="sm"
-                className="min-w-0 flex-1"
-                align="end"
+    <SettingRow
+      label={single ? t("desktopDictation.settings.shortcutLabel") : profile.name}
+      description={description}
+      error={error}
+      controlWidth="select"
+      control={
+        recording ? (
+          <Button size="sm" variant="outline" onClick={() => onRecord(false)}>
+            {t("desktopDictation.settings.cancelRecording")}
+          </Button>
+        ) : (
+          <div className="flex w-full items-center gap-1">
+            <SelectMenu
+              size="sm"
+              className="min-w-0 flex-1"
+              align="end"
+              disabled={saving}
+              aria-label={t("desktopDictation.settings.shortcutLabel")}
+              options={options}
+              value={shortcutValue(shortcut)}
+              onValueChange={(value) => {
+                if (value === CUSTOM) {
+                  onRecord(true);
+                  return;
+                }
+                const next = shortcutFromValue(value);
+                if (next) onShortcut(next);
+              }}
+            />
+            {single ? null : (
+              <Button
+                size="icon-sm"
+                variant="ghost"
                 disabled={saving}
-                aria-label={t("desktopDictation.settings.shortcutLabel")}
-                options={options}
-                value={shortcutValue(shortcut)}
-                onValueChange={(value) => {
-                  if (value === CUSTOM) {
-                    onRecord(true);
-                    return;
-                  }
-                  const next = shortcutFromValue(value);
-                  if (next) onShortcut(next);
-                }}
-              />
-              {single ? null : (
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  disabled={saving}
-                  aria-label={t("desktopDictation.settings.remove")}
-                  title={t("desktopDictation.settings.remove")}
-                  onClick={onRemove}
-                >
-                  <Trash2Icon aria-hidden />
-                </Button>
-              )}
-            </div>
-          )
-        }
-      />
+                aria-label={t("desktopDictation.settings.remove")}
+                title={t("desktopDictation.settings.remove")}
+                onClick={onRemove}
+              >
+                <Trash2Icon aria-hidden />
+              </Button>
+            )}
+          </div>
+        )
+      }
+    >
       <SettingRow
         label={t("desktopDictation.settings.languageLabel")}
         description={t("desktopDictation.settings.languageDescription")}
@@ -910,6 +1010,7 @@ function ProfileRows({
         <SettingRow
           label={t("desktopDictation.settings.modelLabel")}
           description={t("desktopDictation.settings.modelDescription")}
+          error={modelError}
           controlWidth="select"
           control={
             <SelectMenu
@@ -917,6 +1018,8 @@ function ProfileRows({
               className="w-56"
               align="end"
               disabled={saving}
+              loading={modelsLoading}
+              invalid={modelError !== null}
               aria-label={t("desktopDictation.settings.modelLabel")}
               options={modelOptions}
               value={profile.model ? modelValue(profile.model) : WORKSPACE_MODEL}
@@ -925,11 +1028,79 @@ function ProfileRows({
           }
         />
       ) : null}
-    </>
+    </SettingRow>
   );
 }
 
 const NO_MODELS: readonly DictationModelChoice[] = [];
+
+/**
+ * The workspaces to pick from, as the workspace switcher lists them: under
+ * their organizations' names when there are several, each organization's by
+ * name, and a Personal one with its lock. The closed control names the
+ * organization too, which the menu's heading does. One with voice input off
+ * can't take dictations.
+ */
+function workspaceOptions(workspaces: DictationWorkspaces, t: OpenGeniText): SelectOption[] {
+  const severalOrganizations =
+    new Set(workspaces.choices.map((choice) => choice.organization ?? "")).size > 1;
+  const privately = t("desktopDictation.settings.workspacePrivate");
+  return workspaces.choices.map((choice) => {
+    const meta = choice.personal ? privately : undefined;
+    const organization = severalOrganizations ? choice.organization : undefined;
+    return {
+      value: choice.id,
+      label: choice.name,
+      leading: <WorkspaceTile choice={choice} />,
+      ...(meta ? { meta } : {}),
+      ...(organization
+        ? {
+            group: organization,
+            groupLeading: <OrganizationTile />,
+            triggerMeta: meta ? `${meta} · ${organization}` : organization,
+          }
+        : {}),
+      ...(choice.organization ? { keywords: [choice.organization] } : {}),
+      ...(choice.voiceInputOff
+        ? {
+            disabled: true,
+            disabledReason: t("desktopDictation.settings.workspaceVoiceOffOption"),
+            // The lock already means Personal in this list.
+            disabledIcon: <MicOffIcon />,
+          }
+        : {}),
+    };
+  });
+}
+
+/** An organization's tile, as in the workspace switcher. */
+function OrganizationTile() {
+  return (
+    <span
+      aria-hidden="true"
+      className="flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-surface-3 text-fg-muted [&_svg]:size-3"
+    >
+      <Building2Icon />
+    </span>
+  );
+}
+
+/** A workspace's tile, as in the workspace switcher: its initial, or a lock when Personal. */
+function WorkspaceTile({ choice }: { choice: DictationWorkspaceChoice }) {
+  return (
+    <span
+      aria-hidden="true"
+      className="flex size-4 shrink-0 items-center justify-center rounded-[4px] bg-surface-3 text-2xs font-semibold text-fg-muted [&_svg]:size-3"
+    >
+      {choice.personal ? <LockIcon /> : (choice.name.trim()[0] ?? "W").toUpperCase()}
+    </span>
+  );
+}
+
+/** "Azure Speech · MAI-Transcribe-2". */
+function modelLabel(entry: DictationModelChoice): string {
+  return `${entry.providerName} · ${entry.name}`;
+}
 
 function modelValue(model: DesktopDictationModel): string {
   return `${model.providerId}::${model.model}`;

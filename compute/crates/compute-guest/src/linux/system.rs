@@ -153,9 +153,6 @@ pub fn network(network: Option<&Network>) {
     if !network.dns.is_empty() {
         write_resolv_conf(&network.resolv_conf());
     }
-    if fs::symlink_metadata("/etc/hosts").is_err() {
-        let _ = fs::write("/etc/hosts", "127.0.0.1\tlocalhost\n::1\tlocalhost\n");
-    }
 }
 
 /// Writes `/etc/resolv.conf`, unless it is the kernel's own list, which
@@ -196,7 +193,7 @@ pub fn boot_identity(sandbox: &str) {
     if let Err(error) = sys::set_host_name(identity::host_name(sandbox)) {
         log(&format!("host name: {error}"));
     }
-    name_self(identity::host_name(sandbox));
+    write_hosts(Path::new("/"), Some(identity::host_name(sandbox)));
 }
 
 /// Makes the disk under `root` sandbox `sandbox`'s: if it was made for
@@ -227,6 +224,7 @@ pub fn boot_unowned() {
     if let Err(error) = disown_disk(Path::new("/")) {
         log(&format!("identity: {error}"));
     }
+    write_hosts(Path::new("/"), None);
 }
 
 /// Forgets the sandbox the disk under `root` was made for, if any. The
@@ -276,24 +274,25 @@ fn remove_tree(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Makes the guest's own host name `name` resolve locally (see
-/// [`identity::hosts_naming`]). The file need not survive a crash: every
+/// Makes `localhost`, and the guest's own host name `name` when it has
+/// one, resolve locally in the hosts file under `root` (see
+/// [`identity::hosts_file`]). The file need not survive a crash: every
 /// boot and new identity writes it again. A symlinked hosts file belongs
 /// to whatever manages it and is left alone.
-fn name_self(name: &str) {
-    let path = Path::new(identity::HOSTS_FILE);
-    if fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+fn write_hosts(root: &Path, name: Option<&str>) {
+    let path = under(root, identity::HOSTS_FILE);
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.file_type().is_symlink()) {
         return;
     }
-    let hosts = fs::read_to_string(path).ok();
-    let named = identity::hosts_naming(hosts.as_deref(), name);
-    if hosts.as_deref() == Some(named.as_str()) {
+    let hosts = fs::read_to_string(&path).ok();
+    let next_hosts = identity::hosts_file(hosts.as_deref(), name);
+    if hosts.as_deref() == Some(next_hosts.as_str()) {
         return;
     }
     let next = path.with_extension("opengeni-next");
-    let result = fs::write(&next, &named).and_then(|()| {
+    let result = fs::write(&next, &next_hosts).and_then(|()| {
         fs::set_permissions(&next, Permissions::from_mode(0o644))?;
-        fs::rename(&next, path)
+        fs::rename(&next, &path)
     });
     if let Err(error) = result {
         let _ = fs::remove_file(&next);
@@ -331,7 +330,7 @@ pub fn renew_identity(sandbox: &str, seed_hex: &str) -> io::Result<()> {
     let machine_id = identity::derived_machine_id(seed_hex, sandbox);
     replace(MACHINE_ID_FILE, &format!("{machine_id}\n"), 0o444)?;
     sys::set_host_name(identity::host_name(sandbox))?;
-    name_self(identity::host_name(sandbox));
+    write_hosts(Path::new("/"), Some(identity::host_name(sandbox)));
     replace(OWNER_FILE, &format!("{sandbox}\n"), 0o644)?;
     replace(SANDBOX_FILE, &format!("{sandbox}\n"), 0o644)
 }
@@ -436,6 +435,47 @@ mod tests {
         disown_disk(&root).unwrap();
         assert!(under(&root, STATE_DIR).exists());
         assert!(read(&root, GIVEN_FILE).is_some());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn every_boot_gives_localhost_its_loopback_addresses() {
+        const LOOPBACK: &str = "127.0.0.1\tlocalhost\n::1\tlocalhost\n";
+        // A disk whose image brought an empty hosts file, and one captured
+        // from a sandbox whose file earlier guests named it in alone.
+        for image in ["", "127.0.1.1\tsource\n"] {
+            let root = disk_of(Some("source"));
+            fs::write(under(&root, identity::HOSTS_FILE), image).unwrap();
+            write_hosts(&root, Some("clone"));
+            assert_eq!(
+                read(&root, identity::HOSTS_FILE),
+                Some(format!("{LOOPBACK}127.0.1.1\tclone\n"))
+            );
+            // A template's builder, with no name of its own.
+            fs::write(under(&root, identity::HOSTS_FILE), image).unwrap();
+            write_hosts(&root, None);
+            assert_eq!(
+                read(&root, identity::HOSTS_FILE),
+                Some(format!("{LOOPBACK}{image}"))
+            );
+            fs::remove_dir_all(&root).unwrap();
+        }
+
+        // An image with no hosts file gets one; a symlinked one is left
+        // to whatever manages it.
+        let root = disk_of(None);
+        write_hosts(&root, Some("abc"));
+        assert_eq!(
+            read(&root, identity::HOSTS_FILE),
+            Some(format!("{LOOPBACK}127.0.1.1\tabc\n"))
+        );
+        fs::remove_file(under(&root, identity::HOSTS_FILE)).unwrap();
+        std::os::unix::fs::symlink("managed", under(&root, identity::HOSTS_FILE)).unwrap();
+        write_hosts(&root, Some("abc"));
+        assert_eq!(
+            fs::read_link(under(&root, identity::HOSTS_FILE)).unwrap(),
+            Path::new("managed")
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 }

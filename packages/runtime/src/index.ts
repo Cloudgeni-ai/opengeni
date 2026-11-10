@@ -1006,6 +1006,8 @@ export {
 export {
   PROVIDER_QUOTA_EXHAUSTED_CODE,
   PROVIDER_QUOTA_RETRY_HINT_MS,
+  classifyProviderAccountRefusal,
+  classifyProviderAccountRefusalError,
   classifyProviderQuotaError,
   providerMessageRetryHintMs,
   providerQuotaExhaustedMessage,

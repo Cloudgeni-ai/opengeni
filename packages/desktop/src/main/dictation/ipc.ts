@@ -122,6 +122,7 @@ export function parseDictationReport(value: unknown): DesktopDictationReport | n
             ? report.message.slice(0, 300)
             : "Dictation failed.",
         retryable: report.retryable === true,
+        ...(report.fix === "settings" ? { fix: "settings" as const } : {}),
       };
     default:
       return null;

@@ -147,41 +147,84 @@ export async function getManagedSession(...args: Parameters<typeof resolveManage
 export const NATIVE_APP_CREDENTIAL_PREFIX = "ogapp_";
 
 /**
+ * A request that may also carry the desktop window's sign-in cookie. The
+ * desktop app signs its window in with the same device session as its own
+ * credential (`POST /v1/native-app/web-session`), and sends its own requests
+ * with that window's cookies. When such a request renews the shared session,
+ * the renewed cookie goes back with it; otherwise only the app's credential
+ * would ever renew the session, and the window's cookie would lapse a week
+ * after it was last set while the device stayed signed in.
+ */
+export type NativeAppWindowCookie = {
+  request: Request;
+  appendSetCookie: (cookie: string) => void;
+};
+
+/**
  * Resolve a native app credential exactly as the legacy managed cookie path
  * resolves a browser session: Better Auth validates expiry and renews the
  * durable session, then the canonical human session must still be valid. A
  * native credential never reads or selects a browser session set; each app
- * account holds its own independently revocable session.
+ * account holds its own independently revocable session. With `windowCookie`,
+ * a renewal also refreshes the window cookie of that same session when the
+ * request carries it.
  */
 export async function getNativeAppManagedSession(
   auth: ManagedAuth,
   credential: string,
   db: Database | undefined,
+  windowCookie?: NativeAppWindowCookie,
 ) {
   if (!credential.startsWith(NATIVE_APP_CREDENTIAL_PREFIX)) return null;
   const token = credential.slice(NATIVE_APP_CREDENTIAL_PREFIX.length);
   if (!/^[A-Za-z0-9]{16,128}$/u.test(token)) return null;
   const context = await auth.$context;
-  const signed = encodeURIComponent(
-    `${token}.${createHmac("sha256", context.secret).update(token, "utf8").digest("base64")}`,
-  );
-  const session = await withManagedAuthSessionLookup(() =>
+  const signedValue = `${token}.${createHmac("sha256", context.secret).update(token, "utf8").digest("base64")}`;
+  const cookieName = context.authCookies.sessionToken.name;
+  const result = await withManagedAuthSessionLookup(() =>
     auth.api.getSession({
-      headers: new Headers({ cookie: `${context.authCookies.sessionToken.name}=${signed}` }),
+      headers: new Headers({ cookie: `${cookieName}=${encodeURIComponent(signedValue)}` }),
       // Never serve a cached cookie snapshot: the app's session row is authoritative.
       query: { disableCookieCache: true },
+      returnHeaders: true,
     }),
   );
+  const session = result.response;
   if (!session?.user) return null;
   assertManagedUserAdmission(auth, session.user);
-  if (!db) return session;
-  const authSessionId = session.session?.id;
-  if (typeof authSessionId !== "string") return null;
-  const valid = await validateCanonicalHumanSession(db, {
-    authSessionId,
-    authUserId: session.user.id,
-  });
-  return valid ? session : null;
+  if (db) {
+    const authSessionId = session.session?.id;
+    if (typeof authSessionId !== "string") return null;
+    const valid = await validateCanonicalHumanSession(db, {
+      authSessionId,
+      authUserId: session.user.id,
+    });
+    if (!valid) return null;
+  }
+  // Only the window cookie of this exact session is renewed: the request
+  // already holds it, so the renewal grants nothing new.
+  if (windowCookie && requestCookie(windowCookie.request, cookieName) === signedValue) {
+    for (const cookie of setCookieHeaders(result.headers)) windowCookie.appendSetCookie(cookie);
+  }
+  return session;
+}
+
+/**
+ * Does the request carry a sign-in cookie: the managed session's own cookie
+ * or a browser login session set? Only says what was sent, never whether it
+ * is still valid. It only explains a refusal, so it never throws: without a
+ * readable cookie name it answers from the session-set cookie alone.
+ */
+export async function requestCarriesManagedSignInCookie(
+  request: Request,
+  auth: ManagedAuth | null | undefined,
+): Promise<boolean> {
+  if (requestCookie(request, MANAGED_AUTH_SESSION_SET_COOKIE) !== null) return true;
+  if (!auth) return false;
+  const name = await Promise.resolve(auth.$context)
+    .then((context) => context?.authCookies?.sessionToken?.name)
+    .catch(() => undefined);
+  return typeof name === "string" && requestCookie(request, name) !== null;
 }
 
 export function assertManagedUserAdmission(

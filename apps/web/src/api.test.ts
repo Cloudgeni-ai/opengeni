@@ -27,6 +27,7 @@ import {
   shouldBoundBrowserSseForProtocol,
   subscribeManagedActorInvalidation,
   subscribeManagedActorMutationBusy,
+  subscribeSignInLost,
 } from "./api";
 import { resetSignupAttributionForTests, retainSignupAttribution } from "./lib/signup-attribution";
 
@@ -220,6 +221,51 @@ describe("web API auth helpers", () => {
       expect(managedActorMutationBusySnapshot()).toBe(false);
     } finally {
       configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("a 401 that says the sign-in is gone tells the app, other refusals do not", async () => {
+    const originalFetch = globalThis.fetch;
+    const refusal = (status: number, code: string, reason?: string) =>
+      new Response(
+        JSON.stringify({
+          error: {
+            status,
+            code,
+            message: "refused",
+            retryable: false,
+            ...(reason ? { details: { code: reason } } : {}),
+          },
+        }),
+        { status, headers: { "content-type": "application/json" } },
+      );
+    const heard = jest.fn();
+    const unsubscribe = subscribeSignInLost(heard);
+    const cases = [
+      [refusal(401, "unauthenticated", "session_missing"), 1],
+      [refusal(401, "unauthenticated", "session_expired"), 1],
+      [refusal(401, "unauthenticated", "credential_invalid"), 0],
+      [refusal(401, "unauthenticated"), 0],
+      [refusal(403, "forbidden", "missing_permission"), 0],
+    ] as const;
+    try {
+      for (const [response, expected] of cases) {
+        heard.mockClear();
+        globalThis.fetch = (async () => response) as unknown as typeof fetch;
+        await expect(createOpenGeniClient().getAccessContext()).rejects.toThrow();
+        await Bun.sleep(0);
+        expect(heard).toHaveBeenCalledTimes(expected);
+      }
+      unsubscribe();
+      heard.mockClear();
+      globalThis.fetch = (async () =>
+        refusal(401, "unauthenticated", "session_expired")) as unknown as typeof fetch;
+      await expect(createOpenGeniClient().getAccessContext()).rejects.toThrow();
+      await Bun.sleep(0);
+      expect(heard).not.toHaveBeenCalled();
+    } finally {
+      unsubscribe();
       globalThis.fetch = originalFetch;
     }
   });
