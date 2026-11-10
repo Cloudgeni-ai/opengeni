@@ -2275,6 +2275,15 @@ jobs:
             done
           done
 
+      # The signed binaries are staged under agent/install/baked. The cargo
+      # build tree (four release builds) and SDKs this job never uses would
+      # otherwise leave the two-architecture image build without disk.
+      - name: Free runner disk before the image build
+        run: |
+          sudo rm -rf agent/target "$HOME/.cargo/registry" \
+            /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
