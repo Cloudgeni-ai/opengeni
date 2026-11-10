@@ -36,10 +36,10 @@ export type DesktopDictationHostProps = {
   /** Its name, so a problem says where to fix it ("Voice input is off in Acme."). */
   workspaceName?: string | null | undefined;
   /**
-   * Told to every press instead of recording, with Open settings, such as
-   * when the workspace saved for dictation is no longer the person's.
+   * The workspace saved for dictation is no longer the person's: every press
+   * is answered with that (naming `workspaceName`) instead of recording.
    */
-  blocked?: string | null | undefined;
+  workspaceGone?: boolean | undefined;
   /**
    * Shows the dictation settings, for Open settings on a dictation that
    * failed for a reason fixed there. Without it the app offers no such button.
@@ -196,12 +196,12 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
   capabilityRef.current = voiceInput?.capability ?? null;
   const place = useRef({
     name: props.workspaceName ?? null,
-    blocked: props.blocked ?? null,
+    gone: props.workspaceGone ?? false,
     openSettings: props.onOpenSettings ?? null,
   });
   place.current = {
     name: props.workspaceName ?? null,
-    blocked: props.blocked ?? null,
+    gone: props.workspaceGone ?? false,
     openSettings: props.onOpenSettings ?? null,
   };
 
@@ -211,7 +211,7 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
   const handle = useCallback((request: DesktopDictationRequest) => {
     const voiceNow = voiceRef.current;
     const { t: text, report: send } = words.current;
-    const { name, blocked, openSettings } = place.current;
+    const { name, gone, openSettings } = place.current;
     if (request.kind === "settings") {
       openSettings?.();
       return;
@@ -226,12 +226,19 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
           retryable: false,
           ...(openSettings ? { fix: "settings" as const } : {}),
         });
-      if (blocked) {
-        fail(blocked);
-        return;
-      }
       // With Open settings beside it, the message only says what is wrong:
       // the popup is one line.
+      if (gone) {
+        fail(
+          text(
+            openSettings
+              ? "desktopDictation.host.workspaceGoneBrief"
+              : "desktopDictation.host.workspaceGone",
+            { workspace: name ?? "" },
+          ),
+        );
+        return;
+      }
       if (!availableRef.current) {
         fail(
           name
@@ -327,7 +334,7 @@ export function DesktopDictationHost(props: DesktopDictationHostProps): null {
   // Record for the app's shortcut once this workspace's voice input is known,
   // so a press that opened this page waits for it rather than failing.
   // Blocked, it answers each press with why rather than leaving it waiting.
-  const listening = Boolean(dictation && ((workspaceId && voiceInput) || props.blocked));
+  const listening = Boolean(dictation && ((workspaceId && voiceInput) || props.workspaceGone));
   useEffect(() => {
     if (!dictation || !listening) return;
     const off = dictation.onRequest(handle);

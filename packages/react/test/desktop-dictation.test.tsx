@@ -151,7 +151,7 @@ async function mountHost(
     capability?: ClientVoiceInputConfig;
     workspaceId?: string | null;
     workspaceName?: string;
-    blocked?: string;
+    workspaceGone?: boolean;
     onOpenSettings?: () => void;
   } = {},
 ) {
@@ -164,7 +164,7 @@ async function mountHost(
       client={oneShotClient}
       workspaceId={options.workspaceId === undefined ? "ws-1" : options.workspaceId}
       workspaceName={options.workspaceName}
-      blocked={options.blocked}
+      workspaceGone={options.workspaceGone}
       onOpenSettings={options.onOpenSettings}
       capability={options.capability ?? resumableCapability}
       enabled={options.enabled ?? true}
@@ -392,13 +392,14 @@ describe("DesktopDictationHost", () => {
     expect(recorders).toHaveLength(1);
   });
 
-  test("a host told why it can't record answers every press with that and Open settings", async () => {
+  test("a host whose workspace is gone answers every press with that and Open settings", async () => {
     const app = fakeApp();
     const server = new FakeServer();
     let opened = 0;
     const { recorders } = await mountHost(app, server, {
       workspaceId: null,
-      blocked: "You're no longer in Acme. Choose a workspace in Settings.",
+      workspaceName: "Acme",
+      workspaceGone: true,
       onOpenSettings: () => {
         opened += 1;
       },
@@ -409,13 +410,27 @@ describe("DesktopDictationHost", () => {
     expect(app.last("d1")).toEqual({
       dictationId: "d1",
       phase: "failed",
-      message: "You're no longer in Acme. Choose a workspace in Settings.",
+      message: "You're no longer in Acme.",
       retryable: false,
       fix: "settings",
     });
     expect(recorders).toHaveLength(0);
     await app.send({ kind: "settings" });
     expect(opened).toBe(1);
+  });
+
+  test("a host whose workspace is gone says where to fix it when it can't open settings", async () => {
+    const app = fakeApp();
+    const server = new FakeServer();
+    await mountHost(app, server, { workspaceId: null, workspaceName: "Acme", workspaceGone: true });
+    await app.send({ kind: "start", dictationId: "d1", profileId: "default", language: null });
+    await waitFor(() => app.phases("d1").includes("failed"));
+    expect(app.last("d1")).toEqual({
+      dictationId: "d1",
+      phase: "failed",
+      message: "You're no longer in Acme. Choose a workspace in Settings.",
+      retryable: false,
+    });
   });
 
   test("voice input off in the dictation workspace names it", async () => {

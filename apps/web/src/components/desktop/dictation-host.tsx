@@ -4,7 +4,6 @@
 // Loaded only inside a desktop app with dictation.
 import { resolveWorkspaceVoiceInputEnabled } from "@opengeni/contracts";
 import { useAppContext } from "@opengeni/react/app/app-context";
-import { t } from "@opengeni/react/app/lib/console-text";
 import { DesktopDictationHost, useDesktopDictation } from "@opengeni/react/desktop-dictation";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { useCallback, useEffect } from "react";
@@ -52,16 +51,7 @@ export function DesktopDictationRoot() {
       client={client}
       workspaceId={home?.workspaceId ?? null}
       workspaceName={home?.name ?? null}
-      blocked={
-        home?.gone
-          ? t(
-              canOpenSettings
-                ? "desktopDictation.host.workspaceGoneBrief"
-                : "desktopDictation.host.workspaceGone",
-              { workspace: home.name ?? "" },
-            )
-          : null
-      }
+      workspaceGone={home?.gone ?? false}
       onOpenSettings={canOpenSettings ? openSettings : undefined}
       enabled={
         workspace ? (resolveWorkspaceVoiceInputEnabled(workspace.settings) ?? true) : undefined
