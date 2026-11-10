@@ -594,8 +594,8 @@ export class BrowserDownloadStore {
     try {
       return await Promise.race([
         done,
-        new Promise<null>((resolve) => {
-          timer = setTimeout(() => resolve(null), waitMs);
+        new Promise<null>((settle) => {
+          timer = setTimeout(() => settle(null), waitMs);
           timer.unref?.();
         }),
       ]);
