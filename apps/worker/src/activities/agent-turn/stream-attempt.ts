@@ -16,6 +16,7 @@ import {
   deliverPendingSandboxRestoreNotice,
   getSandboxRecoveryDiscontinuity,
   readSandboxReducedSave,
+  readUnseenSandboxStop,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
@@ -95,7 +96,7 @@ import {
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { type MintedRunGitCredentials, type MintedSandboxCodemodeToken } from "../environment";
 import { withFirstPartyTools } from "../goals";
-import { reducedWorkspaceSaveNote, turnInput } from "../run-input";
+import { reducedWorkspaceSaveNote, turnInput, unseenSandboxStopNote } from "../run-input";
 import { createRuntimeBatcher, currentActivityContext, nextStreamEvent } from "../streaming";
 import type {
   TurnActivityServices as ActivityServices,
@@ -697,6 +698,15 @@ export async function runTurnStreamAttempt(
       const reducedSave = await (async () =>
         await readSandboxReducedSave(db, input.workspaceId, input.sessionId))().catch(() => null);
       const workspaceSaveNote = reducedSave ? reducedWorkspaceSaveNote(reducedSave) : undefined;
+      // A managed sandbox stopped (or lost) since the model's last output was
+      // or will be replaced from its saved /workspace alone; say so before the
+      // model relies on anything else. Optional: never fails a turn.
+      const stopBackend = activeSandboxBackend ?? groupBoxBackend;
+      const unseenStop =
+        stopBackend !== "none" && stopBackend !== "selfhosted"
+          ? await readUnseenSandboxStop(db, input.workspaceId, input.sessionId).catch(() => null)
+          : null;
+      const sandboxStopNote = unseenStop ? unseenSandboxStopNote(unseenStop) : undefined;
       const prepared = await turnInput(db, runtime, agent, trigger, {
         turnId: activeTurnId,
         fileAuthority: {
@@ -706,6 +716,7 @@ export async function runTurnStreamAttempt(
         recovering: turn.executionGeneration > 1,
         ...(workspaceRecoveryNote ? { workspaceRecoveryNote } : {}),
         ...(workspaceSaveNote ? { workspaceSaveNote } : {}),
+        ...(sandboxStopNote ? { sandboxStopNote } : {}),
         programmaticApprovalAcknowledged,
         ...(codemodeContinuationNote ? { codemodeContinuationNote } : {}),
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),

@@ -45,6 +45,7 @@ export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./session-search-records";
 export * from "./model-call-timing";
+export * from "./sandbox-stop-notice";
 export * from "./turn-timing-profile";
 export * from "./turn-timing-profile-store";
 export * from "./model-provider-execution-inputs";

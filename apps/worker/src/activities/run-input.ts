@@ -179,6 +179,8 @@ export type TurnInputOptions = {
   workspaceRecoveryNote?: string;
   /** The latest save left rebuildable folders out (see `reducedWorkspaceSaveNote`). */
   workspaceSaveNote?: string;
+  /** The managed sandbox stopped since the model's last output (see `unseenSandboxStopNote`). */
+  sandboxStopNote?: string;
   /** The chat's attendance differs from how it started (see `attendanceChangeNote`). */
   attendanceNote?: string;
   /**
@@ -918,6 +920,7 @@ export async function turnInput(
     options.knowledgeSourcePreparationNote,
     options.workspaceRecoveryNote,
     options.workspaceSaveNote,
+    options.sandboxStopNote,
     options.attendanceNote,
   );
   if (trigger.type === "user.message") {
@@ -1016,6 +1019,28 @@ export function reducedWorkspaceSaveNote(save: {
   const more = save.omittedPaths.length - shown.length;
   const paths = `${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
   return `Workspace note: this workspace was last saved at ${save.capturedAt} without these folders, which can be rebuilt: ${paths}. If they are missing, reinstall dependencies or rebuild before relying on them.`;
+}
+
+/** Turn notice after the chat's managed sandbox stopped since the model's last
+ * output: its replacement starts from the saved /workspace alone, so anything
+ * else the model set up is gone, and it would otherwise find out only from
+ * failing commands. */
+export function unseenSandboxStopNote(stop: {
+  kind: "stopped" | "lost";
+  at: string;
+  reason: string | null;
+}): string {
+  const at = new Date(stop.at);
+  const when = Number.isFinite(at.getTime())
+    ? ` at ${at.toISOString().slice(0, 16).replace("T", " ")} UTC`
+    : "";
+  const what =
+    stop.kind === "lost"
+      ? `stopped unexpectedly${when}`
+      : stop.reason === "idle"
+        ? `was stopped${when} because it was idle`
+        : `was stopped${when}`;
+  return `Sandbox note: this chat's sandbox ${what}; commands now run in a replacement restored from its saved /workspace. Only /workspace is kept: files elsewhere (such as /tmp), tools installed outside /workspace, and programs or background commands that were running are gone. Recreate what you still need before relying on it.`;
 }
 
 async function openSuffixMessageInput(

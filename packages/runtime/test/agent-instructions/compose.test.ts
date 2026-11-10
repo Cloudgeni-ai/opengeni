@@ -219,6 +219,20 @@ describe("modular composer: module selection (AC12)", () => {
     expect(composed).not.toContain(".opengeni/files");
   });
 
+  test("only a managed sandbox is told that just /workspace survives an idle stop", () => {
+    // A Connected Machine keeps /tmp and its programs; a managed sandbox
+    // restored after an idle stop keeps only /workspace.
+    const sentence = "only `/workspace` is kept when an idle sandbox is stopped";
+    const capabilities = allAgentCapabilities();
+    expect(compose(capabilities, { ...NO_RESOURCES, managedSandbox: true }).composed).toContain(
+      sentence,
+    );
+    expect(
+      compose(capabilities, { ...NO_RESOURCES, connectedMachine: true }).composed,
+    ).not.toContain(sentence);
+    expect(compose(capabilities, NO_RESOURCES).composed).not.toContain(sentence);
+  });
+
   test("background-command guidance needs a sandbox or Connected Machine", () => {
     for (const capabilities of [allAgentCapabilities(), noneAgentCapabilities()]) {
       const detached = compose(capabilities, NO_RESOURCES).composed;
