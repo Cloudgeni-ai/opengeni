@@ -99,6 +99,33 @@ export function isReadOnlyPathProbeMiss(op: string, error: unknown): boolean {
   );
 }
 
+const CALLER_PATH_OPERATIONS = new Set<string>([
+  ...READ_ONLY_PATH_PROBES,
+  "writeFile",
+  "editor.createFile",
+  "editor.updateFile",
+  "editor.deleteFile",
+]);
+
+/** The SDK's typed refusals of a path the caller supplied: it escapes the
+ * workspace root or the configured path grants (`invalid_manifest_path`), or
+ * the box's resolver refused it (`path_resolution_error`). Matched by code so
+ * a second copy of the SDK error classes still classifies. */
+const CALLER_PATH_REJECTION_CODES = new Set<string>([
+  "invalid_manifest_path",
+  "path_resolution_error",
+]);
+
+/** A path the caller (normally the model) asked for was refused before any
+ * provider work: the request was invalid, the provider did not fail. Only
+ * caller-addressed file operations qualify; a platform operation such as
+ * manifest materialization with a bad path is a real failure. */
+export function isCallerPathRejection(op: string, error: unknown): boolean {
+  if (!CALLER_PATH_OPERATIONS.has(op) || !error || typeof error !== "object") return false;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && CALLER_PATH_REJECTION_CODES.has(code);
+}
+
 const instrumented = new WeakSet<object>();
 
 /**

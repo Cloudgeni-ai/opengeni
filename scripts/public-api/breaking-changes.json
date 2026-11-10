@@ -465,5 +465,14 @@
     "removedInMajor": 6,
     "sunset": "2026-10-27",
     "reason": "Pre-launch removal of the retired Variable Set and environment fields, recorded in docs/design/api-compatibility-policy.md: vaults replaced Variable Sets in SDK 2.0.0, no session, scheduled task, rig version or draft has used them since, and incident telemetry names its vault and secrets directly. No security exception or SDK revision refusal is claimed."
+  },
+  {
+    "ids": [
+      "schema:SaveGoogleDriveIntegrationSourceRequest:$",
+      "schema:SaveGoogleDriveIntegrationSourceRequest:$.idempotencyKey",
+      "schema:SaveGoogleDriveIntegrationSourceRequest:$.sources"
+    ],
+    "securityException": true,
+    "reason": "Description-only change forced by the CASA 6.1.1 security upgrade of zod (4.4.3 has a high-severity memory-exhaustion advisory; fixed in 4.6.6). zod 4.6 renders this z.intersection as one object where 4.4 emitted allOf, which the surface recorded as unknown. The server schema and wire behavior are unchanged: these fields were always required, and the route has answered 410 since Knowledge source sync was retired. Recorded in docs/design/api-compatibility-policy.md."
   }
 ]

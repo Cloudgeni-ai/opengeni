@@ -2585,7 +2585,7 @@ in order; later system items keep their conversation position. Tool names unsupp
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
 ordinary function tools and Opengeni's text compaction remain available.
 
-Claude Opus 5.5 and Sonnet 5.5 can write a progress update before a tool call
+Claude Fable 5.2, Opus 5.5 and Sonnet 5.5 can write a progress update before a tool call
 as its own `thinking` block. For those models requests use
 `thinking.display: "updates"` (beta `thinking-display-updates-2026-08-18`):
 reasoning blocks come back empty, and only progress updates carry text. That
@@ -2738,9 +2738,14 @@ without persisting arbitrary provider explanation text.
 
 ### Claude subscription request identity
 
-OAuth requests use the pinned Claude Code 2.1.285 / Agent SDK 0.3.276 profile in
-`packages/runtime/src/claude-code-identity.ts`: `beta=true`, CLI user-agent,
-Stainless SDK 0.127.0, macOS/arm64 and Node v26.3.0 headers, `x-app: cli`, and
+OAuth requests use a pinned Claude Code profile in
+`packages/runtime/src/claude-code-identity.ts`. Models default to Claude Code
+2.1.285 / Agent SDK 0.3.276. A model that release doesn't support names the
+first pinned release that does (Claude Fable 5.2 uses 2.1.321 / Agent SDK
+0.3.321 with Stainless SDK 0.128.0). Existing models never move to a newer
+release, because the version sits in the billing system block at the start of
+every cached prefix. The profile sets `beta=true`, CLI user-agent,
+the release's Stainless SDK version, macOS/arm64 and Node v26.3.0 headers, `x-app: cli`, and
 the captured v2d dispatch selector. These are compatibility headers, not a
 statement about the actual worker runtime. API-key requests do not use this profile.
 

@@ -1,5 +1,7 @@
 # @opengeni/network
 
+## 6.13.0
+
 ## 6.12.0
 
 ### Minor Changes

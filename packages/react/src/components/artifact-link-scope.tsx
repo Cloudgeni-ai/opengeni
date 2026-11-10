@@ -4,10 +4,16 @@ import {
   type OpenGeniLinkTarget,
 } from "@opengeni/sdk";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import type { StoredFileClientLike } from "../stored-file-preview";
 import type { OpenGeniLinkResolver } from "./open-geni-links";
 
 export type ArtifactLinkScope = {
-  client: Partial<Pick<OpenGeniClient, "resolveArtifactLink">>;
+  /**
+   * Reads in this workspace: artifact links, and the files sent with user
+   * messages (`getFile` and `createFileDownloadUrl`; without them those files
+   * show as named chips that can't open).
+   */
+  client: Partial<Pick<OpenGeniClient, "resolveArtifactLink">> & StoredFileClientLike;
   workspaceId: string;
   sessionId?: string | undefined;
   /** Explicit host destinations retain precedence over automatic metadata reads. */

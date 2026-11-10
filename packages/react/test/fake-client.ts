@@ -31,7 +31,13 @@ export function savedComposerPolicy(
  * Structural fake for `SessionClientLike`: implement only the methods the
  * hook under test calls; everything else throws with a clear message.
  */
-const OPTIONAL_METHODS = new Set(["findGoal", "updateSessionAttention", "listEventPage"]);
+const OPTIONAL_METHODS = new Set([
+  "findGoal",
+  "updateSessionAttention",
+  "listEventPage",
+  "getToolActionReview",
+  "getToolReviewDetails",
+]);
 
 export function fakeClient(
   partial: Partial<SessionClientLike<ChatClient>>,

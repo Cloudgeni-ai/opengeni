@@ -1,21 +1,17 @@
-import type { ClientModel, EffectiveSessionControl, FileAsset } from "@opengeni/sdk";
+import type { ClientModel, EffectiveSessionControl } from "@opengeni/sdk";
 import {
-  AppWindowIcon,
   ArrowUpIcon,
   ChevronDownIcon,
   FileIcon,
-  ImageIcon,
   LoaderCircleIcon,
   PaperclipIcon,
   PauseIcon,
   PlayIcon,
-  RotateCwIcon,
   SquareIcon,
   XIcon,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import {
-  cloneElement,
   createContext,
   forwardRef,
   useCallback,
@@ -32,7 +28,6 @@ import {
   type ComponentPropsWithoutRef,
   type DragEvent,
   type KeyboardEvent,
-  type ReactElement,
   type ReactNode,
   type Ref,
   type RefObject,
@@ -71,7 +66,6 @@ import { useCalmServiceFailure } from "../lib/use-calm-service-failure";
 import { defaultChatComposerMessages, type ChatComposerMessages } from "../composer-messages";
 import { singleSendText } from "../messages/single-send";
 import type { PickerModelRow } from "../model-policy";
-import { useLightboxOptional } from "../timeline/screenshot-lightbox";
 import { readStoredFilePreviewUrl, useStoredFiles } from "../stored-file-preview";
 import { OPEN_WORKSTREAM_CONTROL_EVENT } from "../workstream-control-event";
 import { CommandPalette as CommandPaletteView } from "./command-palette";
@@ -80,20 +74,15 @@ import { TooltipProvider } from "./tooltip";
 import { useOpenGeniText } from "../messages/runtime";
 import { useComposerImageTags } from "../hooks/use-composer-image-tags";
 import { restoredImageKey } from "../lib/image-markers";
+import {
+  AttachmentChips,
+  ComposerTip,
+  ImageTagLabel,
+  storedFileAttachment,
+} from "./attachment-chips";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 export type { ResponsiveBasis } from "../lib/composer-responsive-context";
-
-function ComposerTip({
-  tip,
-  children,
-}: {
-  tip: string;
-  children: ReactElement<{ title?: string }>;
-}) {
-  if (!tip) return children;
-  return cloneElement(children, { title: tip });
-}
 
 export type ComposerDelivery = Pick<
   ComposerState,
@@ -1240,7 +1229,14 @@ export function RestoredResources() {
   const fileEntries = stored.ready
     ? restoredFiles.flatMap(({ fileId, index }) => {
         const file = stored.files.get(fileId);
-        return file ? [{ index, attachment: restoredFileAttachment(index, file) }] : [];
+        return file
+          ? [
+              {
+                index,
+                attachment: storedFileAttachment(`restored-resource:${index}:${file.id}`, file),
+              },
+            ]
+          : [];
       })
     : [];
   const shownFileIds = new Set(fileEntries.map((entry) => entry.attachment.file.id));
@@ -1268,6 +1264,7 @@ export function RestoredResources() {
     <>
       {fileEntries.length > 0 ? (
         <AttachmentChips
+          className={ATTACHMENT_CHIPS_PADDING}
           attachments={fileEntries.map((entry) => entry.attachment)}
           messages={controller.messages}
           disabled={controller.disabled}
@@ -1275,7 +1272,6 @@ export function RestoredResources() {
             const index = indexById.get(id);
             if (index !== undefined) onRemove(index);
           }}
-          onRetainPreview={noRetainedPreview}
           onLoadPreview={loadPreview}
           imageNumbers={restoredImageNumbers}
         />
@@ -1292,28 +1288,14 @@ export function RestoredResources() {
   );
 }
 
-const noRetainedPreview = () => undefined;
-
-function restoredFileAttachment(
-  index: number,
-  file: FileAsset,
-): UseFileAttachmentsResult["attachments"][number] & { file: FileAsset } {
-  return {
-    id: `restored-resource:${index}:${file.id}`,
-    name: file.filename,
-    contentType: file.contentType,
-    sizeBytes: file.sizeBytes,
-    status: "ready",
-    file,
-    ...(file.appShot ? { appShot: file.appShot } : {}),
-  };
-}
+const ATTACHMENT_CHIPS_PADDING = "px-3 pt-2 pb-0.5";
 
 export function Attachments() {
   const controller = useComposerController();
   if (!controller.attachments || controller.attachments.attachments.length === 0) return null;
   return (
     <AttachmentChips
+      className={ATTACHMENT_CHIPS_PADDING}
       attachments={controller.attachments.attachments}
       messages={controller.messages}
       disabled={controller.disabled}
@@ -2241,15 +2223,6 @@ function RestoredResourceChips({
   );
 }
 
-/** The `Image N` a chip shows when its image has a tag in the text. */
-function ImageTagLabel({ children }: { children: ReactNode }) {
-  return (
-    <span data-image-tag="" className="shrink-0 font-medium text-og-fg tabular-nums">
-      {children}
-    </span>
-  );
-}
-
 function ConfirmBar({
   command,
   messages,
@@ -2305,330 +2278,6 @@ function ConfirmBar({
           {messages.runCommand(command.name)}
         </button>
       </span>
-    </div>
-  );
-}
-
-function AttachmentChips({
-  attachments,
-  messages,
-  disabled,
-  onRemove,
-  onRetry,
-  onRetainPreview,
-  onLoadPreview,
-  imageNumbers,
-}: {
-  attachments: UseFileAttachmentsResult["attachments"];
-  messages: ChatComposerMessages;
-  disabled: boolean;
-  onRemove: (id: string) => void;
-  onRetry?: ((id: string) => void) | undefined;
-  onRetainPreview: UseFileAttachmentsResult["retainPreview"];
-  onLoadPreview: UseFileAttachmentsResult["loadPreview"];
-  /** With image tags on, the number each image's tag in the text carries. */
-  imageNumbers?: ReadonlyMap<string, number> | undefined;
-}) {
-  const t = useOpenGeniText();
-  const lightbox = useLightboxOptional();
-  const previewRequest = useRef<AbortController | null>(null);
-  const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
-  const [previewErrorId, setPreviewErrorId] = useState<string | null>(null);
-  // Thumbnails always show: an uploaded image without a live local preview (a
-  // restored draft, a revoked or broken object URL) loads its stored copy.
-  const [storedThumbs, setStoredThumbs] = useState<Record<string, string>>({});
-  const [brokenLocal, setBrokenLocal] = useState<ReadonlySet<string>>(() => new Set());
-  const thumbRequests = useRef<Map<string, AbortController>>(new Map());
-  const localPreview = (attachment: UseFileAttachmentsResult["attachments"][number]) =>
-    attachment.previewUrl && !brokenLocal.has(attachment.id) ? attachment.previewUrl : undefined;
-
-  useEffect(() => {
-    if (!onLoadPreview) return;
-    for (const attachment of attachments) {
-      const id = attachment.id;
-      if (
-        attachment.status !== "ready" ||
-        !attachment.file ||
-        !attachment.contentType.startsWith("image/") ||
-        (attachment.previewUrl && !brokenLocal.has(id)) ||
-        storedThumbs[id] ||
-        thumbRequests.current.has(id)
-      ) {
-        continue;
-      }
-      const controller = new AbortController();
-      thumbRequests.current.set(id, controller);
-      void onLoadPreview(id, controller.signal)
-        .then((url) => {
-          if (url && !controller.signal.aborted) {
-            setStoredThumbs((current) => ({ ...current, [id]: url }));
-          }
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          if (thumbRequests.current.get(id) === controller) thumbRequests.current.delete(id);
-        });
-    }
-  }, [attachments, brokenLocal, onLoadPreview, storedThumbs]);
-  useEffect(() => {
-    const requests = thumbRequests.current;
-    return () => {
-      for (const controller of requests.values()) controller.abort();
-      requests.clear();
-    };
-  }, []);
-
-  useEffect(() => () => previewRequest.current?.abort(), [onLoadPreview]);
-
-  async function openPreview(
-    attachment: UseFileAttachmentsResult["attachments"][number],
-    source: HTMLButtonElement,
-    canLoadPreview: boolean,
-  ) {
-    previewRequest.current?.abort();
-    const attachmentId = attachment.id;
-    const local = localPreview(attachment);
-    const releaseSource = local ? onRetainPreview(attachmentId) : undefined;
-    let src = local ?? storedThumbs[attachmentId];
-    // An unretained local URL may already be revoked: prefer the stored copy.
-    if (!releaseSource && canLoadPreview) src = storedThumbs[attachmentId];
-    if (!src && canLoadPreview) {
-      const controller = new AbortController();
-      previewRequest.current = controller;
-      setPreviewLoadingId(attachmentId);
-      setPreviewErrorId(null);
-      try {
-        src = await onLoadPreview!(attachmentId, controller.signal);
-        if (controller.signal.aborted) return;
-        if (!src) {
-          setPreviewErrorId(attachmentId);
-          return;
-        }
-      } catch {
-        if (!controller.signal.aborted) setPreviewErrorId(attachmentId);
-        return;
-      } finally {
-        if (previewRequest.current === controller) {
-          setPreviewLoadingId(null);
-        }
-      }
-    }
-    lightbox!.open(
-      src!,
-      attachment.name,
-      source,
-      messages.attachmentPreviewLabel,
-      attachment.name,
-      {
-        download: messages.downloadAttachment(attachment.name),
-        close: messages.closeAttachmentPreview,
-      },
-      releaseSource,
-    );
-  }
-
-  return (
-    // Compact chips extend their touch targets beyond their visible borders.
-    // Keep neighboring rows and columns outside those expanded hit areas.
-    <div className="flex flex-wrap gap-1.5 px-3 pt-2 pb-0.5 pointer-coarse:gap-2.5">
-      {attachments.map((attachment) => {
-        const failed = attachment.status === "failed";
-        const secureContextRequired = attachment.errorCode === "secure_context_required";
-        const previewFailed = previewErrorId === attachment.id;
-        const previewLoading = previewLoadingId === attachment.id;
-        const local = localPreview(attachment);
-        const thumb = local ?? storedThumbs[attachment.id];
-        // A local object URL that fails (revoked, unreadable) falls back to the stored copy.
-        const onThumbError = local
-          ? () =>
-              setBrokenLocal((current) =>
-                current.has(attachment.id) ? current : new Set(current).add(attachment.id),
-              )
-          : undefined;
-        const canLoadPreview = Boolean(
-          lightbox &&
-          onLoadPreview &&
-          attachment.status === "ready" &&
-          attachment.file &&
-          attachment.contentType.startsWith("image/"),
-        );
-        const appShot = attachment.appShot;
-        const statusText = previewFailed
-          ? (messages.previewUnavailable ?? t("composer.previewUnavailable"))
-          : attachment.status === "uploading"
-            ? messages.uploading
-            : failed
-              ? attachment.error || messages.uploadFailed
-              : appShot
-                ? t("composer.appShotSummary", { app: appShot.app })
-                : messages.formatBytes(attachment.sizeBytes);
-        // An app-shot reads as the window it shows: its title first, then the
-        // app, with a wider thumbnail so the window is recognizable.
-        const displayName = appShot ? appShot.title.trim() || appShot.app : attachment.name;
-        // A plain file reads on one line (thumbnail, name, size) so it costs the
-        // conversation as little height as possible; states that need words
-        // (failures, app-shots) keep their two-line layout.
-        const compact = !appShot && !failed && !previewFailed;
-        const imageNumber = imageNumbers?.get(attachment.id);
-        const thumbSize = appShot ? "h-10 w-16" : compact ? "size-6" : "size-8";
-        return (
-          <div
-            key={attachment.id}
-            data-app-shot={appShot ? "" : undefined}
-            className={cn(
-              "flex min-w-0 items-center gap-2 rounded-og-md border text-og-sm",
-              compact ? "py-1 pr-1 pl-1" : "px-2 py-1.5",
-              // A captured window arrives from outside the page: let it settle in.
-              appShot && "animate-og-enter",
-              failed
-                ? cn(
-                    "border-og-status-failed/40 bg-og-status-failed/10",
-                    secureContextRequired
-                      ? "max-w-full items-start sm:max-w-[32rem]"
-                      : appShot
-                        ? "max-w-[320px]"
-                        : "max-w-[240px]",
-                  )
-                : cn(
-                    "border-og-border bg-og-surface-2",
-                    appShot ? "max-w-[320px]" : "max-w-[240px]",
-                  ),
-            )}
-          >
-            {lightbox && (thumb || canLoadPreview) ? (
-              <button
-                type="button"
-                className={cn(
-                  thumbSize,
-                  "shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent",
-                  // The slim chip's 24px preview keeps a 44px touch target; the
-                  // hit area grows over the name, never the remove button.
-                  compact &&
-                    "relative overflow-visible pointer-coarse:before:absolute pointer-coarse:before:-inset-y-2.5 pointer-coarse:before:-left-2.5 pointer-coarse:before:-right-2.5 pointer-coarse:before:content-['']",
-                  appShot && "border border-og-border bg-og-surface-1",
-                  !thumb && "flex items-center justify-center disabled:cursor-wait",
-                )}
-                aria-label={messages.previewAttachment(displayName)}
-                aria-busy={previewLoading || undefined}
-                disabled={previewLoading}
-                onClick={(event) =>
-                  void openPreview(attachment, event.currentTarget, canLoadPreview)
-                }
-              >
-                {thumb ? (
-                  <img
-                    src={thumb}
-                    alt=""
-                    onError={onThumbError}
-                    className={cn(
-                      "h-full w-full object-cover transition-opacity hover:opacity-80",
-                      appShot && "object-top",
-                      compact && "rounded",
-                    )}
-                  />
-                ) : previewLoading ? (
-                  <LoaderCircleIcon className="size-4 animate-og-spin text-og-fg-muted" />
-                ) : (
-                  <ImageIcon className="size-4 text-og-fg-muted" />
-                )}
-              </button>
-            ) : thumb ? (
-              <img
-                src={thumb}
-                alt=""
-                onError={onThumbError}
-                className={cn(thumbSize, "shrink-0 rounded object-cover", appShot && "object-top")}
-              />
-            ) : attachment.contentType.startsWith("image/") ? (
-              <ImageIcon className="size-4 shrink-0 text-og-fg-muted" />
-            ) : (
-              <FileIcon className="size-4 shrink-0 text-og-fg-muted" />
-            )}
-            {compact ? (
-              <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
-                {imageNumber !== undefined ? (
-                  <ImageTagLabel>{t("composer.imageTag", { number: imageNumber })}</ImageTagLabel>
-                ) : null}
-                <span
-                  className={cn(
-                    "truncate",
-                    imageNumber === undefined ? "font-medium text-og-fg" : "text-og-fg-muted",
-                  )}
-                >
-                  {displayName}
-                </span>
-                <span className="shrink-0 text-og-xs text-og-fg-subtle tabular-nums">
-                  {statusText}
-                </span>
-              </div>
-            ) : (
-              <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 items-baseline gap-1.5">
-                  {imageNumber !== undefined ? (
-                    <ImageTagLabel>{t("composer.imageTag", { number: imageNumber })}</ImageTagLabel>
-                  ) : null}
-                  <div className="min-w-0 truncate font-medium text-og-fg">{displayName}</div>
-                </div>
-                {appShot && !failed && !previewFailed && attachment.status !== "uploading" ? (
-                  <ComposerTip
-                    tip={
-                      appShot.text?.trim()
-                        ? t("composer.appShotTextIncluded")
-                        : t("composer.appShotNoText")
-                    }
-                  >
-                    <div className="flex min-w-0 items-center gap-1 text-og-xs text-og-fg-subtle">
-                      <AppWindowIcon aria-hidden className="size-3 shrink-0" />
-                      <span className="truncate">{statusText}</span>
-                    </div>
-                  </ComposerTip>
-                ) : secureContextRequired ? (
-                  <div className="break-words text-og-xs leading-4 text-og-status-failed">
-                    {statusText}
-                  </div>
-                ) : failed || previewFailed ? (
-                  <ComposerTip tip={statusText}>
-                    <div className="truncate text-og-xs text-og-status-failed">{statusText}</div>
-                  </ComposerTip>
-                ) : (
-                  <div className="truncate text-og-xs text-og-fg-subtle">{statusText}</div>
-                )}
-              </div>
-            )}
-            {attachment.status === "uploading" ? (
-              <LoaderCircleIcon className="size-3.5 shrink-0 animate-og-spin" />
-            ) : null}
-            {failed && !secureContextRequired && onRetry ? (
-              <ComposerTip tip={messages.retryUpload}>
-                <button
-                  type="button"
-                  onClick={() => onRetry(attachment.id)}
-                  disabled={disabled}
-                  className="shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-10"
-                  aria-label={messages.retryAttachment(displayName)}
-                >
-                  <RotateCwIcon className="size-3.5" />
-                </button>
-              </ComposerTip>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => onRemove(attachment.id)}
-              disabled={disabled}
-              className={cn(
-                "shrink-0 rounded-og-xs p-1 text-og-fg-muted hover:bg-og-surface-1 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50",
-                // The slim chip keeps a 44px touch target with an invisible hit area.
-                compact
-                  ? "relative pointer-coarse:p-1.5 pointer-coarse:before:absolute pointer-coarse:before:-inset-2.5 pointer-coarse:before:content-['']"
-                  : "pointer-coarse:size-10",
-              )}
-              aria-label={messages.removeAttachment(displayName)}
-            >
-              <XIcon className="size-3.5" />
-            </button>
-          </div>
-        );
-      })}
     </div>
   );
 }

@@ -227,6 +227,7 @@ import { ShimmerText } from "../timeline/shimmer-text";
 import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 import { isChunkLoadError } from "../lib/chunk-load-error";
 import { LazyPart } from "./lazy-part";
+import { MessageAttachments } from "./message-attachments";
 import { LoadFailureNotice } from "./load-failure-notice";
 import { AuthNeededRow } from "./auth-needed-row";
 
@@ -346,6 +347,12 @@ export type MessageTimelineProps = {
    * sandbox downloads by default.
    */
   resolveLink?: OpenGeniLinkResolver | undefined;
+  /**
+   * Reads in the conversation's workspace: workspace-less `artifact:` links
+   * resolve through it, and the files sent with each user message load from
+   * it (`getFile` and `createFileDownloadUrl`), shown above the message the
+   * way they looked in the composer. `SessionConversation` supplies it.
+   */
   artifactScope?: ArtifactLinkScope | undefined;
   /** Resolve opaque retained screenshot receipts through the authenticated host SDK. */
   loadRetainedScreenshot?: RetainedScreenshotLoader | undefined;
@@ -4545,10 +4552,14 @@ function UserMessageRow({
   const t = useOpenGeniText();
   const enter = useEntranceAnimation();
   const deliveryFailed = item.delivery?.state === "failed";
+  const resources = item.resources ?? [];
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
         <MessageSenderSlot item={item} />
+        {resources.some((resource) => resource.kind === "file") ? (
+          <MessageAttachments resources={resources} className="justify-end" />
+        ) : null}
         <CopyHoverFrame
           copyText={
             item.text ||

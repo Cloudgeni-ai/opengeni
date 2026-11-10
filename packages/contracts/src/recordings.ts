@@ -667,6 +667,16 @@ export const CreateRecordingPersonRequest = /* @__PURE__ */ defineSchema(() =>
 );
 export type CreateRecordingPersonRequest = z.infer<typeof CreateRecordingPersonRequest>;
 
+/** A stretch of a recording one of its tracks has no audio for. */
+export const RecordingUnrecordedStretch = /* @__PURE__ */ defineSchema(() =>
+  z.object({
+    startMilliseconds: z.number().int().min(0),
+    /** Null when the stretch runs to the end of the recording. */
+    endMilliseconds: z.number().int().min(0).nullable(),
+  }),
+);
+export type RecordingUnrecordedStretch = z.infer<typeof RecordingUnrecordedStretch>;
+
 export const RecordingTrack = /* @__PURE__ */ defineSchema(() =>
   z.object({
     trackNumber: z.number().int(),
@@ -676,6 +686,13 @@ export const RecordingTrack = /* @__PURE__ */ defineSchema(() =>
     chunkCount: z.number().int(),
     totalBytes: z.number().int(),
     durationMilliseconds: z.number().int(),
+    /**
+     * Stretches of the recording this track has no audio for, because its
+     * source was lost (a microphone unplugged, tab sharing ended) or joined
+     * late. Empty while the recording is being captured and when the track
+     * covers all of it.
+     */
+    unrecorded: z.array(RecordingUnrecordedStretch),
     /** The worker has prepared one seekable file for this track. */
     playable: z.boolean(),
     /** A video track's picture, once its video is prepared; null otherwise. */

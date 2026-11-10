@@ -45,6 +45,7 @@ import {
 } from "@opengeni/db";
 import type { EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
+import { releaseAdmissionBlocksAfterAccessChange } from "../application/admission-release";
 import {
   NatsControlRpc,
   NatsOpStreamTransport,
@@ -81,6 +82,8 @@ export type FleetServices = {
    * this to the same viewer/provider verification + rematerialization path; core
    * tests may omit it when exercising pointer mechanics only. */
   ensureSessionGroupReady?: (ctx: FleetContext) => Promise<FleetReadinessHold>;
+  /** Deliver wakes now when a move lets a waiting saved message start. */
+  requestSessionWorkflowWakeDispatch?: () => Promise<void>;
 };
 
 export type FleetReadinessHold = {
@@ -1008,6 +1011,22 @@ export async function swapActiveSandbox(
         };
       }
       if (result.swapped && result.pointer) {
+        // A saved message may have been waiting for a machine its sender may
+        // use. An agent moving its own running turn has nothing waiting.
+        if (!ctx.attemptAuthority) {
+          await releaseAdmissionBlocksAfterAccessChange(
+            {
+              db: services.db,
+              requestSessionWorkflowWakeDispatch: services.requestSessionWorkflowWakeDispatch,
+            },
+            {
+              accountId: ctx.accountId,
+              workspaceId: ctx.workspaceId,
+              change: "machine",
+              sessionIds: [ctx.sessionId],
+            },
+          );
+        }
         return {
           swapped: true,
           activeSandboxId: result.pointer.activeSandboxId,

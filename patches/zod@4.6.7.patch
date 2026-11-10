@@ -1,0 +1,54 @@
+diff --git a/v4/core/regexes.cjs b/v4/core/regexes.cjs
+index 6846616cdb3358139aed229078ac5248cb53f27b..a2380931f00fc03945e15fcf027b047fc30fba79 100644
+--- a/v4/core/regexes.cjs
++++ b/v4/core/regexes.cjs
+@@ -134,7 +134,8 @@ function datetime(args) {
+     if (args.offset)
+         opts.push(`([+-](?:[01]\\d|2[0-3]):[0-5]\\d)`);
+     // RFC 3339 mandates seconds wherever the time carries a `Z` or an offset, so only the unqualified form `local` adds may omit them
+-    const qualified = `${timeSource({ precision: args.precision, seconds: true })}(?:${opts.join("|")})`;
++    // opengeni patch: keep zod 4.4 behavior, where seconds stay optional in datetime()
++    const qualified = `${timeSource({ precision: args.precision })}(?:${opts.join("|")})`;
+     const timeRegex = args.local ? `${qualified}|${timeSource({ precision: args.precision })}` : qualified;
+     return new RegExp(`^${dateSource}T(?:${timeRegex})$`);
+ }
+diff --git a/v4/core/regexes.js b/v4/core/regexes.js
+index e433775ab3fd5fba02d9648ba05182a3bfcd0792..16cc25be4e74b5a9dd7bdd7945dc95c283a75bdc 100644
+--- a/v4/core/regexes.js
++++ b/v4/core/regexes.js
+@@ -101,7 +101,8 @@ export function datetime(args) {
+     if (args.offset)
+         opts.push(`([+-](?:[01]\\d|2[0-3]):[0-5]\\d)`);
+     // RFC 3339 mandates seconds wherever the time carries a `Z` or an offset, so only the unqualified form `local` adds may omit them
+-    const qualified = `${timeSource({ precision: args.precision, seconds: true })}(?:${opts.join("|")})`;
++    // opengeni patch: keep zod 4.4 behavior, where seconds stay optional in datetime()
++    const qualified = `${timeSource({ precision: args.precision })}(?:${opts.join("|")})`;
+     const timeRegex = args.local ? `${qualified}|${timeSource({ precision: args.precision })}` : qualified;
+     return new RegExp(`^${dateSource}T(?:${timeRegex})$`);
+ }
+diff --git a/v4/core/util.cjs b/v4/core/util.cjs
+index 7db65e0cada986f911868d1c0464fe2adee1fb66..42259c9ef192059323671ab6df9f1c2b9588f5b0 100644
+--- a/v4/core/util.cjs
++++ b/v4/core/util.cjs
+@@ -688,6 +688,8 @@ function getSizableOrigin(input) {
+ const highSurrogate = /[\uD800-\uDBFF]/;
+ // Code points in `str`: a surrogate pair counts once, a lone surrogate as itself. Hand-rolled because the string iterator allocates and runs ~250x slower on this path; the regex probe exits ~50x quicker for a string with no astral characters.
+ function codePointLength(str) {
++    // opengeni patch: keep zod 4.4 behavior, where string length checks count UTF-16 units
++    return str.length;
+     const units = str.length;
+     if (!highSurrogate.test(str))
+         return units;
+diff --git a/v4/core/util.js b/v4/core/util.js
+index b53c7a0ae51b9ad0e49f7262f282b01c67671681..9ada2993018b16a49ddd634973a75a86e001949e 100644
+--- a/v4/core/util.js
++++ b/v4/core/util.js
+@@ -617,6 +617,8 @@ export function getSizableOrigin(input) {
+ const highSurrogate = /[\uD800-\uDBFF]/;
+ // Code points in `str`: a surrogate pair counts once, a lone surrogate as itself. Hand-rolled because the string iterator allocates and runs ~250x slower on this path; the regex probe exits ~50x quicker for a string with no astral characters.
+ export function codePointLength(str) {
++    // opengeni patch: keep zod 4.4 behavior, where string length checks count UTF-16 units
++    return str.length;
+     const units = str.length;
+     if (!highSurrogate.test(str))
+         return units;

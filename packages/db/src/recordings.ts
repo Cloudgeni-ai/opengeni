@@ -12,6 +12,7 @@ import {
   type RecordingTranscriptPage,
   type RecordingTranscriptSegment,
   type RecordingTranscriptVersion,
+  type RecordingUnrecordedStretch,
   type RecordingPurpose,
   type RecordingTitleSource,
   type RecordingVisibility,
@@ -103,6 +104,7 @@ function trackView(row: TrackRow): RecordingTrack {
     chunkCount: row.chunkCount,
     totalBytes: Number(row.totalBytes),
     durationMilliseconds: row.durationMilliseconds,
+    unrecorded: row.unrecorded ?? [],
     playable: row.preparedObjectKey !== null,
     video:
       row.videoWidth !== null && row.videoHeight !== null && row.videoFrameCount !== null
@@ -1829,6 +1831,119 @@ export async function reserveRecordingChunks(
   });
 }
 
+/**
+ * The shortest stretch without audio that counts as unrecorded. Shorter ones
+ * are a reopened microphone's moment of setup, not missing speech.
+ */
+export const RECORDING_UNRECORDED_MIN_MILLISECONDS = 2_000;
+
+/**
+ * Where one track has no audio, from the places its chunks declared on the
+ * recording's timeline: before its first chunk, between runs of chunks (its
+ * source was lost and came back), and after its last one when the recording
+ * went on. `recordingEndMilliseconds` is where the recording's last track ends.
+ */
+export function recordingUnrecordedStretches(
+  chunks: ReadonlyArray<{
+    chunkNumber: number;
+    startMilliseconds: number;
+    durationMilliseconds: number;
+  }>,
+  recordingEndMilliseconds: number,
+): RecordingUnrecordedStretch[] {
+  const ordered = [...chunks].sort((left, right) => left.chunkNumber - right.chunkNumber);
+  const stretches: RecordingUnrecordedStretch[] = [];
+  let covered = 0;
+  for (const chunk of ordered) {
+    const start = Math.max(0, Math.round(chunk.startMilliseconds));
+    if (start - covered >= RECORDING_UNRECORDED_MIN_MILLISECONDS) {
+      stretches.push({ startMilliseconds: covered, endMilliseconds: start });
+    }
+    covered = Math.max(covered, start + Math.max(0, Math.round(chunk.durationMilliseconds)));
+  }
+  if (recordingEndMilliseconds - covered >= RECORDING_UNRECORDED_MIN_MILLISECONDS) {
+    stretches.push({ startMilliseconds: covered, endMilliseconds: null });
+  }
+  return stretches;
+}
+
+/** Work out and save every track's unrecorded stretches from its chunk rows. */
+async function saveUnrecordedStretches(
+  tx: Database,
+  workspaceId: string,
+  recordingId: string,
+): Promise<void> {
+  const tracks = await tx
+    .select({ trackNumber: schema.recordingTracks.trackNumber })
+    .from(schema.recordingTracks)
+    .where(
+      and(
+        eq(schema.recordingTracks.workspaceId, workspaceId),
+        eq(schema.recordingTracks.recordingId, recordingId),
+      ),
+    );
+  const chunks = await tx
+    .select({
+      trackNumber: schema.recordingChunks.trackNumber,
+      chunkNumber: schema.recordingChunks.chunkNumber,
+      startMilliseconds: schema.recordingChunks.startMilliseconds,
+      durationMilliseconds: schema.recordingChunks.durationMilliseconds,
+    })
+    .from(schema.recordingChunks)
+    .where(
+      and(
+        eq(schema.recordingChunks.workspaceId, workspaceId),
+        eq(schema.recordingChunks.recordingId, recordingId),
+      ),
+    );
+  const end = chunks.reduce(
+    (latest, chunk) => Math.max(latest, chunk.startMilliseconds + chunk.durationMilliseconds),
+    0,
+  );
+  for (const track of tracks) {
+    const own = chunks.filter((chunk) => chunk.trackNumber === track.trackNumber);
+    await tx
+      .update(schema.recordingTracks)
+      .set({ unrecorded: recordingUnrecordedStretches(own, end) })
+      .where(
+        and(
+          eq(schema.recordingTracks.workspaceId, workspaceId),
+          eq(schema.recordingTracks.recordingId, recordingId),
+          eq(schema.recordingTracks.trackNumber, track.trackNumber),
+        ),
+      );
+  }
+}
+
+/**
+ * Work out the unrecorded stretches of a recording finalized before they
+ * were saved. Does nothing for one still being captured, or whose tracks
+ * already have them. Returns whether it saved any.
+ */
+export async function fillRecordingUnrecordedStretches(
+  db: Database,
+  input: RecordingActor & { recordingId: string },
+): Promise<boolean> {
+  return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (tx) => {
+    const recording = await lockRecording(tx, input.workspaceId, input.recordingId);
+    if (recording.state === "capturing") return false;
+    const [unfilled] = await tx
+      .select({ trackNumber: schema.recordingTracks.trackNumber })
+      .from(schema.recordingTracks)
+      .where(
+        and(
+          eq(schema.recordingTracks.workspaceId, input.workspaceId),
+          eq(schema.recordingTracks.recordingId, input.recordingId),
+          isNull(schema.recordingTracks.unrecorded),
+        ),
+      )
+      .limit(1);
+    if (!unfilled) return false;
+    await saveUnrecordedStretches(tx, input.workspaceId, input.recordingId);
+    return true;
+  });
+}
+
 export async function listRecordingChunks(
   db: Database,
   input: RecordingActor & {
@@ -2039,6 +2154,7 @@ export async function finalizeRecording(
     if (totalChunks === 0) {
       throw new RecordingConflictError("This recording has no audio", "empty_recording");
     }
+    await saveUnrecordedStretches(tx, input.workspaceId, input.recordingId);
     const endedAt = input.endedAt ?? new Date();
     const refusedCode = input.transcriptRefusedCode?.slice(0, 128) ?? null;
     const [finalized] = await tx

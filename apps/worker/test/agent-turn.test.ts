@@ -6079,6 +6079,37 @@ describe("transient provider error classifier", () => {
     ).not.toContain("SECRET");
   });
 
+  test("a claim refused for a personal machine's approval or membership names that cause", () => {
+    const refusal = (message: string) =>
+      new SessionEventPersistenceError(
+        {
+          code: "db_failure",
+          sqlState: "42501",
+          stage: "session_attempts.claim",
+          eventTypes: ["session.turn.attempt_claimed"],
+          correlationId: "corr-claim-refusal",
+          attempts: 1,
+          retryOutcome: "not_retryable",
+          database: {},
+        },
+        Object.assign(new Error(message), { code: "42501" }),
+      );
+    for (const [message, reason] of [
+      ["personal machine use requires explicit grant", "personal_resource_grant_required"],
+      ["personal machine authority is no longer live", "personal_resource_grant_required"],
+      ["initiating human lacks target-workspace membership", "initiator_membership_required"],
+      // Another person's message on the owner's machine: moving the chat fixes it.
+      ["only the personal machine owner may attach it", "database_claim_rejected"],
+    ] as const) {
+      const failure = preClaimAdmissionFailure(refusal(message));
+      expect(failure).toMatchObject({
+        details: [{ disposition: "blocked", sqlState: "42501", reason }],
+      });
+      // The database's words stay out of workflow history.
+      expect(JSON.stringify(failure)).not.toContain(message);
+    }
+  });
+
   test("exports exact post-claim recovery truth only for operational database failures", () => {
     const identity = {
       turnId: "turn-claimed",
