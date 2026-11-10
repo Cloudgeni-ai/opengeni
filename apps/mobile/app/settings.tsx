@@ -60,7 +60,9 @@ function Settings() {
           text: "Sign out",
           style: "destructive",
           onPress: () => {
-            void signOut(account.id).then(() => dismissToHome());
+            void signOut(account.id).then((signedOut) => {
+              if (signedOut) dismissToHome();
+            });
           },
         },
       ],

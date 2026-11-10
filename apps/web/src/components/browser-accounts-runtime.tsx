@@ -25,6 +25,8 @@ import { OrganizationOnboardingPanel } from "@/components/organization-onboardin
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import { userErrorText } from "@opengeni/react/ui/api-error";
 import { managedAuthModeFromSearch } from "@/lib/managed-auth-url";
+import { recordingOwnerForSignOut } from "@/lib/sign-out-recordings";
+import { prepareRecordingsForSignOut } from "@opengeni/react/meetings-recorder";
 import {
   browserAccountBridgeBlockersSnapshot,
   installBrowserAccountBridgeOperations,
@@ -357,6 +359,11 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
     const replacement =
       projection.slots.find((slot) => slot.id !== selectedSlotId && slot.state === "active")?.id ??
       null;
+    if (
+      !(await prepareRecordingsForSignOut(recordingOwnerForSignOut(projection, selectedSlotId)))
+    ) {
+      return;
+    }
     await accounts.logoutSlot(selectedSlotId, replacement);
   }
 

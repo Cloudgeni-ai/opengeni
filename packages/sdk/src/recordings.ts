@@ -578,6 +578,12 @@ export type StoredRecordingChunk = Omit<RecordingChunk, "bytes"> & {
 export type StoredRecording = {
   workspaceId: string;
   recordingId: string;
+  /**
+   * Who made it, as the app knows them (such as their sign-in email), so
+   * their recordings can be found and removed when they sign out. Absent
+   * when the app gave none; such a recording counts as anyone's.
+   */
+  ownerId?: string;
   create: CreateRecordingRequest;
   /** The server has the recording. */
   created: boolean;
@@ -1286,6 +1292,8 @@ export const RECORDING_AUDIO_UPLOAD_PIECE_BYTES = 8 * 1024 * 1024;
 export type UploadRecordingAudioOptions = {
   uploader: RecordingUploader;
   workspaceId: string;
+  /** Who is sending it; see {@link StoredRecording.ownerId}. */
+  ownerId?: string;
   /** One encoded audio file, such as a recorder's WebM or a phone's AAC. */
   audio: Blob;
   /** Its type; the blob's own type by default. */
@@ -1345,6 +1353,7 @@ export async function uploadRecordingAudio(
   }
   await options.uploader.begin({
     workspaceId: options.workspaceId,
+    ...(options.ownerId ? { ownerId: options.ownerId } : {}),
     recordingId,
     create: {
       ...create,
@@ -1378,6 +1387,38 @@ export async function uploadRecordingAudio(
     endedAt: new Date(startedAtMilliseconds + duration),
     ...(options.signal ? { signal: options.signal } : {}),
   });
+}
+
+/**
+ * The recordings this device still holds for `ownerId` (theirs, and those
+ * with no owner), or for everyone when it is null: audio not on the server
+ * yet, or a capture still going. Empty means signing them out loses nothing.
+ */
+export async function localRecordingsOf(
+  store: RecordingChunkStore,
+  ownerId: string | null,
+): Promise<StoredRecording[]> {
+  const recordings = await store.listRecordings();
+  return ownerId === null
+    ? recordings
+    : recordings.filter((recording) => !recording.ownerId || recording.ownerId === ownerId);
+}
+
+/**
+ * Remove from this device what {@link localRecordingsOf} finds for
+ * `ownerId`: each recording and every chunk it still has. The server keeps
+ * what it already received. Returns the ids removed.
+ */
+export async function discardLocalRecordingsOf(
+  store: RecordingChunkStore,
+  ownerId: string | null,
+): Promise<string[]> {
+  const removed: string[] = [];
+  for (const recording of await localRecordingsOf(store, ownerId)) {
+    await store.deleteRecording(recording.recordingId);
+    removed.push(recording.recordingId);
+  }
+  return removed;
 }
 
 // --- Local stores -------------------------------------------------------------
@@ -1664,6 +1705,8 @@ export type RecorderErrorCode =
 export type RecorderOptions = {
   client: RecordingTransport;
   workspaceId: string;
+  /** Who records; see {@link StoredRecording.ownerId}. */
+  ownerId?: string;
   /**
    * meeting (the default), or dictation: speech recorded to type it, kept
    * private, transcribed with the workspace's voice input and never listed
@@ -2485,6 +2528,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       emit({ recordingId, title: options.title ?? null });
       await uploader.begin({
         workspaceId: options.workspaceId,
+        ...(options.ownerId ? { ownerId: options.ownerId } : {}),
         recordingId,
         create: {
           recordingId,

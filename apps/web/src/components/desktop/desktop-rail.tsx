@@ -13,6 +13,7 @@ import {
   DropdownMenuSubTrigger,
 } from "@opengeni/react/ui/dropdown-menu";
 import { desktopCapability } from "@opengeni/react/app/lib/desktop";
+import { prepareRecordingsForSignOut } from "@opengeni/react/meetings-recorder";
 
 /** Keep the desktop app's links, notifications and computer on the open workspace. */
 export function useDesktopWorkspace(workspaceId: string): void {
@@ -92,7 +93,12 @@ export function DesktopAccountMenuItems() {
         variant="destructive"
         disabled={!activeId}
         onSelect={() => {
-          if (activeId) void bridge.accounts.signOut(activeId);
+          if (!activeId) return;
+          // This account's page and storage are its own: everything here is
+          // theirs. Recordings still uploading: wait, or discard and sign out.
+          void prepareRecordingsForSignOut(null).then((proceed) => {
+            if (proceed) void bridge.accounts.signOut(activeId);
+          });
         }}
       >
         <LogOutIcon />

@@ -9,6 +9,7 @@ import { useNavigate } from "@tanstack/react-router";
 // The light entry: the capture code loads only when Meetings is first opened.
 import {
   MeetingRecorderProvider,
+  recordingOwnerKey,
   useMeetingRecorderLostTrack,
   type MeetingRecorderLostTrack,
 } from "@opengeni/react/meetings-recorder";
@@ -28,6 +29,7 @@ export function useRecorderPerson(person: string | null | undefined): string | n
 export function ConsoleMeetingRecorderProvider({
   workspaceId,
   person,
+  owner,
   fallbackWorkspaceId,
   client,
   children,
@@ -36,6 +38,11 @@ export function ConsoleMeetingRecorderProvider({
   workspaceId: string | null;
   /** Who is signed in; null when nobody is, undefined while it is being read. */
   person: string | null | undefined;
+  /**
+   * Their sign-in email, which their recordings on this device are kept
+   * under; null when there is none, undefined while it is being read.
+   */
+  owner?: string | null | undefined;
   /** Where a desktop call notification opens Meetings outside a workspace. */
   fallbackWorkspaceId: string | null;
   /** The console's SDK client: no <OpenGeniProvider> is mounted this high. */
@@ -44,11 +51,13 @@ export function ConsoleMeetingRecorderProvider({
 }) {
   const navigate = useNavigate();
   const scope = useRecorderPerson(person);
+  const ownerId = recordingOwnerKey(useRecorderPerson(owner));
   const meetingsWorkspaceId = scope === null ? null : (workspaceId ?? fallbackWorkspaceId);
   return (
     <MeetingRecorderProvider
       workspaceId={workspaceId}
       scope={scope}
+      ownerId={ownerId}
       client={client}
       onOpenMeetings={
         meetingsWorkspaceId

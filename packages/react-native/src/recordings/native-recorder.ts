@@ -76,6 +76,12 @@ export interface NativeAudioCapture {
   activeRecordingId(): string | null;
   /** Start or stop sending the live transcript's copy of the audio as `onPcm`. Older builds lack it. */
   setLivePcm?(enabled: boolean): void;
+  /**
+   * Keep a folder (created if missing) and its contents off iCloud backups.
+   * iOS only; Android leaves the folder out through the config plugin's
+   * backup rules. Older builds lack it.
+   */
+  excludeFromBackup?(path: string): void;
   addListener(
     event: "onChunk",
     listener: (event: NativeAudioChunkEvent) => void,
@@ -260,6 +266,7 @@ export function createNativeRecorder(options: NativeRecorderOptions): Recorder {
       emit({ recordingId, title: options.title ?? null, live: null });
       await uploader.begin({
         workspaceId: options.workspaceId,
+        ...(options.ownerId ? { ownerId: options.ownerId } : {}),
         recordingId,
         create: {
           recordingId,

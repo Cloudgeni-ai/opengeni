@@ -148,6 +148,7 @@ export const SECTION_KEYS = [
   "page-org-people",
   "page-org-connectors",
   "page-eu-only",
+  "page-sign-out-recordings",
   "page-github-integration",
 ] as const;
 
@@ -1122,6 +1123,15 @@ export const SECTIONS: readonly SectionMeta[] = [
       "The organization setting and what an EU-only workspace switches off, in production components.",
     usedOn: "Organization settings > Security & data, model pickers, feature settings",
     load: () => import("./page-eu-only"),
+  },
+  {
+    key: "page-sign-out-recordings",
+    group: "Pages",
+    title: "Sign out with recordings uploading",
+    purpose:
+      "Signing out while recordings are still uploading from this device asks to wait for the upload or discard them; with nothing pending it signs out at once.",
+    usedOn: "Account menu > Sign out, browser accounts, desktop app accounts",
+    load: () => import("./page-sign-out-recordings"),
   },
   {
     key: "page-github-integration",
