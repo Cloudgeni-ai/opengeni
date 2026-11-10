@@ -597,7 +597,7 @@ describe("capabilities browser e2e", () => {
     }
   }, 60_000);
 
-  test("native Atlassian retirement preserves hosted agent tools and historical cleanup", async () => {
+  test("a historical native Atlassian connection stays hidden while hosted agent tools remain", async () => {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await context.newPage();
     try {
@@ -619,43 +619,12 @@ describe("capabilities browser e2e", () => {
       await expectVisible(
         page.getByRole("button", { name: /Let agents work in Jira and Confluence/ }),
       );
-      await expectVisible(page.getByRole("button", { name: /Previous sync connections/ }));
-      expect(
-        await page.getByText("You can set up both. Each one is connected separately.").count(),
-      ).toBe(0);
-      await page.getByRole("button", { name: /Previous sync connections/ }).click();
-      await page
-        .getByRole("button", { name: "More actions for Jira & Confluence", exact: true })
-        .click();
-      await page.getByRole("menuitem", { name: "Disconnect previous sync", exact: true }).click();
-      const confirmation = page.getByRole("dialog");
-      await expectVisible(
-        confirmation.getByRole("button", { name: "Disconnect previous sync", exact: true }),
-      );
-      await expectText(confirmation, "Its imported documents and history remain.");
-      await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
-      await expectHidden(confirmation);
-      await expectText(page.locator("main"), "Knowledge sync retired");
-      await expectText(page.locator("main"), "Imported documents and history remain.");
-      expect(
-        await page
-          .getByRole("button", { name: /Reconnect|Choose sources|Resume/, exact: false })
-          .count(),
-      ).toBe(0);
-      await assertAccessibleAndBounded(page, "main");
-      await page.screenshot({
-        path: `${evidenceDir}atlassian-retired-desktop.png`,
-        fullPage: true,
-      });
-      expect(state.nativeRequests).toBe(0);
-
-      state.nativeConnected = false;
-      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/plugins`, {
-        waitUntil: "networkidle",
-      });
-      await page.getByRole("button", { name: /^Jira & Confluence(?:\s|$)/ }).click();
+      // Integration Knowledge sync was removed: a saved native connection is
+      // inert and no longer shown, and nothing calls the native routes.
       expect(await page.getByRole("button", { name: /Previous sync connections/ }).count()).toBe(0);
+      expect(await page.getByText(/Knowledge sync retired/).count()).toBe(0);
       await expectVisible(page.getByRole("heading", { name: "Jira & Confluence", exact: true }));
+      await assertAccessibleAndBounded(page, "main");
       expect(state.nativeRequests).toBe(0);
     } catch (error) {
       console.error(
@@ -672,7 +641,7 @@ describe("capabilities browser e2e", () => {
     }
   }, 60_000);
 
-  test("a saved Google Drive Knowledge source shows only as retired and removable", async () => {
+  test("a saved Google Drive Knowledge source facet is never shown", async () => {
     const state: DriveUiState = {
       driveSaves: 0,
       binding: driveBinding(),
@@ -701,15 +670,10 @@ describe("capabilities browser e2e", () => {
       await instance
         .getByRole("button", { name: "Manage facets for Google Drive — Finance" })
         .click();
-      // Integration Knowledge sync is retired: the saved source stays visible
-      // so it can be removed, but it cannot be configured or resumed.
-      const facet = instance.locator('[data-integration-facet="drive-content"]');
-      await expectVisible(facet);
-      await expectText(facet, "Retired");
-      await expectText(facet, "Knowledge sync is retired");
-      expect(await facet.getByRole("button", { name: "Configure" }).count()).toBe(0);
-      expect(await facet.getByRole("button", { name: "Edit" }).count()).toBe(0);
-      await expectVisible(facet.getByRole("button", { name: "Remove" }));
+      // Integration Knowledge sync was removed: a stale knowledge_source facet
+      // from an older server is never shown; the account's other facets are.
+      await expectVisible(instance.locator('[data-integration-facet="account-identity"]'));
+      expect(await instance.locator('[data-integration-facet="drive-content"]').count()).toBe(0);
       await assertAccessibleAndBounded(page, '[data-integration-sheet="google-drive"]');
       expect(state.driveSaves).toBe(0);
     } finally {
@@ -950,8 +914,7 @@ async function expectNoCapabilitiesChunkCycle(assetsDir: string): Promise<void> 
           member.startsWith("capabilities-services-") ||
           member.startsWith("integration-account-facets-") ||
           member.startsWith("integration-facets-panel-") ||
-          member.startsWith("custom-api-setup-dialog-") ||
-          member.startsWith("google-drive-knowledge-source-dialog-"),
+          member.startsWith("custom-api-setup-dialog-"),
       )
         ? cycle
         : null;

@@ -9,7 +9,8 @@ export type TurnFailureStep =
   | "upgrade_plan"
   | "connect_model"
   | "new_session"
-  | "send_message";
+  | "send_message"
+  | "allow_machine";
 
 let sink: ((step: TurnFailureStep) => void) | null = null;
 

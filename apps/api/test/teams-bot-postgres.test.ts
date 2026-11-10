@@ -16,6 +16,13 @@ import {
   createConnection,
   upsertCapabilityCatalogItem,
   enableCapabilityInstallation,
+  recordTeamsContextMessage,
+  listTeamsContextMessages,
+  markTeamsContextMentionAccepted,
+  reviseTeamsContextMessage,
+  clearTeamsContextConversation,
+  disconnectTeamsBot,
+  TEAMS_CONTEXT_MESSAGES_PER_THREAD,
 } from "@opengeni/db";
 import { updateManagedHumanSessionVisibility, type ApiRouteDeps } from "@opengeni/core";
 import { teamsRouteId } from "../src/integrations/teams-protocol";
@@ -95,15 +102,26 @@ async function fixture() {
     payload: { text: "Please investigate the project" },
   };
   const messages: string[] = [];
-  const send = async (_m: unknown, text: string) => {
+  const deliveries: Array<{ text: string; ai: boolean; link?: { title: string; url: string } }> =
+    [];
+  const send = async (
+    _m: unknown,
+    text: string,
+    options?: { ai?: boolean; link?: { title: string; url: string } },
+  ) => {
     messages.push(text);
+    deliveries.push({
+      text,
+      ai: options?.ai === true,
+      ...(options?.link ? { link: options.link } : {}),
+    });
     return `sent-${messages.length}`;
   };
   const tick = async (sender = send) => {
     await shared.admin`update teams_bot_routes set lease_until=null where route_id=${routeId}`;
     await drainTeamsBotOnce(deps, sender);
   };
-  return { i, actor, subject, deps, input, messages, tick, grant, access, personal };
+  return { i, actor, subject, deps, input, messages, deliveries, tick, grant, access, personal };
 }
 
 test("a linked person's 1:1 chat lands in their own Personal workspace; channels and Personal-off stay in the installation's", async () => {
@@ -126,9 +144,28 @@ test("a linked person's 1:1 chat lands in their own Personal workspace; channels
   expect(session!.workspace_id).toBe(f.personal);
   expect(session!.visibility).toBe("user_private");
   expect(session!.owner_subject_id).toBe(f.subject);
-  expect(f.messages).toEqual([
-    `Started. Follow progress or approve requests: https://app.example.test/workspaces/${f.personal}/sessions/${session!.id}`,
+  // The session is a labelled button on a notice card, not a URL in the text.
+  expect(f.deliveries).toEqual([
+    {
+      text: "Started. Follow progress or approve requests in Opengeni.\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.",
+      ai: false,
+      link: {
+        title: "Open in Opengeni",
+        url: `https://app.example.test/workspaces/${f.personal}/sessions/${session!.id}`,
+      },
+    },
   ]);
+  // The stored text still writes the URL out: a replica from before notice
+  // cards sends that text during a rolling deploy, so the session stays
+  // reachable from Teams.
+  const [started] =
+    await shared.admin`select o.payload from teams_bot_outbox o join teams_bot_routes r on r.route_id=o.route_id where r.session_id=${session!.id} and o.source_sequence=0`;
+  expect(started!.payload).toEqual({
+    text: `Started. Follow progress or approve requests: https://app.example.test/workspaces/${f.personal}/sessions/${session!.id}\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.`,
+    link: "session",
+    cardText:
+      "Started. Follow progress or approve requests in Opengeni.\n\nOpengeni is an AI agent and can make mistakes. Send **help** for tips and commands.",
+  });
   const [shared0] =
     await shared.admin`select count(*)::int as n from sessions where workspace_id=${f.i.workspace_id}`;
   expect(shared0!.n).toBe(0);
@@ -246,7 +283,8 @@ test("duplicate channel delivery creates one native session, acknowledges, and p
     await shared.admin`select session_id,session_bound from teams_bot_routes where route_id=${f.input.routeId}`;
   expect(route!.session_bound).toBe(true);
   expect(f.messages).toHaveLength(1);
-  expect(f.messages[0]).toContain(route!.session_id);
+  expect(f.deliveries[0]!.link?.url).toContain(route!.session_id);
+  expect(f.messages[0]).not.toContain("https:");
   const [count] =
     await shared.admin`select count(*)::int as n from sessions where workspace_id=${f.i.workspace_id}`;
   expect(count!.n).toBe(1);
@@ -257,6 +295,262 @@ test("duplicate channel delivery creates one native session, acknowledges, and p
   expect(f.messages).toEqual([f.messages[0]!, "The completed answer"]);
   await f.tick();
   expect(f.messages).toHaveLength(2);
+  // Notices about the session are cards with a button; the answer is the
+  // agent's text with the AI label and no button.
+  expect(f.deliveries.map(({ ai, link }) => ({ ai, title: link?.title }))).toEqual([
+    { ai: false, title: "Open in Opengeni" },
+    { ai: true, title: undefined },
+  ]);
+  await appendSessionEvents(client.db, f.i.workspace_id, route!.session_id, [
+    { type: "session.requiresAction", payload: { approvals: [{ id: "tool-call-1" }] } },
+    { type: "turn.failed", payload: { error: "expected test failure" } },
+  ]);
+  await f.tick();
+  await f.tick();
+  expect(f.deliveries.slice(2)).toEqual([
+    {
+      text: "Your task needs your input or approval in the secure Opengeni chat.",
+      ai: false,
+      link: {
+        title: "Open in Opengeni",
+        url: `https://app.example.test/workspaces/${f.i.workspace_id}/sessions/${route!.session_id}`,
+      },
+    },
+    {
+      text: "The task could not finish. The details are in Opengeni.",
+      ai: false,
+      link: {
+        title: "Open in Opengeni",
+        url: `https://app.example.test/workspaces/${f.i.workspace_id}/sessions/${route!.session_id}`,
+      },
+    },
+  ]);
+});
+test("a channel thread mention sees the unmentioned messages before it, and a follow-up only the new ones", async () => {
+  const f = await fixture();
+  const thread = "root";
+  const context = (messageId: string, minute: number, text: string, mentioned = false) =>
+    recordTeamsContextMessage(client.db, f.i, {
+      conversationId: "19:channel",
+      threadId: thread,
+      messageId,
+      actorId: f.actor,
+      actorName: "Ada Lovelace",
+      text,
+      hasAttachments: false,
+      mentioned,
+      occurredAt: `2026-11-02T13:0${minute}:00.000Z`,
+    });
+  const mention = (eventId: string, minute: number, text: string) => ({
+    ...f.input,
+    conversationId: `19:channel;messageid=${thread}`,
+    threadId: thread,
+    eventId,
+    payload: {
+      text,
+      personal: false,
+      groupChat: false,
+      conversationId: `19:channel;messageid=${thread}`,
+      threadId: thread,
+      eventId,
+      occurredAt: `2026-11-02T13:0${minute}:00.000Z`,
+    },
+  });
+  const userMessages = async (sessionId: string) =>
+    await shared.admin<{ text: string; model_context: string | null }[]>`
+      select payload ->> 'text' as text, payload ->> 'modelContext' as model_context
+      from session_events where session_id=${sessionId} and type='user.message' order by sequence`;
+  await context(thread, 1, "Root post: planning the launch");
+  await context("m2", 2, "The codeword is HERON");
+  // Recorded twice (Teams redelivery): kept once.
+  await context("m2", 2, "The codeword is HERON");
+  // Recorded unmarked, as the webhook does; the drain marks it once accepted.
+  await context("m3", 3, "@Opengeni what is the codeword?");
+  // Posted after the mention: never part of its context.
+  await context("m4", 4, "Later message");
+  await enqueueTeamsMessage(client.db, f.i, mention("m3", 3, "what is the codeword?"));
+  await f.tick();
+  const [route] =
+    await shared.admin`select session_id from teams_bot_routes where route_id=${f.input.routeId}`;
+  const [first] = await userMessages(route!.session_id);
+  expect(first!.text).toBe("what is the codeword?");
+  expect(first!.model_context).toContain(
+    "Recent messages in this channel thread before the mention",
+  );
+  expect(first!.model_context).toContain("Root post: planning the launch");
+  expect(first!.model_context?.match(/The codeword is HERON/g)).toHaveLength(1);
+  expect(first!.model_context).not.toContain("Later message");
+  expect(first!.model_context).not.toContain("what is the codeword?");
+  const [marked] =
+    await shared.admin`select mentioned from teams_bot_context_messages where workspace_id=${f.i.workspace_id} and message_id='m3'`;
+  expect(marked!.mentioned).toBe(true);
+
+  await context("m5", 5, "Actually it changed to EGRET");
+  await context("m6", 6, "@Opengeni and now?");
+  await enqueueTeamsMessage(client.db, f.i, mention("m6", 6, "and now?"));
+  await f.tick();
+  const [, second] = await userMessages(route!.session_id);
+  expect(second!.text).toBe("and now?");
+  expect(second!.model_context).toContain("since Opengeni was last mentioned");
+  expect(second!.model_context).toContain("Later message");
+  expect(second!.model_context).toContain("Actually it changed to EGRET");
+  expect(second!.model_context).not.toContain("HERON");
+
+  // Each thread keeps its newest messages only; disconnecting removes them all.
+  for (let index = 0; index < TEAMS_CONTEXT_MESSAGES_PER_THREAD + 5; index++)
+    await recordTeamsContextMessage(client.db, f.i, {
+      conversationId: "19:channel",
+      threadId: "busy",
+      messageId: `busy-${index}`,
+      actorId: f.actor,
+      actorName: null,
+      text: `busy ${index}`,
+      hasAttachments: false,
+      mentioned: false,
+      occurredAt: new Date(Date.UTC(2026, 10, 2, 14, 0, index)).toISOString(),
+    });
+  const busy = await listTeamsContextMessages(client.db, f.i, {
+    conversationId: "19:channel",
+    threadId: "busy",
+    beforeMessageId: "none",
+    notAfter: "2026-11-03T00:00:00.000Z",
+    limit: 200,
+  });
+  expect(busy).toHaveLength(TEAMS_CONTEXT_MESSAGES_PER_THREAD);
+  expect(busy[0]!.text).toBe(`busy ${TEAMS_CONTEXT_MESSAGES_PER_THREAD + 4}`);
+  const roots = await listTeamsContextMessages(client.db, f.i, {
+    conversationId: "19:channel",
+    threadId: null,
+    beforeMessageId: "none",
+    notAfter: "2026-11-03T00:00:00.000Z",
+    limit: 5,
+    rootPostsOnly: true,
+  });
+  expect(roots.map((row) => row.text)).toEqual(["Root post: planning the launch"]);
+  await disconnectTeamsBot(client.db, f.i);
+  const [left] =
+    await shared.admin`select count(*)::int as n from teams_bot_context_messages where workspace_id=${f.i.workspace_id}`;
+  expect(left!.n).toBe(0);
+});
+test("recorded context follows edits, deletions, accepted mentions, retention and its workspace", async () => {
+  const f = await fixture();
+  const other = await fixture();
+  const keep = (
+    i: typeof f.i,
+    conversationId: string,
+    messageId: string,
+    minute: number,
+    text: string,
+  ) =>
+    recordTeamsContextMessage(client.db, i, {
+      conversationId,
+      threadId: null,
+      messageId,
+      actorId: f.actor,
+      actorName: "Ada Lovelace",
+      text,
+      hasAttachments: false,
+      mentioned: false,
+      occurredAt: `2026-11-02T15:0${minute}:00.000Z`,
+    });
+  const read = (i: typeof f.i, conversationId = "19:group") =>
+    listTeamsContextMessages(client.db, i, {
+      conversationId,
+      threadId: null,
+      beforeMessageId: "none",
+      notAfter: "2026-11-03T00:00:00.000Z",
+      limit: 50,
+    });
+  await keep(f.i, "19:group", "g1", 1, "The password is hunter2");
+  await keep(f.i, "19:group", "g2", 2, "Lunch at noon");
+  await keep(f.i, "19:group", "g3", 3, "@Opengeni summarize");
+  await keep(f.i, "19:elsewhere", "e1", 1, "Another chat");
+  // Another workspace's installation never sees these rows.
+  await keep(other.i, "19:group", "o1", 1, "Other workspace");
+  expect((await read(other.i)).map((row) => row.text)).toEqual(["Other workspace"]);
+
+  // Teams edits replace the text; deletions (and edits to nothing) remove it.
+  await reviseTeamsContextMessage(client.db, f.i, {
+    conversationId: "19:group",
+    messageId: "g2",
+    edit: { text: "Lunch at one", hasAttachments: false },
+  });
+  await reviseTeamsContextMessage(client.db, f.i, {
+    conversationId: "19:group",
+    messageId: "g1",
+    edit: null,
+  });
+  // A revision of a message never recorded records nothing.
+  await reviseTeamsContextMessage(client.db, f.i, {
+    conversationId: "19:group",
+    messageId: "unknown",
+    edit: { text: "new", hasAttachments: false },
+  });
+  // Only an accepted mention is marked.
+  await markTeamsContextMentionAccepted(client.db, f.i, {
+    conversationId: "19:group",
+    messageId: "g3",
+  });
+  expect((await read(f.i)).map((row) => [row.messageId, row.text, row.mentioned])).toEqual([
+    ["g3", "@Opengeni summarize", true],
+    ["g2", "Lunch at one", false],
+  ]);
+
+  // Past retention, a row is no longer offered even before it is pruned.
+  await shared.admin`update teams_bot_context_messages set created_at=now()-interval '8 days' where workspace_id=${f.i.workspace_id} and message_id='g2'`;
+  expect((await read(f.i)).map((row) => row.messageId)).toEqual(["g3"]);
+
+  // Clearing one conversation leaves the others.
+  await clearTeamsContextConversation(client.db, f.i, "19:group");
+  expect(await read(f.i)).toEqual([]);
+  expect((await read(f.i, "19:elsewhere")).map((row) => row.text)).toEqual(["Another chat"]);
+
+  // Clearing also sets the chat's join cutoff: a delayed delivery of a message
+  // from before people were added never puts that history back, while a
+  // message from after it is kept.
+  await keep(f.i, "19:group", "delayed", 4, "Posted before the join");
+  const afterJoin = new Date(Date.now() + 60_000).toISOString();
+  await recordTeamsContextMessage(client.db, f.i, {
+    conversationId: "19:group",
+    threadId: null,
+    messageId: "joined",
+    actorId: f.actor,
+    actorName: "Ada Lovelace",
+    text: "Posted after the join",
+    hasAttachments: false,
+    mentioned: false,
+    occurredAt: afterJoin,
+  });
+  // A row from before the cutoff that is somehow still there is never read.
+  await shared.admin`insert into teams_bot_context_messages(account_id,workspace_id,tenant_id,conversation_id,thread_id,message_id,actor_id,text,occurred_at)
+    values(${f.i.account_id},${f.i.workspace_id},${f.i.tenant_id},'19:group','','stale',${f.actor},'Stale pre-join row','2026-11-02T15:05:00Z')`;
+  const readAll = () =>
+    listTeamsContextMessages(client.db, f.i, {
+      conversationId: "19:group",
+      threadId: null,
+      beforeMessageId: "none",
+      notAfter: new Date(Date.now() + 3_600_000).toISOString(),
+      limit: 50,
+    });
+  expect((await readAll()).map((row) => row.messageId)).toEqual(["joined"]);
+  const [delayed] =
+    await shared.admin`select count(*)::int as n from teams_bot_context_messages where workspace_id=${f.i.workspace_id} and message_id='delayed'`;
+  expect(delayed!.n).toBe(0);
+  // Adding people again only moves the cutoff forward.
+  await clearTeamsContextConversation(client.db, f.i, "19:group");
+  const [cutoffs] =
+    await shared.admin`select count(*)::int as n from teams_bot_context_cutoffs where workspace_id=${f.i.workspace_id} and conversation_id='19:group'`;
+  expect(cutoffs!.n).toBe(1);
+
+  // A write from before a disconnect never lands after it.
+  await disconnectTeamsBot(client.db, f.i);
+  await keep(f.i, "19:group", "late", 4, "Racing the disconnect");
+  const [left] =
+    await shared.admin`select count(*)::int as n from teams_bot_context_messages where workspace_id=${f.i.workspace_id}`;
+  expect(left!.n).toBe(0);
+  const [cutoffsLeft] =
+    await shared.admin`select count(*)::int as n from teams_bot_context_cutoffs where workspace_id=${f.i.workspace_id}`;
+  expect(cutoffsLeft!.n).toBe(0);
 });
 test("throttling retries durable output while an ambiguous delivery is never repeated", async () => {
   const f = await fixture();
@@ -359,7 +653,10 @@ test("personal admission refusal delivers durable generic guidance without creat
   await f.tick();
   expect(f.messages).toHaveLength(1);
   expect(f.messages[0]).toContain("could not start");
-  expect(f.messages[0]).toContain(`/workspaces/${f.i.workspace_id}/plugins`);
+  expect(f.deliveries[0]!.link).toEqual({
+    title: "Open Opengeni",
+    url: `https://app.example.test/workspaces/${f.i.workspace_id}/plugins`,
+  });
   const [count] =
     await shared.admin`select count(*)::int as n from sessions where workspace_id=${f.i.workspace_id}`;
   expect(count!.n).toBe(0);
@@ -485,9 +782,9 @@ test("each refused input gets one actionable notice while provider replay stays 
   await enqueueTeamsMessage(client.db, f.i, second);
   await f.tick();
   expect(f.messages).toHaveLength(2);
-  expect(f.messages.every((text) => text.includes(`/workspaces/${f.i.workspace_id}/plugins`))).toBe(
-    true,
-  );
+  expect(
+    f.deliveries.every((d) => d.link?.url.includes(`/workspaces/${f.i.workspace_id}/plugins`)),
+  ).toBe(true);
 });
 
 test("an immediate native completion wakes the reserved route before inbox binding", async () => {

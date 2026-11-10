@@ -1,4 +1,4 @@
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessGrant, ModelDecisionRequest, ModelDecisionResponse } from "@opengeni/contracts";
 import type { SingleModelCallRequest, SingleModelCallResult } from "@opengeni/runtime";
 
 /**
@@ -43,6 +43,17 @@ export interface ModelCallService {
   /** Models the caller may use for a single call, in catalog order. */
   listModels(caller: ModelCallCaller): Promise<ModelCallModel[]>;
   call(input: ModelCallInput): Promise<ModelCallOutput>;
+}
+
+export type DecisionCallInput = ModelCallCaller & {
+  requestId: string;
+  signal?: AbortSignal;
+  request: ModelDecisionRequest;
+};
+export interface DecisionCallService {
+  decide(input: DecisionCallInput): Promise<ModelDecisionResponse>;
+  /** Drain off-path usage before the host closes its database. */
+  flushUsage(): Promise<void>;
 }
 
 export type ModelCallErrorType =

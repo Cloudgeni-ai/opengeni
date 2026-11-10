@@ -48,9 +48,10 @@ export type { ConnectAttemptHints, ConnectWindowHost } from "./connect-window-ho
 export type { ConnectView } from "./hooks/use-connect";
 export type { ConnectAttempt, ConnectController, ConnectNavigation } from "@opengeni/connect";
 export { useConnect } from "./hooks/use-connect";
-export { showsMcpServerLabel } from "./components/mcp-server-label";
+export { connectionCardSubtitle, showsMcpServerLabel } from "./components/mcp-server-label";
 export {
   authNeededPresentation,
+  capabilityReconnectConnectionId,
   providerLabel,
   type AuthNeededPresentation,
 } from "./auth-needed-presentation";

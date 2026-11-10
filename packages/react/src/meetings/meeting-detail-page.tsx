@@ -66,6 +66,7 @@ import {
   type MeetingHereStatus,
   type RecordingsClientOverride,
 } from "../recordings";
+import { isKeepingRecordingAudio } from "../hooks/use-recordings";
 
 import { Button } from "../ui/button";
 import { ConfirmDialog } from "../ui/confirm-dialog";
@@ -153,11 +154,12 @@ function useTrackSources(
   const playable = useMemo(() => {
     const tracks = recording?.tracks ?? [];
     const partial =
-      state === "processing" && tracks.some((track) => track.chunkCount > 0 && !track.playable);
+      (state === "processing" && tracks.some((track) => track.chunkCount > 0 && !track.playable)) ||
+      isKeepingRecordingAudio(recording);
     return partial
       ? []
       : tracks.filter((track) => track.playable).map((track) => track.trackNumber);
-  }, [recording?.tracks, state]);
+  }, [recording, state]);
   const key = playable.join(",");
   const getAudioRef = useRef(getAudio);
   getAudioRef.current = getAudio;
@@ -649,7 +651,9 @@ function FailedTranscriptActions({
     about?.funding !== "deployment"
       ? fixes.onConnectModels
       : undefined;
-  const billing = !switchTo && transcriptNeedsCredits(code) ? fixes.onOpenBilling : undefined;
+  const upgrade = code === "subscription_plan_required";
+  const billing =
+    !switchTo && (transcriptNeedsCredits(code) || upgrade) ? fixes.onOpenBilling : undefined;
   return (
     <span className="flex flex-wrap gap-2">
       {switchTo ? (
@@ -675,7 +679,7 @@ function FailedTranscriptActions({
       ) : billing ? (
         <Button type="button" size="sm" onClick={billing}>
           <CreditCardIcon aria-hidden="true" />
-          {msg("meetings.detailPage.addCredits")}
+          {msg(upgrade ? "meetings.detailPage.upgradeToPro" : "meetings.detailPage.addCredits")}
         </Button>
       ) : connect ? (
         <Button type="button" size="sm" onClick={connect}>
@@ -1850,6 +1854,7 @@ function MeetingDetailPageForRecording({
           segments={segments}
           speakers={transcript.speakers}
           tracks={recording.tracks}
+          durationMilliseconds={recording.durationMilliseconds}
           people={people.people}
           activeSegment={activeSegment}
           actions={actions}

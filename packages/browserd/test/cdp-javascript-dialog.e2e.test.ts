@@ -16,7 +16,7 @@ import {
   type AttachedBrowserBridgeTransport,
 } from "../src/attached-cdp";
 import { CdpConnection } from "../src/cdp";
-import { PAGE_NOT_ANSWERING_MESSAGE, PAGE_STILL_BUSY_MESSAGE } from "../src/cdp-driver";
+import { PAGE_NOT_ANSWERING_HIDDEN_MESSAGE, PAGE_NOT_ANSWERING_MESSAGE } from "../src/cdp-driver";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
@@ -129,12 +129,13 @@ async function provesCutShortActionsNeverRunLater(
   expect(await bridge.evaluate(start.target.id, "others")).toBe(0);
 }
 
-/** Dialog text is page content and can echo a secret the action typed. */
-async function provesDialogTextIsRedacted(driver: Driver, start: BrowserObservation) {
+/** Dialog text is page content: when the page echoes a value the action
+ * typed, the agent sees it as the page wrote it (docs/secrets.md,
+ * "Agent-visible content"). */
+async function provesDialogTextIsShownAsWritten(driver: Driver, start: BrowserObservation) {
   const current = await driver.observe(start.target.id);
   const raw = ["{{", "secret:Desk/code", "}}"].join("");
-  // Long and multi-line, so shortening or collapsing the dialog text first
-  // would leave a recognizable part of it.
+  // Long and multi-line, like a real page message.
   const secret = `s3cret-${"x".repeat(320)}\nsecond line`;
   const typed = await driver
     .dispatch({
@@ -152,9 +153,8 @@ async function provesDialogTextIsRedacted(driver: Driver, start: BrowserObservat
       (error: unknown) => error as Error & { observation?: BrowserObservation },
     );
   expect(typed?.message).toContain("A JavaScript alert dialog is open");
-  expect(typed?.message).not.toContain("s3cret-x");
-  expect(typed?.message).not.toContain("second line");
-  expect(JSON.stringify(typed?.observation)).not.toContain(secret);
+  expect(typed?.message).toContain("s3cret-x");
+  expect(typed?.message).not.toContain("[secret]");
   // Each answer returns promptly, including when the page opens the next
   // dialog straight away.
   let page: BrowserObservation | null = typed!.observation!;
@@ -222,7 +222,7 @@ e2e(
       const start = await driver.start(PAGE);
       await provesDialogsReturnPromptly(driver, start);
       await provesCutShortActionsNeverRunLater(driver, bridge, start);
-      await provesDialogTextIsRedacted(driver, start);
+      await provesDialogTextIsShownAsWritten(driver, start);
     } finally {
       await driver.close().catch(() => undefined);
       browser.close();
@@ -362,7 +362,7 @@ e2e(
           actor: { kind: "agent", subjectId: "browserd-dialog-e2e" },
           action: { type: "handle_dialog", response: "dismiss" },
         }),
-      ).rejects.toThrow(PAGE_STILL_BUSY_MESSAGE);
+      ).rejects.toThrow(PAGE_NOT_ANSWERING_HIDDEN_MESSAGE);
       expect(bridge.activeTabId).toBe(tabId);
       expect(await bridge.pageCount()).toBe(pages);
       expect(await bridge.title(tabId)).toBe("busy");

@@ -12,7 +12,6 @@ import {
 } from "../src/runtime-posture";
 import {
   applyCreditDebitAfterUse,
-  applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
   createDb,
   ensureManagedAccessForUser,
@@ -61,12 +60,14 @@ const debit = (
   modelId?: string,
   idempotencyKey = crypto.randomUUID(),
 ) =>
-  applyCreditDebitUpToBalance(client!.db, {
+  applyCreditDebitAfterUse(client!.db, {
     accountId,
-    requestedAmountMicros: amount,
+    amountMicros: amount,
     type: "test_model_debit",
+    sourceType: "model_response",
+    sourceId: idempotencyKey,
     idempotencyKey,
-    ...(modelId ? { modelId } : {}),
+    ...(modelId ? { usage: modelId } : {}),
   });
 
 test("the migrated application role passes runtime posture with read-only policy access", async () => {
@@ -89,9 +90,17 @@ test("uses eligible grants first; other models and resources spend general credi
   const id = await account();
   await grant(id, 100, ["model-a"]);
   await grant(id, 10);
-  expect((await debit(id, 30, "model-a")).debitedMicros).toBe(30);
+  expect(await debit(id, 30, "model-a")).toMatchObject({
+    debitedMicros: 30,
+    grantDebitedMicros: 30,
+  });
   expect((await getBillingBalance(client.db, id)).generalBalanceMicros).toBe(10);
-  expect((await debit(id, 20, "model-b")).debitedMicros).toBe(10);
+  // Charged in full after use: general credit goes negative, never the grant.
+  expect(await debit(id, 20, "model-b")).toMatchObject({
+    debitedMicros: 20,
+    grantDebitedMicros: 0,
+  });
+  expect((await getBillingBalance(client.db, id)).generalBalanceMicros).toBe(-10);
   expect((await getSpendableCreditBalance(client.db, id)).balanceMicros).toBe(0);
   expect((await getSpendableCreditBalance(client.db, id, "model-a")).balanceMicros).toBe(70);
   await applyCreditDebitAfterUse(client.db, {
@@ -103,10 +112,16 @@ test("uses eligible grants first; other models and resources spend general credi
     idempotencyKey: crypto.randomUUID(),
   });
   const balance = await getBillingBalance(client.db, id);
-  expect(balance.generalBalanceMicros).toBe(-5);
+  expect(balance.generalBalanceMicros).toBe(-15);
   expect(balance.promotionalCredits?.[0]?.remainingMicros).toBe(70);
-  expect((await debit(id, 80, "model-a")).debitedMicros).toBe(70);
-  expect((await getBillingBalance(client.db, id)).balanceMicros).toBe(-5);
+  expect(await debit(id, 80, "model-a")).toMatchObject({
+    debitedMicros: 80,
+    grantDebitedMicros: 70,
+  });
+  const after = await getBillingBalance(client.db, id);
+  expect(after.promotionalCredits).toEqual([]);
+  expect(after.generalBalanceMicros).toBe(-25);
+  expect(after.balanceMicros).toBe(-25);
 }, 180_000);
 
 test("concurrent charges cannot spend a grant twice, and retries preserve allocations", async () => {
@@ -115,11 +130,14 @@ test("concurrent charges cannot spend a grant twice, and retries preserve alloca
   await grant(id, 100, ["model-a"]);
   const keys = Array.from({ length: 10 }, () => crypto.randomUUID());
   const charged = await Promise.all(keys.map((key) => debit(id, 20, "model-a", key)));
-  expect(charged.reduce((sum, item) => sum + item.debitedMicros, 0)).toBe(100);
+  // Every response is charged in full; the grant pays 100 and general credit the rest.
+  expect(charged.reduce((sum, item) => sum + item.debitedMicros, 0)).toBe(200);
+  expect(charged.reduce((sum, item) => sum + item.grantDebitedMicros, 0)).toBe(100);
+  expect((await getBillingBalance(client.db, id)).generalBalanceMicros).toBe(-100);
   await grant(id, 100, ["model-a"]);
   const replayed = await Promise.all(keys.map((key) => debit(id, 20, "model-a", key)));
   expect(replayed.every((item) => item.debitedMicros === 0)).toBe(true);
-  expect((await getBillingBalance(client.db, id)).balanceMicros).toBe(100);
+  expect((await getBillingBalance(client.db, id)).balanceMicros).toBe(0);
   const [row] =
     await shared.admin`select sum(amount_micros)::int as total from credit_debit_allocations where account_id = ${id}`;
   expect(row?.total).toBe(100);
@@ -131,8 +149,15 @@ test("each grant keeps its own eligibility and cannot fund another organization"
   const other = await account();
   await grant(id, 40, ["model-a"]);
   await grant(id, 60, ["model-b"]);
-  expect((await debit(id, 50, "model-a")).debitedMicros).toBe(40);
-  expect((await debit(other, 50, "model-b")).debitedMicros).toBe(0);
+  expect(await debit(id, 50, "model-a")).toMatchObject({
+    debitedMicros: 50,
+    grantDebitedMicros: 40,
+  });
+  expect(await debit(other, 50, "model-b")).toMatchObject({
+    debitedMicros: 50,
+    grantDebitedMicros: 0,
+  });
+  expect((await getBillingBalance(client.db, other)).generalBalanceMicros).toBe(-50);
   expect((await getBillingBalance(client.db, other)).promotionalCredits).toEqual([]);
   expect((await getSpendableCreditBalance(client.db, id, "model-b")).balanceMicros).toBe(60);
 }, 180_000);
@@ -152,11 +177,13 @@ test("issued terms cannot be edited, and failed allocation persistence rolls bac
   // The helper must keep the debit and its allocations in the outer transaction.
   await expect(
     withRlsContext(client.db, { accountId: id }, async (tx) => {
-      await applyCreditDebitUpToBalance(tx, {
+      await applyCreditDebitAfterUse(tx, {
         accountId: id,
-        requestedAmountMicros: 50,
+        amountMicros: 50,
         type: "test_model_debit",
-        modelId: "model-a",
+        sourceType: "model_response",
+        sourceId: crypto.randomUUID(),
+        usage: "model-a",
         idempotencyKey: crypto.randomUUID(),
       });
       throw new Error("simulate caller rollback");
@@ -206,12 +233,14 @@ test("operator changes live coverage, per-offer overrides, and in-flight settlem
   expect((await getSpendableCreditBalance(client.db, id, "model-b")).balanceMicros).toBe(125);
   expect((await getSpendableCreditBalance(client.db, id, "model-c")).balanceMicros).toBe(225);
   // A response admitted just before the switch still spends the free grant.
-  await applyCreditDebitUpToBalance(client.db, {
+  await applyCreditDebitAfterUse(client.db, {
     accountId: id,
     type: "test_model_debit",
-    modelId: "model-a",
-    requestedAmountMicros: 50,
+    usage: "model-a",
+    amountMicros: 50,
     creditPolicyRevision: admitted.creditPolicyRevision,
+    sourceType: "model_response",
+    sourceId: crypto.randomUUID(),
     idempotencyKey: crypto.randomUUID(),
   });
   expect((await getBillingBalance(client.db, id)).generalBalanceMicros).toBe(25);

@@ -3,7 +3,7 @@ import type { ResolvedModelProvider } from "@opengeni/config";
 import type { ReasoningEffort } from "@opengeni/contracts";
 import type OpenAI from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
-import { instrumentedModelFetch, modelToolNameObservers } from "./model-provider-client";
+import { instrumentedModelFetch } from "./model-provider-client";
 import type { InferenceResidencyRequirement } from "./inference-residency";
 import { modelResponseUsageFromResponse, type ModelResponseUsage } from "./run-events";
 
@@ -115,7 +115,6 @@ export async function runSingleModelCall(
         provider,
         modelId,
         instrumentedModelFetch(provider.id, globalThis.fetch, false, residency),
-        modelToolNameObservers(provider.id),
       ),
       request,
       options,

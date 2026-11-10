@@ -130,6 +130,19 @@ impl<V> Ready<V> {
         }
     }
 
+    /// The records of the idle ready sandboxes cloned from `template`,
+    /// and whether one of its shape is being filled.
+    pub fn of_template(&self, template: &Arc<Template>) -> (Vec<&Record>, bool) {
+        let idle = self
+            .idle
+            .iter()
+            .filter(|idle| Arc::ptr_eq(&idle.template, template))
+            .map(|idle| &idle.record)
+            .collect();
+        let shape = template.shape();
+        (idle, self.filling.values().any(|each| *each == shape))
+    }
+
     /// Ready and filling sandboxes of `shape`.
     fn count(&self, shape: Shape) -> usize {
         self.idle

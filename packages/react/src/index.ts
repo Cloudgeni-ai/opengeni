@@ -189,6 +189,19 @@ export type {
   UseFileAttachmentsOptions,
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
+export {
+  isStoredImage,
+  readStoredFile,
+  readStoredFilePreviewUrl,
+  useStoredFilePreview,
+  useStoredFiles,
+} from "./stored-file-preview";
+export type {
+  StoredFileClientLike,
+  StoredFilePreview,
+  StoredFileSource,
+  StoredFiles,
+} from "./stored-file-preview";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
@@ -235,6 +248,7 @@ export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
 export { useSessionControl } from "./hooks/use-session-control";
 export type {
+  ApprovalDecisionOptions,
   UseSessionControlOptions,
   UseSessionControlResult,
 } from "./hooks/use-session-control";
@@ -475,6 +489,7 @@ export { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "./human-in
 
 // Timeline projection
 export {
+  automationRunOutcomesOnly,
   buildTimeline,
   creditExhaustedFromEvents,
   creditRefusalFromEvents,
@@ -569,6 +584,7 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
   TurnSummaryProps,
   TurnSummaryStatus,
@@ -667,6 +683,7 @@ export type {
   SessionConversationProps,
   SessionConversationViewProps,
 } from "./components/session-conversation";
+export type { AgentSignalOptions, AgentSignals } from "./session-agents-model";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {
@@ -786,6 +803,7 @@ export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/sess
 export {
   promptSendDestination,
   sessionAdmissionBlocked,
+  sessionArchived,
   sessionDisplayStatus,
 } from "./session-status-model";
 export type { SessionDisplayStatus } from "./session-status-model";

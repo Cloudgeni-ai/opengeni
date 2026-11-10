@@ -217,6 +217,11 @@ export interface DesktopAccount {
   workspaceId: string | null;
   /** The server rejected the credential; the person has to sign in again. */
   signedOut: boolean;
+  /**
+   * The account's page records a meeting. Absent from apps made before it
+   * existed.
+   */
+  recording?: boolean;
 }
 
 export interface DesktopAccountsSnapshot {
@@ -349,6 +354,11 @@ export interface DesktopDictationProfile {
 export interface DesktopDictationModel {
   providerId: string;
   model: string;
+  /**
+   * How it was shown when it was picked ("OpenAI · GPT-4o Transcribe"), to
+   * name it should the workspace stop offering it.
+   */
+  name?: string;
 }
 
 /**
@@ -382,6 +392,20 @@ export interface DesktopDictationSettings {
   retryShortcut?: DesktopDictationKeys | null;
   /** Throws away the dictation under way. Null: none. */
   cancelShortcut?: DesktopDictationKeys | null;
+  /**
+   * The workspace every shortcut dictation from this computer belongs to,
+   * whichever one the app shows: its voice input, who pays and where a failed
+   * one is saved. Its name is kept too, so a workspace the person has left can
+   * still be named. Null until one is saved: the person's default workspace.
+   * Absent from apps that don't keep one.
+   */
+  workspace?: DesktopDictationWorkspace | null;
+}
+
+/** The workspace shortcut dictations belong to, as this computer keeps it. */
+export interface DesktopDictationWorkspace {
+  id: string;
+  name: string;
 }
 
 /** A shortcut that acts on dictations rather than starting one. */
@@ -476,7 +500,9 @@ export type DesktopDictationRequest =
   /** Let a failed dictation go without deleting it: the composer offers it later. */
   | { kind: "dismiss"; dictationId: string }
   /** Transcribe a failed dictation again. */
-  | { kind: "retry"; dictationId: string };
+  | { kind: "retry"; dictationId: string }
+  /** Show the dictation settings: the person chose Open settings on a failed dictation. */
+  | { kind: "settings" };
 
 /** How a dictation is going, reported by the page that records it. */
 export type DesktopDictationReport =
@@ -503,6 +529,11 @@ export type DesktopDictationReport =
       message: string;
       /** The speech is kept and can be transcribed again. */
       retryable: boolean;
+      /**
+       * The fix is in the dictation settings (choosing a workspace or a
+       * model), so the app offers Open settings. Ignored by older apps.
+       */
+      fix?: "settings";
     }
   /** Nothing was recorded, or it was thrown away. */
   | {

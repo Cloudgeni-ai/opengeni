@@ -130,10 +130,10 @@ test.each(["unfinished_debit", "settled_debit_delayed_admission"] as const)(
       began();
       await released;
     };
-    const originalDebit = opengeniDb.applyCreditDebitUpToBalance;
+    const originalDebit = opengeniDb.applyCreditDebitAfterUse;
     const debit =
       delayBoundary === "unfinished_debit"
-        ? spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(async (db, input) => {
+        ? spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(async (db, input) => {
             if (input.metadata?.sessionId === session.id) await holdOnce();
             return originalDebit(db, input);
           })

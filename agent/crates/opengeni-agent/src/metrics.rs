@@ -397,6 +397,7 @@ fn read_gpus() -> Vec<GpuSample> {
             "--query-gpu=name,utilization.gpu,memory.used,memory.total",
             "--format=csv,noheader,nounits",
         ])
+        .stdin(opengeni_agent_platform::discarded_stdio())
         .output();
     let Ok(output) = output else {
         return Vec::new();
@@ -446,7 +447,11 @@ fn parse_nvidia_smi(text: &str) -> Vec<GpuSample> {
 /// `nvidia-smi` spawn in [`read_gpus`] — never panics, never blocks on input.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn run_capture(cmd: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(cmd).args(args).output().ok()?;
+    let output = std::process::Command::new(cmd)
+        .args(args)
+        .stdin(opengeni_agent_platform::discarded_stdio())
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }

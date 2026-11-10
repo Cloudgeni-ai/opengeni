@@ -18,6 +18,7 @@ pub mod vsock;
 pub mod watchdog;
 
 use std::future::Future;
+use std::ops::Range;
 use std::os::fd::OwnedFd;
 use std::time::Duration;
 
@@ -25,7 +26,8 @@ pub use cgroup::{MemoryStats, Writes};
 pub use error::{EngineError, ErrorKind};
 pub use profile::{MemoryProfile, PageSize, ProfileError, SaveMode};
 pub use spec::{
-    Drive, MemorySource, Network, PagerSpec, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec,
+    Drive, GuestMemory, MemorySource, Network, PagerSpec, Region, RestoreFiles, SnapshotFiles,
+    SnapshotKind, VmSpec,
 };
 pub use tokio_util::sync::CancellationToken;
 
@@ -203,6 +205,25 @@ pub trait Engine: Send + Sync + 'static {
         files: &SnapshotFiles,
         kind: SnapshotKind,
     ) -> impl Future<Output = Result<(), EngineError>> + Send;
+
+    /// What of a paused VM's memory its guest gave back to the host and
+    /// reads as zeros now, as byte ranges of the memory image the VM was
+    /// restored from, whose bytes `memory` says where the VMM holds:
+    /// sorted, apart and whole pages. A [`SnapshotKind::Diff`] leaves such pages
+    /// out, since the guest wrote none of them, so an image merged from one
+    /// holds them as zeros only if they are taken from here. Asked after
+    /// the snapshot, before the VM resumes. Only ranges that certainly read
+    /// as zeros are named; memory the engine cannot account for, such as a
+    /// VM not mapping the file `memory` names, gives none. The future does
+    /// not borrow the VM.
+    fn freed_memory(
+        &self,
+        vm: &Self::Vm,
+        memory: &GuestMemory,
+    ) -> impl Future<Output = Result<Vec<Range<u64>>, EngineError>> + Send + 'static {
+        let _ = (vm, memory);
+        std::future::ready(Ok(Vec::new()))
+    }
 
     /// Ends the VM process and releases its host resources. Its disks and
     /// any snapshot stay on disk. Resolves only once the process has ended,
@@ -414,6 +435,18 @@ pub trait Engine: Send + Sync + 'static {
     fn set_only_copy(&self, vm: &Self::Vm, only: bool) -> Result<(), EngineError> {
         let _ = (vm, only);
         Ok(())
+    }
+
+    /// Whether a VM left for `spec` is held frozen, as the host's guard
+    /// leaves every VM once the lease has run out (ADR 18): its VMM
+    /// cannot answer until something thaws it, and a VM held frozen runs
+    /// nothing meanwhile. A host whose agent finds one it cannot take back
+    /// lists it when it registers, so the service rules on it before the
+    /// lease lets it run again. No VM left for `spec` is not held frozen,
+    /// and neither is any VM of an engine whose VMs no guard stops.
+    fn held_frozen(&self, spec: &VmSpec) -> Result<bool, EngineError> {
+        let _ = spec;
+        Ok(false)
     }
 
     /// Whether the kernel may compress running VMs' memory (ADR 24): on

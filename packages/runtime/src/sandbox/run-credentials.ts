@@ -477,6 +477,8 @@ function outputOf(result: unknown): string {
     .join("\n");
 }
 
+const BOX_DISK_FAILURE = /no space left on device|disk quota exceeded|read-only file system/i;
+
 async function runCredentialCommand(
   session: RunCredentialCommandSession,
   cmd: string,
@@ -495,8 +497,16 @@ async function runCredentialCommand(
       : session.execCommand
         ? await session.execCommand(args)
         : undefined;
-  if (!outputOf(result).includes(COMMAND_OK_MARKER)) {
-    throw new Error("run credential materialization command failed");
+  const output = outputOf(result);
+  if (!output.includes(COMMAND_OK_MARKER)) {
+    // The output can hold credential text, so only a known disk failure
+    // phrase is kept: setup can then tell a full box (which the model can
+    // fix) from other failures.
+    const disk = BOX_DISK_FAILURE.exec(output);
+    throw new Error(
+      "run credential materialization command failed",
+      disk ? { cause: new Error(disk[0]) } : undefined,
+    );
   }
 }
 

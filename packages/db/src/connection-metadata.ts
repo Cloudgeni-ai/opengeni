@@ -9,7 +9,7 @@ import {
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY,
 } from "@opengeni/contracts";
-import { and, desc, eq, isNull, or, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, withWorkspaceSubjectRls, type Database } from "./database";
 import * as schema from "./schema";
 
@@ -109,6 +109,39 @@ export async function getConnectionMetadata(
       )
       .limit(1);
     return row ? mapConnectionMetadata(row) : null;
+  });
+}
+
+/**
+ * `getConnectionMetadata` for several connections of one workspace in one
+ * scope: the same context, visibility and row filter, so each id maps to
+ * exactly what its own `getConnectionMetadata` read returns (null when absent
+ * or not visible). Nothing else is read.
+ */
+export async function getConnectionMetadataByIds(
+  db: Database,
+  workspaceId: string,
+  connectionIds: readonly string[],
+  subjectId?: string | null,
+): Promise<Map<string, ConnectionMetadataWithVerification | null>> {
+  const ids = [...new Set(connectionIds)];
+  const found = new Map<string, ConnectionMetadataWithVerification | null>(
+    ids.map((id) => [id, null]),
+  );
+  if (ids.length === 0) return found;
+  return await withConnectionSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select(connectionMetadataColumns)
+      .from(schema.connections)
+      .where(
+        and(
+          eq(schema.connections.workspaceId, workspaceId),
+          inArray(schema.connections.id, ids),
+          connectionSubjectVisibility(subjectId),
+        ),
+      );
+    for (const row of rows) found.set(row.id, mapConnectionMetadata(row));
+    return found;
   });
 }
 

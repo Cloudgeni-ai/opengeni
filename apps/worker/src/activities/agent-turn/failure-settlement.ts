@@ -8,6 +8,7 @@ import { reportSessionPersistenceFailure } from "./persistence-diagnostic";
 import { shouldFallbackModelSocket } from "./persistent-transport-recovery";
 import {
   requestSessionTurnRecovery as persistSessionTurnRecovery,
+  readSessionTurnSandboxBoxNotSaved,
   recordUsageEvent,
   getActiveSessionHistoryItemsPaged,
   readLease,
@@ -20,6 +21,7 @@ import {
   isSubscriptionCoreCodexSourceDisconnected,
   SubscriptionCoreCodexLeaseLostError,
   readSessionTurnToolProgressRecoveryState,
+  isSessionCompactionRequested,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -61,6 +63,7 @@ import {
 import { recordCoreCodexRefusal } from "./codex-core-settlement";
 import { failOverCoreCodexTurn } from "./codex-core-failover";
 import { createTurnHistorySink } from "./history-sink";
+import { SandboxBoxNotSavedError } from "./sandbox-setup-agent-failure";
 
 import { BudgetExhaustedError, sessionUsageLimitStopEvents } from "./admission";
 import {
@@ -82,6 +85,7 @@ import {
   escapedMcpTimeoutRecoveryFailure,
   preClaimAdmissionFailure,
   isWorkerShutdownCancellation,
+  isSandboxMachineReplacing,
   sandboxLifecycleTransitionDiagnostic,
   sandboxRouteTransitionCode,
   safeErrorDiagnostic,
@@ -89,6 +93,9 @@ import {
   agentRunRecoveryFailurePayload,
   classifyCodexCredentialFailure,
   codexUsageLimitFailurePayload,
+  compactionFailureTurnEventPayload,
+  compactionFailureReason,
+  compactionFailureReasonFromError,
 } from "./errors";
 import { selectRejectedProviderArtifactHistoryIds } from "./history";
 import { waitForTurnFinalizerStep, turnFinalizerCancellationSignal } from "./quiescence";
@@ -115,7 +122,11 @@ import { settleCoreSubscriptionRefusal } from "./subscription-core-settlement";
 import { claudeCoreRefusal, claudeCoreRequestOutcomeUnknown } from "./claude-core";
 import { coreLanesRecoverAfterCheckpoint } from "./subscription-core-requests";
 
-import { providerRecoveryCause, recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
+import {
+  providerRecoveryCause,
+  recordProviderRecoveryOutcome,
+  turnRecoveryCauseForCode,
+} from "./provider-recovery-metrics";
 import { errorMessage } from "@opengeni/contracts/values";
 
 export type TurnFailureDeps = {
@@ -178,6 +189,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       if (recovery) {
         deps.control.activityStatus = "recovering";
         deps.control.turnMetricOutcome = "recovering";
+        deps.control.turnRecoveryCause = "database";
         deps.control.activityError = error;
         throw recovery;
       }
@@ -198,7 +210,6 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     console.error(JSON.stringify({ message: "Local turn failure source locations", locations }));
   }
   const {
-    error,
     input,
     settings,
     db,
@@ -221,6 +232,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     acknowledgeLostAttemptOwnership,
     acknowledgeRecoveryQuiescence,
   } = deps;
+  // A turn whose own box replacement cannot be saved stops instead of
+  // waiting (see sandboxBoxNotSavedStop).
+  const error = await sandboxBoxNotSavedStop(deps);
   // A refused socket applies to the entire logical turn, including recovery
   // caused later by a lease, tool, or worker interruption rather than a model.
   const requestTurnRecovery: typeof persistSessionTurnRecovery = (
@@ -302,6 +316,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       if (!databaseRecovery) throw checkpointError;
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "database";
       control.activityError = error;
       throw databaseRecovery;
     }
@@ -315,14 +330,32 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
     control.activityStatus = "recovering";
     control.turnMetricOutcome = "recovering";
+    control.turnRecoveryCause = "sandbox";
     control.activityError = error;
     return claimedResult({ status: "recovering", deferredUntilWake: true });
   }
+  // Call-scoped proof that an in-flight exec_command never dispatched its
+  // command: the provider's typed pre-dispatch refusal in the error, or a call
+  // whose every operation was still waiting for (or had failed in) sandbox
+  // resolution, which settling closes so it never dispatches later. Those
+  // calls settle as not started (replay safe), never unknown, whether this
+  // turn recovers or fails.
+  const commandCallsNotStarted = (): string[] =>
+    isRoutingMutationOutcomeUnknownError(error)
+      ? []
+      : [
+          ...new Set([
+            ...toolCallCommandNotStartedCallIds(error),
+            ...(eventing.toolCancellationFenceRef?.current?.settleCommandCallsNotStarted?.() ?? []),
+          ]),
+        ];
   // A true epoch supersession and a provider lifecycle transition are both
   // recoverable control-plane states, never session failures. A rotation
   // persists an exact group/epoch wait marker so the workflow parks before
   // another turn-worker dispatch; shorter non-rotation transitions retain
-  // their existing paced retry.
+  // their existing paced retry. A command still waiting for the box (for
+  // example while setup found it could not start programs and asked for its
+  // replacement) never reached it, so it settles as not started.
   const lifecycleTransition = sandboxLifecycleTransitionDiagnostic(error);
   const leaseControlError =
     error instanceof SandboxLeaseSupersededError ? error : lifecycleTransition;
@@ -351,6 +384,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         transitionPending && !sandboxLifecycleWait
           ? sandboxDeadlineRotationRecoveryDelayMs(settings)
           : undefined;
+      const notStartedToolCallIds = commandCallsNotStarted();
       const recovery = await requestTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
@@ -377,6 +411,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
           : {}),
         ...(sandboxLifecycleWait ? { sandboxLifecycleWait } : {}),
         ...(transitionRetryAfterMs !== undefined ? { retryAfterMs: transitionRetryAfterMs } : {}),
+        ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
       });
       if (recovery.action === "stale") {
         acknowledgeLostAttemptOwnership();
@@ -388,6 +423,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "sandbox";
       return claimedResult({
         status: "recovering",
         ...(transitionRetryAfterMs !== undefined
@@ -447,6 +483,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       if (postClaimRecovery) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "database";
         control.activityError = error;
         throw postClaimRecovery;
       }
@@ -463,6 +500,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "control";
       control.activityError = error;
       return claimedResult({
         status: "recovering",
@@ -498,6 +536,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "sandbox";
       control.activityError = error;
       return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
@@ -542,6 +581,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "sandbox";
       return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
       console.error(
@@ -581,6 +621,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "worker";
       return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
       // The database transition is atomic. If it could not commit, surface
@@ -643,6 +684,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       // ordinary durable quiescence/writer fences.
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "database";
       control.activityError = error;
       throw recoveryFailure;
     }
@@ -851,6 +893,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
     control.activityStatus = "recovering";
     control.turnMetricOutcome = "recovering";
+    control.turnRecoveryCause = "provider";
     return claimedResult({ status: "recovering" });
   }
   // Definitive Codex credential/account refusals are the only provider
@@ -1005,6 +1048,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       if (postClaimRecovery) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "database";
         control.activityError = error;
         throw postClaimRecovery;
       }
@@ -1020,6 +1064,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       acknowledgeRecoveryQuiescence();
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "provider";
       control.activityStatus = "recovering";
       control.activityError = error;
       return claimedResult({ status: "recovering", continueDelayMs });
@@ -1309,6 +1354,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       acknowledgeRecoveryQuiescence();
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.turnMetricOutcome = "recovering";
+      control.turnRecoveryCause = "provider";
       control.activityStatus = "recovering";
       control.activityError = error;
       return claimedResult({ status: "recovering" });
@@ -1338,20 +1384,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     !!attempt.triggerEventId &&
     attempt.executionGeneration > 0;
   const earlyRecoverableSetup = earlyDefinitionMismatch || earlyCommandStartUnavailable;
-  // Call-scoped proof that an in-flight exec_command never dispatched its
-  // command: the provider's typed pre-dispatch refusal in the error, or a call
-  // whose every operation was still waiting for (or had failed in) sandbox
-  // resolution, which settling closes so it never dispatches later. Those
-  // calls settle as not started (replay safe), never unknown, whether this
-  // turn recovers or fails.
-  const notStartedToolCallIds = isRoutingMutationOutcomeUnknownError(error)
-    ? []
-    : [
-        ...new Set([
-          ...toolCallCommandNotStartedCallIds(error),
-          ...(eventing.toolCancellationFenceRef?.current?.settleCommandCallsNotStarted?.() ?? []),
-        ]),
-      ];
+  const notStartedToolCallIds = commandCallsNotStarted();
   // Custody decides whether replay is safe, not what caused the failure. Keep
   // the existing diagnostic in the permission-controlled terminal event;
   // never copy it into logs or use its retry classification for admission.
@@ -1492,6 +1525,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         acknowledgeRecoveryQuiescence();
         await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "sandbox";
         control.activityStatus = "recovering";
         control.activityError = error;
         return claimedResult({ status: "recovering" });
@@ -1535,6 +1569,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
         acknowledgeRecoveryQuiescence();
         await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = turnRecoveryCauseForCode(recoveryCode);
         control.activityStatus = "recovering";
         control.activityError = error;
         const recoveryCause = providerRecoveryCause(recoveryCode);
@@ -1594,6 +1629,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       if (escaped) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "tool";
         control.activityError = error;
         throw escaped;
       }
@@ -1625,6 +1661,7 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
       if (postClaimRecovery) {
         control.activityStatus = "recovering";
         control.turnMetricOutcome = "recovering";
+        control.turnRecoveryCause = "database";
         control.activityError = error;
         throw postClaimRecovery;
       }
@@ -1652,6 +1689,9 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     await historySink.reconcileConversationTruth({ requireDurable: true });
   } else {
     await historySink.reconcileConversationTruth();
+  }
+  if (attempt.triggerType === "session.context.compaction.requested") {
+    return await settleFailedCompactionCheckpoint(deps, error, failure.code, notStartedToolCallIds);
   }
   if (
     !(await eventing.settle!({
@@ -1682,6 +1722,73 @@ async function settleTurnFailureInAttempt(deps: TurnFailureDeps): Promise<RunAge
     attempt.turnId,
   );
   return claimedResult({ status: "failed" });
+}
+
+/**
+ * A compaction checkpoint (the idle one after a person's turn, or `/compact`)
+ * is maintenance: when it fails for any reason, the chat itself is still fine.
+ * Settle it as a failed compaction, exactly as a failed summary is: the
+ * session returns to idle instead of failed, and a still-pending request is
+ * consumed with its `skipped` landmark so it is not claimed again. The
+ * person's next turn compacts at its usual threshold.
+ */
+async function settleFailedCompactionCheckpoint(
+  deps: TurnFailureDeps,
+  error: unknown,
+  failureCode: string | undefined,
+  notStartedToolCallIds: readonly string[],
+): Promise<RunAgentTurnResult> {
+  const { input, db, control, eventing, claimedResult, observability } = deps;
+  // The turn records a short reason; the classification goes to telemetry.
+  // Error class names only: never the message, which may hold content.
+  const diagnostic = safeErrorDiagnostic(error);
+  // Many error subclasses keep the inherited name "Error"; their class name
+  // says more.
+  const errorName =
+    error instanceof Error ? error.constructor.name || error.name || "Error" : typeof error;
+  observability.warn("Compaction checkpoint failed", {
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    attemptId: input.attemptId,
+    failureCode: failureCode ?? "unknown",
+    errorName,
+    ...(diagnostic.status !== undefined ? { status: diagnostic.status } : {}),
+  });
+  // A provider, quota or summary failure keeps its own reason. Anything else
+  // happened before or around the summary, so say the checkpoint could not run
+  // and name the error class rather than a bare "unexpected Error".
+  const unclassifiedReason = compactionFailureReason(
+    `unexpected ${error instanceof Error && error.name ? error.name : "unknown error"}`,
+  );
+  const payload =
+    compactionFailureReasonFromError(error) === unclassifiedReason
+      ? compactionFailureTurnEventPayload(error, {
+          error: compactionFailureReason(`the checkpoint could not run (${errorName})`),
+        })
+      : compactionFailureTurnEventPayload(error);
+  // Consuming needs the request to still be pending (settlement is stale
+  // otherwise); a checkpoint that already started has consumed it. A failed
+  // read throws into the post-claim database recovery like any settlement
+  // error: settling idle with the request pending would claim it again.
+  const requestPending = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+  if (
+    !(await eventing.settle!({
+      events: [
+        { type: "turn.failed", payload },
+        { type: "session.status.changed", payload: { status: "idle" } },
+      ],
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      ...(requestPending ? { consumeRequestedCompactionFailure: true } : {}),
+      ...(notStartedToolCallIds.length > 0 ? { notStartedToolCallIds } : {}),
+    }))
+  ) {
+    return claimedResult({ status: "cancelled" });
+  }
+  control.turnMetricOutcome = "failed";
+  control.activityStatus = "idle";
+  return claimedResult({ status: "idle" });
 }
 
 /** An error of the given class, directly or anywhere in the cause chain. */
@@ -1799,4 +1906,41 @@ export function ownInterruptedCoreRequestRecovery(
   }
   if (failure.code && INTERRUPTED_RESPONSE_CODES.has(failure.code)) return interrupted;
   return failure.retryable === true ? failure : null;
+}
+
+/**
+ * A turn waiting on the replacement of a Modal box that could not start
+ * programs, released because a drain could not save that box (see
+ * releaseSandboxProcessStartReplacementWaiters), comes back fenced by the same
+ * rotation. It stops with clear copy instead of waiting on saves that keep
+ * failing, and so does a person's retry fenced by the same box; the box stays
+ * fenced, so no turn reuses it. Any other failure, including the attempt that
+ * requested the replacement, is returned as is.
+ */
+export async function sandboxBoxNotSavedStop(
+  deps: Pick<TurnFailureDeps, "error" | "db" | "input"> & {
+    attempt: Pick<TurnFailureDeps["attempt"], "turnId">;
+  },
+  reader: typeof readSessionTurnSandboxBoxNotSaved = readSessionTurnSandboxBoxNotSaved,
+): Promise<unknown> {
+  const { error, db, input, attempt } = deps;
+  const transition = sandboxLifecycleTransitionDiagnostic(error);
+  // The box stays fenced by its rotation, or by a drain capture retrying.
+  if (
+    !transition ||
+    transition.reason === "provider_recovery_in_progress" ||
+    !attempt.turnId ||
+    isSandboxMachineReplacing(error)
+  ) {
+    return error;
+  }
+  const replaced = await reader(db, input.workspaceId, {
+    sessionId: input.sessionId,
+    turnId: attempt.turnId,
+  }).catch(() => null);
+  return replaced &&
+    replaced.sandboxGroupId === transition.sandboxGroupId &&
+    replaced.leaseEpoch === transition.leaseEpoch
+    ? new SandboxBoxNotSavedError()
+    : error;
 }

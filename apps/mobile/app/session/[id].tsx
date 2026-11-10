@@ -17,12 +17,13 @@ import {
   NativeSessionScreen,
   SessionActionsButton,
   SessionHeaderTitle,
+  useNativeSessionIdentity,
   useNativeTimelineTheme,
   type NativeInChatConnectOptions,
 } from "@opengeni/react-native/timeline";
 import { createWebMarkdownRenderer } from "@opengeni/react-native/timeline/markdown";
 import { createNativePreviewRenderers } from "@opengeni/react-native/timeline/previews";
-import type { OpenGeniLinkTarget } from "@opengeni/sdk";
+import { resolveOpenGeniLinkTarget, type OpenGeniLinkTarget } from "@opengeni/sdk";
 import { desktopAppReturnUrl } from "@opengeni/contracts";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type { InteractiveAnswerStore } from "@opengeni/react/interactive-answer-model";
@@ -264,7 +265,7 @@ function LiveSession(props: {
   const webBaseUrl = account?.baseUrl ?? null;
   // Agent images and previews resolve through this workspace; artifacts and Sites open on web.
   const renderMarkdown = useMemo(() => {
-    const openLink = (target: OpenGeniLinkTarget) => {
+    const openResolvedLink = (target: OpenGeniLinkTarget) => {
       // Another chat opens here in the app, in the workspace the link names (or this one).
       if (target.kind === "session") {
         router.push(
@@ -290,6 +291,18 @@ function LiveSession(props: {
           `/workspaces/${workspace}/artifacts/editable/${encodeURIComponent(target.artifactId)}`,
         );
     };
+    const openLink = (target: OpenGeniLinkTarget) => {
+      void resolveOpenGeniLinkTarget(props.client, target, props.workspaceId, {
+        sessionId: props.sessionId,
+      })
+        .then(openResolvedLink)
+        .catch((error: unknown) =>
+          Alert.alert(
+            t("markdown.openArtifact"),
+            error instanceof Error ? error.message : String(error),
+          ),
+        );
+    };
     return createWebMarkdownRenderer({
       // Opengeni conversations open in the app; anything else in the browser.
       onLinkPress: (url) => {
@@ -304,7 +317,7 @@ function LiveSession(props: {
         onOpenLink: openLink,
       }),
     });
-  }, [props.client, props.workspaceId, webBaseUrl, t]);
+  }, [props.client, props.workspaceId, props.sessionId, webBaseUrl, t]);
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
   const computeLabel = useSessionComputeLabel(props.workspaceId, props.sessionId);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -330,10 +343,13 @@ function LiveSession(props: {
   }, [controller.initialHistoryReady, props.client, props.workspaceId, props.sessionId]);
   // A session the runtime could not start reads as stuck, never "Waiting on you".
   const status = controller.displayStatus;
-  const paused = controller.queue.effectiveControl?.state === "paused";
+  // Archiving stops (and so pauses) a chat's work: it reads as archived, not paused.
+  const paused = !controller.archived && controller.queue.effectiveControl?.state === "paused";
   // Web header: the status badge beside the title (a paused workstream says so).
   const refreshSession = controller.session.refresh;
   const title = session ? sessionDisplayTitle(session) : "";
+  // The agent's (or the chat's own) avatar beside the title, as on the web header.
+  const identity = useNativeSessionIdentity(session, props.client);
   const agentCall = useAgentCall();
   const onCall = agentCall.sessionId === props.sessionId;
   // In the call's own conversation the green phone button returns to the call,
@@ -404,10 +420,12 @@ function LiveSession(props: {
           status={paused ? "queued" : status}
           statusLabel={paused ? "Paused" : undefined}
           fullAccess={fullAccessOn}
+          avatar={identity.avatar}
+          agentName={identity.agentName}
         />
       </AppThemeProvider>
     ),
-    [fullAccessOn, paused, status, title],
+    [fullAccessOn, identity, paused, status, title],
   );
   const headerRight = useCallback(
     () =>

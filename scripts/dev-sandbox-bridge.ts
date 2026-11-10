@@ -8,7 +8,7 @@
 // address, where nothing listens. This forwarder listens on exactly one
 // address, the gateway of this worktree's Compose network (which every local
 // Docker sandbox joins), and relays only the routes a sandbox calls:
-// Codemode, first-party MCP, and the personal HTTPS Git broker. It refuses
+// Codemode, first-party MCP, the personal HTTPS Git broker and GitHub gateway. It refuses
 // peers outside that network's subnet, so neither other devices nor unrelated
 // containers on the default bridge can reach the API through it.
 //
@@ -185,7 +185,8 @@ export function createSandboxBridgeServer(options: { subnet: string; apiOrigin: 
     }
     if (!sandboxBridgeRouteAllowed(url.pathname)) {
       writeJson(outgoing, 404, {
-        error: "the Docker sandbox route serves only Codemode, first-party MCP, and the Git broker",
+        error:
+          "the Docker sandbox route serves only Codemode, first-party MCP, the Git broker and the GitHub gateway",
       });
       return;
     }
@@ -246,7 +247,7 @@ async function serve(): Promise<void> {
     server.listen({ host, port, exclusive: true }, resolve);
   });
   console.log(
-    `Opengeni Docker sandbox route listening on ${host}:${port} for ${subnet} (Codemode, MCP, Git broker)`,
+    `Opengeni Docker sandbox route listening on ${host}:${port} for ${subnet} (Codemode, MCP, Git broker, GitHub gateway)`,
   );
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => server.close(() => process.exit(0)));

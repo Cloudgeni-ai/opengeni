@@ -1,5 +1,23 @@
 # @opengeni/network
 
+## 6.13.0
+
+## 6.12.0
+
+### Minor Changes
+
+- 913e2b4: Allow deployment operators to permit exact private-network integration hosts, optionally restricted by port, without enabling private destinations globally. Apply the allowlist at DNS-pinned connection time across MCP and OAuth traffic.
+
+## 6.11.0
+
+## 6.10.0
+
+### Patch Changes
+
+- b5201d5: Dependency security updates: sharp 0.35.5 (bundled libvips fixes), Electron 44.10.1, @azure/msal-node 7.1.2, undici 6.29.1, @grpc/grpc-js 1.14.7, and patched transitive versions of dompurify, ip-address, js-yaml, proxy-addr, fast-uri, seroval, follow-redirects and body-parser. This clears the critical and most high advisories reported by `bun audit` for server and desktop code.
+
+## 6.9.0
+
 ## 6.8.0
 
 ## 6.7.0

@@ -36,8 +36,9 @@ true at the same time:
 It is impossible to prove that unknown defects do not exist. Opengeni therefore
 uses the strongest executable equivalent for each candidate: zero known
 defects, deterministic release gates, the complete authenticated live harness,
-100 capture/navigation/cancellation observations, and a failure-free live
-soak. Scheduled real-device and exploratory reviews remain readiness evidence
+100 capture/navigation observations, 20 real Steer cancellations plus a
+hostile Pause, and a failure-free live soak. Scheduled real-device and
+exploratory reviews remain readiness evidence
 and must never be represented as candidate-specific results unless a workflow
 actually ran them. Passing means the evidence proves the claims; it never means
 reviewers failed to notice a problem.
@@ -211,8 +212,11 @@ Required assertions:
 
 Timing-sensitive automated cases must pass their configured repetition/property
 suite. The live per-candidate gate performs 100 capture/navigation observations
-and 100 real Steer cancellations plus a hostile Pause; broader state-machine
-coverage runs in protected source CI.
+and 20 real Steer cancellations plus a hostile Pause; broader state-machine
+coverage runs in protected source CI. Every Steer costs two real model turns in
+one growing session, so the Steer count, not the observation count, sets how
+much of the acceptance workspace's model subscription a run uses; 100 Steers
+used up a full weekly quota.
 
 ## 6. Scale and boundary matrix
 

@@ -11,6 +11,7 @@ mod api;
 mod balloon;
 mod bounds;
 mod drives;
+mod freed;
 mod holder;
 mod jail;
 mod logs;
@@ -53,7 +54,7 @@ use crate::cgroup::{Cgroup, MemoryStats, Writes};
 use crate::confined::Owned;
 use crate::error::{EngineError, ErrorKind};
 use crate::profile::{MemoryProfile, PageSize, ProfileError};
-use crate::spec::{MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
+use crate::spec::{GuestMemory, MemorySource, RestoreFiles, SnapshotFiles, SnapshotKind, VmSpec};
 use crate::{CancellationToken, Completion, Engine, Found, LastWords};
 
 /// Memory pushed to compressed RAM per reclaim request. Small enough that a
@@ -81,36 +82,11 @@ const SYSTEM_PATH: &str = "/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/
 /// so boot pins it unless the caller already chose a clock source.
 const CLOCK_SOURCE: &str = "clocksource=kvm-clock";
 
-/// Guest kernel parameter for the smallest free block, as a power of two of
-/// 4 KiB pages, that the guest reports to the host for reclaim.
-const REPORTING_ORDER: &str = "page_reporting.page_reporting_order";
-
-/// The reporting order that matches the pages backing guest memory.
-///
-/// The host can give back only whole backing pages. A reported range smaller
-/// than one of the 2 MiB huge pages frees nothing (Firecracker's discard of
-/// it fails) and still costs the guest and the VMM a report, which also
-/// slows the reports that would free memory. So a guest on huge pages reports
-/// only blocks of at least one huge page (order 9), and a guest on 4 KiB
-/// pages every free page (order 0), the most it can give back. Firecracker's
-/// ballooning guide gives the same advice: reported ranges should match the
-/// backing page size.
-///
-/// The order is the guest kernel's, set when it boots: a sandbox restored
-/// from a memory image keeps the order it booted with, whatever pages back
-/// it after the restore. A fleet whose hosts all run one memory profile
-/// never sees a difference. Were a guest booted on base pages restored
-/// onto huge pages, its reports smaller than a huge page would free
-/// nothing; one booted on huge pages and restored onto base pages gives
-/// back less than it could.
-fn reporting_order(pages: PageSize) -> u32 {
-    (pages.bytes() / PageSize::Base.bytes()).trailing_zeros()
-}
-
 /// The kernel command line to boot with: the caller's, plus [`CLOCK_SOURCE`]
-/// if it names no clock source of its own, plus the [`reporting_order`] for
-/// `reporting`, the pages backing a guest that reports freed memory, if it
-/// names no order of its own. A guest keeps the order it booted with.
+/// if it names no clock source of its own, plus the
+/// [`reporting_order`](balloon::reporting_order) for `reporting`, the pages
+/// backing a guest that reports freed memory, if it names no order of its
+/// own. A guest keeps the order it booted with.
 fn boot_args(requested: &str, reporting: Option<PageSize>) -> String {
     let names = |parameter: &str| {
         requested.split_whitespace().any(|arg| {
@@ -129,9 +105,10 @@ fn boot_args(requested: &str, reporting: Option<PageSize>) -> String {
         add(CLOCK_SOURCE);
     }
     if let Some(pages) = reporting
-        && !names(REPORTING_ORDER)
+        && !names(balloon::REPORTING_ORDER)
     {
-        add(&format!("{REPORTING_ORDER}={}", reporting_order(pages)));
+        let order = balloon::reporting_order(pages);
+        add(&format!("{}={order}", balloon::REPORTING_ORDER));
     }
     args
 }
@@ -1183,6 +1160,14 @@ impl Engine for Firecracker {
             .map_err(|error| EngineError::io("set_only_copy", error))
     }
 
+    fn held_frozen(&self, spec: &VmSpec) -> Result<bool, EngineError> {
+        // The guard freezes each VM's own group, or the one holding them
+        // all; either holds it.
+        self.cgroup_of(spec)
+            .is_held_frozen()
+            .map_err(|error| EngineError::io("held_frozen", error))
+    }
+
     async fn resize_drives(&self, vm: &FirecrackerVm, spec: &VmSpec) -> Result<(), EngineError> {
         drives::resize(vm, spec).await
     }
@@ -1223,6 +1208,14 @@ impl Engine for Firecracker {
         vm: &FirecrackerVm,
     ) -> impl Future<Output = Result<bool, EngineError>> + Send + 'static {
         logs::halted(vm.console.clone(), vm.name.clone())
+    }
+
+    fn freed_memory(
+        &self,
+        vm: &FirecrackerVm,
+        memory: &GuestMemory,
+    ) -> impl Future<Output = Result<Vec<std::ops::Range<u64>>, EngineError>> + Send + 'static {
+        freed::freed_memory(vm.process.procfs(), memory)
     }
 
     fn last_words(&self, vm: &FirecrackerVm) -> impl Future<Output = LastWords> + Send + 'static {

@@ -112,6 +112,7 @@ pub struct Client {
     request_timeout: Option<Duration>,
     max_payload: Arc<AtomicUsize>,
     connection_stats: Arc<Statistics>,
+    pub(crate) connection_task: Option<tokio::task::AbortHandle>,
 }
 
 pub mod traits {
@@ -243,6 +244,16 @@ impl Client {
             request_timeout,
             max_payload,
             connection_stats: statistics,
+            connection_task: None,
+        }
+    }
+
+    /// Immediately closes this connection, including an internal reconnect.
+    /// All cloned handles become unusable. Unlike drain, closing does not wait
+    /// behind buffered publications or depend on the remote server responding.
+    pub fn close(&self) {
+        if let Some(task) = &self.connection_task {
+            task.abort();
         }
     }
 

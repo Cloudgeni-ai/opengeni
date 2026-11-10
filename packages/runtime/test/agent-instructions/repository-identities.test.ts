@@ -111,11 +111,26 @@ describe("GitHub identity per mounted repository", () => {
     });
     expect(text).toContain("GitHub identity per mounted repository:");
     expect(text).toContain("`repos/github.com/octocat/private`: as the person (@octocat)");
-    expect(text).toContain("`repos/github.com/acme/web`: as the Opengeni app.");
+    expect(text).toContain("`repos/github.com/acme/web`: as the workspace's GitHub app.");
+    expect(text).toContain("git and gh (including gh api) act as the person");
+    expect(text).toContain(
+      "Force-pushing or deleting a non-default branch there follows the person's GitHub settings; the default branch and tags wait for their approval.",
+    );
+    expect(text).not.toContain("do not act as the person");
+    expect(text).toContain("On GitHub app repositories, use the github_app__* tools.");
+    expect(text).toContain("try them before asking for credentials.");
+  });
+
+  test("outside a managed sandbox gh is not routed through Your GitHub", () => {
+    const text = render({
+      ...BASE,
+      managedSandbox: false,
+      connectedMachine: true,
+      repositoryIdentities: [{ path: "repos/github.com/octocat/private", identity: "personal" }],
+    });
     expect(text).toContain("use plain git and the github_personal__* tools");
     expect(text).toContain("gh and raw GitHub API calls do not act as the person");
-    expect(text).toContain("On Opengeni app repositories, use the github_app__* tools.");
-    expect(text).toContain("for repositories that are not mounted as the person");
+    expect(text).not.toContain("Force-pushing");
   });
 
   test("personal only: no app sentence, and the login is optional", () => {

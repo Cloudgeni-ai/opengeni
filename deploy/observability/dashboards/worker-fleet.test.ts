@@ -128,6 +128,23 @@ describe("worker fleet dashboard scope", () => {
     ]);
   });
 
+  test("shows the oldest ready prompt next to the turn-queue backlog age", async () => {
+    const dashboard = JSON.parse(
+      await readFile(new URL("./worker-fleet.json", import.meta.url), "utf8"),
+    );
+    const panel = (
+      dashboard.panels as Array<{
+        title?: string;
+        targets?: Array<{ refId?: string; expr?: string }>;
+      }>
+    ).find((candidate) => candidate.title === "Oldest eligible turn backlog age");
+    // A prompt can wait before its turn reaches the turn queue (session control
+    // activities). Only the durable ready-prompt age shows that wait.
+    expect(panel?.targets?.find((target) => target.refId === "B")?.expr).toBe(
+      'max(opengeni_turns_queued_oldest_age_seconds{namespace="$namespace",environment="$environment",release="$release",hold="ready"})',
+    );
+  });
+
   test("gates backlog panels with freshness from the same scrape instance", async () => {
     const dashboard = JSON.parse(
       await readFile(new URL("./worker-fleet.json", import.meta.url), "utf8"),

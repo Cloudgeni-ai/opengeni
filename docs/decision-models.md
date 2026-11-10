@@ -6,7 +6,10 @@ the conversational model picker. A model judges common input against named
 `@opengeni/decisions` owns the interface and OpenAI/OpenRouter HTTP adapters.
 `@opengeni/jev` adapts its existing TypeSafe client to that interface.
 
-Two consumers use it:
+Three consumers use it:
+
+- The public [stateless decisions API](model-inference.md) exposes the same typed
+  interface to authorized products, using the deployment's configured model.
 
 - Tool discovery judges a candidate list built from keywords and, when an
   embedding model is configured, meaning, then resolves only exact authorized
@@ -21,7 +24,7 @@ Two consumers use it:
 
 ## Deployment configuration
 
-Configure all three explicitly, on API and worker servers:
+Configure the shared model explicitly, on API and worker servers:
 
 ```dotenv
 OPENGENI_DECISION_MODEL_PROVIDER=openrouter
@@ -34,6 +37,14 @@ its existing `OPENGENI_CODE_SEARCH_MODE` and workspace/session setting. No paid
 model is configured by default. No customer key or subscription is borrowed.
 Partial explicit configuration is unavailable; it never falls back to a different
 credential. Configure the category as one deployment change.
+
+Public API calls can select a separate deployment-owned category through
+`OPENGENI_PUBLIC_DECISION_MODEL_PROVIDER/ID/API_KEY/BASE_URL/AUTH` on the API
+process. It uses these same adapters and residency rules without changing tool
+discovery or code search. When every public setting is unset, public calls use
+the shared category above. An explicit public category is complete and independent;
+it never borrows missing credentials or endpoint settings from the shared category.
+See [public decision configuration](model-inference.md#authority-funding-and-configuration).
 
 | Provider | Model example | Endpoint | Optional base URL |
 | --- | --- | --- | --- |
@@ -70,7 +81,8 @@ default, `api_key`, sends `OPENGENI_DECISION_MODEL_API_KEY` as before.
 
 Give the selector its own deployment rather than sharing one that serves the
 agents' own model calls: a tool-search selection with 40 candidates is roughly
-10 to 20 thousand input tokens, so its rate limit should be sized for that.
+10 to 20 thousand input tokens, and a selection slower than 2.5 seconds sends a
+second identical request, so its rate limit should be sized for that.
 
 Legacy `OPENGENI_JEV_API_KEY/BASE_URL/MODEL/REQUEST_TIMEOUT_MS` still serve existing
 code-search deployments when **no** shared category setting is present. They never

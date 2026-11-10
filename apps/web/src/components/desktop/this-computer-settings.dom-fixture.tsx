@@ -33,6 +33,10 @@ const base: ThisComputerStatus = {
 };
 
 let status: ThisComputerStatus = base;
+/** What the workspace lists: this computer as agents see it, and connected Chrome profiles. */
+let machines: { enrollmentId: string; hasDisplay: boolean; allowScreenControl: boolean }[] = [];
+let browsers: { state: string; enrollmentId: string; browserName: string; profileLabel: string }[] =
+  [];
 /** What the app answers when the page reads the status itself. */
 let fresh: ThisComputerStatus | null = null;
 let capabilities: DesktopComputerCapabilities;
@@ -129,8 +133,13 @@ beforeAll(async () => {
       signIn: null,
     }),
   }));
+  // One client for the page's life, as the app's context gives it.
+  const client = {
+    listAttachedBrowsers: async () => ({ devices: browsers }),
+    listMachines: async () => ({ activeSandboxId: null, activeEpoch: 0, machines }),
+  };
   mock.module("@opengeni/react/app/app-context", () => ({
-    useAppContext: () => ({ client: { listAttachedBrowsers: async () => ({ devices: [] }) } }),
+    useAppContext: () => ({ client }),
   }));
   ({ createRoot } = await import("react-dom/client"));
   ({ ThisComputerAgentSettings, ThisComputerMicrophoneSettings } =
@@ -146,6 +155,8 @@ afterEach(() => {
   container?.remove();
   status = base;
   fresh = null;
+  machines = [];
+  browsers = [];
   platform = "macos";
   updates.length = 0;
   detection = { enabled: true, autoRecord: false, available: true };
@@ -247,6 +258,48 @@ describe("a permission macOS hasn't given", () => {
       permissions: permissions({ screenRecording: true }),
     });
     expect(red().length).toBeGreaterThan(0);
+  });
+});
+
+describe("a computer the separately installed Opengeni Agent runs", () => {
+  test("shows what is in effect in words, not switches that look off and won't move", async () => {
+    machines = [{ enrollmentId: "enrollment-1", hasDisplay: true, allowScreenControl: true }];
+    browsers = [
+      {
+        state: "connected",
+        enrollmentId: "enrollment-1",
+        browserName: "Chrome",
+        profileLabel: "Work",
+      },
+    ];
+    // The app didn't connect with the screen itself: the agent service did.
+    await render(
+      { ...base, management: "service" },
+      {
+        ...settings(),
+        unavailable: ["screenControl", "browserExtension"],
+        screenControlConnected: false,
+      },
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain("Agents can see the screen and use apps.");
+    expect(text).toContain("Browser extension connected · Work.");
+    expect(text).toContain("installed on its own on this computer");
+    expect(text).not.toContain("Agent service");
+    // Only Computer use stays a switch; the restart warning is for switches that work.
+    expect(container.querySelectorAll('[role="switch"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-in-effect="on"]')).toHaveLength(2);
+    expect(text).not.toContain("restarts Opengeni");
+  });
+
+  test("a screen the person didn't share reads Off", async () => {
+    machines = [{ enrollmentId: "enrollment-1", hasDisplay: true, allowScreenControl: false }];
+    await render(
+      { ...base, management: "service" },
+      { ...settings(), unavailable: ["screenControl", "browserExtension"] },
+    );
+    expect(container.textContent).toContain("Agents can't see the screen or use apps.");
+    expect(container.querySelectorAll('[data-in-effect="off"]')).toHaveLength(2);
   });
 });
 

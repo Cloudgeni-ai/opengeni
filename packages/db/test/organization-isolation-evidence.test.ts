@@ -65,10 +65,8 @@ const ORGANIZATION_AUTHORITY_TABLES = [
  * `workspaces` and `workspace_memberships` are the tenancy *directory* the
  * access resolver itself reads before an RLS context exists, and
  * `auth_identities` is the Better Auth subject mapping.
- * `automation_webhook_endpoints`, `event_ingress_routes` and
- * `pr_review_managed_github_routes` are exact global ingress keys used to
- * discover tenant context before loading the protected automation source,
- * event source or PR-review binding. Their organization
+ * `event_ingress_routes` holds exact global ingress keys used to discover
+ * tenant context before loading the protected event source. Its organization
  * boundary is enforced above the database, by authenticated ingress and
  * `@opengeni/core` access resolution. The four account-carrying MCP OAuth
  * protocol tables are likewise exact hash-keyed state used before the bearer,
@@ -82,13 +80,11 @@ const ORGANIZATION_AUTHORITY_TABLES = [
  */
 const REVIEWED_UNPROTECTED_ACCOUNT_TABLES = [
   "auth_identities",
-  "automation_webhook_endpoints",
   "event_ingress_routes",
   "mcp_oauth_access_tokens",
   "mcp_oauth_authorization_codes",
   "mcp_oauth_authorization_requests",
   "mcp_oauth_refresh_tokens",
-  "pr_review_managed_github_routes",
   "workspace_memberships",
   "workspaces",
 ] as const;
@@ -344,17 +340,6 @@ async function seedResources(
   });
   resources.push({ family: "session event", table: "session_events", id: event!.id });
 
-  const [variableSet] = await db.admin<{ id: string }[]>`
-    insert into workspace_variable_sets (account_id, workspace_id, name)
-    values (${accountId}, ${workspaceId}, ${`evidence-variable-set-${suffix}`})
-    returning id
-  `;
-  resources.push({
-    family: "variable set",
-    table: "workspace_variable_sets",
-    id: variableSet!.id,
-  });
-
   const [rig] = await db.admin<{ id: string }[]>`
     insert into rigs (account_id, workspace_id, name)
     values (${accountId}, ${workspaceId}, ${`evidence-rig-${suffix}`})
@@ -579,10 +564,8 @@ describe("organization tenancy isolation evidence", () => {
     // POSITIVE CONTROL. Every "zero rows" assertion below is only meaningful
     // because this exact query shape reaches every seeded family here.
     //
-    // `workspace_variable_sets` is deliberately `denied`, not `hidden`: scoped
-    // Variable Sets are a capability-only surface with zero direct runtime
-    // table privileges (migration 0254). Pinning the whole map means a future
-    // GRANT that turns `denied` into `hidden` fails this test on purpose.
+    // Pin the complete current resource map; retired Variable Set relations
+    // have no reachable rows at all, as the direct-query checks below prove.
     expect(
       await probeResources(
         { accountId: fixture.orgA.accountId, workspaceId: fixture.orgA.workspaceId },
@@ -591,7 +574,6 @@ describe("organization tenancy isolation evidence", () => {
     ).toEqual({
       session: "visible",
       "session event": "visible",
-      "variable set": "denied",
       rig: "visible",
       enrollment: "visible",
       "connected machine": "visible",
@@ -603,9 +585,8 @@ describe("organization tenancy isolation evidence", () => {
       "api key": "visible",
     });
 
-    // The `denied` classification above is a catalog reading; prove the same
-    // absence by executing against the capability-only table under the owning
-    // organization's own honest context.
+    // The retired capability-only table is now absent even under its former
+    // organization's honest context, rather than merely hidden by RLS.
     for (const statement of [
       `select * from "workspace_variable_sets" limit 1`,
       `insert into "workspace_variable_sets" default values`,
@@ -618,7 +599,7 @@ describe("organization tenancy isolation evidence", () => {
             { accountId: fixture!.orgA.accountId, workspaceId: fixture!.orgA.workspaceId },
             async (tx) => await tx.unsafe(statement),
           ),
-        "42501",
+        "42P01",
       );
     }
   });

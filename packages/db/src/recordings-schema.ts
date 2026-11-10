@@ -139,6 +139,15 @@ export const recordingTracks = pgTable(
     preparedBytes: bigint("prepared_bytes", { mode: "number" }),
     // Migration 0945.
     preparedSha256: text("prepared_sha256"),
+    // Migration 1240. When the track's uploaded pieces were deleted because
+    // its kept file holds everything they did; null while they are kept.
+    chunkObjectsDeletedAt: timestamp("chunk_objects_deleted_at", { withTimezone: true }),
+    // Migration 1353. The stretches of the recording this track has no audio
+    // for, from its chunks' places on the timeline; null until worked out.
+    unrecorded:
+      jsonb("unrecorded").$type<
+        Array<{ startMilliseconds: number; endMilliseconds: number | null }>
+      >(),
     videoWidth: integer("video_width"),
     videoHeight: integer("video_height"),
     videoFrameCount: integer("video_frame_count"),

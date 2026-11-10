@@ -91,6 +91,7 @@ export {
   type NativeCallEvent,
   type NativeCallPhase,
   type NativeCallRealtime,
+  type NativeCallRouteChangeReason,
   type NativeIncomingCall,
   type NativeIncomingCallAdapter,
   type NativeIncomingCallEndReason,

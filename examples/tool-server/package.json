@@ -9,7 +9,7 @@
     "typecheck": "tsrs --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@opengeni/sdk": "workspace:*",
     "express": "^5.1.0",
     "zod": "^4.2.1"

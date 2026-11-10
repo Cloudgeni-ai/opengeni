@@ -60,8 +60,10 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * register, claim, device count, busy check and ring (1107), the lock-free
  * read of a known external identity (1172), the list of every
  * organization vault wherever it works (1218), the organization's
- * names-only member list (1211) and the Slack agent update sweeper's
- * ids-only inventory of installations that send updates (1153). Each is
+ * names-only member list (1211), the Slack agent update sweeper's
+ * ids-only inventory of installations that send updates (1153) and the
+ * recording compaction sweep's inventory of meeting tracks not yet kept
+ * compact (1240). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -92,6 +94,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
   "list_organization_compute_v1(uuid, uuid, text)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
+  "end_agent_call_rings_v1(uuid)",
 ] as const;
 
 /**
@@ -104,46 +108,40 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * personal-machine owner lookup; until a later migration grants it, the
  * runtime treats the lookup as unavailable and keeps the earlier behaviour.
  * 0984 withheld the connected-command re-arm the same way and 1101 granted
- * it. 0988 withholds the queued-turn
- * hold summary; until it is granted, the control worker does not publish it.
+ * it. 0988 withheld the queued-turn hold summary and 1274 granted it.
  * 1002 withheld the held-browser inventory and 1093 granted it.
  * 1060 withheld the EU-only change function and 1210 granted it. 1091
  * withholds the secret history scrub's
  * reader and cell writer; until they are granted, a scrub reports the cells
  * only they reach as pending. 1103 withheld the subscription
- * account-administrator grant and 1149 granted it. 1107 withholds the agent
+ * account-administrator grant and 1149 granted it. 1107 withheld the agent
  * call routines and the native push v2 functions that carry the iOS VoIP
- * token; until they are granted, native push keeps its v1 functions, no phone
- * takes calls and agents cannot place one.
+ * token; 1239 grants them.
  * 1172 withholds the lock-free external identity read; until it is granted,
  * authenticating an external user takes the organization membership fence
  * exclusively, as before.
- * 1218 withholds the organization vault list; until it is granted, the API
- * lists the organization vaults that work in the current workspace and says
- * the list is incomplete.
+ * 1218 withheld the organization vault list and 1224 the organization machine
+ * and rig list; 1272 granted both.
  * 1211 withholds the names-only member list; until it is granted, members
  * get no names (as before).
  * 1153 withholds the Slack agent update sweeper's inventory; until it is
  * granted, the sweeper finds nothing and sends no update messages.
- * 1224 withholds the organization machine and rig list the same way as the
- * vault list.
+ * 1240 withheld the inventory of meeting tracks not yet kept compact, 1282
+ * granted it and 1283 withholds it again: the binary then in production
+ * (6327db2c) did not know the routine and rejects its runtime grant. Until a
+ * later migration grants it, existing meetings keep their audio as it is and
+ * only new transcripts keep it compact.
+ * 1344 withholds the end of a call's ring on the other phones; until it is
+ * granted, settling a call sends no ended push and those phones ring out.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-  "summarize_queued_turns_by_hold()",
   "session_secret_redaction_rows_v1(uuid, uuid[], text, uuid, integer)",
   "redact_session_secret_cells_v1(uuid, text, jsonb)",
-  "native_push_device_v2(text)",
-  "register_native_push_device_v2(text, text, text, text, text, text[], text)",
-  "claim_native_push_deliveries_v2(uuid, integer, integer)",
-  "agent_call_device_count_v1(text, boolean)",
-  "agent_call_ringing_v1(text)",
-  "ring_agent_call_v1(uuid, boolean)",
-  "read_external_identity_v1(uuid, text, text)",
-  "list_organization_vaults_v1(uuid, jsonb)",
   "list_organization_member_names_v1(uuid)",
   "list_due_slack_agent_update_installations_v1(integer)",
-  "list_organization_compute_v1(uuid, uuid, text)",
+  "list_uncompacted_recording_tracks_v1(integer, text)",
+  "end_agent_call_rings_v1(uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -237,6 +235,17 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
   "list_organization_member_names_v1(uuid)": ["organization_memberships", "auth_users"],
   "list_due_slack_agent_update_installations_v1(integer)": ["slack_agent_update_settings"],
   "list_organization_compute_v1(uuid, uuid, text)": ["enrollments", "rigs", "sandboxes"],
+  "list_uncompacted_recording_tracks_v1(integer, text)": [
+    "recordings",
+    "recording_tracks",
+    "recording_chunks",
+    "recording_transcript_versions",
+  ],
+  "end_agent_call_rings_v1(uuid)": [
+    "agent_calls",
+    "opengeni_private.native_push_deliveries",
+    "opengeni_private.native_push_devices",
+  ],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =
@@ -575,13 +584,9 @@ const GOOGLE_DRIVE_DOCUMENT_CITATION_ROUTINE =
 const GOOGLE_DRIVE_AUTHORITY_TABLES = [
   "connections",
   "files",
-  "google_drive_object_acl_evidence",
-  "google_drive_object_acl_principals",
   "knowledge_document_versions",
   "knowledge_providers",
   "knowledge_source_objects",
-  "knowledge_source_sync_index_obligations",
-  "knowledge_source_sync_states",
   "knowledge_sources",
 ] as const;
 const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
@@ -890,6 +895,17 @@ export const RETIRING_FEATURE_TABLES = {
     "session_variable_set_attachments",
     "workspace_variable_set_variables",
     "workspace_variable_sets",
+  ],
+  // Migration 1275 removes the retired Knowledge-source sync rows and stops
+  // every SQL routine from reading these tables; a later release drops them.
+  knowledgeSourceSync: [
+    "google_drive_object_acl_evidence",
+    "google_drive_object_acl_principals",
+    "knowledge_source_sync_index_obligations",
+    "knowledge_source_sync_item_outcomes",
+    "knowledge_source_sync_object_observations",
+    "knowledge_source_sync_states",
+    "knowledge_source_sync_wakes",
   ],
 } as const;
 const RETIRING_FEATURE_TABLE_NAMES: ReadonlySet<string> = new Set(
@@ -1849,6 +1865,17 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
 );
 
+/**
+ * 1243/1244 agents: SECURITY INVOKER trigger functions. The legacy sync
+ * triggers mirror bot_templates and slack_agents writes into the agents
+ * tables; the guard keeps sessions.agent_id immutable once set.
+ */
+const AGENTS_TRIGGER_ROUTINES = [
+  "sync_agent_from_bot_template()",
+  "sync_agent_from_slack_agent()",
+  "guard_session_agent_id_immutable()",
+] as const;
+
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "guard_session_agent_creation_provenance()",
@@ -1872,6 +1899,9 @@ export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
+  ...AGENTS_TRIGGER_ROUTINES,
+  // 1276: refuses agent-chat claims from workers without the agent layer.
+  "guard_agent_instructions_claim_protocol()",
   ...SESSION_USAGE_LIMIT_INTERNAL_ROUTINES,
   ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
@@ -1896,6 +1926,9 @@ export const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES = [
   "validate_usage_allowance_config(jsonb)",
   "validate_usage_allowance_rule(jsonb)",
   "guard_slack_file_upload_operation()",
+  ...AGENTS_TRIGGER_ROUTINES,
+  // 1276: refuses agent-chat claims from workers without the agent layer.
+  "guard_agent_instructions_claim_protocol()",
   SESSION_USAGE_LIMIT_STATE_ROUTINE,
   ...SESSION_USAGE_LIMIT_AMOUNT_ROUTINES,
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
@@ -1918,7 +1951,10 @@ export const FORCE_RLS_TABLES = [
   "agent_instruction_operations",
   "agent_learning_revisions",
   "agent_learning_snapshots",
+  "agent_revisions",
   "agent_run_states",
+  "agent_slack_installs",
+  "agents",
   "api_keys",
   "attached_browser_devices",
   "attached_browser_inventories",
@@ -1931,6 +1967,13 @@ export const FORCE_RLS_TABLES = [
   "automation_trigger_events",
   "automation_trigger_revisions",
   "automation_triggers",
+  "billing_auto_top_up_mutations",
+  "billing_auto_top_up_operations",
+  "billing_auto_top_up_settings",
+  "billing_credit_alert_settings",
+  "billing_credit_notification_deliveries",
+  "billing_credit_notification_recipients",
+  "billing_credit_notifications",
   "billing_customers",
   "billing_subscription_operations",
   "bot_templates",
@@ -2038,6 +2081,7 @@ export const FORCE_RLS_TABLES = [
   "generated_image_artifacts",
   "generated_video_artifacts",
   "github_installation_repositories",
+  "github_installation_repository_removals",
   "github_installations",
   "google_drive_object_acl_evidence",
   "google_drive_object_acl_principals",
@@ -2120,6 +2164,7 @@ export const FORCE_RLS_TABLES = [
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
+  "model_call_credit_holds",
   "model_call_fact_reconciliation_candidates",
   "model_call_fact_reconciliation_progress",
   "model_call_facts",
@@ -2132,11 +2177,16 @@ export const FORCE_RLS_TABLES = [
   "organization_company_profile_agent_policy_events",
   "organization_connectors",
   "organization_credential_providers",
+  "organization_identity_issuers",
   "organization_inference_residency",
   "organization_inference_residency_events",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
+  "organization_mcp_assertion_replays",
+  "organization_mcp_trusted_issuer_events",
+  "organization_mcp_trusted_issuer_subjects",
+  "organization_mcp_trusted_issuers",
   "organization_membership_invitations",
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
@@ -2382,12 +2432,17 @@ export const FORCE_RLS_TABLES = [
   "task_note_replacement_receipts",
   "task_note_write_capabilities",
   "task_notes",
+  "teams_bot_context_cutoffs",
+  "teams_bot_context_messages",
   "teams_bot_inbox",
   "teams_bot_installations",
   "teams_bot_links",
+  "teams_bot_onboarding_limits",
   "teams_bot_outbox",
   "teams_bot_proofs",
+  "teams_bot_reply_claims",
   "teams_bot_routes",
+  "teams_bot_welcomes",
   "temporal_schedule_cleanup_outbox",
   "tenancy_backfill_receipts",
   "tenancy_backfill_unresolved_rows",
@@ -2400,6 +2455,7 @@ export const FORCE_RLS_TABLES = [
   "turn_personal_resource_attachment_receipts",
   "turn_personal_resource_once_receipts",
   "turn_personal_resource_snapshots",
+  "turn_timing_profiles",
   "usage_events",
   "vault_field_versions",
   "vault_item_fields",
@@ -2488,6 +2544,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   // 1143_agent_call_host_phones: the phones a product embedding Opengeni rings for agent calls.
   "agent_call_host_phones",
   "agent_run_states",
+  // 1243_agents: the agent directory and its Slack installations.
+  "agent_slack_installs",
+  "agents",
   "api_keys",
   "audit_events",
   "auth_identities",
@@ -2504,6 +2563,9 @@ export const RUNTIME_FULL_DML_TABLES = [
   "automation_trigger_revisions",
   "automation_triggers",
   "automation_webhook_endpoints",
+  "billing_credit_alert_settings",
+  "billing_credit_notification_deliveries",
+  "billing_credit_notifications",
   "billing_customers",
   "bot_templates",
   "browser_session_associations",
@@ -2546,6 +2608,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "generated_image_artifacts",
   "generated_video_artifacts",
   "github_installation_repositories",
+  "github_installation_repository_removals",
   "github_installations",
   "host_mcp_bindings",
   "host_mcp_delegations",
@@ -2575,6 +2638,8 @@ export const RUNTIME_FULL_DML_TABLES = [
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
+  // 1295_model_call_credit_holds: in-flight model call holds, deleted at settlement.
+  "model_call_credit_holds",
   "model_call_fact_reconciliation_candidates",
   "model_call_fact_reconciliation_progress",
   "model_call_facts",
@@ -2584,6 +2649,11 @@ export const RUNTIME_FULL_DML_TABLES = [
   "organization_codex_rotation_settings",
   "organization_connectors",
   "organization_credential_providers",
+  "organization_identity_issuers",
+  "organization_mcp_assertion_replays",
+  "organization_mcp_trusted_issuer_events",
+  "organization_mcp_trusted_issuer_subjects",
+  "organization_mcp_trusted_issuers",
   "organization_model_defaults",
   "organization_model_provider_connection_operations",
   "organization_model_provider_connections",
@@ -2731,17 +2801,27 @@ export const RUNTIME_FULL_DML_TABLES = [
   "subscription_session_bindings",
   "subscription_settings",
   "subscription_turn_failures",
+  "teams_bot_context_cutoffs",
+  "teams_bot_context_messages",
   "teams_bot_inbox",
   "teams_bot_installations",
   "teams_bot_links",
+  // 1300_teams_bot_onboarding_limits: onboarding reply limits across replicas.
+  "teams_bot_onboarding_limits",
   "teams_bot_outbox",
   "teams_bot_proofs",
+  // 1301_teams_bot_reply_claims: bot-answered activities claimed once across replicas.
+  "teams_bot_reply_claims",
   "teams_bot_routes",
+  // 1294_teams_bot_welcomes: install welcomes claimed once across replicas.
+  "teams_bot_welcomes",
   "tool_gateway_approval_capabilities",
   "transcription_recording_chunks",
   "transcription_recording_objects",
   "transcription_recording_segments",
   "transcription_recordings",
+  // 1351_turn_timing_profiles: per-turn timing profiles written by the maintenance sweep.
+  "turn_timing_profiles",
   "usage_events",
   "video_generation_operations",
   "video_generation_references",
@@ -2793,6 +2873,7 @@ export const SUBSCRIPTION_CUTOVER_READ_ONLY_TABLES: Readonly<Record<string, read
 
 /** Configuration and lifecycle-owned audit rows are read-only at runtime. */
 export const RUNTIME_READ_ONLY_TABLES = [
+  "billing_credit_notification_recipients",
   "billing_subscription_operations",
   "codex_turn_source_bindings",
   "company_profile_activation_events",
@@ -2839,6 +2920,9 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  // 1243_agents: immutable agent revisions.
+  "agent_revisions",
+  "billing_auto_top_up_mutations",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
@@ -2907,6 +2991,8 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "attached_browser_devices",
   "attached_browser_inventories",
   "auth_runs",
+  "billing_auto_top_up_operations",
+  "billing_auto_top_up_settings",
   "browser_identities",
   "browser_session_retained_downloads",
   "browser_sessions",
@@ -3229,6 +3315,18 @@ export type RuntimeDatabasePostureOptions = {
   targetSchemaForbiddenRoutines?: readonly string[];
   /** Frozen binary contract; current callers require both additive Insights capabilities. */
   modelFactCapabilityRoutines?: readonly string[];
+  /**
+   * Only for checking a database migrated to an earlier point of the migration ledger, such as a
+   * migration test's predecessor state. Contract tables named here may be absent because a later
+   * migration creates them; when one is present it is checked like every other contract table.
+   */
+  tablesCreatedByLaterMigrations?: readonly string[];
+  /**
+   * The same, for runtime definers (named without their argument list): a definer a later
+   * migration creates may be absent even though every table it works on already exists. When
+   * one is present it is checked like every other definer.
+   */
+  routinesCreatedByLaterMigrations?: readonly string[];
 };
 
 export type RuntimeDatabaseIdentity = {
@@ -3683,8 +3781,16 @@ export async function inspectRuntimeDatabasePosture(
                 AND CASE WHEN acl.grantee = 0 THEN true ELSE pg_has_role(current_user, acl.grantee, 'USAGE') END
               ORDER BY acl.privilege_type
             ) AS extra_privileges,
+            -- Same answer as has_any_column_privilege(current_user, c.oid, privilege):
+            -- the table-level privilege, or that privilege on a live user column.
+            -- A column without its own ACL grants nothing beyond the table, so only
+            -- columns with an ACL need a check. has_any_column_privilege reads every
+            -- column through the catalog cache, which on a fresh connection loads
+            -- thousands of pg_attribute rows one by one on each readiness probe.
             ARRAY(SELECT privilege FROM unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) privilege
-              WHERE has_any_column_privilege(current_user, c.oid, privilege)) as column_privileges
+              WHERE has_table_privilege(current_user, c.oid, privilege)
+                OR EXISTS (SELECT 1 FROM unnest(column_acls.attnums) attnum
+                  WHERE has_column_privilege(current_user, c.oid, attnum, privilege))) as column_privileges
           from pg_class c
           join pg_namespace n on n.oid = c.relnamespace
           left join (
@@ -3693,6 +3799,12 @@ export async function inspectRuntimeDatabasePosture(
               bool_or(polname = 'editable_artifact_materializer_owner') as artifact_materializer_policy
             from pg_policy group by polrelid
           ) policies on policies.polrelid = c.oid
+          left join (
+            select attrelid, array_agg(attnum) as attnums
+            from pg_attribute
+            where attnum > 0 and not attisdropped and attacl is not null
+            group by attrelid
+          ) column_acls on column_acls.attrelid = c.oid
           where n.nspname in (${targetSchema}, 'opengeni_private')
             and c.relkind in ('r', 'p')
           order by c.relname
@@ -4314,14 +4426,15 @@ export function evaluateRuntimeDatabasePosture(
     );
   }
   const catalogTables = new Set(tableByName.keys());
+  const notYetCreatedTables = new Set(options.tablesCreatedByLaterMigrations ?? []);
   const missingRuntimeTables = difference(directRuntimeTables, catalogTables).filter(
-    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name),
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name) && !notYetCreatedTables.has(name),
   );
   if (missingRuntimeTables.length > 0) {
     violations.push(`runtime privilege tables are missing: ${missingRuntimeTables.join(", ")}`);
   }
   const missingTables = difference(protectedTables, catalogTables).filter(
-    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name),
+    (name) => !RETIRING_FEATURE_TABLE_NAMES.has(name) && !notYetCreatedTables.has(name),
   );
   if (missingTables.length > 0) {
     violations.push(`protected tables are missing: ${missingTables.join(", ")}`);
@@ -6749,10 +6862,15 @@ export function evaluateRuntimeDatabasePosture(
       violations.push(`runtime role lacks EXECUTE on private routine ${routine.name}`);
     }
   }
+  const notYetCreatedRoutines = new Set(options.routinesCreatedByLaterMigrations ?? []);
   for (const name of RUNTIME_DEFINER_ROUTINES) {
     if (
       RUNTIME_DEFINER_ROUTINE_TABLES[name].every((table) => definerTableByName.has(table)) &&
-      posture.privateRoutines.filter((routine) => routine.name === name).length !== 1
+      posture.privateRoutines.filter((routine) => routine.name === name).length !== 1 &&
+      !(
+        notYetCreatedRoutines.has(name.slice(0, name.indexOf("("))) &&
+        !posture.privateRoutines.some((routine) => routine.name === name)
+      )
     ) {
       violations.push(`runtime definer ${name} is missing or ambiguous`);
     }
@@ -6823,7 +6941,18 @@ export function runtimeDatabaseReadyCheck(
   db: Database,
   options: RuntimeDatabasePostureOptions,
 ): () => Promise<void> {
-  return async () => {
-    await assertRuntimeDatabasePosture(db, options);
+  let inFlight: Promise<void> | undefined;
+  return () => {
+    // The HTTP timeout cannot cancel a driver query. Concurrent probes share
+    // the outstanding inspection, as the worker readiness check does, so slow
+    // database answers cannot pile up one pooled connection per probe. The
+    // next probe after it settles always runs a fresh inspection.
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      await assertRuntimeDatabasePosture(db, options);
+    })().finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
   };
 }

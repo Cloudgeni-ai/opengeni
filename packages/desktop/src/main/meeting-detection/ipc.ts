@@ -5,12 +5,16 @@
 import type { IpcMain, IpcMainEvent, IpcMainInvokeEvent, WebContents } from "electron";
 
 import { DESKTOP_IPC } from "../../contract";
+import { onPageLeft } from "../page-left";
 import { recordingMeeting, type MeetingDetection } from "./index";
 
 /**
  * Answer the meeting detection calls with `detection`. `allow` throws for a
  * sender that may not record, such as a page on another origin or a subframe.
- * A page stops recording and taking choices when it navigates away or closes.
+ * A page stops recording and taking choices once it has gone to another
+ * document, shown an error page, lost its renderer or closed. A navigation that
+ * starts but is cancelled, such as a link the app opens in the browser instead,
+ * leaves the page as it was.
  */
 export function handleMeetingDetectionIpc(input: {
   ipcMain: Pick<IpcMain, "handle" | "on">;
@@ -28,9 +32,7 @@ export function handleMeetingDetectionIpc(input: {
       pages.delete(page);
       detection.pageGone(page);
     });
-    page.on("did-start-navigation", (details) => {
-      if (details.isMainFrame && !details.isSameDocument) detection.pageGone(page);
-    });
+    onPageLeft(page, () => detection.pageGone(page));
   };
   detection.onChange(() => {
     for (const page of pages) {

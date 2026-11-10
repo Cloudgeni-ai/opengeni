@@ -20,6 +20,7 @@ import type {
   DesktopDictationProfile,
   DesktopDictationSettings,
   DesktopDictationShortcut,
+  DesktopDictationWorkspace,
 } from "../../contract";
 import { parseAppShotShortcut } from "../app-shots/settings";
 
@@ -46,6 +47,12 @@ const ENTRY_ID = /^[A-Za-z0-9_-]{1,100}$/u;
 const AUDIO_TYPE = /^audio\/[\w.+-]+(;[\w=.,+\- ]*)?$/u;
 /** A provider id or model name, as the server lists them. */
 const MODEL_PART = /^[\w.:/@+-]{1,128}$/u;
+/** Longer than any "Provider · Model" a workspace lists. */
+const MODEL_NAME_MAX = 200;
+/** A workspace id, as the server gives them. */
+const WORKSPACE_ID = /^[A-Za-z0-9_-]{1,64}$/u;
+/** Longer than any workspace name the server allows. */
+const WORKSPACE_NAME_MAX = 200;
 
 /**
  * Off, with one shortcut: Control and Fn held together on a Mac, a key
@@ -74,6 +81,7 @@ export function defaultDictationSettings(
     vocabulary: [],
     retryShortcut: null,
     cancelShortcut: null,
+    workspace: null,
   };
 }
 
@@ -153,13 +161,20 @@ function parseProfile(value: unknown): DesktopDictationProfile | null {
 /** A shortcut's own model, or null for the workspace's voice input model. */
 function parseModel(value: unknown): DesktopDictationModel | null {
   if (!value || typeof value !== "object") return null;
-  const { providerId, model } = value as Record<string, unknown>;
-  return typeof providerId === "string" &&
-    MODEL_PART.test(providerId) &&
-    typeof model === "string" &&
-    MODEL_PART.test(model)
-    ? { providerId, model }
-    : null;
+  const { providerId, model, name } = value as Record<string, unknown>;
+  if (
+    !(
+      typeof providerId === "string" &&
+      MODEL_PART.test(providerId) &&
+      typeof model === "string" &&
+      MODEL_PART.test(model)
+    )
+  ) {
+    return null;
+  }
+  return typeof name === "string" && name.trim() && name.length <= MODEL_NAME_MAX
+    ? { providerId, model, name: name.trim() }
+    : { providerId, model };
 }
 
 /** The same physical keys, so two shortcuts never fight over one press. */
@@ -219,6 +234,12 @@ export function mergeDictationSettings(
     shortcut && profiles.some((profile) => sameShortcut(profile.shortcut, shortcut))
       ? null
       : shortcut;
+  const keptWorkspace = current.workspace ?? null;
+  const workspace = !("workspace" in candidate)
+    ? keptWorkspace
+    : candidate.workspace === null
+      ? null
+      : (parseWorkspace(candidate.workspace) ?? keptWorkspace);
   return {
     enabled: typeof candidate.enabled === "boolean" ? candidate.enabled : current.enabled,
     profiles,
@@ -229,7 +250,18 @@ export function mergeDictationSettings(
     vocabulary: parseVocabulary(candidate.vocabulary) ?? current.vocabulary ?? [],
     retryShortcut: free(retryShortcut),
     cancelShortcut: free(cancelShortcut),
+    workspace,
   };
+}
+
+/** A workspace as the page saves it, or null when it isn't one. */
+function parseWorkspace(value: unknown): DesktopDictationWorkspace | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { id, name } = value as Record<string, unknown>;
+  if (typeof id !== "string" || !WORKSPACE_ID.test(id)) return null;
+  if (typeof name !== "string") return null;
+  const trimmed = name.trim().slice(0, WORKSPACE_NAME_MAX);
+  return trimmed ? { id, name: trimmed } : null;
 }
 
 /** Speech a page sent with a finished dictation, or null when it isn't any. */

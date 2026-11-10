@@ -247,7 +247,8 @@ personal-machine owner lookup withheld; its callers check
 `has_function_privilege` first, because they run inside transactions that a
 permission error would abort. 0984 created the connected-command re-arm
 withheld the same way, with the same caller check, and 1101 granted it and
-removed that check. 1002 created the
+removed that check. 0988 created the queued-turn hold summary withheld, with
+the same caller check, and 1274 granted it and removed the check. 1002 created the
 held-browser inventory withheld, with the same caller check, and 1093 granted
 it and removed the check. 1060 created the EU-only
 inference change function withheld the same way, and 1210 granted it. 1091
@@ -255,13 +256,24 @@ created the secret history scrub's reader and cell
 writer withheld; the scrub checks the grant once per run and reports the
 cells only they reach as pending until then. 1103 created the subscription
 account-administrator grant withheld, with the same caller check, and 1149
-granted it and removed the check. 1218 created the organization vault list
-withheld, with the same caller check; until it is granted the API lists only
-the organization vaults that work in the requested workspace and says the
-list is incomplete. 1211 created the names-only organization member list
+granted it and removed the check. 1107 created the agent-call and native push
+v2 functions withheld; 1239 grants all six to every configured application
+role and removes the privilege probes and v1 caller fallbacks. The v1 SQL
+functions and grants stay intact for rolling binaries. 1239 follows the
+production baseline pin that contains 1107 (`d91058a8b8` or later). 1218
+created the organization vault list and 1224 the organization machine and rig
+list withheld, with the same caller check, and 1272 granted both and removed
+the check. 1211 created the names-only organization member list
 withheld, with the same caller check; until it is granted the API reports the
-list as unavailable. 1224 created the organization machine and rig list
-withheld the same way as the vault list.
+list as unavailable. 1240 created the inventory of meeting tracks not yet
+kept compact withheld, with the same caller check. 1282 granted it and removed
+the check, citing a baseline pin (`2a02889ffe`) that production never ran:
+production still ran `6327db2c`, which predates 1240 and rejects the grant.
+1283 withholds it again and the caller check is back; 1283 takes the free
+ordinal after 1282 so a database that has not applied 1282 runs the two back
+to back. A later migration grants it once a release containing 1283 is the
+pinned previous production binary. Pin only the binary production really runs
+(its healthz `deploymentRevision`), never one that merely reached staging.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

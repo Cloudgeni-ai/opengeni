@@ -1,5 +1,7 @@
+export * from "./billing-credit-notifications";
 export { readSessionAttachmentFiles } from "./domain/session-file-access";
 export {
+  discoverCompatibleModelReasoning,
   organizationAzureEntraSetupToken,
   verifyDirectModelAccess,
   verifyOrganizationAzureOpenAIDeployment,
@@ -132,6 +134,7 @@ export * from "./model-call";
 export * from "./domain/capabilities";
 export * from "./domain/mcp-credential-content-flow";
 export * from "./domain/organization-connectors";
+export * from "./domain/mcp-auto-connect";
 export * from "./domain/native-mcp-connection-admission";
 export * from "./domain/skill-imports";
 export * from "./domain/skill-search";
@@ -143,6 +146,8 @@ export * from "./rigs";
 export * from "./domain/event-triggers";
 
 export * from "./domain/personal-connection-delegations";
+export * from "./domain/personal-github-repository-access";
+export * from "./domain/connections-needing-reconnect";
 export {
   listApiIntegrationsWithPersonalExtension,
   type PersonalWorkspaceExtensionApiIntegration,
@@ -157,6 +162,8 @@ export * from "./domain/scheduled-task-access";
 export * from "./domain/scheduled-task-account-audit";
 export * from "./domain/scheduled-task-audience";
 export * from "./domain/automation-templates";
+export * from "./domain/agents";
+export * from "./domain/agent-memory";
 export * from "./domain/bot-templates";
 export * from "./domain/site-audience";
 export * from "./domain/project-audience";
@@ -164,6 +171,7 @@ export * from "./domain/file-audience";
 export * from "./domain/sessions";
 export { UNATTENDED_REQUEST_GOAL } from "./domain/unattended-request-goal";
 export * from "./domain/session-resource-removal";
+export * from "./domain/session-repository-attach";
 export * from "./domain/insights";
 export * from "./domain/insights-usage";
 export * from "./domain/memory-slack-publication";
@@ -190,6 +198,7 @@ export * from "./application/organization-privacy";
 export * from "./application/session-share-links";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
+export * from "./application/admission-release";
 export * from "./application/api-integration-servers";
 
 // Durable editable-artifact live broker, ticket, ports, and projection types.
@@ -222,7 +231,12 @@ export {
 } from "./billing-origin";
 export { turnAppActionGrant } from "./app-action-turn-grant";
 
-export { fileOwnerContextForAccess, fileOwnerContextForAgent } from "./domain/file-owner";
+export {
+  agentPrivateFileOwnerSubjectId,
+  fileOwnerContextForAccess,
+  fileOwnerContextForAgent,
+  inProcessFileOwnerContext,
+} from "./domain/file-owner";
 
 export { prepareKnowledgeFile } from "./domain/knowledge-files";
 export { prepareKnowledgeSave } from "./domain/knowledge-preparation";

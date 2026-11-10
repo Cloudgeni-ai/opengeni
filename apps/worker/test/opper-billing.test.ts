@@ -18,7 +18,7 @@ function spies() {
   const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(async (_db, input) => {
     recorded.push({ eventType: input.eventType, quantity: input.quantity });
   });
-  const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+  const debitSpy = spyOn(opengeniDb, "applyCreditDebitAfterUse").mockImplementation(
     async (_db, input) => {
       debits.push(input);
       return {
@@ -28,7 +28,7 @@ function spies() {
           currency: "usd",
           updatedAt: new Date().toISOString(),
         },
-        debitedMicros: input.requestedAmountMicros,
+        debitedMicros: input.amountMicros,
       };
     },
   );
@@ -67,7 +67,7 @@ describe("Opper reported-cost billing", () => {
       );
       // 4,756.4 micros -> 4,757 provider micros; x1.05 -> 4,994.85 -> 4,995.
       expect(s.recorded).toContainEqual({ eventType: "model.cost", quantity: 4_995 });
-      expect(s.debits[0]).toMatchObject({ requestedAmountMicros: 4_995 });
+      expect(s.debits[0]).toMatchObject({ amountMicros: 4_995 });
       expect(billing).toMatchObject({
         billingPath: "opengeni_credits",
         pricedCostMicros: 4_995,

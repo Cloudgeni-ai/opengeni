@@ -70,6 +70,7 @@ import {
   type LiveWebSocketConstructor,
 } from "./recording-live";
 import { errorMessage } from "@opengeni/contracts/values";
+import { OpenGeniApiError } from "./errors";
 import { ownerNameField } from "./recording-owner";
 import { audioFileCreatedAt, audioFileDurationMilliseconds } from "./recording-audio-duration";
 
@@ -78,6 +79,46 @@ export { audioFileCreatedAt, audioFileDurationMilliseconds } from "./recording-a
 
 /** What {@link OpenGeniRecordingsClient} needs from the core client. */
 export type OpenGeniRecordingsTransport = Pick<OpenGeniClient, "requestJson">;
+
+/**
+ * A recordings list, checked only for the shape callers rely on: an array of
+ * recordings with ids. A success answer of any other shape (another route's
+ * body, `{ items }`, `{}`) is a typed `invalid_response` error, never a
+ * resolved value without `recordings`.
+ */
+function recordingsListOf(answer: unknown): ListRecordingsResponse {
+  const body =
+    answer && typeof answer === "object" && !Array.isArray(answer)
+      ? (answer as Record<string, unknown>)
+      : null;
+  const recordings = body?.recordings;
+  const listed =
+    Array.isArray(recordings) &&
+    recordings.every(
+      (recording: unknown) =>
+        recording !== null &&
+        typeof recording === "object" &&
+        typeof (recording as { id?: unknown }).id === "string",
+    );
+  if (!body || !listed) {
+    throw new OpenGeniApiError(200, "Invalid recordings list response.", {
+      code: "invalid_response",
+      retryable: false,
+      displayMessage: "The recordings list could not be read.",
+    });
+  }
+  const nextBefore = body.nextBefore;
+  return {
+    recordings: recordings as ListRecordingsResponse["recordings"],
+    nextBefore:
+      nextBefore &&
+      typeof nextBefore === "object" &&
+      typeof (nextBefore as { startedAt?: unknown }).startedAt === "string" &&
+      typeof (nextBefore as { id?: unknown }).id === "string"
+        ? (nextBefore as NonNullable<ListRecordingsResponse["nextBefore"]>)
+        : null,
+  };
+}
 
 /**
  * Typed client for the recordings API:
@@ -92,7 +133,12 @@ export class OpenGeniRecordingsClient {
   // idempotent, so a client resumes after a lost connection or a reload.
   // RecordingUploader below does all of that from a local-first store.
 
-  /** Recordings the caller can see, newest first. */
+  /**
+   * Recordings the caller can see, newest first. Rejects with an
+   * `OpenGeniApiError` (`code: "invalid_response"`) when a success answer is
+   * not a recordings list, such as a host proxy or test double answering this
+   * route with another route's body; it never resolves without `recordings`.
+   */
   async listRecordings(
     workspaceId: string,
     options: {
@@ -112,7 +158,7 @@ export class OpenGeniRecordingsClient {
       signal?: AbortSignal;
     } = {},
   ): Promise<ListRecordingsResponse> {
-    return await this.client.requestJson<ListRecordingsResponse>(
+    const answer = await this.client.requestJson<unknown>(
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings`,
       undefined,
@@ -133,6 +179,7 @@ export class OpenGeniRecordingsClient {
       },
       options.signal ? { signal: options.signal } : {},
     );
+    return recordingsListOf(answer);
   }
 
   /**
@@ -243,10 +290,26 @@ export class OpenGeniRecordingsClient {
   async listRecordingTranscriptVersions(
     workspaceId: string,
     recordingId: string,
+    options: {
+      /**
+       * Hold the answer until this version (or, without `waitFor`, the newest)
+       * is complete or failed, for at most this many seconds (at most 25).
+       */
+      waitSeconds?: number | undefined;
+      /** The version to wait for. */
+      waitFor?: string | undefined;
+      signal?: AbortSignal | undefined;
+    } = {},
   ): Promise<RecordingTranscriptVersion[]> {
+    const query: Record<string, string> = {};
+    if (options.waitSeconds !== undefined) query.waitSeconds = String(options.waitSeconds);
+    if (options.waitFor !== undefined) query.waitFor = options.waitFor;
     const response = await this.client.requestJson<ListRecordingTranscriptVersionsResponse>(
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/recordings/${encodeURIComponent(recordingId)}/transcripts`,
+      undefined,
+      query,
+      options.signal ? { signal: options.signal } : {},
     );
     return response.versions;
   }
@@ -1561,6 +1624,15 @@ export type RecorderSnapshot = {
     trackNumber: number;
     source: RecordingCaptureSource;
     label: string;
+    /**
+     * Its device went away mid-recording, so nothing is recorded on it:
+     * `reconnecting` while a microphone that was unplugged or turned off waits
+     * for one to open (it records on by itself as soon as one does), `stopped`
+     * when it can't come back: the person stopped sharing tab or computer
+     * audio, or the browser no longer lets the page use the microphone.
+     * Absent while it records.
+     */
+    lost?: RecorderTrackLoss;
   }>;
   upload: RecordingUploadStatus | null;
   error: {
@@ -1664,6 +1736,13 @@ export type Recorder = {
   rename(title: string): Promise<void>;
   /** Current input level per track, 0 to 1, for a meter. */
   levels(): Record<number, number>;
+  /**
+   * Open a stopped track's source again and record on in it, for a click:
+   * the browser asks again what to share, or for the microphone. Rejects with
+   * a {@link RecorderCaptureError} when it can't; the track stays stopped.
+   * Absent where tracks don't drop.
+   */
+  reconnect?(trackNumber: number): Promise<void>;
   /**
    * The live audio of one track while recording, for a waveform; null when
    * not recording, or on platforms that don't expose their capture.
@@ -1920,6 +1999,14 @@ type TrackCapture = {
   stream: MediaStream;
   /** Ends a capture that stopping its tracks alone doesn't (the desktop app's). */
   release?: () => void;
+  /** Opens its source again after it went away. */
+  reopen?: () => Promise<ReopenedSource>;
+  /** Its device went away; see the snapshot's `lost`. */
+  lost?: RecorderTrackLoss;
+  /** Settles once the recorder stopped when its device went away has saved its last chunk. */
+  stopped?: Promise<void>;
+  /** What feeds the level meter and the live transcript from `stream`. */
+  taps?: MediaStreamAudioSourceNode[];
   recorder: MediaRecorder;
   analyser: AnalyserNode | null;
   nextChunk: number;
@@ -2092,10 +2179,10 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
         live.push(samples, context.sampleRate, clock);
         clock += duration;
       };
-      context.createMediaStreamSource(capture.stream).connect(node);
       // A node nobody listens to may not run; its output is silence.
       node.connect(context.destination);
       capture.pcm = node;
+      tapStream(capture);
     }
   };
 
@@ -2132,6 +2219,21 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
     const opened: Array<
       Omit<TrackCapture, "recorder" | "analyser" | "nextChunk" | "chunkStartedAt" | "writes">
     > = [];
+    const openMicrophone = async (constraints: MediaTrackConstraints): Promise<MediaStream> => {
+      try {
+        return await media.getUserMedia({ audio: constraints });
+      } catch (error) {
+        const name = (error as { name?: string }).name;
+        throw new RecorderCaptureError(
+          name === "NotAllowedError" || name === "SecurityError"
+            ? "microphone_denied"
+            : "microphone_unavailable",
+          name === "NotAllowedError" || name === "SecurityError"
+            ? "Microphone access was not allowed."
+            : "No microphone could be opened.",
+        );
+      }
+    };
     try {
       if (options.microphone !== false) {
         const constraints: MediaTrackConstraints =
@@ -2142,25 +2244,14 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
                 noiseSuppression: true,
                 autoGainControl: true,
               };
-        let stream: MediaStream;
-        try {
-          stream = await media.getUserMedia({ audio: constraints });
-        } catch (error) {
-          const name = (error as { name?: string }).name;
-          throw new RecorderCaptureError(
-            name === "NotAllowedError" || name === "SecurityError"
-              ? "microphone_denied"
-              : "microphone_unavailable",
-            name === "NotAllowedError" || name === "SecurityError"
-              ? "Microphone access was not allowed."
-              : "No microphone could be opened.",
-          );
-        }
+        const stream = await openMicrophone(constraints);
         opened.push({
           trackNumber: 0,
           source: "microphone",
           label: stream.getAudioTracks()[0]?.label || "Microphone",
           stream,
+          // Asked without the device's id, so it is whichever microphone is current.
+          reopen: async () => ({ stream: await openMicrophone(constraints) }),
         });
       }
       if (options.systemAudio && options.purpose !== "dictation") {
@@ -2173,6 +2264,11 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           label: shared.label,
           stream: shared.stream,
           release: shared.stop,
+          // Only on a click: the browser asks what to share again.
+          reopen: async () => {
+            const again = await source.open();
+            return { stream: again.stream, label: again.label, release: again.stop };
+          },
         });
       }
     } catch (error) {
@@ -2186,6 +2282,124 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       throw new RecorderCaptureError("unsupported", "Choose at least one audio source to record.");
     }
     return opened;
+  };
+
+  /** The tracks as the snapshot shows them. */
+  const trackList = (): RecorderSnapshot["tracks"] =>
+    captures.map(({ trackNumber, source, label, lost }) => ({
+      trackNumber,
+      source,
+      label,
+      ...(lost ? { lost } : {}),
+    }));
+
+  /** Whether `recordingId` is still being recorded here. */
+  const recording = (recordingId: string) =>
+    snapshot.recordingId === recordingId &&
+    (snapshot.state === "recording" || snapshot.state === "paused");
+
+  /** Feed the level meter and the live transcript, while it runs, from the capture's stream. */
+  const tapStream = (capture: TrackCapture) => {
+    for (const tap of capture.taps ?? []) tap.disconnect();
+    capture.taps = [];
+    if (!audioContext) return;
+    for (const node of [capture.analyser, capture.pcm]) {
+      if (!node) continue;
+      const tap = audioContext.createMediaStreamSource(capture.stream);
+      tap.connect(node);
+      capture.taps.push(tap);
+    }
+  };
+
+  /** Save the capture's chunks in order, and notice when its device goes away. */
+  const record = (capture: TrackCapture, recordingId: string) => {
+    capture.recorder.ondataavailable = (event) => {
+      // Chain writes so chunks of a track are stored in order.
+      capture.writes = capture.writes
+        .then(() => saveChunk(capture, event.data, recordingId))
+        .catch((error: unknown) => fail("capture_failed", errorMessage(error)));
+    };
+    for (const track of capture.stream.getAudioTracks()) {
+      track.addEventListener("ended", () => void lose(capture, recordingId), { once: true });
+    }
+    capture.recorder.start(options.timesliceMilliseconds ?? 5_000);
+  };
+
+  /**
+   * The device behind a track went away: the microphone was unplugged or
+   * turned off, or the person stopped sharing tab or screen audio. The other
+   * tracks record on, and so does the meeting. The microphone is opened again
+   * as soon as there is one and records on in the same track: its new
+   * recorder's chunks start a new run, which the server places on the
+   * recording's timeline where it began. Shared audio can't come back
+   * without the person, so that track stays stopped until `reconnect`.
+   */
+  const lose = async (capture: TrackCapture, recordingId: string) => {
+    if (capture.lost || !recording(recordingId)) return;
+    const waits = capture.source === "microphone" && Boolean(capture.reopen);
+    capture.lost = waits ? "reconnecting" : "stopped";
+    emit({ tracks: trackList() });
+    const recorder = capture.recorder;
+    if (recorder.state !== "inactive") {
+      // Its last chunk is saved before it reports stopped.
+      capture.stopped = new Promise<void>((done) => {
+        recorder.addEventListener("stop", () => done(), { once: true });
+        recorder.stop();
+      });
+      await capture.stopped;
+    }
+    if (waits && recording(recordingId)) await waitForMicrophone(capture, recordingId);
+  };
+
+  /** Open the microphone again, trying whenever devices change and every few seconds. */
+  const waitForMicrophone = async (capture: TrackCapture, recordingId: string) => {
+    let wait = MICROPHONE_RETRY_FIRST_MILLISECONDS;
+    while (recording(recordingId) && capture.reopen && capture.lost === "reconnecting") {
+      let source: ReopenedSource | null = null;
+      try {
+        source = await capture.reopen();
+      } catch (error) {
+        // Refused, the browser would only refuse again (or ask the person
+        // again and again): the track stays stopped.
+        if (error instanceof RecorderCaptureError && error.code === "microphone_denied") {
+          capture.lost = "stopped";
+          if (recording(recordingId)) emit({ tracks: trackList() });
+          return;
+        }
+      }
+      if (source) {
+        if (!recording(recordingId) || capture.lost !== "reconnecting") {
+          closeSource(source);
+          return;
+        }
+        recordOn(capture, source, recordingId);
+        return;
+      }
+      await deviceChangeOr(wait);
+      wait = Math.min(wait * 2, MICROPHONE_RETRY_MAX_MILLISECONDS);
+    }
+  };
+
+  /** Record the track on from its reopened source, with a recorder of its own. */
+  const recordOn = (capture: TrackCapture, source: ReopenedSource, recordingId: string) => {
+    const { stream } = source;
+    const mimeType = capture.recorder.mimeType;
+    for (const track of capture.stream.getTracks()) track.stop();
+    capture.release?.();
+    capture.stream = stream;
+    if (source.release) capture.release = source.release;
+    else delete capture.release;
+    capture.label = source.label || stream.getAudioTracks()[0]?.label || capture.label;
+    capture.recorder = new MediaRecorder(stream, {
+      ...(mimeType ? { mimeType } : {}),
+      audioBitsPerSecond: 32_000,
+    });
+    tapStream(capture);
+    capture.chunkStartedAt = elapsed();
+    delete capture.lost;
+    record(capture, recordingId);
+    if (snapshot.state === "paused") capture.recorder.pause();
+    emit({ tracks: trackList() });
   };
 
   const saveChunk = async (capture: TrackCapture, data: Blob, recordingId: string) => {
@@ -2254,16 +2468,17 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
         if (audioContext) {
           analyser = audioContext.createAnalyser();
           analyser.fftSize = 512;
-          audioContext.createMediaStreamSource(item.stream).connect(analyser);
         }
-        captures.push({
+        const capture: TrackCapture = {
           ...item,
           recorder,
           analyser,
           nextChunk: 0,
           chunkStartedAt: 0,
           writes: Promise.resolve(),
-        });
+        };
+        tapStream(capture);
+        captures.push(capture);
       }
       const recordedType = captures[0]!.recorder.mimeType || mimeType || "audio/webm";
       watchUploads();
@@ -2294,21 +2509,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       startedAt = performance.now();
       pausedAt = null;
       pausedTotal = 0;
-      for (const capture of captures) {
-        capture.recorder.ondataavailable = (event) => {
-          // Chain writes so chunks of a track are stored in order.
-          capture.writes = capture.writes
-            .then(() => saveChunk(capture, event.data, recordingId))
-            .catch((error: unknown) => fail("capture_failed", errorMessage(error)));
-        };
-        for (const track of capture.stream.getAudioTracks()) {
-          track.addEventListener("ended", () => {
-            // The person stopped sharing, or the device went away: keep the other tracks.
-            if (capture.recorder.state !== "inactive") capture.recorder.stop();
-          });
-        }
-        capture.recorder.start(options.timesliceMilliseconds ?? 5_000);
-      }
+      for (const capture of captures) record(capture, recordingId);
       globalThis.document?.addEventListener("visibilitychange", onHidden);
       if (options.keepAwake !== false) {
         const wake = (
@@ -2326,15 +2527,7 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
           .catch(() => undefined);
       }
       ticker = setInterval(() => emit({ elapsedMilliseconds: elapsed() }), 250);
-      emit({
-        state: "recording",
-        recordingId,
-        tracks: captures.map(({ trackNumber, source, label }) => ({
-          trackNumber,
-          source,
-          label,
-        })),
-      });
+      emit({ state: "recording", recordingId, tracks: trackList() });
       void startLive(recordingId).catch(() => undefined);
     },
 
@@ -2361,6 +2554,20 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
       emit({ state: "recording", pauseReason: null });
     },
 
+    async reconnect(trackNumber) {
+      const recordingId = snapshot.recordingId;
+      const capture = captures.find((item) => item.trackNumber === trackNumber);
+      if (!recordingId || !capture?.lost || !capture.reopen || !recording(recordingId)) return;
+      // A dropped recorder hands over its last chunk before a new one starts.
+      await capture.stopped;
+      const source = await capture.reopen();
+      if (!recording(recordingId) || !capture.lost) {
+        closeSource(source);
+        return;
+      }
+      recordOn(capture, source, recordingId);
+    },
+
     async stop(stopOptions = {}) {
       const recordingId = snapshot.recordingId;
       if (!recordingId || (snapshot.state !== "recording" && snapshot.state !== "paused")) {
@@ -2371,7 +2578,11 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
         captures.map(
           (capture) =>
             new Promise<void>((done) => {
-              if (capture.recorder.state === "inactive") return done();
+              // A recorder its lost device stopped may still be handing over its last chunk.
+              if (capture.recorder.state === "inactive") {
+                void (capture.stopped ?? Promise.resolve()).then(done);
+                return;
+              }
               capture.recorder.addEventListener("stop", () => done(), {
                 once: true,
               });
@@ -2455,6 +2666,35 @@ export function createBrowserRecorder(options: RecorderOptions): Recorder {
     },
   };
 }
+
+/** How soon a microphone that went away is looked for again, doubling up to the most. */
+const MICROPHONE_RETRY_FIRST_MILLISECONDS = 500;
+const MICROPHONE_RETRY_MAX_MILLISECONDS = 8_000;
+
+/** Wait until the devices change (one was plugged in) or `milliseconds` pass. */
+function deviceChangeOr(milliseconds: number): Promise<void> {
+  const media = globalThis.navigator?.mediaDevices;
+  return new Promise((done) => {
+    const finish = () => {
+      clearTimeout(timer);
+      media?.removeEventListener?.("devicechange", finish);
+      done();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    media?.addEventListener?.("devicechange", finish);
+  });
+}
+
+/** A track's source opened again: its stream, and how to end a capture stopping it doesn't. */
+type ReopenedSource = { stream: MediaStream; label?: string; release?: () => void };
+
+function closeSource(source: ReopenedSource): void {
+  for (const track of source.stream.getTracks()) track.stop();
+  source.release?.();
+}
+
+/** Why a track records nothing right now; see `RecorderSnapshot`'s tracks. */
+export type RecorderTrackLoss = "reconnecting" | "stopped";
 
 /** Why a recorder couldn't open one of its audio sources. */
 export class RecorderCaptureError extends Error {

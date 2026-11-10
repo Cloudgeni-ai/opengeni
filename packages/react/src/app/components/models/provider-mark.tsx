@@ -17,8 +17,12 @@ export type ModelProviderId =
   | "opper"
   | "anthropic"
   | "claude_subscription"
+  /** "Claude Code (API key)": the Anthropic API-key connection, with the Claude mark. */
+  | "claude_code_api"
   | "openai"
-  | "azure_openai";
+  | "azure_openai"
+  /** An organization's own OpenAI-compatible endpoint: a generic API mark. */
+  | "openai_compatible";
 
 function VercelMark(props: SVGProps<SVGSVGElement>) {
   return (
@@ -37,6 +41,26 @@ function AzureMark(props: SVGProps<SVGSVGElement>) {
   );
 }
 
+/** A generic API endpoint mark (two linked nodes), currentColor like the other marks. */
+function EndpointMark(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="m8 7-5 5 5 5" />
+      <path d="m16 7 5 5-5 5" />
+      <path d="m13.5 5-3 14" />
+    </svg>
+  );
+}
+
 export function ProviderMark({
   provider,
   className,
@@ -46,8 +70,10 @@ export function ProviderMark({
 }) {
   if (provider === "codex" || provider === "openai") return <ChatGptMark className={className} />;
   if (provider === "azure_openai") return <AzureMark className={className} />;
+  if (provider === "openai_compatible") return <EndpointMark className={className} />;
   if (provider === "vercel") return <VercelMark className={className} />;
-  if (provider === "claude_subscription") return <ClaudeMark className={className} />;
+  if (provider === "claude_subscription" || provider === "claude_code_api")
+    return <ClaudeMark className={className} />;
   if (provider === "anthropic") return <AnthropicMark className={className} />;
   if (provider === "supergrok") return <GrokMark className={className} />;
   if (provider === "opper") return <OpperMark className={className} />;

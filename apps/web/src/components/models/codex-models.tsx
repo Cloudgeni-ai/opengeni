@@ -15,6 +15,7 @@ import {
   ResetCreditInventory,
   codexAccountName,
   codexUsageReadings,
+  codexUsageWindows,
   hasResetInventory,
   planLabel,
   planReportsNoResets,
@@ -60,7 +61,8 @@ import {
 } from "@opengeni/react/ui/setting-row";
 import { StatusBadge, type ProductStatus } from "@opengeni/react/ui/status-badge";
 import { Switch } from "@opengeni/react/ui/switch";
-import { UsageMeterGroup, UsageReadout, usageResets } from "@opengeni/react/ui/usage-meter";
+import { UsageMeterGroup } from "@opengeni/react/ui/usage-meter";
+import { SubscriptionUsageCell } from "@opengeni/react/app/components/models/subscription-usage";
 import { CODEX_EXTRA_CREDITS_DESCRIPTION, CodexCreditBalance } from "./codex-account-usage";
 import { OwnWhereItWorksSection } from "@opengeni/react/app/components/own-where-it-works";
 import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
@@ -73,7 +75,7 @@ import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 
 /** The one fact column account rows line up in: the usage readout, against the chevron. */
 export const ACCOUNT_COLUMNS: RowListColumn[] = [
-  { id: "usage", label: "Usage", width: 200, hideLabel: true, align: "end", leadsWhenFolded: true },
+  { id: "usage", label: "Usage", width: 240, hideLabel: true, align: "end", leadsWhenFolded: true },
 ];
 
 export interface CodexPlaces {
@@ -442,8 +444,7 @@ function CodexRow({
   onOpen: () => void;
 }) {
   const live = codex.usageMap[account.id];
-  const readings = codexUsageReadings(live?.usage, codex.now);
-  const weekly = readings[0]!;
+  const windows = codexUsageWindows(live?.usage, codex.now);
   const status = attentionStatus(account, codex.now);
   const primary = codex.accounts.length > 1 && account.id === codex.activeAccountId;
   const resets = codex.overviewMap[account.id]?.resetCredits.availableCount;
@@ -476,11 +477,10 @@ function CodexRow({
           ) : status === "out_of_usage" ? (
             <span className="text-xs font-medium text-danger">Out of usage</span>
           ) : (
-            <UsageReadout
-              percent={loadingUsage ? null : weekly.percent}
+            <SubscriptionUsageCell
+              windows={windows}
               loading={loadingUsage}
-              window="this week"
-              resets={usageResets(readings, weekly.label)}
+              now={codex.now}
               fallback={
                 live?.status === "error" || (!live && codex.usageError)
                   ? "Usage unavailable"

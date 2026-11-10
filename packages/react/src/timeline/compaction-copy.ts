@@ -20,6 +20,15 @@ export const COMPACTION_INTERRUPTED_TITLE = (t: OpenGeniText) =>
 export const COMPACTION_POSTPONED_TITLE = (t: OpenGeniText) =>
   t("timeline.compactionCopy.compactionPostponed");
 
+/**
+ * Headline and subtitle for a checkpoint that trimmed older messages because
+ * the chat's model could not summarize them. Not a failure: the turn goes on.
+ */
+export const COMPACTION_TRIMMED_TITLE = (t: OpenGeniText) =>
+  t("timeline.compactionCopy.olderMessagesTrimmed");
+export const COMPACTION_TRIMMED_SUBTITLE = (t: OpenGeniText) =>
+  t("timeline.compactionCopy.theModelCouldnTSummarizeThem");
+
 /** Headline for a settled `skipped` compaction landmark. */
 export function compactionSkipTitle(t: OpenGeniText, reason: string | null): string {
   if (reason === "interrupted") return COMPACTION_INTERRUPTED_TITLE(t);
@@ -35,11 +44,14 @@ export const COMPACTION_REJECTION_NOTE = (t: OpenGeniText) =>
  * Subtitle for a settled compaction landmark. Kept short: a definitive provider
  * rejection withholds the generic retry promise, names the one recovery step,
  * and moves its identifiers behind Details ({@link compactionFailureDetails}).
+ * An automatic compaction (labelled Auto) was not requested by anyone, so its
+ * failure does not ask the person to request it again.
  */
 export function compactionSkipSubtitle(
   t: OpenGeniText,
   reason: string | null,
   providerRejection: ContextCompactionItem["providerRejection"] = null,
+  trigger: ContextCompactionItem["trigger"] = null,
 ): string {
   switch (reason) {
     case "no_history":
@@ -57,7 +69,9 @@ export function compactionSkipSubtitle(
     case "summarization_failed":
       return providerRejection
         ? t("timeline.compactionCopy.chatHistoryIsUnchangedIf")
-        : t("timeline.compactionCopy.requestItAgainToRetry");
+        : trigger === "auto" || trigger === "proactive"
+          ? t("timeline.compactionCopy.chatHistoryIsUnchanged")
+          : t("timeline.compactionCopy.requestItAgainToRetry");
     default:
       return t("timeline.compactionCopy.compactionWasNotNeededChat");
   }
@@ -71,17 +85,41 @@ export type CompactionFailureDetails = {
 };
 
 /**
- * Technical diagnostics for a failed compaction landmark, or null when it has
- * none: a definitive provider rejection lists its content-free identifiers;
- * any other failure shows the turn's recorded error text. Presentation only.
+ * `implementation` of a checkpoint that trimmed older messages because the
+ * chat's model could not summarize them.
+ */
+export const TRIMMED_COMPACTION_IMPLEMENTATION = "deterministic_trim";
+
+/** Whether a landmark is a checkpoint that trimmed history instead of summarizing it. */
+export function isTrimmedCompaction(item: Pick<ContextCompactionItem, "phase" | "implementation">) {
+  return item.phase === "compacted" && item.implementation === TRIMMED_COMPACTION_IMPLEMENTATION;
+}
+
+/**
+ * Technical diagnostics for a failed compaction landmark, or for a checkpoint
+ * that trimmed history because its summary failed, or null when it has none:
+ * a definitive provider rejection lists its content-free identifiers, and the
+ * provider's own message follows when it sent one; any other failure shows the
+ * turn's recorded error text. Presentation only.
  */
 export function compactionFailureDetails(
   t: OpenGeniText,
-  item: Pick<ContextCompactionItem, "phase" | "skipReason" | "providerRejection" | "failureDetail">,
+  item: Pick<
+    ContextCompactionItem,
+    "phase" | "skipReason" | "providerRejection" | "failureDetail" | "implementation"
+  > & { providerMessage?: string },
 ): CompactionFailureDetails | null {
-  if (item.phase !== "skipped" || item.skipReason !== "summarization_failed") return null;
+  const trimmed = isTrimmedCompaction(item);
+  if (!trimmed && (item.phase !== "skipped" || item.skipReason !== "summarization_failed")) {
+    return null;
+  }
   const rejection = item.providerRejection;
+  const providerMessage = item.providerMessage?.trim();
+  const messageFact = providerMessage
+    ? [{ label: t("timeline.compactionCopy.providerMessage"), value: providerMessage }]
+    : [];
   if (!rejection) {
+    if (trimmed) return messageFact.length > 0 ? { note: null, facts: messageFact } : null;
     const recorded = item.failureDetail?.trim();
     return recorded
       ? { note: null, facts: [{ label: t("timeline.compactionCopy.error"), value: recorded }] }
@@ -90,7 +128,12 @@ export function compactionFailureDetails(
   const facts = [
     {
       label: t("timeline.compactionCopy.response"),
-      value: [`HTTP ${rejection.httpStatus}`, rejection.type, rejection.code]
+      // Some providers repeat the type as the code; name it once.
+      value: [
+        `HTTP ${rejection.httpStatus}`,
+        rejection.type,
+        rejection.code === rejection.type ? null : rejection.code,
+      ]
         .filter((part): part is string => Boolean(part))
         .join(" · "),
     },
@@ -99,7 +142,9 @@ export function compactionFailureDetails(
     facts.push({ label: t("timeline.compactionCopy.parameter"), value: rejection.param });
   if (rejection.requestId)
     facts.push({ label: t("timeline.compactionCopy.requestId"), value: rejection.requestId });
-  return { note: COMPACTION_REJECTION_NOTE(t), facts };
+  facts.push(...messageFact);
+  // A trimmed checkpoint already recovered; the repeat warning is for a failure.
+  return { note: trimmed ? null : COMPACTION_REJECTION_NOTE(t), facts };
 }
 
 const COMPACTION_TURN_FAILURE_PREFIX = "compaction summarization failed:";

@@ -21,9 +21,15 @@ import {
   classifyControlCommandMarkerEvent,
   controlCancellationDurationMs,
   controlCancellationTimelineMs,
+  CONTROL_FIXTURE_READY_MS,
+  controlFixturePrompt,
+  controlFixtureReadyLabel,
+  controlPaceVerdict,
+  DEFAULT_CONTROL_BUDGET_MS,
   fixturePrompt,
   fixtureSetupScript,
   isDormantSandboxLiveness,
+  isExactControlExec,
   isExpectedBrowserCancellation,
   LIVE_STOPPING_STATE_PATTERN,
   LIVE_STOPPING_SURFACES,
@@ -820,7 +826,7 @@ describe("workbench live acceptance preflight", () => {
     );
   });
 
-  test("enforces HTTPS, a full SHA, Modal, and at least 100 repetitions", () => {
+  test("enforces HTTPS, a full SHA, Modal, 100 observations and a bounded Steer count", () => {
     const base = [
       "--api-url",
       "https://api.example.com",
@@ -843,7 +849,77 @@ describe("workbench live acceptance preflight", () => {
     ];
     expect(parseLiveAcceptanceArgs(base).repetitions).toBe(100);
     expect(() => parseLiveAcceptanceArgs([...base, "--repetitions", "99"])).toThrow(">= 100");
+    // Steers are the model-billed part of the run: 20 by default, never fewer.
+    expect(parseLiveAcceptanceArgs(base).steerRepetitions).toBe(20);
+    expect(parseLiveAcceptanceArgs([...base, "--repetitions", "150"]).steerRepetitions).toBe(20);
+    expect(parseLiveAcceptanceArgs([...base, "--steer-repetitions", "40"]).steerRepetitions).toBe(
+      40,
+    );
+    expect(() => parseLiveAcceptanceArgs([...base, "--steer-repetitions", "19"])).toThrow(
+      "--steer-repetitions must be an integer >= 20",
+    );
     expect(() => parseLiveAcceptanceArgs(base.with(1, "http://api.example.com"))).toThrow("HTTPS");
+    expect(parseLiveAcceptanceArgs(base).controlBudgetMs).toBe(DEFAULT_CONTROL_BUDGET_MS);
+    expect(DEFAULT_CONTROL_BUDGET_MS).toBe(25 * 60_000);
+    expect(
+      parseLiveAcceptanceArgs([...base, "--control-budget-ms", "3600000"]).controlBudgetMs,
+    ).toBe(3_600_000);
+    expect(() => parseLiveAcceptanceArgs([...base, "--control-budget-ms", "1000"])).toThrow(
+      ">= 60000",
+    );
+  });
+
+  test("control fixtures run in the background so the finish floor never delays a repetition", () => {
+    const command = "bash steer-stress/.opengeni-control-test.sh";
+    const prompt = controlFixturePrompt(command);
+    expect(prompt).toContain("exec_command, background true and yield_time_ms 2000");
+    expect(prompt).toContain("```bash\n" + command + "\n```");
+    const call = (args: Record<string, unknown>) =>
+      ({
+        type: "agent.toolCall.created",
+        payload: { name: "exec_command", arguments: JSON.stringify(args) },
+      }) as never;
+    expect(
+      isExactControlExec(call({ cmd: command, background: true, yield_time_ms: 2000 }), command),
+    ).toBe(true);
+    // An older run's foreground form stays exact; only its pace differs.
+    expect(isExactControlExec(call({ cmd: command, yield_time_ms: 2000 }), command)).toBe(true);
+    expect(isExactControlExec(call({ cmd: command, background: false }), command)).toBe(false);
+    expect(isExactControlExec(call({ cmd: command, background: true, tty: true }), command)).toBe(
+      false,
+    );
+    expect(isExactControlExec(call({ cmd: `${command} &`, background: true }), command)).toBe(
+      false,
+    );
+    // A readiness timeout names the likely cause instead of waiting out the session timeout.
+    expect(CONTROL_FIXTURE_READY_MS).toBeLessThan(60_000);
+    expect(controlFixtureReadyLabel("Steer")).toContain("60s finish floor");
+  });
+
+  test("control repetitions fail as soon as their pace cannot fit the budget", () => {
+    const budgetMs = 75 * 60_000;
+    // The released pace: about 100 seconds per Steer, 101 controls in all.
+    const slow = controlPaceVerdict({ completed: 3, total: 101, elapsedMs: 300_000, budgetMs });
+    expect(slow.withinBudget).toBe(false);
+    expect(Math.round(slow.projectedMs / 60_000)).toBe(168);
+    expect(slow.reason).toContain("3 of 101 took 300s (100s each)");
+    expect(slow.reason).toContain("past the 75-minute control budget");
+    // One slow start is not judged yet.
+    expect(
+      controlPaceVerdict({ completed: 1, total: 101, elapsedMs: 120_000, budgetMs }).withinBudget,
+    ).toBe(true);
+    // A pace that fits passes.
+    expect(
+      controlPaceVerdict({ completed: 10, total: 101, elapsedMs: 300_000, budgetMs }).withinBudget,
+    ).toBe(true);
+    // Running past the budget fails whatever the sample count.
+    expect(
+      controlPaceVerdict({ completed: 1, total: 101, elapsedMs: budgetMs + 1, budgetMs })
+        .withinBudget,
+    ).toBe(false);
+    expect(() => controlPaceVerdict({ completed: 0, total: 101, elapsedMs: 0, budgetMs })).toThrow(
+      "invalid control pace sample",
+    );
   });
 
   test("binds capture API samples to the exact regional deployment identity", () => {

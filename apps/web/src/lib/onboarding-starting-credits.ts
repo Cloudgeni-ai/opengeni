@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   BillingSummary,
   BillingBalance,
@@ -96,7 +97,7 @@ export function startingCreditsForOnboarding(input: {
  * choice screen.
  */
 export async function loadModelAccessOnboarding(
-  client: Pick<OpenGeniBrowserClient, "getWorkspaceModelCatalog" | "getBilling">,
+  client: Pick<ChatClient<OpenGeniBrowserClient>, "getWorkspaceModelCatalog" | "getBilling">,
   input: {
     organizationId: string;
     workspaceId: string;

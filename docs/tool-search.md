@@ -24,13 +24,19 @@ call. This page describes what a search does and how a deployment configures it.
    candidate's own description points to.
 4. **Selection**, when a [decision model](decision-models.md) is configured. One
    call judges every candidate, with its full description, against the query, the
-   separate requests and what this turn already loaded. Every candidate judged to
-   belong to the requested actions is loaded, up to the search's `limit`. If none
-   is, the most likely one is loaded anyway. When the choice was not clear, up to
-   five next candidates are listed by name.
-5. **Without a decision model**, or when it fails or has not answered within 5
+   separate requests and what this turn already loaded: will the agent need it to
+   do what the query asks? That includes a tool a chosen tool needs called first,
+   for example to find an id it requires. Every candidate judged needed is loaded,
+   whatever the search's `limit`, which bounds only keyword results and listed
+   suggestions. If none is, the most likely one is loaded anyway. When the choice
+   was not clear, up to five next candidates are listed by name.
+5. **Without a decision model**, or when it fails or has not answered within 8
    seconds, the best candidate for each request is loaded and the next candidates
-   are listed by name.
+   are listed by name. A selection not answered within 2.5 seconds sends one
+   identical request beside it; the first answer wins and the other is cancelled.
+   Each fallback is counted in `opengeni_tool_search_selection_fallbacks_total` by
+   reason (`deadline`, `rate_limited`, `provider_error`, `request_failed`,
+   `invalid_answer`) and logged with its time and attempts.
 
 A search never comes back empty while candidates exist. On native tool-search
 routes (OpenAI and Codex), which can only carry loaded definitions, the candidates

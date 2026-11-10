@@ -101,10 +101,10 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
   });
 
   test("immutable provider image builds are explicit and unsupported by default", () => {
-    expect(providerSupportsImmutableImageBuild("modal")).toBe(true);
+    // Modal builds snapshot images; compute captures team templates.
+    const builders = new Set(["modal", "compute"]);
     for (const backend of SandboxBackend.options) {
-      if (backend === "modal") continue;
-      expect(providerSupportsImmutableImageBuild(backend)).toBe(false);
+      expect(providerSupportsImmutableImageBuild(backend)).toBe(builders.has(backend));
     }
   });
 

@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   isMaintenanceError,
   isTransientRequestError,
@@ -490,7 +491,7 @@ type HeldBatch = { latestMatch: SessionEvent | undefined; windowStart: number };
  * `events` log or tails the stream directly (reconnect handled by the SDK).
  */
 export function useSessionEventTrigger(
-  client: EmbeddedSessionEventClientLike,
+  client: EmbeddedSessionEventClientLike<ChatClient>,
   workspaceId: string,
   sessionId: string | null | undefined,
   match: (event: SessionEvent) => boolean,

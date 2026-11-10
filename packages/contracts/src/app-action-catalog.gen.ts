@@ -609,6 +609,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:read"
   },
   {
+    "id": "checkMcpTrustedIssuer",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/mcp-trusted-issuers/check",
+    "request": [
+      "CheckMcpTrustedIssuerRequest"
+    ],
+    "response": [
+      "CheckMcpTrustedIssuerResponse"
+    ]
+  },
+  {
+    "id": "checkOrganizationConnectorAutoConnect",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/connectors/auto-connect/check",
+    "request": [
+      "CheckOrganizationConnectorAutoConnectRequest"
+    ],
+    "response": [
+      "AutoConnectSupport"
+    ]
+  },
+  {
     "id": "checkSiteHostname",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/site-hostnames/:label",
@@ -838,6 +860,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "connectWorkspaceOrganizationConnector",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/organization-connectors/:connectorId/connect",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "continueAfterCapabilitySetup",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/capability-continuations",
@@ -895,6 +924,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "browserOnly": "it acts on the person's own account across organizations (creating an organization, listing their memberships or invitations, accepting an invitation), and an agent works in one organization"
   },
   {
+    "id": "createAgent",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agents",
+    "request": [
+      "CreateAgentRequest"
+    ],
+    "response": [
+      "Agent",
+      "AgentResponse"
+    ]
+  },
+  {
     "id": "createApiKey",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/api-keys",
@@ -918,6 +959,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "AutomationTemplateResponse",
       "WorkspaceAutomationTemplate"
+    ]
+  },
+  {
+    "id": "createBillingAutoTopUpSetupSession",
+    "method": "POST",
+    "path": "/v1/billing/auto-top-up/setup",
+    "request": [
+      "CreateBillingAutoTopUpSetupSessionRequest"
+    ],
+    "response": [
+      "CreateBillingAutoTopUpSetupSessionResponse"
     ]
   },
   {
@@ -1148,6 +1200,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "createMcpTrustedIssuer",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/mcp-trusted-issuers",
+    "request": [
+      "CreateMcpTrustedIssuerRequest"
+    ],
+    "response": [
+      "McpTrustedIssuer"
+    ]
+  },
+  {
     "id": "createNetworkRoute",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/network-routes",
@@ -1201,6 +1264,31 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "secretFields": [
       "response.token"
+    ]
+  },
+  {
+    "id": "createOrganizationCompatibleEndpoint",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints",
+    "request": [
+      "CreateOrganizationCompatibleEndpointRequest"
+    ],
+    "response": [
+      "OrganizationCompatibleEndpoint"
+    ],
+    "secretFields": [
+      "request.apiKey"
+    ]
+  },
+  {
+    "id": "createOrganizationCompatibleEndpointModel",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models",
+    "request": [
+      "CreateOrganizationCompatibleEndpointModelRequest"
+    ],
+    "response": [
+      "OrganizationProviderCustomModel"
     ]
   },
   {
@@ -1682,6 +1770,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "account:admin"
   },
   {
+    "id": "deleteAgent",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId",
+    "request": [],
+    "response": [
+      "DeleteAgentResponse"
+    ]
+  },
+  {
+    "id": "deleteAgentSlackAvailability",
+    "method": "DELETE",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/slack/:connectionId",
+    "request": [],
+    "response": [
+      "AgentSlackAvailabilityResponse"
+    ]
+  },
+  {
     "id": "deleteApiKey",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/api-keys/:apiKeyId",
@@ -1752,6 +1858,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:control"
   },
   {
+    "id": "deleteMcpTrustedIssuer",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/mcp-trusted-issuers/:trustedIssuerId",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "deleteOpenGeniSlackAgent",
     "method": "DELETE",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/agents/:agentId",
@@ -1765,6 +1878,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ApiKey"
+    ]
+  },
+  {
+    "id": "deleteOrganizationCompatibleEndpointModel",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId",
+    "request": [
+      "DeleteOrganizationProviderCustomModelRequest"
+    ],
+    "response": [
+      "OrganizationProviderCustomModel"
     ]
   },
   {
@@ -2583,14 +2707,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "GET /v1/workspaces/:workspaceId/connections/google-drive/:connectionId/browse",
-    "method": "GET",
-    "path": "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/browse",
-    "request": [],
-    "response": [],
-    "permission": "connections:read"
-  },
-  {
     "id": "GET /v1/workspaces/:workspaceId/credential-profile",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/credential-profile",
@@ -3050,6 +3166,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "getAgent",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId",
+    "request": [],
+    "response": [
+      "Agent",
+      "AgentResponse"
+    ]
+  },
+  {
     "id": "getAgentCall",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/agent-calls/:callId",
@@ -3109,6 +3235,30 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "accountId"
     ],
     "response": []
+  },
+  {
+    "id": "getBillingAlertSettings",
+    "method": "GET",
+    "path": "/v1/billing/alerts",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": [
+      "BillingAlertSettings"
+    ]
+  },
+  {
+    "id": "getBillingAutoTopUp",
+    "method": "GET",
+    "path": "/v1/billing/auto-top-up",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": [
+      "BillingAutoTopUpSettings"
+    ]
   },
   {
     "id": "getBillingCheckout",
@@ -4861,6 +5011,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "linkSlackUserAsOrganizationMember",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/integrations/slack/user-link-intents/:requestId/link",
+    "request": [
+      "SlackUserLinkAccessMutationRequest"
+    ],
+    "response": [
+      "SlackUserLinkAccessRequest"
+    ]
+  },
+  {
     "id": "listAccessibleDocuments",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/documents",
@@ -4869,6 +5030,22 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "Document"
     ],
     "permission": "documents:search"
+  },
+  {
+    "id": "listAgentChats",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/chats",
+    "request": [
+      "AgentChatsFilter"
+    ],
+    "query": [
+      "cursor",
+      "filter",
+      "limit"
+    ],
+    "response": [
+      "ListAgentChatsResponse"
+    ]
   },
   {
     "id": "listAgentInstructionReviews",
@@ -4892,6 +5069,55 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "AgentLearningOverrideRecord"
+    ]
+  },
+  {
+    "id": "listAgentRevisions",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/revisions",
+    "request": [],
+    "query": [
+      "cursor",
+      "limit"
+    ],
+    "response": [
+      "ListAgentRevisionsResponse"
+    ]
+  },
+  {
+    "id": "listAgents",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents",
+    "request": [
+      "AgentListFilter"
+    ],
+    "query": [
+      "filter"
+    ],
+    "response": [
+      "AgentSummary",
+      "ListAgentsResponse"
+    ]
+  },
+  {
+    "id": "listAgentSlackChannels",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/slack/:connectionId/channels",
+    "request": [],
+    "query": [
+      "cursor"
+    ],
+    "response": [
+      "AgentSlackChannelListResponse"
+    ]
+  },
+  {
+    "id": "listAgentSlackInstalls",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/slack",
+    "request": [],
+    "response": [
+      "ListAgentSlackInstallsResponse"
     ]
   },
   {
@@ -4991,6 +5217,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "AvailableOpenGeniSlackBots"
     ],
     "permission": "connections:read"
+  },
+  {
+    "id": "listBillingCreditNotifications",
+    "method": "GET",
+    "path": "/v1/billing/notifications",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": [
+      "ListBillingCreditNotificationsResponse"
+    ]
   },
   {
     "id": "listBotTemplates",
@@ -5491,6 +5729,24 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "listMcpTrustedIssuerEvents",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/mcp-trusted-issuers/:trustedIssuerId/events",
+    "request": [],
+    "response": [
+      "ListMcpTrustedIssuerEventsResponse"
+    ]
+  },
+  {
+    "id": "listMcpTrustedIssuers",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/mcp-trusted-issuers",
+    "request": [],
+    "response": [
+      "ListMcpTrustedIssuersResponse"
+    ]
+  },
+  {
     "id": "listMemorySlackPublicationChannels",
     "method": "GET",
     "path": "/v1/workspaces/:workspaceId/memory-slack-publications/channels",
@@ -5607,6 +5863,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [],
     "response": [
       "ClaudeSubscriptionAccountsResponse"
+    ]
+  },
+  {
+    "id": "listOrganizationCompatibleEndpoints",
+    "method": "GET",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints",
+    "request": [],
+    "response": [
+      "OrganizationCompatibleEndpointsResponse"
     ]
   },
   {
@@ -6329,6 +6594,16 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "enrollments:read"
   },
   {
+    "id": "markBillingCreditNotificationRead",
+    "method": "POST",
+    "path": "/v1/billing/notifications/:notificationId/read",
+    "request": [],
+    "query": [
+      "accountId"
+    ],
+    "response": []
+  },
+  {
     "id": "migrateSiteSql",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/published-artifacts/:artifactId/sql/migrations",
@@ -6853,32 +7128,6 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
-    "id": "POST /v1/workspaces/:workspaceId/connections/atlassian/install",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/connections/atlassian/install",
-    "request": [
-      "AtlassianOAuthStartRequest"
-    ],
-    "response": [],
-    "permission": "connections:write"
-  },
-  {
-    "id": "POST /v1/workspaces/:workspaceId/connections/google-drive/:connectionId/source",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/connections/google-drive/:connectionId/source",
-    "request": [],
-    "response": [],
-    "permission": "connections:write"
-  },
-  {
-    "id": "POST /v1/workspaces/:workspaceId/connections/google-drive/install",
-    "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/connections/google-drive/install",
-    "request": [],
-    "response": [],
-    "permission": "connections:write"
-  },
-  {
     "id": "POST /v1/workspaces/:workspaceId/github/installations",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/github/installations",
@@ -6914,12 +7163,13 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "connections:write"
   },
   {
-    "id": "POST /v1/workspaces/:workspaceId/integrations/slack/user-links",
+    "id": "POST /v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",
     "method": "POST",
-    "path": "/v1/workspaces/:workspaceId/integrations/slack/user-links",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/bot/microsoft-sign-in",
     "request": [],
     "response": [],
-    "permission": "sessions:create"
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
+    "permission": "workspace:admin"
   },
   {
     "id": "POST /v1/workspaces/:workspaceId/integrations/teams/link",
@@ -7364,6 +7614,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "account:admin"
   },
   {
+    "id": "postAgentSlackIntro",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/slack/:connectionId/intro",
+    "request": [
+      "AgentSlackIntroRequest"
+    ],
+    "response": [
+      "AgentSlackIntroResponse"
+    ]
+  },
+  {
     "id": "postOpenGeniSlackAgentIntro",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/integrations/slack/agents/:agentId/intro",
@@ -7802,6 +8063,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "workspace:admin"
   },
   {
+    "id": "putAgentSlackAvailability",
+    "method": "PUT",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId/slack/:connectionId",
+    "request": [
+      "PutAgentSlackAvailabilityRequest"
+    ],
+    "response": [
+      "AgentSlackAvailabilityResponse"
+    ]
+  },
+  {
     "id": "putOrganizationCredentialProvider",
     "method": "PUT",
     "path": "/v1/organizations/:organizationId/credential-provider",
@@ -8192,6 +8464,20 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:create"
   },
   {
+    "id": "replaceOrganizationCompatibleEndpointKey",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/key",
+    "request": [
+      "ReplaceOrganizationCompatibleEndpointKeyRequest"
+    ],
+    "response": [
+      "OrganizationCompatibleEndpoint"
+    ],
+    "secretFields": [
+      "request.apiKey"
+    ]
+  },
+  {
     "id": "replacePersonalGitHubRepositorySelections",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories",
@@ -8251,6 +8537,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "SiteSqlResetRequest"
     ],
     "response": []
+  },
+  {
+    "id": "resolveArtifactLink",
+    "method": "GET",
+    "path": "/v1/workspaces/:workspaceId/artifact-catalog/:artifactId/resolve",
+    "request": [],
+    "query": [
+      "sessionId"
+    ],
+    "response": [
+      "ArtifactLinkResolution"
+    ]
   },
   {
     "id": "resolveInteractionIntervention",
@@ -8371,6 +8669,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ],
     "response": [
       "KnowledgeEntryWriteReceipt"
+    ]
+  },
+  {
+    "id": "revokeOrganizationCompatibleEndpoint",
+    "method": "DELETE",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId",
+    "request": [
+      "RevokeOrganizationModelProviderConnectionRequest"
+    ],
+    "response": [
+      "OrganizationCompatibleEndpoint"
     ]
   },
   {
@@ -8897,6 +9206,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "setOrganizationCompatibleEndpointModelReasoning",
+    "method": "PUT",
+    "path": "/v1/organizations/:organizationId/model-providers/openai_compatible/endpoints/:connectionId/models/:customModelId/reasoning",
+    "request": [
+      "SetOrganizationCompatibleEndpointModelReasoningRequest"
+    ],
+    "response": [
+      "OrganizationCompatibleEndpointModel"
+    ]
+  },
+  {
     "id": "setOrganizationSuperGrokAccountAllocator",
     "method": "PATCH",
     "path": "/v1/organizations/:organizationId/supergrok/accounts/:accountId/allocator",
@@ -9354,6 +9674,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": []
   },
   {
+    "id": "testOrganizationConnectorAutoConnect",
+    "method": "POST",
+    "path": "/v1/organizations/:organizationId/connectors/:connectorId/auto-connect/test",
+    "request": [],
+    "response": [
+      "TestOrganizationConnectorAutoConnectResponse"
+    ]
+  },
+  {
     "id": "testWorkspaceCredentialProvider",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/credential-provider/test",
@@ -9462,6 +9791,18 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "github:manage"
   },
   {
+    "id": "updateAgent",
+    "method": "PATCH",
+    "path": "/v1/workspaces/:workspaceId/agents/:agentId",
+    "request": [
+      "UpdateAgentRequest"
+    ],
+    "response": [
+      "Agent",
+      "AgentResponse"
+    ]
+  },
+  {
     "id": "updateArtifactPin",
     "method": "PUT",
     "path": "/v1/workspaces/:workspaceId/artifact-catalog/:kind/:artifactId/pin",
@@ -9483,6 +9824,28 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "response": [
       "AutomationTemplateResponse",
       "WorkspaceAutomationTemplate"
+    ]
+  },
+  {
+    "id": "updateBillingAlertSettings",
+    "method": "PUT",
+    "path": "/v1/billing/alerts",
+    "request": [
+      "UpdateBillingAlertSettingsRequest"
+    ],
+    "response": [
+      "BillingAlertSettings"
+    ]
+  },
+  {
+    "id": "updateBillingAutoTopUp",
+    "method": "PUT",
+    "path": "/v1/billing/auto-top-up",
+    "request": [
+      "UpdateBillingAutoTopUpRequest"
+    ],
+    "response": [
+      "BillingAutoTopUpSettings"
     ]
   },
   {
@@ -9729,6 +10092,17 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
       "OrganizationComputeReachResponse"
     ],
     "permission": "enrollments:read"
+  },
+  {
+    "id": "updateMcpTrustedIssuer",
+    "method": "PATCH",
+    "path": "/v1/organizations/:organizationId/mcp-trusted-issuers/:trustedIssuerId",
+    "request": [
+      "UpdateMcpTrustedIssuerRequest"
+    ],
+    "response": [
+      "McpTrustedIssuer"
+    ]
   },
   {
     "id": "updateMemberNotifications",

@@ -33,12 +33,21 @@ import {
 } from "../auth/organization-user-setup";
 import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
+import {
+  MANAGED_AUTH_PASSWORD_COMPROMISED_CODE,
+  MANAGED_AUTH_PASSWORD_COMPROMISED_MESSAGE,
+  managedAuthBreachedPasswordCheckEnabled,
+  managedAuthPasswordBreached,
+  type PasswordBreachLookup,
+} from "../auth/password-breach";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 import { parseRequestBody, parseRequestJson, requestValidationError } from "../http/request-body";
 
 export type ManagedOnboardingRouteOptions = {
   accountSetupLimiter?: { take(key: string): boolean };
   hashPassword?: (password: string) => Promise<string>;
+  /** Breached-password lookup; Have I Been Pwned unless a test replaces it. */
+  passwordBreachLookup?: PasswordBreachLookup;
 };
 
 const completedSetupReplayPasswordHash = `completed-replay:${"0".repeat(64)}`;
@@ -232,6 +241,23 @@ export function registerManagedOnboardingRoutes(
       name,
       password: parsed.password,
     });
+    if (
+      preflight !== "completed" &&
+      (await managedAuthPasswordBreached(parsed.password, {
+        enabled: managedAuthBreachedPasswordCheckEnabled(deps.settings),
+        ...(options.passwordBreachLookup ? { lookup: options.passwordBreachLookup } : {}),
+        onUnavailable: (reason) =>
+          deps.observability?.warn("Breached-password lookup unavailable", { reason }),
+      }))
+    ) {
+      return context.json(
+        {
+          code: MANAGED_AUTH_PASSWORD_COMPROMISED_CODE,
+          message: MANAGED_AUTH_PASSWORD_COMPROMISED_MESSAGE,
+        },
+        422,
+      );
+    }
     const passwordHash =
       preflight === "completed"
         ? completedSetupReplayPasswordHash
@@ -293,6 +319,8 @@ function enforceAccountSetupRateLimit(
  * The global bucket prevents spoofed/high-cardinality client keys from
  * multiplying password-hash work, while the per-client bucket limits bursts.
  * A full key map rejects new clients until an idle bucket can be pruned.
+ * A request spends a token from both buckets only when both admit it, so a
+ * client its own bucket refuses never drains the capacity others share.
  */
 export class PublicSetupRateLimiter {
   private readonly buckets = new Map<string, { tokens: number; updatedAt: number }>();
@@ -316,54 +344,32 @@ export class PublicSetupRateLimiter {
 
   take(key: string): boolean {
     const now = this.options.now?.() ?? Date.now();
-    const globalCapacity = this.options.globalCapacity ?? 50;
-    if (
-      !takeSetupRateLimitToken(
-        this.global,
-        globalCapacity,
-        this.options.globalRefillPerSecond ?? 5,
-        now,
-      )
-    ) {
-      return false;
-    }
     const clientCapacity = this.options.clientCapacity ?? 5;
+    const clientRefillPerSecond = this.options.clientRefillPerSecond ?? 0.1;
     const maxClientKeys = this.options.maxClientKeys ?? 2_048;
     let bucket = this.buckets.get(key);
     if (!bucket && this.buckets.size >= maxClientKeys) {
       for (const [candidateKey, candidate] of this.buckets) {
-        refillSetupRateLimitBucket(
-          candidate,
-          clientCapacity,
-          this.options.clientRefillPerSecond ?? 0.1,
-          now,
-        );
+        refillSetupRateLimitBucket(candidate, clientCapacity, clientRefillPerSecond, now);
         if (candidate.tokens >= clientCapacity) this.buckets.delete(candidateKey);
       }
       if (this.buckets.size >= maxClientKeys) return false;
     }
     bucket ??= { tokens: clientCapacity, updatedAt: now };
-    const allowed = takeSetupRateLimitToken(
-      bucket,
-      clientCapacity,
-      this.options.clientRefillPerSecond ?? 0.1,
+    refillSetupRateLimitBucket(bucket, clientCapacity, clientRefillPerSecond, now);
+    if (bucket.tokens < 1) return false;
+    refillSetupRateLimitBucket(
+      this.global,
+      this.options.globalCapacity ?? 50,
+      this.options.globalRefillPerSecond ?? 5,
       now,
     );
+    if (this.global.tokens < 1) return false;
+    bucket.tokens -= 1;
+    this.global.tokens -= 1;
     this.buckets.set(key, bucket);
-    return allowed;
+    return true;
   }
-}
-
-function takeSetupRateLimitToken(
-  bucket: { tokens: number; updatedAt: number },
-  capacity: number,
-  refillPerSecond: number,
-  now: number,
-): boolean {
-  refillSetupRateLimitBucket(bucket, capacity, refillPerSecond, now);
-  if (bucket.tokens < 1) return false;
-  bucket.tokens -= 1;
-  return true;
 }
 
 function refillSetupRateLimitBucket(

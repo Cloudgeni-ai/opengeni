@@ -8,7 +8,6 @@ import {
   replaceReferencesDeep,
   tokenizeSecretText,
 } from "./secret-references";
-import { maskSecretValues, type SecretValueMaskOptions } from "./secret-value-masking";
 
 export const INTERACTION_PROTOCOL_VERSION = 1 as const;
 /** Controller-only display metadata. Never a routing or authorization identity. */
@@ -2376,6 +2375,12 @@ export const BrowserPermissionSetting = /* @__PURE__ */ defineSchema(() =>
 );
 export type BrowserPermissionSetting = z.infer<typeof BrowserPermissionSetting>;
 
+/**
+ * The longest one browser wait action may wait. The attached-browser bridge
+ * answers each request within two minutes, so a longer wait is several waits.
+ */
+export const BROWSER_WAIT_MAX_MS = 120_000;
+
 const browserActionVariants = [
   z.object({ type: z.literal("navigate"), url: boundedUrl }).strict(),
   z.object({ type: z.literal("history"), direction: z.enum(["back", "forward"]) }).strict(),
@@ -2602,7 +2607,15 @@ const browserActionVariants = [
       type: z.literal("wait"),
       condition: z.enum(["load", "network_idle", "visible", "hidden"]),
       locator: BrowserLocator.optional(),
-      timeoutMs: z.number().int().positive().max(120_000).optional(),
+      timeoutMs: z
+        .number()
+        .int()
+        .positive()
+        .max(BROWSER_WAIT_MAX_MS)
+        .optional()
+        .describe(
+          "Up to 120000 (2 minutes); default 30000. To wait longer, for example while a person approves a sign-in on their phone, wait again.",
+        ),
     })
     .strict(),
 ] as const;
@@ -4361,61 +4374,6 @@ export function withoutInteractionSecretValues<T extends { secretValues?: unknow
   return rest;
 }
 
-export const INTERACTION_REDACTED_SECRET = "[secret]";
-/** Values shorter than this are not searched for: they would redact noise. */
-export const INTERACTION_MIN_REDACTED_SECRET_CHARS = 3;
-
-/** Identifier-like keys keep their strings untouched (generations, refs,
- * digests, image payloads, timestamps): redacting inside them would corrupt
- * the result rather than protect anything. URLs are text: a page can put a
- * typed value into its address, though an address keeps its host and port. */
-const NON_TEXT_KEY = /^(id|ref|data|digest|mimeType|type)$|(Id|Ids|Ref|Generation|Digest|At)$/u;
-
-/** How browser and desktop results are masked: the shared known-value engine
- * with the `[secret]` marker, a three-character minimum (including CVCs; typed values are
- * often short) for values, their lines and clipped starts (at the end of any
- * text too), and identifier keys left alone. */
-export const INTERACTION_SECRET_MASK_OPTIONS: SecretValueMaskOptions = {
-  minChars: INTERACTION_MIN_REDACTED_SECRET_CHARS,
-  base64: false,
-  lines: "all",
-  // Typed values are short: every form (lines, percent-encoded) may be clipped.
-  clippedForms: "all",
-  // A complete CVC may have three digits; a three-character prefix of a
-  // longer password is not distinctive enough to remove from ordinary text.
-  clippedMinChars: 4,
-  clippedMinShare: 0,
-  // An observed field or label clipped to its width ends partway through.
-  clippedTextEndMinChars: 0,
-  skipKey: (key) => NON_TEXT_KEY.test(key),
-  // A short code inside a host or port would leave a tab with no valid address.
-  keepUrlHosts: true,
-  // Results are data, not conversation: a tool-shaped record is masked in full.
-  keepToolIdentities: false,
-  // Typed values belong to one session and were typed on purpose: a page
-  // shows them in fields, labels and clipped text with no credential word
-  // beside them, so even a weak typed value is replaced wherever it appears.
-  weakValues: "anywhere",
-};
-
-/** Deep copy with every occurrence of a supplied secret value in a text
- * string (raw or percent-encoded) replaced by `[secret]`, including a value's
- * start left at the end of a clipped string or before a truncation mark.
- * Used on results a driver returns after dispatching materialized values (CUA
- * tools echo typed text; desktop accessibility trees and page fields expose
- * values). One engine with agent tool-result masking: `maskSecretValues`. */
-export function redactInteractionSecretValues<T>(
-  value: T,
-  secretValues: InteractionSecretValues | undefined,
-): T {
-  if (secretValues === undefined) return value;
-  const entries = Object.values(secretValues).map((secret) => ({
-    value: secret,
-    label: INTERACTION_REDACTED_SECRET,
-  }));
-  return maskSecretValues(value, entries, INTERACTION_SECRET_MASK_OPTIONS);
-}
-
 // ---------------------------------------------------------------------------
 // Agent-owned passkeys (design §10B.4, BR-5). browserd hosts a CDP WebAuthn
 // virtual authenticator on every page target. The API loads the principal's
@@ -4469,6 +4427,10 @@ export const BrowserPasskeyEvent = /* @__PURE__ */ defineSchema(() =>
         /** Top-level origin of the page that registered it, when known. */
         origin: z.string().max(2_048).nullable(),
         credential: BrowserPasskeyCredentialMaterial,
+        /** The owner of the credential set loaded when the page registered it
+         *  (null when none was named). Returned only to a caller that names
+         *  its own owner. */
+        owner: primitives.nullableUuid.optional(),
       })
       .strict(),
     z
@@ -4492,7 +4454,12 @@ export const BROWSER_MAX_PASSKEY_CREDENTIALS = 256;
 export const BROWSER_MAX_PASSKEY_EVENTS = 256;
 
 /** Controller-private. `credentials` replaces the loaded set (null keeps it).
- * Events stay pending in browserd until a later sync acknowledges them. */
+ * Events stay pending in browserd until a later sync acknowledges them.
+ * `owner` names the agent attempt the caller syncs for. It travels as the
+ * `owner` query parameter, which controllers that predate it ignore; a
+ * controller that knows it records the owner of each replacement set, stamps
+ * registrations with it, and never carries one owner's unacknowledged
+ * registrations into another owner's set. */
 export const BrowserPasskeySyncRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -4504,6 +4471,7 @@ export const BrowserPasskeySyncRequest = /* @__PURE__ */ defineSchema(() =>
         .max(BROWSER_MAX_PASSKEY_CREDENTIALS)
         .nullable(),
       acknowledgeEventIds: z.array(primitives.uuid).max(BROWSER_MAX_PASSKEY_EVENTS),
+      owner: primitives.nullableUuid.optional(),
     })
     .strict(),
 );
@@ -4519,6 +4487,8 @@ export const BrowserPasskeySyncResponse = /* @__PURE__ */ defineSchema(() =>
       events: z.array(BrowserPasskeyEvent).max(BROWSER_MAX_PASSKEY_EVENTS),
       /** Sent only when the caller opts into backup-flag negotiation. */
       supportsBackupFlags: z.literal(true).optional(),
+      /** Sent only when the caller names an owner: registrations carry theirs. */
+      supportsOwners: z.literal(true).optional(),
     })
     .strict(),
 );

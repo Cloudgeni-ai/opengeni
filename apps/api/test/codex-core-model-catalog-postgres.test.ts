@@ -3,7 +3,13 @@ import * as codex from "@opengeni/codex";
 import { configuredModels, withCodexCatalogProvider } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { resolveDefaultSessionModel } from "@opengeni/core";
-import { bootstrapWorkspace, createDb, encryptEnvironmentValue, type DbClient } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  createDb,
+  encryptEnvironmentValue,
+  withBillingOriginOverride,
+  type DbClient,
+} from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
@@ -80,11 +86,6 @@ async function organization(): Promise<Fixture> {
     workspaceId: access.defaultWorkspaceId!,
     subjectId,
   };
-  // 0680 seeds every new organization enabled on the shared core.
-  const [cutover] = await shared!.admin<{ enabled: boolean }[]>`
-    select enabled from subscription_provider_cutovers
-    where account_id = ${fixture.accountId}::uuid and provider = 'codex'`;
-  expect(cutover?.enabled).toBe(true);
   return fixture;
 }
 
@@ -142,14 +143,16 @@ async function request(fixture: Fixture, path: string, init: RequestInit = {}) {
     } as never,
     managedAuth: null,
   } as never);
-  return await app.request(path, {
-    ...init,
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      ...(init.headers ?? {}),
-    },
-  });
+  return await withBillingOriginOverride("app", () =>
+    app.request(path, {
+      ...init,
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        ...(init.headers ?? {}),
+      },
+    }),
+  );
 }
 
 type CatalogModel = {
@@ -203,7 +206,7 @@ describe.skipIf(!realDb)("Codex model catalog and default after the cutover", ()
     expect(value.defaultSelection?.model).not.toBe(unserved.id);
     expect(models).toHaveBeenCalled();
 
-    // The server-side default for API creates, drafts and occurrences.
+    // The server-side default for app chats, drafts and occurrences.
     const resolved = await defaultModel(fixture);
     expect(resolved.source).toBe("subscription");
     expect(resolved.model).toBe(value.defaultSelection!.model);

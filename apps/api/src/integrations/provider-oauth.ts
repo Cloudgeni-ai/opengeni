@@ -1,5 +1,4 @@
 import { integrationAvailable, requireIntegrationAvailable } from "./teams-rollout";
-import { GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE } from "@opengeni/contracts/google-drive-native-retirement";
 import { withOrganizationIntegrationAcquisition } from "@opengeni/db/organization-integration-policy";
 import { claimOAuthAcquisition, finishOAuthAcquisition } from "./oauth-client";
 import { Buffer } from "node:buffer";
@@ -8,6 +7,7 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   integrationDefinitionProviderDomain,
   integrationDefinitionById,
+  CORE_INTEGRATION_DEFINITIONS,
   type IntegrationDefinition,
 } from "@opengeni/capabilities";
 import {
@@ -668,8 +668,9 @@ function providerClientForDefinition(
   settings: Settings,
   definition: IntegrationDefinition,
 ): ProviderOAuthClient {
+  // Google Drive connects through its MCP connection, never provider OAuth.
   if (definition.id === "google-drive")
-    throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
+    throw new HTTPException(410, { message: "Google Drive connects through its MCP connection." });
   const configured = parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
   const candidates = providerClientKeys(definition);
   let entry: IntegrationOAuthClientConfig | undefined;
@@ -707,6 +708,44 @@ export function isApiIntegrationProviderOAuthState(
   }
 }
 
+function configuredClientId(settings: Settings, definition: IntegrationDefinition): string | null {
+  try {
+    return providerClientForDefinition(settings, definition).clientId;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The link an organization's administrator opens once to approve every
+ * Microsoft service this workspace connects through the same app (Outlook Mail
+ * and Calendar together), so a person adding another later needs no second
+ * approval. Null for other providers or without a configured client.
+ */
+export function microsoftOrganizationApprovalUrl(
+  settings: Settings,
+  workspaceId: string,
+  definition: IntegrationDefinition,
+  apiBaseUrl: string,
+): string | null {
+  if (definition.provider.id !== "microsoft") return null;
+  const clientId = configuredClientId(settings, definition);
+  if (!clientId) return null;
+  const redirectPath = providerOAuthCallbackPath(definition);
+  return microsoftAdminConsentUrl({
+    clientId,
+    redirectUri: `${apiBaseUrl}${redirectPath}`,
+    definitions: CORE_INTEGRATION_DEFINITIONS.filter(
+      (other) =>
+        other.id === definition.id ||
+        (other.provider.id === "microsoft" &&
+          providerOAuthCallbackPath(other) === redirectPath &&
+          integrationAvailable(settings, workspaceId, other.id) &&
+          configuredClientId(settings, other) === clientId),
+    ),
+  });
+}
+
 /** Microsoft denial with an administrator approval link, or null for other providers. */
 function microsoftDenial(
   settings: Settings,
@@ -716,22 +755,11 @@ function microsoftDenial(
   description: string | undefined,
 ): ReturnType<typeof microsoftAuthorizationNotGranted> | null {
   const definition = integrationDefinitionById(state.definitionId);
-  if (!definition || definition.provider.id !== "microsoft") return null;
-  let clientId: string;
-  try {
-    clientId = providerClientForDefinition(settings, definition).clientId;
-  } catch {
-    return null;
-  }
-  return microsoftAuthorizationNotGranted({
-    error,
-    description,
-    adminConsentUrl: microsoftAdminConsentUrl({
-      clientId,
-      redirectUri: `${apiBaseUrl}${providerOAuthCallbackPath(definition)}`,
-      definition,
-    }),
-  });
+  const adminConsentUrl = definition
+    ? microsoftOrganizationApprovalUrl(settings, state.workspaceId, definition, apiBaseUrl)
+    : null;
+  if (!adminConsentUrl) return null;
+  return microsoftAuthorizationNotGranted({ error, description, adminConsentUrl });
 }
 
 function providerOAuthCallbackPath(definition: IntegrationDefinition): string {

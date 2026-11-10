@@ -13,6 +13,7 @@
  * people saved in the workspace. A template only fills the form.
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   BookmarkPlusIcon,
   CalendarClockIcon,
@@ -82,7 +83,7 @@ import type { EventSourceLogoResolver } from "./event-source-tile";
 import { EventTriggerSummary } from "./event-trigger-summary";
 
 export interface AutomationsPanelProps {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   /**
    * Scope it to one chat: that chat's automations, and new ones continue it.
@@ -827,7 +828,7 @@ function AutomationDetail({
   onDelete,
   notice,
 }: {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   task: ScheduledTask;
   sessionId: string | undefined;
@@ -966,7 +967,7 @@ function AutomationRuns({
   startedAt,
   onOpenSession,
 }: {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   task: ScheduledTask;
   startedAt: number | null;

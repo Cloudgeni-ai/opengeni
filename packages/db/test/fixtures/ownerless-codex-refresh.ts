@@ -39,9 +39,6 @@ export async function ownerlessRefreshFixture(context: OwnerlessRefreshContext, 
     values (${accountId}::uuid, ${workspaceId}::uuid, ${subjectId}, 'owner')`;
   await admin`insert into workspace_inference_controls (account_id, workspace_id)
     values (${accountId}::uuid, ${workspaceId}::uuid)`;
-  await admin`insert into subscription_provider_cutovers (account_id, provider, enabled)
-    values (${accountId}::uuid, 'codex', true)
-    on conflict (account_id, provider) do update set enabled = true`;
   await admin`delete from subscription_settings where account_id = ${accountId}::uuid and workspace_id is null`;
   await admin`insert into subscription_settings
     (account_id, rotation, providers, cross_provider_failover, fallback_order,

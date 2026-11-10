@@ -29,7 +29,12 @@ import { Input } from "../../../ui/input";
 import { Notice } from "../../../ui/notice";
 import { MENU_LABEL_CLASS, MENU_NOTE_CLASS, MENU_SEPARATOR_CLASS } from "../../../ui/menu-styles";
 import { isMachineComputeSelectable } from "../../lib/machine-selectability";
-import { machineNameTwinLabel } from "../../../sandbox-label-model";
+import {
+  machineNameTwinLabel,
+  machinePlatformLabel,
+  machineScreenLabel,
+} from "../../../sandbox-label-model";
+import { useDesktopThisComputer } from "../desktop/this-computer";
 import {
   rememberedMachineFolder,
   workspaceDefaultRigOptionLabel,
@@ -53,11 +58,22 @@ import { cn } from "../../lib/utils";
  * plain radio buttons that Tab reaches.
  */
 
-function machineStateMeta(machine: MachineView): string {
+/**
+ * What a person needs to pick a machine: whether it's the computer they are
+ * on, what kind of computer it is, and whether agents can use its screen.
+ * "macos/aarch64" stays in the Machines page's tooltip.
+ */
+function machineStateMeta(machine: MachineView, thisComputer: boolean): string {
   if (machine.state === "offline") return "Offline";
   if (machine.state === "reconnecting") return "Reconnecting";
   if (!isMachineComputeSelectable(machine.state)) return "Unavailable";
-  return machine.os ? `${machine.os}/${machine.arch}` : "";
+  return [
+    thisComputer ? t("sandboxLabelModel.thisComputerName") : null,
+    machine.os ? machinePlatformLabel(t, machine.os) : null,
+    machineScreenLabel(t, machine),
+  ]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 export type RunsOnChoices = {
@@ -234,6 +250,8 @@ export function RunsOnMenuBody(
       customPathInputRef.current.focus({ preventScroll: true });
     }
   }, [compute]);
+  // Inside the desktop app, the computer it runs on is marked in the list.
+  const thisComputerEnrollment = useDesktopThisComputer()?.computer.status?.enrollmentId;
   const personalRigs = props.rigs.filter((rig) => rig.scope === "user");
   const workspaceRigs = props.rigs.filter((rig) => rig.scope !== "user");
   const showWhere =
@@ -327,7 +345,14 @@ export function RunsOnMenuBody(
                 disabled={props.disabled || !isMachineComputeSelectable(machine.state)}
                 icon={machine.os === "macos" ? <LaptopIcon /> : <ServerIcon />}
                 label={machine.name}
-                meta={[machineNameTwinLabel(t, machine, props.machines), machineStateMeta(machine)]
+                meta={[
+                  machineNameTwinLabel(t, machine, props.machines),
+                  machineStateMeta(
+                    machine,
+                    Boolean(thisComputerEnrollment) &&
+                      machine.enrollmentId === thisComputerEnrollment,
+                  ),
+                ]
                   .filter(Boolean)
                   .join(" · ")}
                 onSelect={() => selectMachine(machine)}
@@ -466,6 +491,8 @@ export function VisibilityMenuBody(props: {
   presentation?: MenuBodyPresentation | undefined;
   value: "private" | "workspace";
   disabled: boolean;
+  /** Why the chat can't be shared (it starts with an Only me agent); null when it can. */
+  workspaceUnavailable?: string | null | undefined;
   onChange: (visibility: "private" | "workspace") => void;
 }) {
   const presentation = props.presentation ?? "menu";
@@ -478,10 +505,10 @@ export function VisibilityMenuBody(props: {
         <RadioGroup presentation={presentation} label="Who can see this chat" value={props.value}>
           <RadioRow
             value="workspace"
-            disabled={props.disabled}
+            disabled={props.disabled || Boolean(props.workspaceUnavailable)}
             icon={<UsersIcon />}
             label="Workspace"
-            meta="People in this workspace"
+            meta={props.workspaceUnavailable || "People in this workspace"}
             onSelect={() => props.onChange("workspace")}
           />
           <RadioRow

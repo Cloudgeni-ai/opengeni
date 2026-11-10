@@ -32,6 +32,7 @@ mod capture;
 mod checkpoint;
 mod disk_lengths;
 mod disk_reading;
+mod disk_relief;
 mod fleet;
 mod images;
 mod link;
@@ -45,6 +46,7 @@ mod requests;
 #[path = "../support/required.rs"]
 mod required;
 mod restart;
+mod restart_in_place;
 mod roots;
 mod sleep;
 mod stopped;
@@ -153,6 +155,10 @@ struct World {
     /// VMs that cannot be checked on, by name: adopting one fails as when
     /// its VMM does not answer.
     unadoptable: Mutex<HashSet<String>>,
+    /// VMs held frozen, by name, as the guard leaves them once the lease
+    /// has run out: adopting one fails as when its VMM does not answer,
+    /// and the engine says it is held frozen while its process lives.
+    held_frozen: Mutex<HashSet<String>>,
     /// How long taking back each VM a previous agent left running takes,
     /// as on a host whose VMMs answer slowly.
     adopt_delay: Mutex<Duration>,
@@ -362,7 +368,9 @@ impl Fake {
     /// Takes back the VM a previous agent left running for `spec`, if
     /// any.
     fn adopt_now(&self, spec: &VmSpec) -> Result<Option<(FakeVm, Found)>, EngineError> {
-        if self.world.unadoptable.lock().unwrap().contains(&spec.name) {
+        if self.world.unadoptable.lock().unwrap().contains(&spec.name)
+            || self.world.held_frozen.lock().unwrap().contains(&spec.name)
+        {
             return Err(EngineError::new(
                 ErrorKind::Transient,
                 "adopt",
@@ -1005,8 +1013,25 @@ impl Engine for Fake {
     ) -> impl Future<Output = Result<Option<(FakeVm, Found)>, EngineError>> + Send {
         let delay = *self.world.adopt_delay.lock().unwrap();
         let found = self.adopt_now(spec);
+        // A VMM held frozen answers if it is thawed within the time it is
+        // given to, as the guard thaws it a step after the lease runs.
+        let thawing = self
+            .world
+            .held_frozen
+            .lock()
+            .unwrap()
+            .contains(&spec.name)
+            .then(|| (self.clone(), spec.clone()));
         async move {
             sleep(delay).await;
+            if let Some((fake, spec)) = thawing {
+                for _ in 0..100 {
+                    if !fake.world.held_frozen.lock().unwrap().contains(&spec.name) {
+                        return fake.adopt_now(&spec);
+                    }
+                    sleep(Duration::from_millis(2)).await;
+                }
+            }
             found
         }
     }
@@ -1117,6 +1142,17 @@ impl Engine for Fake {
             .unwrap()
             .push((vm.name.clone(), bytes));
         Ok(())
+    }
+
+    fn held_frozen(&self, spec: &VmSpec) -> Result<bool, EngineError> {
+        let alive = self
+            .world
+            .vms
+            .lock()
+            .unwrap()
+            .get(&spec.name)
+            .is_some_and(|process| !*process.exit.borrow());
+        Ok(alive && self.world.held_frozen.lock().unwrap().contains(&spec.name))
     }
 
     fn set_only_copy(&self, vm: &FakeVm, only: bool) -> Result<(), EngineError> {
@@ -1266,6 +1302,7 @@ impl Lab {
             first_wake_within: HostConfig::FIRST_WAKE_WITHIN,
             disk_reading: None,
             stream_idle: HostConfig::STREAM_IDLE,
+            hand_off_unwakeable: HostConfig::HAND_OFF_UNWAKEABLE,
             guest_ports: Vec::new(),
             restore_notice_port: None,
             guest_checks: compute_host::GuestChecks::DEFAULT,

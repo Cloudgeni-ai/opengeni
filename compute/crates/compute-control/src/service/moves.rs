@@ -15,11 +15,15 @@ use compute_protocol::host::{
 };
 use futures::StreamExt as _;
 
-use super::{Asked, Failure, Service, host_failure};
-use crate::store::{SandboxRow, Store};
+use super::{Asked, Failure, Service, host_failure, now_ms};
+use crate::store::{Forsaken, Gone, SandboxRow, Store};
 
 /// How long a host may take to hand a sandbox off: it archives it first.
 const HAND_OFF_WAIT: Duration = Duration::from_secs(300);
+/// How long a host may take to restart a sandbox where it is: it ends its
+/// VM, cancelling any step under way, and forgets its memory image, with
+/// nothing to store first.
+const RESTART_WAIT: Duration = Duration::from_secs(120);
 /// How long a host may take to answer a sleep, which it answers at once.
 const SLEEP_WAIT: Duration = Duration::from_secs(10);
 /// How long a host may take to say how its sandboxes are.
@@ -242,6 +246,66 @@ impl<S: Store> Service<S> {
         ))
     }
 
+    /// Boots a team's sandbox afresh from its disk, keeping its files and
+    /// its shape. Its owner restarts it where it is: it ends its VM without
+    /// saving it and forgets its memory image, so its next wake boots it
+    /// from its files there, and nothing is stored first, so a slow store
+    /// never holds a restart up. An owner from before that request hands it
+    /// off instead, as in [`Self::resize`] (even while it is awake), and
+    /// the service takes it anew with its copy's files only. One nobody
+    /// owns is taken anew at once. Its running programs end. This recovers
+    /// a machine whose running system is broken (for example its
+    /// `/dev/null` was removed) or stuck while its files are fine.
+    pub async fn restart(&self, team: &str, id: Id) -> Result<SandboxRow, Failure> {
+        for _ in 0..RESIZE_TRIES {
+            let mut row = self.get(team, id).await?;
+            if let Some(host) = row.ownership.owner {
+                if self.restart_in_place(&row, host).await? {
+                    tracing::info!(%id, "sandbox restarted from its disk where it is");
+                    return self.get(team, id).await;
+                }
+                self.hand_off(&row, host, true).await?;
+                continue;
+            }
+            row.ownership = row.ownership.retake(false).set;
+            if self.store.respec(&row).await? {
+                tracing::info!(%id, "sandbox restarted from its disk");
+                return self.get(team, id).await;
+            }
+        }
+        Err(Failure::Unavailable(
+            "it was taken up again each time it was handed off; try again".into(),
+        ))
+    }
+
+    /// Has `host`, the owner, restart `row`'s sandbox where it is. False
+    /// for a host from before that request, which a hand-off restarts.
+    async fn restart_in_place(&self, row: &SandboxRow, host: HostId) -> Result<bool, Failure> {
+        let target = self
+            .view
+            .target(host)
+            .ok_or_else(|| Failure::Unavailable("its host is not reachable".into()))?;
+        let request = Request::Restart { id: row.id };
+        let answered = self
+            .hosts
+            .call(&target, Some(row.ownership.epoch), &request, RESTART_WAIT)
+            .await
+            .map_err(|error| Failure::Unavailable(error.to_string()))?;
+        if answered.outcome() == Outcome::Done {
+            return Ok(true);
+        }
+        Err(match answered.code() {
+            Some(ErrorCode::Invalid) => return Ok(false),
+            Some(ErrorCode::NotFound) => Failure::Unavailable(
+                "its host may still be creating it; try again in a few seconds".into(),
+            ),
+            Some(ErrorCode::Stale) => {
+                Failure::Unavailable("it changed meanwhile; try again".into())
+            }
+            _ => host_failure(&answered),
+        })
+    }
+
     /// Has `host`, the owner, hand `row`'s sandbox off, even while it is
     /// awake with `awake`, and clears its owner under a raised epoch once
     /// it has.
@@ -250,7 +314,7 @@ impl<S: Store> Service<S> {
         let target = self
             .view
             .target(host)
-            .ok_or_else(|| Failure::Unavailable("its host is not reachable".into()))?;
+            .ok_or_else(|| Failure::Unavailable(self.unreachable(host)))?;
         let request = Request::HandOff {
             id: row.id,
             owner_epoch: epoch.0,
@@ -309,6 +373,35 @@ impl<S: Store> Service<S> {
             }
         }
         Ok(drained)
+    }
+
+    /// Declares the host named `name`, given up on, gone for good: each
+    /// sandbox that waits for it goes on from its newest stored copy, and
+    /// notes what it went back to. For an operator who knows the host is
+    /// not coming back; one that comes back after all sets its copies
+    /// aside rather than dropping them.
+    pub async fn declare_gone(&self, name: &str) -> Result<Vec<Forsaken>, Failure> {
+        let known = self.view.named(name).ok_or(Failure::NotFound)?;
+        if known.state != HostState::Lost {
+            return Err(Failure::Invalid(format!(
+                "{name} was not given up on: only a host that stopped answering can be declared gone"
+            )));
+        }
+        let forsaken = self
+            .store
+            .declare_gone(known.target.host, Gone::Declared, now_ms())
+            .await?
+            .ok_or_else(|| {
+                Failure::Invalid(format!(
+                    "{name} registered again: it is no longer given up on"
+                ))
+            })?;
+        tracing::warn!(
+            host = name,
+            sandboxes = forsaken.len(),
+            "a host was declared gone: its sandboxes go on from their stored copies"
+        );
+        Ok(forsaken)
     }
 
     /// Takes the host named `name` back into placement after a drain.

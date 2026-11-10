@@ -138,7 +138,7 @@ test("an existing chat's Chat settings opens its Agent tab instead of a second e
     row.textContent?.includes("Chat settings"),
   );
   if (!item) throw new Error("Missing Chat settings");
-  expect(item.textContent).toContain("Agent tab");
+  expect(item.textContent).toContain("Settings tab");
   await act(async () => item.click());
   expect(opened).toEqual(["agent-tab"]);
   expect(openStates).toEqual([false]);

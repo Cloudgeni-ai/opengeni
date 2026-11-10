@@ -29,6 +29,7 @@ import {
   reapOrphanedAgentBrowserDaemons,
   stopEndedManagedBrowserProcess,
   inspectOwnedManagedBrowserProcess,
+  managedChromeArguments,
 } from "../src/runner";
 
 describe("managed browser profile cryptography", () => {
@@ -177,6 +178,30 @@ describe("managed browser profile cryptography", () => {
       "--enable-features=CDPScreenshotNewSurface,OverlayScrollbar,Extra",
     ]);
     expect(merged.at(-1)).toBe("--lang=en-US");
+  });
+
+  test("presents a desktop mouse from a browser without a window", () => {
+    const pointer =
+      "primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4";
+    const blink = (windowed: boolean, additional?: string[]) =>
+      managedChromeArguments({
+        platform: "linux",
+        windowed,
+        profileDirectory: "/tmp/profile",
+        proxyServer: null,
+        ...(additional ? { additional } : {}),
+      }).filter((argument) => argument.startsWith("--blink-settings="));
+    expect(blink(false)).toEqual([`--blink-settings=${pointer}`]);
+    // A window has the machine's own mouse or touch screen.
+    expect(blink(true)).toEqual([]);
+    // Chromium honors only the last switch: an additional one is folded in
+    // after the mouse and overrides it key by key.
+    expect(blink(false, ["--blink-settings=primaryPointerType=2"])).toEqual([
+      `--blink-settings=${pointer},primaryPointerType=2`,
+    ]);
+    expect(blink(true, ["--blink-settings=primaryPointerType=2"])).toEqual([
+      "--blink-settings=primaryPointerType=2",
+    ]);
   });
 
   test.skipIf(process.platform !== "darwin")(

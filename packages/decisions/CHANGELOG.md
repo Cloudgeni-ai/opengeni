@@ -1,5 +1,40 @@
 # @opengeni/decisions
 
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [1c7aa2a]
+  - @opengeni/contracts@6.13.0
+
+## 6.12.0
+
+### Patch Changes
+
+- c0b9f88: Add workspace-scoped stateless typed decisions with SDK `decide`. Reuse the
+  deployment's configured decision model, chat-completions authority, usage settlement
+  and residency checks. Calls are deployment-funded, independent of customer agent
+  allowances, with optional tenant-label attribution and off-path usage receipts.
+  Preserve typed refusals and reported, estimated and unknown provider costs.
+- Updated dependencies [64fd53f]
+- Updated dependencies [281af3a]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [3929153]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+  - @opengeni/contracts@6.12.0
+
+## 6.11.0
+
+## 6.10.0
+
+## 6.9.0
+
 ## 6.8.0
 
 ## 6.7.0

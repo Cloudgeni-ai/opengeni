@@ -285,7 +285,7 @@ export function SessionRunsOnMenuBody(props: {
 function machineStateLabel(state: string): string {
   if (state === "offline") return "Offline";
   if (state === "reconnecting") return "Reconnecting";
-  if (state === "display_unavailable") return "No display";
+  if (state === "display_unavailable") return "No screen";
   return state;
 }
 

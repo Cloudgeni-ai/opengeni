@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   SessionEvent,
   SessionMcpApprovalPolicy,
@@ -31,11 +32,12 @@ export function isSessionMcpApprovalPolicyEvent(
   return payload?.serverId === serverId;
 }
 
-export type UseSessionMcpApprovalPolicyOptions = EmbeddedSessionMcpApprovalPolicyClientOverride &
-  SessionEventFeedOptions & {
-    /** Optional safety-net polling (ms). Off by default; policy events drive refreshes. */
-    pollIntervalMs?: number | undefined;
-  };
+export type UseSessionMcpApprovalPolicyOptions =
+  EmbeddedSessionMcpApprovalPolicyClientOverride<ChatClient> &
+    SessionEventFeedOptions & {
+      /** Optional safety-net polling (ms). Off by default; policy events drive refreshes. */
+      pollIntervalMs?: number | undefined;
+    };
 
 export type UseSessionMcpApprovalPolicyResult = {
   server: SessionMcpApprovalPolicyTarget | null;

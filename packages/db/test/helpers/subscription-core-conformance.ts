@@ -384,10 +384,6 @@ export function describeSubscriptionCoreConformance<Credential>(
         account_id, organization_membership_id, personal_fallback_opt_in
       ) values (${accountId}::uuid, ${membership!.id}::uuid, true)
       on conflict do nothing`;
-    await admin()`
-      insert into subscription_provider_cutovers (account_id, provider, enabled)
-      values (${accountId}::uuid, ${providerId}, true)
-      on conflict (account_id, provider) do update set enabled = true`;
     // Another provider's connections in the same organization and pool: the
     // quarantined one recovers sooner and is exhausted until sooner than
     // anything this suite creates, so any read that lost its provider filter
@@ -5621,9 +5617,6 @@ export function describeSubscriptionCoreConformance<Credential>(
         await closeBindingRollingWindow();
         const org = await organization();
         const own = await sharedConnection(org, `two-choices-${crypto.randomUUID()}`);
-        await admin()`insert into subscription_provider_cutovers (account_id, provider, enabled)
-          values (${org.accountId}::uuid, ${subject.foreignProvider}, true)
-          on conflict (account_id, provider) do update set enabled = true`;
         const turn = await runningTurn(org);
         const input = { ...turn.identity, subjectId: org.ownerSubjectId };
         const both = [provider, choicePeer!];
@@ -5792,9 +5785,11 @@ export function describeSubscriptionCoreConformance<Credential>(
             expect(armed.waiter).toMatchObject({ resetKind: "authoritative", refreshAttempt: 0 });
             expect(armedCheckAt).toBe(resetAt);
           }
+          // An hour-long wait is long, so this top-level chat's person is told at once.
           expect(armed.events.map((event): string => event.type)).toEqual([
             waits.events.waiting,
             "session.status.changed",
+            "session.notification.posted",
           ]);
           const [row] = await admin()<{ provider: string }[]>`
           select provider from subscription_capacity_waiters
@@ -5921,6 +5916,7 @@ export function describeSubscriptionCoreConformance<Credential>(
           expect(resumed.events.map((event): string => event.type)).toEqual([
             waits.events.resumed,
             "session.status.changed",
+            "session.notification.withdrawn",
           ]);
           const [state] = await admin()<{ session_status: string; turn_status: string }[]>`
           select session.status as session_status, turn.status as turn_status
@@ -6238,9 +6234,11 @@ export function describeSubscriptionCoreConformance<Credential>(
           evaluation: { kind: "revoked" },
         });
         expect(superseded.action).toBe("superseded");
+        // A wait with no known reset is long; its notice is withdrawn with it.
         expect(superseded.events.map((event): string => event.type)).toEqual([
           waits.events.superseded,
           "session.status.changed",
+          "session.notification.withdrawn",
         ]);
         expect(superseded.events[0]!.payload).toMatchObject({
           waiterId: revoked.waiter.waiterId,

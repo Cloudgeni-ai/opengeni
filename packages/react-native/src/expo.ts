@@ -4,6 +4,7 @@
 // namespaced per signed-in principal); everything else here is the standard Expo
 // implementation of the adapter contract.
 import { AppState } from "react-native";
+import type { ChatClient } from "@opengeni/sdk";
 import { useMemo } from "react";
 import * as Crypto from "expo-crypto";
 import * as DocumentPicker from "expo-document-picker";
@@ -277,7 +278,7 @@ export function useExpoVoiceRecorder(): NativeVoiceRecorder {
  * text is in the draft. Failures carry the HTTP status (null when offline).
  */
 export async function transcribeExpoRecording(input: {
-  client: Pick<OpenGeniClient, "fetchApi">;
+  client: Pick<ChatClient<OpenGeniClient>, "fetchApi">;
   workspaceId: string;
   recording: NativeVoiceRecording;
   /** The language spoken ("nb", "en"); omitted or null detects it. */

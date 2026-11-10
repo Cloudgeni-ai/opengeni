@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type {
   ComputerAction,
   ComputerActionReceipt,
@@ -62,7 +63,7 @@ import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export type ComputerViewerNotification = { kind: "error" | "info"; message: string };
 
-export type ComputerViewerProps = EmbeddedComputerInteractionClientOverride & {
+export type ComputerViewerProps = EmbeddedComputerInteractionClientOverride<ChatClient> & {
   /** Selected Opengeni agent/session. Peer ComputerSessions remain visible. */
   sessionId: string;
   enabled?: boolean | undefined;

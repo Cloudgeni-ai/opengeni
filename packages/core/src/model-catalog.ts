@@ -40,6 +40,8 @@ import {
   organizationDirectModelIdPrefix,
   organizationDirectModelProviderOf,
   withOrganizationDirectCatalogProvider,
+  withOrganizationCompatibleProviders,
+  type OrganizationCompatibleEndpointOverlay,
   type OrganizationDirectModelProvider,
   type ConfiguredModel,
   type Settings,
@@ -336,6 +338,10 @@ export async function resolveWorkspaceCatalogSettings(
     workspaceId: string;
     retainedProductModelId?: string | null;
     retainedProductModelIds?: readonly (string | null | undefined)[];
+    /** This call's already loaded metadata for the exact workspace and provider set. */
+    catalogInputs?: Awaited<ReturnType<typeof loadWorkspaceModelCatalogInputs>>;
+    /** This invocation's deployment catalog, before workspace overlays. */
+    deploymentCatalog?: ResolvedCatalogSettings;
   },
 ): Promise<ResolvedCatalogSettings> {
   // A few pure catalog tests inject the historical minimal DB port and mock the
@@ -410,21 +416,23 @@ export async function resolveWorkspaceCatalogSettings(
         )
       : []),
   ];
-  const publicCatalog = supportsOrganizationProviderReads
-    ? loadWorkspaceModelCatalogInputs(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        providerKinds: workspaceCustomModelKinds,
-        organizationProviderKinds: [
-          "vercel_gateway",
-          "openrouter",
-          "opper",
-          "openai",
-          "azure_openai",
-          ...CLAUDE_CONNECTION_KINDS,
-        ],
-      })
-    : undefined;
+  const publicCatalog = input.catalogInputs
+    ? Promise.resolve(input.catalogInputs)
+    : supportsOrganizationProviderReads
+      ? loadWorkspaceModelCatalogInputs(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          providerKinds: workspaceCustomModelKinds,
+          organizationProviderKinds: [
+            "vercel_gateway",
+            "openrouter",
+            "opper",
+            "openai",
+            "azure_openai",
+            ...CLAUDE_CONNECTION_KINDS,
+          ],
+        })
+      : undefined;
   const [
     resolved,
     workspaceCustomModels,
@@ -437,8 +445,9 @@ export async function resolveWorkspaceCatalogSettings(
     retainedOpperCustomModels,
     retainedOrganizationOpperCustomModels,
     retainedOrganizationDirectCustomModels,
+    organizationCompatibleEndpoints,
   ] = await Promise.all([
-    resolveCatalogSettings(db, envSettings),
+    input.deploymentCatalog ?? resolveCatalogSettings(db, envSettings),
     publicCatalog?.then((catalog) => catalog.workspaceCustomModels) ??
       listWorkspaceProviderCustomModelsByKind(db, {
         accountId: input.accountId,
@@ -530,6 +539,10 @@ export async function resolveWorkspaceCatalogSettings(
           ),
         )
       : Promise.resolve([]),
+    // The organization's own OpenAI-compatible endpoints this workspace can
+    // use, read in the same scope as the other public catalog families.
+    publicCatalog?.then((catalog) => catalog.organizationCompatibleEndpoints) ??
+      Promise.resolve([]),
   ]);
   const includeRetainedModels = <T extends { upstreamModelId: string }>(
     activeModels: readonly T[],
@@ -624,7 +637,13 @@ export async function resolveWorkspaceCatalogSettings(
                 withOrganizationOpenRouterCatalogProvider(
                   withOrganizationGatewayCatalogProvider(
                     withWorkspaceOpenRouterCatalogProvider(
-                      withWorkspaceGatewayCatalogProvider(resolved.settings, gatewayCustomModels),
+                      withWorkspaceGatewayCatalogProvider(
+                        withOrganizationCompatibleProviders(
+                          resolved.settings,
+                          organizationCompatibleEndpoints,
+                        ),
+                        gatewayCustomModels,
+                      ),
                       openRouterCustomModels,
                     ),
                     organizationGatewayModels,
@@ -729,6 +748,12 @@ export type WorkspaceModelSelectionInput = {
       }
     >
   >;
+  /**
+   * The organization's own OpenAI-compatible endpoints this workspace can use
+   * (only active ones), with their models. Absent when the caller's settings
+   * already carry them.
+   */
+  organizationCompatibleEndpoints?: readonly OrganizationCompatibleEndpointOverlay[];
   credentialReadinessObservations?:
     | Readonly<Record<string, ModelCredentialReadinessObservation>>
     | undefined;
@@ -887,6 +912,10 @@ function credentialReadinessFor(input: {
         };
   }
   if (source.kind === "organization_connection") {
+    // An organization's own endpoint is in the catalog only while it is
+    // active and reaches this workspace.
+    if (input.provider?.kind === "direct-compatible-organization")
+      return { status: "ready", reason: null, basis: "connection", checkedAt: null };
     const claudeKind = CLAUDE_CONNECTION_KINDS.find(
       (kind) => claudeProviderId(kind) === input.model.providerId,
     );
@@ -1061,8 +1090,12 @@ export function resolveWorkspaceModelSelection(
   const xaiSettings = input.settings.supergrokSubscriptionEnabled
     ? withXaiSubscriptionCatalogProvider(codexSettings)
     : codexSettings;
-  const directCatalogSettings = (settings: Settings) =>
-    withOrganizationDirectCatalogProviders(settings, input.organizationDirect ?? {});
+  const directCatalogSettings = (settings: Settings) => {
+    const direct = withOrganizationDirectCatalogProviders(settings, input.organizationDirect ?? {});
+    return input.organizationCompatibleEndpoints
+      ? withOrganizationCompatibleProviders(direct, input.organizationCompatibleEndpoints)
+      : direct;
+  };
   const catalogSettings = withClaudeConnectionCatalog(
     withClaudeConnectionCatalog(
       directCatalogSettings(

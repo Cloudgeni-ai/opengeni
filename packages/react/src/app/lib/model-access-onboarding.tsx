@@ -1,4 +1,5 @@
 import { directModelProviderOfProviderId } from "@opengeni/contracts";
+import type { ChatClient } from "@opengeni/sdk";
 import { t } from "./console-text";
 import { checkoutPageReturnUrl } from "./credit-checkout";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -49,8 +50,13 @@ function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): bo
   switch (family) {
     case "openai":
     case "azure_openai":
-    case "openai_compatible":
       return directModelProviderOfProviderId(row.provider) === family;
+    case "openai_compatible":
+      // A workspace's own endpoint, or one of the organization's.
+      return (
+        directModelProviderOfProviderId(row.provider) === family ||
+        row.provider.startsWith("organization-compatible-")
+      );
     case "codex":
       return row.billingClass === "codex_subscription";
     case "supergrok":
@@ -130,7 +136,7 @@ export function composerFallbackModel(input: {
 
 /** Select the connected model in the actor-private draft without workspace administration. */
 export async function applyConnectedModelToNewSessionDraft(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   family?: ConnectedModelFamily,
   preferredModelId?: string,
@@ -212,7 +218,7 @@ export function creditCheckoutSuccessUrl(
 
 /** Resolve the credits model for a checkout return; a catalog failure never blocks checkout. */
 export async function creditsModelForCheckout(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
 ): Promise<{ id: string; effort: string } | null> {
   try {

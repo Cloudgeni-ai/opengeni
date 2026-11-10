@@ -11,7 +11,6 @@ import {
   PauseIcon,
   PencilIcon,
   PlayIcon,
-  RefreshCwIcon,
   Trash2Icon,
   ZapIcon,
 } from "lucide-react";
@@ -37,7 +36,6 @@ import type { ScheduledTask, ScheduledTaskRun } from "@opengeni/react/app/types"
 import {
   hasEventTriggers,
   isFinishedOnce,
-  isKnowledgeSync,
   nextRunOf,
   ownerName,
   ownsSchedule,
@@ -77,15 +75,12 @@ export function useScheduleAccess(workspaceId: string): ScheduleAccess {
 /** What this viewer can do with one schedule. */
 export function schedulePermissions(task: ScheduledTask, access: ScheduleAccess) {
   const own = ownsSchedule(task, access.viewerSubjectId);
-  const knowledge = isKnowledgeSync(task);
-  const retired = scheduledTaskStateLabel(task).reason === "provider_retired";
   return {
     own,
-    canEdit: own && access.canManage && !retired,
-    canRun: own && access.canRun && !retired,
+    canEdit: own && access.canManage,
+    canRun: own && access.canRun,
     canPauseOrDelete: own && access.canManage,
-    /** Knowledge syncs belong to their source; they aren't copied. */
-    canDuplicate: access.canManage && !knowledge && !retired,
+    canDuplicate: access.canManage,
   };
 }
 
@@ -188,30 +183,14 @@ export function ScheduleTile({ task }: { task: ScheduledTask }) {
   return (
     <LogoTile
       name={task.name}
-      icon={
-        isKnowledgeSync(task) ? (
-          <RefreshCwIcon />
-        ) : hasEventTriggers(task) ? (
-          <ZapIcon />
-        ) : (
-          <CalendarClockIcon />
-        )
-      }
+      icon={hasEventTriggers(task) ? <ZapIcon /> : <CalendarClockIcon />}
     />
   );
 }
 
-/**
- * Whether the list row shows the on/off switch: the viewer can pause it, and
- * turning it on would make it run. A retired sync, or one stopped by its
- * source or connection (paused or not), keeps Pause in the menu instead, so
- * the switch never reads On while nothing runs and never vanishes under focus.
- */
+/** Whether the list row shows the on/off switch: the viewer can pause it. */
 export function canSwitchSchedule(task: ScheduledTask, access: ScheduleAccess): boolean {
-  return (
-    schedulePermissions(task, access).canPauseOrDelete &&
-    scheduledTaskStateLabel({ ...task, status: "active" }).reason === "active"
-  );
+  return schedulePermissions(task, access).canPauseOrDelete;
 }
 
 /**
@@ -346,7 +325,6 @@ export function ScheduleMenuItems({
   const paused = !scheduleSwitchedOn(task);
   const state = scheduledTaskStateLabel(task);
   const active = state.active;
-  const retired = state.reason === "provider_retired";
   return (
     <>
       {perms.own ? null : (
@@ -358,13 +336,13 @@ export function ScheduleMenuItems({
           <DropdownMenuSeparator />
         </>
       )}
-      {perms.canRun && !retired ? (
+      {perms.canRun ? (
         <DropdownMenuItem disabled={busy || !active} onSelect={onRunNow}>
           <PlayIcon />
           Run now
         </DropdownMenuItem>
       ) : null}
-      {pauseItem && perms.canPauseOrDelete && !retired ? (
+      {pauseItem && perms.canPauseOrDelete ? (
         <DropdownMenuItem disabled={busy} onSelect={paused ? onResume : onPause}>
           {paused ? <PlayIcon /> : <PauseIcon />}
           {paused ? "Resume" : "Pause"}

@@ -106,7 +106,7 @@ export function SessionDefaultsPage({
   const identityTooLong = identity.trim().length > AGENT_IDENTITY_MAX_CHARACTERS;
   const legacyHumanInputOff = workspace?.settings.agentHumanInputEnabled === false;
   const capabilitiesRequest = (current: AgentCapabilityDraft): AgentCapabilities => {
-    const request = requestFromDraft(current, availability);
+    const request = requestFromDraft(current, availability, { saved: true });
     // The workspace's older "Ask questions" switch is off: say "on" out loud.
     if (!legacyHumanInputOff || current.values.humanInput !== true) return request;
     return typeof request === "string"
@@ -199,7 +199,7 @@ export function SessionDefaultsPage({
             availability={availability}
             disabled={!canManage}
             startingPointLabel="What agents can do"
-            startingPointDescription="People can change this for one chat in the composer or in the chat's Agent tab."
+            startingPointDescription="People can change this for one chat in the composer or in the chat's Settings tab."
             learning={
               learningDraft ? { modes: learningDraft, onChange: setLearningDraft } : undefined
             }

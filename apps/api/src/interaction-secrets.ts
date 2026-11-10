@@ -280,6 +280,11 @@ function isUnsupportedSync(error: unknown): boolean {
   return status === 404 || status === 405 || name === "BrowserControlUnsupportedError";
 }
 
+/** The relying parties the browser holds passkeys for (no key material). */
+function loadedRpIds(credentials: readonly BrowserPasskeyCredential[]): string[] {
+  return [...new Set(credentials.map((credential) => credential.rpId))].sort();
+}
+
 /**
  * Load the principal's passkeys into the BrowserSession and write back what
  * happened since the last sync. Best effort: a failure is logged and never
@@ -324,7 +329,14 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
   const store = input.port?.passkeys;
   if (!store) return null;
   const principal = attemptSecretPrincipal(input.grant);
-  if (!principal) return null;
+  if (!principal) {
+    // Passkeys are usable only while the attempt that loaded them acts: a
+    // caller acting for no attempt (a person or an API key) drives a browser
+    // whose authenticators hold nothing. Its pending events stay for the
+    // attempt that owns them.
+    if (input.refresh === true) await clearBrowserPasskeys(input);
+    return null;
+  }
   const now = input.now ?? Date.now;
   const holder = passkeyLeaseHolder(input.browserSessionId);
   // Per attempt: a later turn may act for another person, so it leases (and
@@ -372,6 +384,7 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
         ...(supportsBackupFlags && backupState === true ? { backupState: true } : {}),
       })) ?? null,
     acknowledgeEventIds,
+    owner: principal.attemptId,
   });
   try {
     const due =
@@ -403,16 +416,39 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
       }
       throw error;
     }
-    if (response.events.length === 0) return { saved: 0, asserted: 0 };
+    // The write-back after an action reports what it found even when the
+    // browser held passkeys and none was used, so a sign-in that never reached
+    // the authenticator is told apart from one that never had the passkey.
+    const reportUnused = input.refresh !== true && (state?.credentials.length ?? 0) > 0;
+    if (response.events.length === 0) {
+      if (reportUnused) {
+        input.log?.("browser.passkey.synced", {
+          saved: 0,
+          asserted: 0,
+          loadedRpIds: loadedRpIds(state!.credentials),
+        });
+      }
+      return { saved: 0, asserted: 0 };
+    }
     const processed: string[] = [];
     const itemByCredential = new Map(
       (state?.credentials ?? []).map((credential) => [credential.credentialId, credential.itemId]),
     );
     let saved = 0;
     let asserted = 0;
+    let discarded = 0;
     for (const event of response.events as BrowserPasskeyEvent[]) {
       try {
         if (event.type === "registered") {
+          // Saved only for the attempt whose passkeys were loaded when the
+          // page registered it. A registration made under another attempt,
+          // under nobody's, or by a controller that cannot say, is dropped:
+          // it never lands in another person's vault.
+          if (response.supportsOwners !== true || event.owner !== principal.attemptId) {
+            processed.push(event.eventId);
+            discarded += 1;
+            continue;
+          }
           const existing = itemByCredential.get(event.credential.credentialId);
           if (existing === undefined) {
             const result = await store.saveRegistered(principal, {
@@ -442,8 +478,13 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
     // New items are loaded with their item IDs so later assertions write back.
     const refreshed = saved > 0 ? await lease() : null;
     await input.client.passkeySync(request(refreshed, processed));
-    if (saved > 0 || asserted > 0) {
-      input.log?.("browser.passkey.synced", { saved, asserted });
+    if (discarded > 0) input.log?.("browser.passkey.registrations_discarded", { discarded });
+    if (saved > 0 || asserted > 0 || reportUnused) {
+      input.log?.("browser.passkey.synced", {
+        saved,
+        asserted,
+        loadedRpIds: loadedRpIds(state?.credentials ?? []),
+      });
     }
     return { saved, asserted };
   } catch (error) {
@@ -451,6 +492,24 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
       message: errorMessage(error),
     });
     return null;
+  }
+}
+
+/** Empty the BrowserSession's authenticators before an action no attempt
+ * owns. Best effort, like every sync: a controller without passkeys has
+ * nothing to clear. */
+async function clearBrowserPasskeys(input: PasskeySyncInput): Promise<void> {
+  try {
+    await input.client.passkeySync({
+      protocolVersion: INTERACTION_PROTOCOL_VERSION,
+      browserSessionId: input.browserSessionId,
+      controllerGeneration: input.controllerGeneration,
+      credentials: [],
+      acknowledgeEventIds: [],
+    });
+  } catch (error) {
+    if (isUnsupportedSync(error)) return;
+    input.log?.("browser.passkey.sync_failed", { message: errorMessage(error) });
   }
 }
 

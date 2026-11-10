@@ -1,6 +1,6 @@
 // Shared tool classification and bounded search ranking for lazy-tool-transport.ts.
 import { type Tool } from "@openai/agents";
-import type { FirstPartyMcpToolName } from "@opengeni/contracts";
+import { HARNESS_CONTROL_FIRST_PARTY_TOOLS } from "@opengeni/contracts";
 import { ToolSearchIndex } from "./tool-discovery-ranking";
 import { ALIASED_MCP_TOOL_LEAF_LENGTH, isAliasedMcpToolName } from "./mcp-model-tool-name";
 import {
@@ -10,7 +10,7 @@ import {
 } from "./mcp-network";
 
 const DEFAULT_SEARCH_LIMIT = 8;
-const MAX_SEARCH_LIMIT = 20;
+export const MAX_SEARCH_LIMIT = 20;
 
 const MCP_TOOL_NAME_SEPARATOR = "__";
 const NO_MCP_SERVER_IDS: ReadonlySet<string> = new Set();
@@ -65,31 +65,9 @@ export function isSearchableMcpFunctionTool(
 /** The first-party server that hosts the harness control tools. */
 export const HARNESS_CONTROL_MCP_SERVER_ID = "opengeni";
 
-/**
- * First-party tools the harness itself relies on: goal lifecycle, background
- * command polling, and the session-level wait, plus sandbox_file_publish, the
- * last step of every task that hands the person a file. Hiding any of them
- * behind search spends a model round trip to rediscover the same schema (for
- * a document or spreadsheet the person asked for, one of every six requests).
- * Tools that only some chats can use stay behind search: excel_run, loaded up
- * front in every chat, made agents in chats with no workbook read "here" as
- * an open workbook and probe Excel; an add-in message names the tool, so the
- * agent loads it by exact name when a workbook is there. This is an exact
- * per-tool exception, never the whole `opengeni` catalog, and it never widens
- * authority: only a tool the attempt's prepared server actually listed
- * (selection and permissions already applied) can be visible.
- */
-export const HARNESS_CONTROL_FIRST_PARTY_TOOLS = [
-  "goal_set",
-  "goal_update",
-  "goal_complete",
-  "goal_pause",
-  "goal_resume",
-  "command_read",
-  "command_wait",
-  "wait_for_input",
-  "sandbox_file_publish",
-] as const satisfies readonly FirstPartyMcpToolName[];
+// The always-visible harness control tools; the list lives in contracts so the
+// effective-tools projection reports them as the runtime attaches them.
+export { HARNESS_CONTROL_FIRST_PARTY_TOOLS };
 
 const HARNESS_CONTROL_MODEL_TOOL_NAMES: ReadonlySet<string> = new Set(
   HARNESS_CONTROL_FIRST_PARTY_TOOLS.map(

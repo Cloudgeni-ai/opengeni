@@ -41,6 +41,11 @@ import { Buffer } from "node:buffer";
 import { encryptEnvironmentValue } from "./environment-crypto";
 import type { Database } from "./database";
 import { withConnectionRefreshLock } from "./connection-refresh-lock";
+import {
+  IdJagExchangeError,
+  isIdJagCredential,
+  refreshIdJagConnectionCredential,
+} from "./id-jag-issuer";
 import type {
   AcceptedConnectionUseContext,
   AcceptedConnectionUseResolution,
@@ -512,6 +517,40 @@ export type ConnectionTokenResolverOptions = {
   transitionPermanentRefreshFailure?: (
     failure: PermanentConnectionRefreshFailure,
   ) => Promise<boolean>;
+  /**
+   * Called when a refresh was attempted and failed for a reason that may pass
+   * (the token endpoint was unreachable, answered 5xx, 408 or 429, or the
+   * refresh raced another change). The connection stays active and the result
+   * is still `refresh_failed`. Not called for a rejected grant or for a
+   * connection that cannot be refreshed at all (see
+   * ConnectionNotRefreshableError): only reconnecting fixes those.
+   */
+  onTransientRefreshFailure?: (failure: { connectionId: string }) => void;
+  /**
+   * Called once, when this resolve is the one that moved an active connection
+   * to `needs_reauth` because its provider rejected the stored grant. A later
+   * resolve of the already-broken connection, a transient failure or a lost
+   * status race never calls it, so the owner can be told exactly once.
+   */
+  onConnectionNeedsReauth?: (broken: ConnectionNeedsReauth) => void | Promise<void>;
+};
+
+/** A connection this resolve just found broken: only reconnecting fixes it. */
+export type ConnectionNeedsReauth = {
+  /** The workspace that holds the connection (a personal account may live elsewhere). */
+  workspaceId: string;
+  connectionId: string;
+  subjectId: string | null;
+  providerDomain: string;
+  httpStatus: number;
+  /** The accepted chat turn whose use found it, when there was one. */
+  use?: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+  };
 };
 
 export type RefreshTransportOptions = {
@@ -648,7 +687,9 @@ export function buildConnectionTokenResolver(
       throw new Error("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
     }
     const refreshed = await measureMcpPhase("oauth_refresh", () =>
-      deps.refresh(cred, ref, settings, options.refreshTransport),
+      isIdJagCredential(cred.credential)
+        ? refreshAutoConnectedCredential(lockedDb, settings, cred, ref, options.refreshTransport)
+        : deps.refresh(cred, ref, settings, options.refreshTransport),
     );
     const refreshRecord: ConnectionTokenRefreshInput = {
       id: cred.id,
@@ -842,7 +883,8 @@ export function buildConnectionTokenResolver(
           cred.expiresAt.getTime() <= now.getTime() &&
           !(
             input.preflightAcceptsRefreshableExpiry === true &&
-            stringValue((cred.credential as { refresh_token?: unknown }).refresh_token)
+            (stringValue((cred.credential as { refresh_token?: unknown }).refresh_token) ||
+              isIdJagCredential(cred.credential))
           )))
     ) {
       return authNeeded(ref, "refresh_failed", cred.id);
@@ -874,7 +916,7 @@ export function buildConnectionTokenResolver(
             }
           }
           if (!handled) {
-            await deps
+            const transitioned = await deps
               // A personal credential may originate outside the workspace
               // consuming it. Apply the CAS to the same row we refreshed.
               .setStatus(db, cred.workspaceId, "needs_reauth", error.message, {
@@ -882,8 +924,35 @@ export function buildConnectionTokenResolver(
                 version: cred.version,
                 subjectId: cred.subjectId,
               })
-              .catch(() => undefined);
+              .catch(() => false);
+            if (transitioned && options.onConnectionNeedsReauth) {
+              const use = input.connectionUseContext;
+              try {
+                await options.onConnectionNeedsReauth({
+                  workspaceId: cred.workspaceId,
+                  connectionId: cred.id,
+                  subjectId: cred.subjectId,
+                  providerDomain: cred.providerDomain,
+                  httpStatus: error.httpStatus,
+                  ...(use
+                    ? {
+                        use: {
+                          workspaceId: use.workspaceId,
+                          sessionId: use.sessionId,
+                          turnId: use.turnId,
+                          attemptId: use.attemptId,
+                          executionGeneration: use.executionGeneration,
+                        },
+                      }
+                    : {}),
+                });
+              } catch {
+                // Telling the owner never changes the credential result.
+              }
+            }
           }
+        } else if (!(error instanceof ConnectionNotRefreshableError)) {
+          options.onTransientRefreshFailure?.({ connectionId: cred.id });
         }
         return authNeeded(ref, "refresh_failed", cred.id);
       }
@@ -1057,6 +1126,19 @@ export class ConnectionRefreshHttpError extends Error {
   }
 }
 
+/**
+ * The connection holds nothing to refresh with (no refresh token or token
+ * endpoint, or an unusable endpoint). Retrying cannot help; a rejected access
+ * token stays rejected until the person reconnects. The connection itself is
+ * left as it is, since its access token may still work for other requests.
+ */
+export class ConnectionNotRefreshableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConnectionNotRefreshableError";
+  }
+}
+
 // The token endpoint rejecting the grant itself means re-auth is the only way
 // forward. 429 (throttling) and 408 are transient despite being 4xx; network
 // failures and AS 5xx are likewise retryable.
@@ -1068,6 +1150,36 @@ function isPermanentRefreshError(error: unknown): error is ConnectionRefreshHttp
     error.httpStatus !== 408 &&
     error.httpStatus !== 429
   );
+}
+
+/**
+ * An auto-connected login has no refresh token: a new ID-JAG is signed for
+ * its owner and redeemed. The app refusing it is permanent, like a refused
+ * refresh token; not reaching the app is not.
+ */
+async function refreshAutoConnectedCredential(
+  db: Database,
+  settings: Settings,
+  cred: ConnectionCredentialForBroker,
+  ref: McpServerConnectionRef,
+  transport: RefreshTransportOptions | undefined,
+): Promise<{
+  credential: Record<string, unknown>;
+  expiresAt: Date | null;
+  grantedScopes?: string[];
+  metadata?: Record<string, unknown>;
+}> {
+  try {
+    return await refreshIdJagConnectionCredential(db, settings, cred, ref, transport ?? {});
+  } catch (error) {
+    if (error instanceof IdJagExchangeError)
+      throw new ConnectionRefreshHttpError(
+        error.httpStatus === 0 ? 503 : error.httpStatus,
+        error.oauthErrorCode,
+        error.message,
+      );
+    throw error;
+  }
 }
 
 function shouldRefresh(cred: ConnectionCredentialForBroker, force: boolean, now: Date): boolean {
@@ -1220,7 +1332,7 @@ export async function refreshOAuthConnectionCredential(
     stringValue((cred.metadata as { token_endpoint?: unknown }).token_endpoint);
   const tokenEndpoint = personalGitHub ? PERSONAL_GITHUB_TOKEN_URL : storedTokenEndpoint;
   if (!refreshToken || !tokenEndpoint) {
-    throw new Error("connection has no refresh token endpoint");
+    throw new ConnectionNotRefreshableError("connection has no refresh token endpoint");
   }
   if (personalGitHub && storedTokenEndpoint !== PERSONAL_GITHUB_TOKEN_URL) {
     throw new ConnectionRefreshHttpError(401, "client_unavailable");
@@ -1232,7 +1344,7 @@ export async function refreshOAuthConnectionCredential(
       allowLoopbackHttp: settings.environment === "local" || settings.environment === "test",
     });
   } catch {
-    throw new Error("connection has an invalid refresh token endpoint");
+    throw new ConnectionNotRefreshableError("connection has an invalid refresh token endpoint");
   }
   const body = new URLSearchParams();
   body.set("grant_type", "refresh_token");

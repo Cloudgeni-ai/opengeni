@@ -4,6 +4,8 @@ import {
   type ModalSandboxSession,
   type ModalSandboxSessionState,
 } from "@openai/agents-extensions/sandbox/modal";
+import { imageOutputFromBytes } from "@openai/agents-core/sandbox/internal";
+import { posix } from "node:path";
 import { effectiveModalIdleTimeoutSeconds } from "@opengeni/config";
 import type { Settings } from "@opengeni/config";
 import {
@@ -135,6 +137,10 @@ type MutableModalSnapshotSandbox = {
 
 type ModalWorkspaceCaptureOptions = {
   requestId: string;
+  /** Hard provider-side timeout for this one capture. A zero-holder drain
+   * passes its own (longer) budget so the caller's wait never doubles as
+   * Modal's deadline; other captures keep the session's configured value. */
+  providerTimeoutMs?: number;
 };
 
 type MutableModalSandboxSession = {
@@ -163,6 +169,10 @@ type MutableModalSandboxSession = {
   cancelPendingExecCommand?: () => Promise<void>;
   readFile?: ChannelASession["readFile"];
   listDir?: ChannelASession["listDir"];
+  viewImage?: (args: { path: string; runAs?: string }) => Promise<unknown>;
+  // Pinned Agents Extensions 0.14.3: the adapter's own file read, the one its
+  // viewImage and readFile use after path validation.
+  readSandboxFile?: (path: string) => Promise<Uint8Array>;
   persistWorkspace?: (options?: ModalWorkspaceCaptureOptions) => Promise<Uint8Array>;
   writeStdin?: (args: {
     sessionId: number;
@@ -178,6 +188,7 @@ const modalFilesystemRetentionWrappedSandboxes = new WeakSet<object>();
 const modalDirectoryRetentionWrappedSandboxes = new WeakSet<object>();
 const modalSnapshotRequestIds = new WeakMap<object, string>();
 const modalDirectorySnapshotTimeouts = new WeakMap<object, number | undefined>();
+const modalProviderSnapshotTimeouts = new WeakMap<object, number>();
 const MODAL_TURN_SHELL_MARKER = "/tmp/opengeni-turn-shell/";
 
 type ModalPendingExecStart = {
@@ -255,6 +266,33 @@ function installModalListDirCompatibility(session: MutableModalSandboxSession): 
         : entry.path,
       type: entry.type === "file" || entry.type === "dir" ? entry.type : "other",
     }));
+  };
+}
+
+/**
+ * `view_image` reads whatever the agent's own shell can read in the box, as it
+ * does on Connected Machine and compute sandboxes. The adapter's viewImage
+ * first confines the path to the manifest root (or a manifest path grant, which
+ * Modal create refuses), so an image the shell had just rendered to `/tmp` was
+ * refused with SandboxInvalidManifestPathError although the same box reads it.
+ * Resolve the path the way the shell does (absolute as given, relative from the
+ * workspace root, the shell's working directory) and read it with the
+ * adapter's own file read, which runs inside the box as the shell's user. That
+ * also drops the adapter's separate validation command, one round trip per
+ * image. A `runAs` read keeps the adapter's user-scoped path.
+ */
+function installModalShellPathViewImage(session: MutableModalSandboxSession): void {
+  if (typeof session.viewImage !== "function" || typeof session.readSandboxFile !== "function") {
+    return;
+  }
+  const viewImage = session.viewImage.bind(session);
+  session.viewImage = async (args) => {
+    const root = session.state?.manifest?.root;
+    if (args.runAs || !root?.startsWith("/") || typeof session.readSandboxFile !== "function") {
+      return await viewImage(args);
+    }
+    const path = posix.resolve(root, args.path.trim());
+    return imageOutputFromBytes(args.path, await session.readSandboxFile(path));
   };
 }
 
@@ -467,8 +505,9 @@ function installModalNativeSnapshotRetention(session: MutableModalSandboxSession
       if (!requestId) {
         throw new Error("Modal native workspace capture requires a durable request id");
       }
+      const timeoutMs = modalProviderSnapshotTimeouts.get(session) ?? legacyParams;
       return await snapshotFilesystem.call(sandbox, {
-        ...(legacyParams === undefined ? {} : { timeoutMs: legacyParams }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ttlMs: null,
         snapshotId: requestId,
       });
@@ -645,6 +684,7 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
   installModalPendingExecCancellation(mutable);
   installModalSynchronousCommandCollection(mutable, () => mutable.sandbox);
   installModalListDirCompatibility(mutable);
+  installModalShellPathViewImage(mutable);
   if (
     mutable.modal?.cpClient &&
     mutable.modal.version &&
@@ -692,10 +732,20 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
     if (options && nativePersistence) {
       modalSnapshotRequestIds.set(session, options.requestId);
     }
+    const providerTimeoutMs =
+      options?.providerTimeoutMs !== undefined &&
+      Number.isSafeInteger(options.providerTimeoutMs) &&
+      options.providerTimeoutMs > 0
+        ? options.providerTimeoutMs
+        : undefined;
+    if (providerTimeoutMs !== undefined && nativePersistence) {
+      modalProviderSnapshotTimeouts.set(session, providerTimeoutMs);
+    }
     const directoryTimeout =
       mutable.state?.workspacePersistence === "snapshot_directory"
-        ? mutable.state.snapshotFilesystemTimeoutMs
+        ? (providerTimeoutMs ?? mutable.state.snapshotFilesystemTimeoutMs)
         : undefined;
+    const savedDirectoryTimeout = mutable.state?.snapshotFilesystemTimeoutMs;
     const directoryTimeoutWasPresent =
       mutable.state?.workspacePersistence === "snapshot_directory" &&
       Object.hasOwn(mutable.state, "snapshotFilesystemTimeoutMs");
@@ -710,9 +760,10 @@ export function installOpenGeniModalSnapshotPolicy<T extends object>(session: T)
       return await persistWorkspace();
     } finally {
       modalSnapshotRequestIds.delete(session);
+      modalProviderSnapshotTimeouts.delete(session);
       if (mutable.state?.workspacePersistence === "snapshot_directory") {
         if (directoryTimeoutWasPresent) {
-          Reflect.set(mutable.state, "snapshotFilesystemTimeoutMs", directoryTimeout);
+          Reflect.set(mutable.state, "snapshotFilesystemTimeoutMs", savedDirectoryTimeout);
         } else {
           delete mutable.state.snapshotFilesystemTimeoutMs;
         }

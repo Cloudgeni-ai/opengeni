@@ -37,10 +37,10 @@
 //! confirmed recently names it (see [`confirmed`]).
 
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, SystemTime};
 
@@ -52,10 +52,10 @@ use compute_storage::manifest::{DiskManifest, ExtentSource};
 use compute_storage::store::{Begun, ChunkStore, Held, Publication, Rewrite};
 pub use compute_storage::sweep::Report;
 use futures::{StreamExt as _, stream};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 
 pub use crate::image::CHUNK_BYTES;
-use crate::image::{Hash, ZERO, chunk_count, chunk_range, hash_chunks};
+use crate::image::{Hash, ZERO, chunk_count, chunk_range};
 use crate::lanes::Lanes;
 use crate::protocol::{Id, ImageId};
 use crate::store::{
@@ -65,7 +65,8 @@ use crate::store::{
 use crate::threads::Threads;
 use crate::working_set::{self, WakeProfile};
 use confirmed::{Confirmed, ImageChunks};
-use files::{Earlier, Reusable};
+use files::{Earlier, reusable};
+use seeds::{Identity, Seed, Seeds};
 
 /// Chunk uploads in flight per file.
 const UPLOADS_PER_FILE: usize = 32;
@@ -86,6 +87,10 @@ const ZSTD_LEVEL: i32 = 1;
 /// it was last carried a sweep may take it anyway.
 const HELD_IDLE: Duration = Duration::from_secs(3_600);
 
+/// Tries one archive makes before it fails: each sweep that took stock
+/// while a try was in flight costs one, and sweeps come an hour apart.
+const FENCED_TRIES: u32 = 3;
+
 /// Each sandbox's archive's held chunks, and when a try last began.
 type InFlight = std::sync::Mutex<HashMap<Id, (Arc<Held>, SystemTime)>>;
 
@@ -93,8 +98,18 @@ type InFlight = std::sync::Mutex<HashMap<Id, (Arc<Held>, SystemTime)>>;
 /// holding it (`None` for zeros).
 type Piece = (Range<u64>, Option<ChunkRef>);
 
+/// The format a copy is written in: [`copy::VERSION_PACKS`] when its new
+/// chunks are in packs, [`copy::VERSION`] otherwise (ADR 31).
+fn copy_version(packing: bool) -> u32 {
+    if packing {
+        copy::VERSION_PACKS
+    } else {
+        copy::VERSION
+    }
+}
+
 /// The head of a stored copy (see [`compute_storage::copy`]), in a format
-/// this build reads; it writes only [`copy::VERSION`].
+/// this build reads.
 fn parse_head(operation: &'static str, bytes: &[u8]) -> Result<Head, EngineError> {
     Head::parse(bytes).map_err(|error| EngineError::caused_by(ErrorKind::Fatal, operation, error))
 }
@@ -118,140 +133,6 @@ pub struct Chunked {
     /// What each sandbox's archive stored that it has not published yet,
     /// held across its tries, and when a try last began.
     in_flight: Arc<InFlight>,
-}
-
-/// What identifies one version of a local file: if any of it changes, the
-/// file's chunk hashes must be computed again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Identity {
-    device: u64,
-    inode: u64,
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-impl Identity {
-    fn of(path: &Path) -> io::Result<Self> {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = fs::metadata(path)?;
-        Ok(Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
-        })
-    }
-}
-
-/// A local file a fetched disk probably shares most of its chunks with, at
-/// the same offsets, and the hash of each of its chunks.
-#[derive(Debug)]
-struct Seed {
-    path: PathBuf,
-    identity: Identity,
-    hashes: Vec<Hash>,
-}
-
-impl Seed {
-    fn compute(path: &Path) -> io::Result<Self> {
-        let identity = Identity::of(path)?;
-        let file = File::open(path)?;
-        let indices: Vec<usize> = (0..chunk_count(identity.len)).collect();
-        let hashes = hash_chunks(&file, identity.len, &indices)?;
-        if Identity::of(path)? != identity {
-            return Err(io::Error::other("the file changed while it was hashed"));
-        }
-        Ok(Self {
-            path: path.to_owned(),
-            identity,
-            hashes,
-        })
-    }
-
-    /// Whether chunk `index` of the seed holds exactly `hash`.
-    fn holds(&self, index: usize, hash: &str) -> bool {
-        self.hashes
-            .get(index)
-            .zip(hash_from_hex(hash).ok())
-            .is_some_and(|(held, wanted)| *held == wanted)
-    }
-}
-
-/// The chunk hashes of each local file disks are fetched over (the host's
-/// base image and each sandbox image it keeps), computed at most once per
-/// version of the file however many fetches ask at once. One file's
-/// hashing never holds up fetches over another, and the hashes of a file
-/// that is gone (an image retired) are dropped by the next fetch.
-#[derive(Debug, Default)]
-struct Seeds {
-    by_path: std::sync::Mutex<HashMap<PathBuf, SeedSlot>>,
-}
-
-/// Where the hashes of one file are kept, once taken.
-type SeedSlot = Arc<Mutex<Option<Arc<Seed>>>>;
-
-impl Seeds {
-    /// The hashes of `path` as it is now, from `compute` (which blocks) if
-    /// none were taken of this version of it. `None` if it cannot be read.
-    async fn get(
-        &self,
-        path: &Path,
-        compute: impl FnOnce(&Path) -> io::Result<Seed> + Send + 'static,
-    ) -> Option<Arc<Seed>> {
-        let slot = {
-            let mut by_path = self.by_path.lock().unwrap_or_else(PoisonError::into_inner);
-            // A slot no fetch holds, for a file that is gone, keeps nothing
-            // anyone can use again. There are only as many as the host has
-            // had images since the last fetch.
-            by_path
-                .retain(|held, slot| held == path || Arc::strong_count(slot) > 1 || held.exists());
-            Arc::clone(by_path.entry(path.to_owned()).or_default())
-        };
-        let mut cached = slot.lock().await;
-        let current = match Identity::of(path) {
-            Ok(current) => current,
-            Err(error) => {
-                // Gone (an image retired): nothing more to keep for it.
-                drop(cached);
-                self.forget(path, &slot);
-                tracing::debug!(path = %path.display(), %error, "no seed to fetch over");
-                return None;
-            }
-        };
-        if let Some(seed) = cached.as_ref()
-            && seed.identity == current
-        {
-            return Some(Arc::clone(seed));
-        }
-        *cached = None;
-        let owned = path.to_owned();
-        match tokio::task::spawn_blocking(move || compute(&owned)).await {
-            Ok(Ok(seed)) => {
-                let seed = Arc::new(seed);
-                *cached = Some(Arc::clone(&seed));
-                Some(seed)
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(path = %path.display(), %error, "base image unreadable; downloading whole disks");
-                None
-            }
-            Err(error) => {
-                tracing::warn!(%error, "hashing the base image failed");
-                None
-            }
-        }
-    }
-
-    /// Drops the slot for `path` if it is still `slot`.
-    fn forget(&self, path: &Path, slot: &SeedSlot) {
-        let mut by_path = self.by_path.lock().unwrap_or_else(PoisonError::into_inner);
-        if by_path
-            .get(path)
-            .is_some_and(|held| Arc::ptr_eq(held, slot))
-        {
-            by_path.remove(path);
-        }
-    }
 }
 
 impl Chunked {
@@ -508,7 +389,13 @@ impl Chunked {
         op: &'static str,
         references: impl IntoIterator<Item = ChunkRef>,
     ) -> Result<bool, EngineError> {
-        let checks: Vec<Result<bool, EngineError>> = stream::iter(references)
+        // One look at an object proves every chunk in it: a pack's chunks
+        // are asked about once.
+        let mut objects = HashMap::new();
+        for reference in references {
+            objects.entry(reference.key()).or_insert(reference);
+        }
+        let checks: Vec<Result<bool, EngineError>> = stream::iter(objects.into_values())
             .map(|reference| async move {
                 let _permit = self
                     .transfers
@@ -762,24 +649,25 @@ impl Chunked {
     }
 
     /// One try of archiving sandbox `id`, storing its chunks through a
-    /// store holding them ([`Self::holding`]).
+    /// store holding them ([`Self::holding`]): `None` when a sweep took
+    /// stock after it began, so it may not publish.
     async fn archive_once(
         &self,
         id: Id,
         save: Stamp,
         files: &SavedFiles,
         cancel: &CancellationToken,
-    ) -> Result<Archive, EngineError> {
+    ) -> Result<Option<Archive>, EngineError> {
         const OP: &str = "archive";
         if cancel.is_cancelled() {
-            return Ok(Archive::Cancelled);
+            return Ok(Some(Archive::Cancelled));
         }
         // Begun before the store is looked at: a sweep that takes stock
         // before this archive publishes stops it from publishing, so it
         // never names what that sweep deletes.
         let publication = match self.begin(id, save).await? {
             Ok(publication) => publication,
-            Err(settled) => return Ok(settled),
+            Err(settled) => return Ok(Some(settled)),
         };
         let now = self.chunks.now();
         let Before {
@@ -789,11 +677,14 @@ impl Chunked {
             state: state_before,
             memory: memory_before,
         } = self.before(id, files, now).await;
+        // Decided once, so the head names the format its references are in.
+        let packing = self.chunks.writes_packs();
         let disk = self.put_file(
             files.disk.path(),
             files.disk.open(),
             disk_before,
             None,
+            packing,
             cancel,
         );
         let memory = async {
@@ -808,6 +699,7 @@ impl Chunked {
                     File::open(&image.state),
                     state_before,
                     None,
+                    packing,
                     cancel
                 ),
                 self.put_file(
@@ -815,6 +707,7 @@ impl Chunked {
                     File::open(&image.memory),
                     memory_before,
                     image.chunks.clone(),
+                    packing,
                     cancel,
                 ),
             );
@@ -839,13 +732,13 @@ impl Chunked {
         let pack = self.put_pack(id, files, learned.as_deref(), cancel);
         let (disk, memory, profile, pack) = tokio::join!(disk, memory, profile, pack);
         let (Some(disk), Some(memory), profile) = (disk?, memory?, profile?) else {
-            return Ok(Archive::Cancelled);
+            return Ok(Some(Archive::Cancelled));
         };
         if cancel.is_cancelled() {
-            return Ok(Archive::Cancelled);
+            return Ok(Some(Archive::Cancelled));
         }
         let head = Head {
-            version: copy::VERSION,
+            version: copy_version(packing),
             disk,
             memory,
             profile,
@@ -855,11 +748,12 @@ impl Chunked {
             .map_err(|error| EngineError::caused_by(ErrorKind::Fatal, OP, error))?;
         let receipt = receipt_of(&bytes);
         // Refused when the pointer changed since this archive began: the
-        // next archive begins again and checks the owner anew.
-        self.chunks
-            .publish(publication, bytes)
-            .await
-            .map_err(|error| storage_error(OP, error))?;
+        // next try begins again and checks the owner anew.
+        match self.chunks.publish(publication, bytes).await {
+            Ok(()) => {}
+            Err(StorageError::Superseded) => return Ok(None),
+            Err(error) => return Err(storage_error(OP, error)),
+        }
         // Everything the new copy names was stored by now, or asked about
         // now, or confirmed when the copies it was reused from were.
         let confirmed = [earlier_confirmed, image.map(|image| image.at)]
@@ -868,7 +762,7 @@ impl Chunked {
             .fold(now, SystemTime::min);
         self.confirmed
             .confirm_sandbox(id, receipt.clone(), confirmed);
-        Ok(Archive::Stored(receipt))
+        Ok(Some(Archive::Stored(receipt)))
     }
 }
 
@@ -886,8 +780,25 @@ impl Store for Chunked {
         // again.
         let held = self.held(id);
         let holding = self.holding(&held);
-        let once = holding.archive_once(id, save, files, cancel);
-        let (archived, kept) = self.chunks.keeping(&held, once).await;
+        // A sweep takes stock of every pointer before it deletes anything,
+        // so a try in flight then may not publish. The same files are tried
+        // again at once: that try finds everything the stopped one stored,
+        // and only checks it, where failing the step would capture and
+        // upload the sandbox again after a pause.
+        let tries = Box::pin(async {
+            for tried in 1..=FENCED_TRIES {
+                if let Some(archived) = holding.archive_once(id, save, files, cancel).await? {
+                    return Ok(archived);
+                }
+                tracing::info!(
+                    %id,
+                    tried,
+                    "a sweep took stock while the archive was in flight; trying again"
+                );
+            }
+            Err(storage_error("archive", StorageError::Superseded))
+        });
+        let (archived, kept) = self.chunks.keeping(&held, tries).await;
         if kept.copied_bytes > 0 {
             crate::observe::notes::bytes("copied", kept.copied_bytes);
         }
@@ -1162,38 +1073,6 @@ struct Before {
     memory: Earlier,
 }
 
-/// What an archive may reuse of a file, by offset: what its own earlier
-/// copy `own` holds there, confirmed to be stored if `own_confirmed`, and
-/// what the confirmed `image` holds there if it differs. A chunk of the
-/// earlier copy that the image holds at the same offset is confirmed with
-/// the image.
-fn reusable(
-    own: HashMap<u64, ChunkRef>,
-    own_confirmed: bool,
-    image: Option<&HashMap<u64, ChunkRef>>,
-) -> Earlier {
-    let mut earlier: Earlier = HashMap::with_capacity(own.len().max(image.map_or(0, HashMap::len)));
-    for (&offset, reference) in image.into_iter().flatten() {
-        earlier.entry(offset).or_default().push(Reusable {
-            reference: reference.clone(),
-            confirmed: true,
-        });
-    }
-    for (offset, reference) in own {
-        let held = earlier.entry(offset).or_default();
-        if held.iter().any(|reusable| reusable.reference == reference) {
-            continue;
-        }
-        // After the image's, so a range that matches both names the
-        // confirmed one.
-        held.push(Reusable {
-            reference,
-            confirmed: own_confirmed,
-        });
-    }
-    earlier
-}
-
 /// The chunk at each chunk-sized position of a memory manifest (`None` for
 /// zeros), or `None` if the manifest is not laid out in whole chunks at
 /// chunk boundaries, as [`Chunked`] stores memory.
@@ -1262,7 +1141,9 @@ fn storage_error(operation: &'static str, error: StorageError) -> EngineError {
 
 mod confirmed;
 mod files;
+mod packed;
 mod rootfs;
+mod seeds;
 pub(crate) use rootfs::file_id;
 #[cfg(test)]
 mod tests;

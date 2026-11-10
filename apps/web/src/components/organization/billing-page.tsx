@@ -49,6 +49,11 @@ const WorkspaceBudgetsSection = lazy(() =>
     default: module.WorkspaceBudgetsSection,
   })),
 );
+const CreditProtectionSettings = lazy(() =>
+  import("./credit-protection-settings").then((module) => ({
+    default: module.CreditProtectionSettings,
+  })),
+);
 const PersonalWorkspaceLimitSection = lazy(() =>
   import("@/components/usage/personal-workspace-limit-section").then((module) => ({
     default: module.PersonalWorkspaceLimitSection,
@@ -73,6 +78,7 @@ export function OrganizationBillingPage({
   identity: OrganizationAdminIdentity;
   canReadBilling: boolean;
   canManageBilling: boolean;
+  canManageAutomaticTopUp: boolean;
   /** The workspace whose budget page is open. */
   budgetWorkspaceId?: string | undefined;
 }) {
@@ -105,11 +111,13 @@ function BillingOverview({
   identity,
   canReadBilling,
   canManageBilling,
+  canManageAutomaticTopUp,
   onOpenBudget,
 }: {
   identity: OrganizationAdminIdentity;
   canReadBilling: boolean;
   canManageBilling: boolean;
+  canManageAutomaticTopUp: boolean;
   onOpenBudget: (workspaceId: string) => void;
 }) {
   const { client, clientConfig } = useAppContext();
@@ -402,6 +410,19 @@ function BillingOverview({
           </div>
         </Section>
       </section>
+
+      {canReadBilling && accountId ? (
+        <Suspense fallback={null}>
+          <CreditProtectionSettings
+            key={identityKey}
+            client={client}
+            accountId={accountId}
+            canManageAlerts={canManageBilling}
+            canManageAutoTopUp={canManageAutomaticTopUp}
+            returnUrl={`${window.location.origin}/workspaces/${encodeURIComponent(workspaceId)}/organization?section=billing`}
+          />
+        </Suspense>
+      ) : null}
 
       <EntitlementsSection
         enabled={canReadBilling && Boolean(accountId)}

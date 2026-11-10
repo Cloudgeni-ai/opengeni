@@ -6,20 +6,20 @@ use std::io;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use compute_engine::{CancellationToken, EngineError, ErrorKind};
 use compute_storage::Error as StorageError;
 use compute_storage::chunk::{ChunkRef, EncodedChunk};
 use compute_storage::manifest::{DiskManifest, Extent, ExtentSource};
 use futures::{StreamExt as _, stream};
-use tokio::sync::Semaphore;
+use tokio::sync::{OnceCell, Semaphore};
 
 use super::{
     CHUNK_BYTES, Chunked, DOWNLOADS_PER_FILE, Identity, Piece, Seed, UPLOADS_PER_FILE, ZSTD_LEVEL,
     hash_from_hex, storage_error,
 };
-use crate::image::{Hash, ZERO, chunk_count, chunk_range, data_ranges, overlaps};
+use crate::image::{Hash, ZERO, chunk_count, chunk_range, data_ranges, overlaps, punch_hole};
 use crate::layout::Staging;
 
 /// A chunk an earlier copy holds at an offset of the file being stored: a
@@ -29,6 +29,22 @@ pub(super) struct Reusable {
     pub(super) reference: ChunkRef,
     /// Known to be in the store; otherwise the store is asked first.
     pub(super) confirmed: bool,
+    /// Named by the image the file was made from, which keeps it stored
+    /// whatever this copy names (ADR 31).
+    pub(super) image: bool,
+}
+
+/// The store's answers about chunks an archive would reuse, by key, so
+/// that each object, a pack of many of them above all, is asked about once
+/// however many of its chunks are reused.
+#[derive(Debug, Default)]
+pub(super) struct Checks(Mutex<HashMap<String, Arc<OnceCell<bool>>>>);
+
+impl Checks {
+    fn slot(&self, key: String) -> Arc<OnceCell<bool>> {
+        let mut checks = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(checks.entry(key).or_default())
+    }
 }
 
 /// What earlier copies hold, by offset, the confirmed first.
@@ -42,6 +58,9 @@ impl Chunked {
     /// against its hash. A chunk not confirmed to be in the store is asked
     /// about first, and stored again from the local bytes if it is not.
     ///
+    /// With `packing`, new chunks are stored in packs ([`Self::put_packed`],
+    /// ADR 31); otherwise each as an object of its own.
+    ///
     /// Once `cancel` fires, or a chunk fails, no further chunk is started;
     /// the call returns after the chunks under way have finished, so nothing
     /// is still writing. A cancelled file returns `None` and stores no
@@ -52,6 +71,7 @@ impl Chunked {
         file: io::Result<File>,
         earlier: Earlier,
         known: Option<Arc<Vec<Hash>>>,
+        packing: bool,
         cancel: &CancellationToken,
     ) -> Result<Option<String>, EngineError> {
         const OP: &str = "archive";
@@ -79,6 +99,19 @@ impl Chunked {
             Some(known) => known[index] != ZERO,
             None => overlaps(&data, &chunk_range(index, length)),
         });
+        if packing {
+            let wanted: Vec<usize> = wanted.collect();
+            let pieces =
+                Box::pin(self.put_packed(&file, length, wanted, earlier, known.clone(), &stop))
+                    .await?;
+            return match pieces {
+                Some(pieces) if !cancel.is_cancelled() => {
+                    self.put_pieces(length, pieces).await.map(Some)
+                }
+                _ => Ok(None),
+            };
+        }
+        let checks = &Checks::default();
         let results: Vec<Result<Option<Piece>, EngineError>> = stream::iter(wanted)
             .map(|index| {
                 let file = Arc::clone(&file);
@@ -92,7 +125,7 @@ impl Chunked {
                     let range = chunk_range(index, length);
                     let earlier = earlier.get(&range.start).cloned().unwrap_or_default();
                     let stored = self
-                        .store_chunk(&file, range.clone(), earlier, expected)
+                        .store_chunk(&file, range.clone(), earlier, expected, checks)
                         .await;
                     match stored {
                         Ok(reference) => Ok(Some((range, reference))),
@@ -119,6 +152,12 @@ impl Chunked {
         if skipped || cancel.is_cancelled() {
             return Ok(None);
         }
+        self.put_pieces(length, pieces).await.map(Some)
+    }
+
+    /// Stores the manifest of a file of `length` bytes stored as `pieces`,
+    /// and returns its name.
+    async fn put_pieces(&self, length: u64, pieces: Vec<Piece>) -> Result<String, EngineError> {
         let manifest = DiskManifest {
             version: 1,
             disk_len: length,
@@ -129,8 +168,7 @@ impl Chunked {
         self.chunks
             .put_manifest(&manifest)
             .await
-            .map(Some)
-            .map_err(|error| storage_error(OP, error))
+            .map_err(|error| storage_error("archive", error))
     }
 
     /// Stores the chunk-sized `range` of `file` and returns its chunk
@@ -142,38 +180,13 @@ impl Chunked {
         range: Range<u64>,
         earlier: Vec<Reusable>,
         expected: Option<Hash>,
+        checks: &Checks,
     ) -> Result<Option<ChunkRef>, EngineError> {
         const OP: &str = "archive";
         let transient = |error| EngineError::caused_by(ErrorKind::Transient, OP, error);
-        let prepared = match prepare_blocking(
-            &self.compress,
-            file,
-            range.clone(),
-            earlier,
-            expected,
-        )
-        .await?
-        {
-            Prepared::Known(reusable) if reusable.confirmed => Prepared::Known(reusable),
-            Prepared::Known(reusable) => {
-                let present = {
-                    let _permit = self.transfers.acquire().await.map_err(transient)?;
-                    self.chunks
-                        .has_chunk(&reusable.reference)
-                        .await
-                        .map_err(|error| storage_error(OP, error))?
-                };
-                if present {
-                    Prepared::Known(reusable)
-                } else {
-                    // Gone or cut short since: store these bytes again
-                    // rather than name a chunk no copy can be read from.
-                    tracing::warn!(chunk = %reusable.reference.key(), "stored chunk missing; storing it again");
-                    prepare_blocking(&self.compress, file, range, Vec::new(), expected).await?
-                }
-            }
-            prepared => prepared,
-        };
+        let prepared = self
+            .resolve_chunk(file, range, earlier, expected, checks)
+            .await?;
         Ok(match prepared {
             Prepared::Zero => None,
             Prepared::Known(reusable) => Some(reusable.reference),
@@ -194,6 +207,48 @@ impl Chunked {
                 Some(put.reference)
             }
         })
+    }
+
+    /// Reads the chunk-sized `range` of `file` and decides how to store it
+    /// ([`prepare`]), asking the store, once per object through `checks`,
+    /// about a chunk of an `earlier` copy not known to be there.
+    pub(super) async fn resolve_chunk(
+        &self,
+        file: &Arc<File>,
+        range: Range<u64>,
+        earlier: Vec<Reusable>,
+        expected: Option<Hash>,
+        checks: &Checks,
+    ) -> Result<Prepared, EngineError> {
+        const OP: &str = "archive";
+        let transient = |error| EngineError::caused_by(ErrorKind::Transient, OP, error);
+        Ok(
+            match prepare_blocking(&self.compress, file, range.clone(), earlier, expected).await? {
+                Prepared::Known(reusable) if reusable.confirmed => Prepared::Known(reusable),
+                Prepared::Known(reusable) => {
+                    let slot = checks.slot(reusable.reference.key());
+                    let present = slot
+                        .get_or_try_init(|| async {
+                            let _permit = self.transfers.acquire().await.map_err(transient)?;
+                            self.chunks
+                                .has_chunk(&reusable.reference)
+                                .await
+                                .map_err(|error| storage_error(OP, error))
+                        })
+                        .await?;
+                    let present = *present;
+                    if present {
+                        Prepared::Known(reusable)
+                    } else {
+                        // Gone or cut short since: store these bytes again
+                        // rather than name a chunk no copy can be read from.
+                        tracing::warn!(chunk = %reusable.reference.key(), "stored chunk missing; storing it again");
+                        prepare_blocking(&self.compress, file, range, Vec::new(), expected).await?
+                    }
+                }
+                prepared => prepared,
+            },
+        )
     }
 
     /// Writes the file a manifest describes to `path`, replacing it whole.
@@ -252,42 +307,14 @@ impl Chunked {
         );
         // Every download runs to its end, so nothing writes into the file
         // once this returns; after the first failure the rest are skipped.
+        // Chunks that follow one another in a pack come in one read.
         let stop = CancellationToken::new();
-        let results: Vec<Result<(), EngineError>> = stream::iter(reads)
-            .map(|(at, length, reference, within)| {
+        let results: Vec<Result<(), EngineError>> = stream::iter(runs(reads))
+            .map(|run| {
                 let file = Arc::clone(&file);
-                let chunks = self.chunks.clone();
-                let transfers = Arc::clone(&self.transfers);
                 let stop = stop.clone();
                 async move {
-                    let written = async {
-                        let plain = {
-                            let _permit = transfers.acquire_owned().await.map_err(|error| {
-                                EngineError::caused_by(ErrorKind::Transient, OP, error)
-                            })?;
-                            if stop.is_cancelled() {
-                                return Ok(());
-                            }
-                            let plain = chunks
-                                .get_chunk(&reference)
-                                .await
-                                .map_err(|error| storage_error(OP, error))?;
-                            crate::observe::notes::bytes("fetched", plain.len() as u64);
-                            plain
-                        };
-                        tokio::task::spawn_blocking(move || {
-                            let start = usize::try_from(within).unwrap_or(usize::MAX);
-                            let bytes = usize::try_from(length)
-                                .ok()
-                                .and_then(|length| plain.get(start..start.checked_add(length)?))
-                                .ok_or_else(|| io::Error::other("extent outside its chunk"))?;
-                            file.write_all_at(bytes, at)
-                        })
-                        .await
-                        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
-                        .map_err(|error| EngineError::io(OP, error))
-                    }
-                    .await;
+                    let written = self.fetch_run(file, run, &stop).await;
                     if written.is_err() {
                         stop.cancel();
                     }
@@ -304,10 +331,58 @@ impl Chunked {
             .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
             .map_err(|error| EngineError::io(OP, error))
     }
+
+    /// Downloads `run`, chunks that follow one another (see [`runs`]), with
+    /// one read, and writes each where it goes in `file`; nothing once
+    /// `stop` fired.
+    async fn fetch_run(
+        &self,
+        file: Arc<File>,
+        run: Vec<Read>,
+        stop: &CancellationToken,
+    ) -> Result<(), EngineError> {
+        const OP: &str = "fetch";
+        let plains = {
+            let _permit = self
+                .transfers
+                .acquire()
+                .await
+                .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?;
+            if stop.is_cancelled() {
+                return Ok(());
+            }
+            let references: Vec<ChunkRef> = run
+                .iter()
+                .map(|(_, _, reference, _)| reference.clone())
+                .collect();
+            let plains = self
+                .chunks
+                .get_chunks(&references)
+                .await
+                .map_err(|error| storage_error(OP, error))?;
+            let fetched = plains.iter().map(|plain| plain.len() as u64).sum();
+            crate::observe::notes::bytes("fetched", fetched);
+            plains
+        };
+        tokio::task::spawn_blocking(move || {
+            for ((at, length, _, within), plain) in run.into_iter().zip(plains) {
+                let start = usize::try_from(within).unwrap_or(usize::MAX);
+                let bytes = usize::try_from(length)
+                    .ok()
+                    .and_then(|length| plain.get(start..start.checked_add(length)?))
+                    .ok_or_else(|| io::Error::other("extent outside its chunk"))?;
+                file.write_all_at(bytes, at)?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| EngineError::caused_by(ErrorKind::Transient, OP, error))?
+        .map_err(|error| EngineError::io(OP, error))
+    }
 }
 
 /// What one chunk-sized range of a file turned out to hold.
-enum Prepared {
+pub(super) enum Prepared {
     Zero,
     Known(Reusable),
     New(EncodedChunk),
@@ -362,7 +437,7 @@ fn prepare(
 }
 
 /// [`prepare`] on a blocking thread, once one of `permits` is free.
-async fn prepare_blocking(
+pub(super) async fn prepare_blocking(
     permits: &Semaphore,
     file: &Arc<File>,
     range: Range<u64>,
@@ -431,6 +506,31 @@ pub(super) fn extents(length: u64, pieces: Vec<(Range<u64>, Option<ChunkRef>)>) 
 /// One chunk range to download: where it goes, its length, its chunk and
 /// where in the chunk it starts.
 type Read = (u64, u64, ChunkRef, u32);
+
+/// The most stored bytes one read of consecutive chunks in a pack gets.
+const RUN_BYTES: u64 = 4 << 20;
+
+/// `reads` in order, in runs of chunks that follow one another in one pack
+/// ([`compute_storage::pack::follows`]), each read with one request.
+fn runs(reads: Vec<Read>) -> Vec<Vec<Read>> {
+    let mut runs: Vec<Vec<Read>> = Vec::new();
+    let mut bytes = 0;
+    for read in reads {
+        let stored = u64::from(read.2.stored_len);
+        if let Some(run) = runs.last_mut()
+            && let Some((_, _, last, _)) = run.last()
+            && compute_storage::pack::follows(last, &read.2)
+            && bytes + stored <= RUN_BYTES
+        {
+            bytes += stored;
+            run.push(read);
+            continue;
+        }
+        bytes = stored;
+        runs.push(vec![read]);
+    }
+    runs
+}
 
 /// How a fetched file is filled in.
 struct Plan {
@@ -501,27 +601,38 @@ async fn copy_seed(seed: &Seed, staging: &Path) -> Result<bool, EngineError> {
     }))
 }
 
-/// Makes `range` of `file` read as zeros, freeing its blocks.
-#[cfg(target_os = "linux")]
-fn punch_hole(file: &File, range: Range<u64>) -> io::Result<()> {
-    use rustix::fs::{FallocateFlags, fallocate};
-    fallocate(
-        file,
-        FallocateFlags::PUNCH_HOLE | FallocateFlags::KEEP_SIZE,
-        range.start,
-        range.end - range.start,
-    )
-    .map_err(io::Error::from)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn punch_hole(file: &File, range: Range<u64>) -> io::Result<()> {
-    let zeros = vec![0_u8; usize::try_from(CHUNK_BYTES).unwrap_or(0)];
-    let mut at = range.start;
-    while at < range.end {
-        let length = usize::try_from((range.end - at).min(CHUNK_BYTES)).unwrap_or(0);
-        file.write_all_at(&zeros[..length], at)?;
-        at += length as u64;
+/// What an archive may reuse of a file, by offset: what its own earlier
+/// copy `own` holds there, confirmed to be stored if `own_confirmed`, and
+/// what the confirmed `image` holds there if it differs. A chunk of the
+/// earlier copy that the image holds at the same offset is confirmed with
+/// the image.
+pub(super) fn reusable(
+    own: HashMap<u64, ChunkRef>,
+    own_confirmed: bool,
+    image: Option<&HashMap<u64, ChunkRef>>,
+) -> Earlier {
+    let mut earlier: Earlier = HashMap::with_capacity(own.len().max(image.map_or(0, HashMap::len)));
+    let mut kept_by_image = std::collections::HashSet::new();
+    for (&offset, reference) in image.into_iter().flatten() {
+        kept_by_image.insert(reference.key());
+        earlier.entry(offset).or_default().push(Reusable {
+            reference: reference.clone(),
+            confirmed: true,
+            image: true,
+        });
     }
-    Ok(())
+    for (offset, reference) in own {
+        let held = earlier.entry(offset).or_default();
+        if held.iter().any(|reusable| reusable.reference == reference) {
+            continue;
+        }
+        // After the image's, so a range that matches both names the
+        // confirmed one.
+        held.push(Reusable {
+            image: kept_by_image.contains(&reference.key()),
+            reference,
+            confirmed: own_confirmed,
+        });
+    }
+    earlier
 }

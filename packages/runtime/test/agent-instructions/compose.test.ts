@@ -12,10 +12,12 @@ import {
 } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing/settings";
 import {
+  AGENT_INSTRUCTIONS_PREAMBLE,
   AGENT_PROMPT_MODULES,
   CODE_SEARCH_DIRECTIVE,
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
   DEFAULT_AGENT_IDENTITY,
+  NEUTRAL_AGENT_IDENTITY,
   INSTRUCTION_PRECEDENCE,
   SESSION_INSTRUCTIONS_PREAMBLE,
   agentPromptResourcesFor,
@@ -333,7 +335,7 @@ describe("modular composer: secrets module (AG-2)", () => {
       [
         "# Secrets",
         "",
-        "- Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`). A reference is replaced by its value where something runs: shell commands, files, browser typing and connector tool calls. Opengeni's own tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something. In a shell command or script, including `ogtool call`, write `\\{{secret:Item}}` to pass one on. Find saved items and their ready references with `secret_search`.",
+        "- Use saved passwords, keys and codes by reference: `{{secret:Item}}`, `{{secret:Item/field}}` or `{{secret:Vault/Item/field}}`, plus `/otp` for the current one-time code (`{{secret:GitHub/otp}}`). A reference is replaced by its value where something runs: shell commands, files, browser typing and connector tool calls. Built-in workspace tools that store or send text (messages to other sessions, schedules, goals, notes, Slack or social posts) keep the reference as text, and the work that receives it resolves it when it runs something. In a shell command or script, including `ogtool call`, write `\\{{secret:Item}}` to pass one on. Find saved items and their ready references with `secret_search`.",
         "- Sign in yourself, in this order: reuse a saved browser session; sign in with the saved login and its `/otp` code; after signing in, enroll your own 2FA and save it with `secret_save`; get email or SMS codes through connected tools; when the task allows creating accounts, create the account without asking, saving a generated password with `secret_save` first.",
         '- Never ask for passwords, keys or codes in chat or in a plain text question. Ask only for what only the user has, with a `kind: "secret"` question in `request_human_input`; a tool error about a missing secret already contains that call, so make it, adjusting only `saveTo` or `prompt`, and continue with the returned reference.',
         "- Hand the browser to the user with `interaction_request_human` only for push approvals or hardware keys.",
@@ -458,6 +460,139 @@ describe("modular composer: renderer (AC15)", () => {
     const opengeni = compose(allAgentCapabilities(), ALL_RESOURCES, "opengeni");
     expect(opengeni.composed).toContain("](sandbox:");
     expect(opengeni.composed).not.toContain("# Links and rendering");
+  });
+});
+
+describe("modular composer: text that needs attached compute", () => {
+  const SANDBOX: AgentPromptResources = { ...NO_RESOURCES, managedSandbox: true };
+  const MACHINE: AgentPromptResources = { ...NO_RESOURCES, connectedMachine: true };
+  // Sandbox files, publishing new files, workspace file links, sandbox paths,
+  // background commands and CLI lists exist only with a sandbox or machine.
+  // Sites are created from inline HTML by the Site tools, so they stay.
+  const COMPUTE_ONLY = [
+    "edited in the sandbox with ordinary tools",
+    "do not write a sandbox Markdown report first",
+    "A sandbox path, a raw file ID",
+    "fall back to a sandbox link",
+    "source-code navigation",
+    "Publish files you deliberately deliver",
+    "Source-code navigation may still use workspace file links.",
+    "or a sandbox path for a published artifact reference",
+    "For a sandbox image, publish the file first",
+    "Audit reads do not acknowledge command completion.",
+    "holding the inference and sandbox",
+    "sandbox CLI lists",
+  ];
+  // Said only without compute, where the sandbox file-format sentence is gone.
+  const NO_COMPUTE_ONLY = [
+    "export the native document if the artifact export tool lists that format",
+  ];
+  const KEPT = [
+    "# Documents, files, and visuals",
+    "Create a document Artifact only when",
+    "## Visuals in chat",
+    "Never substitute a storage URL",
+    "Inline HTML stays in chat unless explicitly saved as a Site.",
+    "read the sites Skill",
+    "Sites and native documents keep their tool-returned canonical links.",
+    "documents, Sites, and visuals",
+    "a Site reaches the model and workspace tools",
+    "# Session coordination",
+    "Decide the design before building it.",
+    "# Images and video",
+  ];
+
+  test("renders with a sandbox or a Connected Machine and is left out without one", () => {
+    const without = compose(allAgentCapabilities(), NO_RESOURCES).composed;
+    for (const resources of [SANDBOX, MACHINE]) {
+      const withCompute = compose(allAgentCapabilities(), resources).composed;
+      for (const text of COMPUTE_ONLY) expect(withCompute).toContain(text);
+      for (const text of NO_COMPUTE_ONLY) expect(withCompute).not.toContain(text);
+      for (const text of KEPT) expect(withCompute).toContain(text);
+    }
+    for (const text of COMPUTE_ONLY) expect(without).not.toContain(text);
+    for (const text of NO_COMPUTE_ONLY) expect(without).toContain(text);
+    for (const text of KEPT) expect(without).toContain(text);
+    expect(without).toContain("Do not invent an artifact reference or claim success.");
+    expect(without).toContain(
+      "Ordinary in-chat answers, brief progress updates, and internal worker findings do not become report deliverables merely because they contain Markdown.",
+    );
+    expect(without).toContain("integration catalogs do not enumerate it.");
+    expect(without).toContain("rather than looping while holding the inference.");
+  });
+
+  test("a smaller configuration without compute drops the same text", () => {
+    const features = {
+      ...noneAgentCapabilities(),
+      artifacts: true,
+      media: true,
+      subagents: true,
+      goals: true,
+    };
+    const without = compose(features, NO_RESOURCES).composed;
+    const withCompute = compose(features, SANDBOX).composed;
+    for (const text of COMPUTE_ONLY) expect(without).not.toContain(text);
+    for (const text of NO_COMPUTE_ONLY) expect(without).toContain(text);
+    expect(withCompute).toContain("edited in the sandbox with ordinary tools");
+    expect(withCompute).toContain("For a sandbox image, publish the file first");
+  });
+
+  test("the markdown renderer without compute keeps only renderer-neutral delivery rules", () => {
+    const markdown = compose(allAgentCapabilities(), NO_RESOURCES, "markdown").composed;
+    for (const text of COMPUTE_ONLY) expect(markdown).not.toContain(text);
+    expect(markdown).toContain(
+      "Sites and native documents keep their tool-returned canonical links.",
+    );
+    expect(markdown).not.toContain("Inline HTML stays in chat");
+  });
+
+  test("the image paragraph names no sandbox path without compute, with or without file publishing", () => {
+    for (const unavailable of [[], ["sandbox_file_publish"]] as const) {
+      const render = (resources: AgentPromptResources) =>
+        composeModularAgentInstructions({
+          capabilities: allAgentCapabilities(),
+          renderer: "opengeni",
+          identity: DEFAULT_AGENT_IDENTITY,
+          resources,
+          toolAvailability: { unavailable: [...unavailable] },
+        }).composed;
+      const without = render(NO_RESOURCES);
+      expect(without).toContain(
+        "Display images with ![descriptive alt text](artifact:<artifactId>).",
+      );
+      expect(without).not.toContain("A sandbox path is not an inline image source.");
+      expect(without).not.toContain("a sandbox path is not an inline image source.");
+      expect(render(SANDBOX)).toMatch(/[Aa] sandbox path is not an inline image source\./u);
+    }
+  });
+
+  test("the verification rule names goals and Skills only when the session has them", () => {
+    const rule = (capabilities: ResolvedAgentCapabilities) =>
+      compose(capabilities, NO_RESOURCES)
+        .composed.split("\n")
+        .find((line) => line.startsWith("- Match verification"))!;
+    expect(rule(allAgentCapabilities())).toContain(
+      "requested by the goal, user, or applicable Skill are substantive work",
+    );
+    expect(rule(allAgentCapabilities())).toContain(
+      "without dropping the full completion audit or required evidence.",
+    );
+    const noGoals = rule({ ...allAgentCapabilities(), goals: false });
+    expect(noGoals).toContain("requested by the user or applicable Skill are substantive work");
+    expect(noGoals).toContain("without dropping required evidence.");
+    const none = rule({ ...noneAgentCapabilities(), skills: false });
+    expect(none).toContain("requested by the user are substantive work");
+    expect(none).not.toMatch(/goal|Skill|completion audit/u);
+    // Compute does not change the rule: a sandbox session without goals gets
+    // the same goal-free wording.
+    const sandboxNoGoals = compose({ ...allAgentCapabilities(), goals: false }, SANDBOX)
+      .composed.split("\n")
+      .find((line) => line.startsWith("- Match verification"))!;
+    expect(sandboxNoGoals).toBe(noGoals);
+    const sandboxGoals = compose(allAgentCapabilities(), SANDBOX)
+      .composed.split("\n")
+      .find((line) => line.startsWith("- Match verification"))!;
+    expect(sandboxGoals).toBe(rule(allAgentCapabilities()));
   });
 });
 
@@ -618,7 +753,8 @@ describe("modular composer: prompt-cache stability", () => {
       agentConfig: config(noneAgentCapabilities(), { from: "none", renderer: "markdown" }),
     });
     expect(String(legacy.instructions)).toStartWith("You are an agent for the current workspace.");
-    expect(String(modular.instructions)).toStartWith(DEFAULT_AGENT_IDENTITY);
+    // "none" shares no workspace, so the default identity is the neutral one.
+    expect(String(modular.instructions)).toStartWith(NEUTRAL_AGENT_IDENTITY);
     expect(String(modular.instructions)).toContain("# Links and rendering");
     expect(String(modular.instructions)).not.toMatch(MARKERS.knowledge!);
     // A capability-free modular prompt is a little over half the legacy one
@@ -665,5 +801,110 @@ describe("deployment environment instructions", () => {
         options,
       ),
     ).toEqual(inspectPersistentAgentInstructions(testSettings(), options));
+  });
+});
+
+describe("agent instructions layer", () => {
+  const AGENT = "Answer every question as a pirate.";
+  const bindings = [
+    { credentialBindingId: "a", provider: "github" as const, token: "x" },
+    { credentialBindingId: "b", provider: "github" as const, token: "y" },
+  ];
+
+  test("modular: after the directives and before Git bindings, governance, memory and session", () => {
+    const inspection = inspectPersistentAgentInstructions(testSettings(), {
+      agentConfig: config(allAgentCapabilities()),
+      codemodeAvailable: true,
+      codeSearchAvailable: true,
+      gitCredentialBindings: bindings,
+      agentInstructions: `  ${AGENT}\n`,
+      workspaceGovernance: "GOVERNANCE",
+      workspaceMemory: "MEMORY",
+      sessionInstructions: "SESSION",
+    });
+    expect(inspection.layers.map((layer) => layer.id)).toEqual([
+      "identity",
+      "operational_contract",
+      "codemode",
+      "code_search",
+      "agent_instructions",
+      "git_bindings",
+      "workspace_governance",
+      "workspace_memory",
+      "session_instructions",
+    ]);
+    const layer = inspection.layers.find((candidate) => candidate.id === "agent_instructions")!;
+    expect(layer.content).toBe(`${AGENT_INSTRUCTIONS_PREAMBLE}${AGENT}`);
+    expect(layer.content).toContain("grant no additional authority");
+    expect(inspection.composed).toBe(joinPersistentAgentInstructionLayers(inspection.layers));
+  });
+
+  test("absent or blank instructions add nothing and keep the exact bytes", () => {
+    for (const agentConfig of [config(allAgentCapabilities()), undefined]) {
+      const options = {
+        ...(agentConfig ? { agentConfig } : {}),
+        codemodeAvailable: true,
+        codeSearchAvailable: true,
+        workspaceMemory: "MEMORY",
+        sessionInstructions: "SESSION",
+      };
+      const plain = inspectPersistentAgentInstructions(testSettings(), options);
+      expect(
+        inspectPersistentAgentInstructions(testSettings(), {
+          ...options,
+          agentInstructions: " \n",
+        }),
+      ).toEqual(plain);
+      expect(plain.layers.map((layer) => layer.id)).not.toContain("agent_instructions");
+    }
+  });
+
+  test("legacy: after the directives without governance, right after the persona with it", () => {
+    const settings = testSettings({ sandboxBackend: "docker" });
+    const base = {
+      codemodeAvailable: true,
+      codeSearchAvailable: true,
+      gitCredentialBindings: bindings,
+      workspaceMemory: "MEMORY",
+      sessionInstructions: "SESSION",
+      agentInstructions: AGENT,
+    };
+    const ungoverned = inspectPersistentAgentInstructions(settings, base);
+    expect(ungoverned.layers.map((layer) => layer.id)).toEqual([
+      "operational_contract",
+      "persona_and_core",
+      "codemode",
+      "code_search",
+      "agent_instructions",
+      "git_bindings",
+      "workspace_memory",
+      "session_instructions",
+    ]);
+    // A Markdown section of its own: a paragraph break before and after it.
+    expect(ungoverned.composed).toContain(
+      `${CODE_SEARCH_DIRECTIVE}\n\n${AGENT_INSTRUCTIONS_PREAMBLE}${AGENT}\n\n`,
+    );
+    const governed = inspectPersistentAgentInstructions(settings, {
+      ...base,
+      workspaceGovernance: "GOVERNANCE",
+    });
+    expect(governed.layers.map((layer) => layer.id).slice(0, 4)).toEqual([
+      "operational_contract",
+      "persona_and_core",
+      "agent_instructions",
+      "workspace_governance",
+    ]);
+    // Removing the layer gives back the historical legacy bytes.
+    const { agentInstructions: _omitted, ...legacy } = base;
+    expect(inspectPersistentAgentInstructions(settings, legacy).composed.includes(AGENT)).toBe(
+      false,
+    );
+    expect(
+      joinPersistentAgentInstructionLayers(
+        ungoverned.layers
+          .filter((layer) => layer.id !== "agent_instructions")
+          .map(({ joinBefore: _join, ...layer }) => layer),
+      ),
+    ).toBe(inspectPersistentAgentInstructions(settings, legacy).composed);
   });
 });

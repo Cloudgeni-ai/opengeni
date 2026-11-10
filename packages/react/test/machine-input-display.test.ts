@@ -3,6 +3,8 @@ import type { MachineInputMember } from "../src/timeline/types";
 import {
   agentMemberText,
   agentMemberTitle,
+  automationRunLine,
+  isAutomationRunBatch,
   cleanMachineInputSummary,
   machineInputBatchLabel,
   machineInputSummaryIsUseful,
@@ -242,5 +244,49 @@ describe("machineInputSummaryIsUseful", () => {
     expect(
       machineInputSummaryIsUseful(englishText, "agent_message", "Cache verification completed."),
     ).toBe(true);
+  });
+});
+
+describe("automationRunLine", () => {
+  const run = (
+    name: string,
+    eventSummaries: string[] = [],
+    eventCount = eventSummaries.length,
+  ) => ({
+    ...member("scheduled_occurrence", "Continue this conversation when a task is assigned."),
+    automation: { name, eventSummaries, eventCount },
+  });
+
+  test("says what happened, never the instructions", () => {
+    const line = automationRunLine(englishText, [
+      run("Task assigned to you", ["Replace the gutter"]),
+    ]);
+    expect(line).toBe("Task assigned to you: Replace the gutter");
+    expect(line).not.toContain("Continue this conversation");
+  });
+
+  test("counts the events it does not name", () => {
+    expect(
+      automationRunLine(englishText, [run("Task assigned to you", ["Replace the gutter"], 3)]),
+    ).toBe("Task assigned to you: Replace the gutter and 2 more");
+  });
+
+  test("a scheduled run is its name", () => {
+    expect(automationRunLine(englishText, [run("Weekly summary")])).toBe("Weekly summary");
+  });
+
+  test("falls back to a plain default for runs recorded before their name was", () => {
+    const legacy = member("scheduled_occurrence", "Continue this conversation when …");
+    expect(automationRunLine(englishText, [legacy])).toBe("Automation run");
+    expect(automationRunLine(englishText, [legacy, { ...legacy, id: "b" }])).toBe(
+      "2 automation runs",
+    );
+    expect(automationRunLine(englishText, [run("A"), run("B")])).toBe("2 automation runs");
+  });
+
+  test("only batches of automation runs read as one", () => {
+    expect(isAutomationRunBatch([run("A")])).toBe(true);
+    expect(isAutomationRunBatch([run("A"), member("agent_message", "hi")])).toBe(false);
+    expect(isAutomationRunBatch([])).toBe(false);
   });
 });

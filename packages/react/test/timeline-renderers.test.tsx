@@ -383,6 +383,62 @@ describe("context compaction rendering", () => {
     }
   });
 
+  test("a checkpoint that trimmed history reads as a recovery, with the provider's reason behind Details", async () => {
+    const r = await renderComponent(
+      <MessageTimeline
+        turnSummary={{ rolling: true }}
+        events={[
+          timelineEvent("user.message", { text: "Continue" }, null),
+          timelineEvent("session.context.compaction.started", { trigger: "auto" }),
+          timelineEvent("session.context.compacted", {
+            trigger: "auto",
+            implementation: "deterministic_trim",
+            estimatedTokensBefore: 240_000,
+            estimatedTokensAfter: 9_000,
+            fallback: {
+              reason: "provider_rejected",
+              providerRejection: {
+                httpStatus: 400,
+                type: "invalid_request_error",
+                code: null,
+                param: null,
+                requestId: "req_trim",
+              },
+              providerMessage: "max_tokens exceeds the limit",
+            },
+          }),
+        ]}
+      />,
+    );
+    try {
+      await flush();
+      const status = Array.from(r.container.querySelectorAll<HTMLElement>('[role="status"]')).find(
+        (element) => element.textContent?.includes("Older messages trimmed"),
+      );
+      expect(status?.textContent).toContain("Older messages trimmed · Auto");
+      expect(status?.textContent).toContain(
+        "The model couldn’t summarize them. Chat history above is unchanged.",
+      );
+      expect(status?.textContent).not.toContain("Couldn’t compact");
+      expect(status?.className).not.toContain("status-failed");
+      const panel = r.container.querySelector<HTMLElement>("[data-og-compaction-details]");
+      expect(panel?.hidden).toBe(true);
+      expect(status?.textContent).not.toContain("max_tokens exceeds the limit");
+      const toggle = Array.from(status?.querySelectorAll("button") ?? []).find(
+        (button) => button.textContent === "Details",
+      );
+      await act(async () => toggle?.click());
+      await flush();
+      expect(panel?.hidden).toBe(false);
+      expect(panel?.textContent).toContain("HTTP 400 · invalid_request_error");
+      expect(panel?.textContent).toContain("req_trim");
+      expect(panel?.textContent).toContain("max_tokens exceeds the limit");
+      expect(panel?.textContent).not.toContain("rejects this request the same way");
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("a compaction cut short by worker shutdown reads as interrupted, not failed", async () => {
     const r = await renderComponent(
       <MessageTimeline
@@ -4160,6 +4216,54 @@ describe("StartupPhaseRow", () => {
     expect(r.container.textContent ?? "").toContain("Waiting for sandbox rotation");
     expect(r.container.textContent ?? "").not.toContain("Sandbox startup interrupted");
     await r.unmount();
+  });
+
+  test("a running setup step names its environment and counts up while it runs", async () => {
+    setStartupDetails(true);
+    const startedAt = new Date(Date.now() - 41_500).toISOString();
+    const running: StartupPhaseItem = {
+      kind: "startup-phase",
+      id: "rig-running",
+      turnId: "turn-setup",
+      phase: "rig",
+      status: "running",
+      subject: "cloudgeni",
+      startedAt,
+      completedAt: null,
+      durationMs: null,
+      outcome: null,
+      occurredAt: startedAt,
+    };
+    const r = await renderComponent(<ActivityRail items={[running]} />);
+    try {
+      await flush();
+      const text = () => r.container.textContent ?? "";
+      // The time runs in the title, as in the turn header; no gutter chip.
+      expect(text()).toContain("Setting up cloudgeni · 41s");
+      await flush(1_100);
+      expect(text()).toContain("Setting up cloudgeni · 42s");
+
+      // Settled, the step shows its recorded duration and the ordinary title.
+      await r.rerender(
+        <ActivityRail
+          items={[
+            {
+              ...running,
+              status: "complete",
+              completedAt: new Date().toISOString(),
+              durationMs: 66_400,
+            },
+          ]}
+        />,
+      );
+      await flush();
+      expect(text()).toContain("Sandbox Environment ready");
+      expect(text()).not.toContain("·");
+      expect(text()).toContain("1m 06s");
+    } finally {
+      await r.unmount();
+      setStartupDetails(false);
+    }
   });
 
   beforeEach(() => setStartupDetails(true));

@@ -189,6 +189,19 @@ describe.skipIf(process.platform === "win32")("service-backed desktop setup", ()
     f.preserved();
   });
 
+  test("a computer its own service runs says which machine it is in the workspace", async () => {
+    const f = fixture();
+    const app = f.create();
+    await app.connect("signed-in-account", "https://server.example", "w1", { screenControl: true });
+    // Screens find this computer in the machine list by it: its screen and
+    // Chrome state, and "This computer" where a chat picks a machine.
+    const status = await app.status("https://server.example", "w1", "signed-in-account");
+    expect(status.management).toBe("service");
+    expect(status.state).toBe("connected");
+    expect(status.enrollmentId).toBe("a1");
+    f.preserved();
+  });
+
   test("an unauthenticated connect never changes the service", async () => {
     const f = fixture({ signedOut: true });
     await expect(

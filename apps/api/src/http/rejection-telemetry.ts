@@ -122,11 +122,18 @@ export function httpRejectionFactsFromError(
   const message = error instanceof Error ? error.message : undefined;
   const permission =
     error && typeof error === "object" ? (error as { permission?: unknown }).permission : undefined;
+  // A typed refusal (an API error, a missing sign-in) carries the same
+  // `details.code` its envelope would.
+  const details =
+    error && typeof error === "object" ? (error as { details?: unknown }).details : undefined;
+  const detailCode =
+    details && typeof details === "object" ? (details as { code?: unknown }).code : undefined;
   return {
     code: fallbackCode,
     reason:
       permissionReason(permission) ??
       rejectionReasonFromMessage(message) ??
+      (typeof detailCode === "string" && DETAIL_CODE.test(detailCode) ? detailCode : null) ??
       UNCLASSIFIED_REJECTION_REASON,
     ...(message ? { fingerprint: rejectionFingerprint(message) } : {}),
   };

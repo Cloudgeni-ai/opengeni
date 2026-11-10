@@ -46,7 +46,7 @@ describe("delegated service initiator claims", () => {
     expect(token.startsWith("ogd2_")).toBe(true);
     expect(token.startsWith("ogd_")).toBe(false);
 
-    expect(await verifyDelegatedAccessToken(SECRET, token, 1_900_000_000)).toMatchObject({
+    expect(await verifyDelegatedAccessToken(SECRET, token, 1_999_996_400)).toMatchObject({
       subjectId: "host:automation-gateway",
       serviceInitiator: {
         kind: "service",
@@ -59,15 +59,15 @@ describe("delegated service initiator claims", () => {
       },
     });
     expect(
-      await verifyDelegatedAccessToken(SECRET, token.replace(/^ogd2_/, "ogd_"), 1_900_000_000),
+      await verifyDelegatedAccessToken(SECRET, token.replace(/^ogd2_/, "ogd_"), 1_999_996_400),
     ).toBeNull();
-    expect(await verifyDelegatedAccessToken(SECRET, `ogd_${token}`, 1_900_000_000)).toBeNull();
+    expect(await verifyDelegatedAccessToken(SECRET, `ogd_${token}`, 1_999_996_400)).toBeNull();
 
     const ordinary = await signDelegatedAccessToken(SECRET, BASE);
     expect(ordinary.startsWith("ogd_")).toBe(true);
-    expect(await verifyDelegatedAccessToken(SECRET, ordinary, 1_900_000_000)).toMatchObject(BASE);
+    expect(await verifyDelegatedAccessToken(SECRET, ordinary, 1_999_996_400)).toMatchObject(BASE);
     expect(
-      await verifyDelegatedAccessToken(SECRET, ordinary.replace(/^ogd_/, "ogd2_"), 1_900_000_000),
+      await verifyDelegatedAccessToken(SECRET, ordinary.replace(/^ogd_/, "ogd2_"), 1_999_996_400),
     ).toBeNull();
 
     expect(
@@ -77,11 +77,11 @@ describe("delegated service initiator claims", () => {
           ...SERVICE_BASE,
           serviceInitiator: { kind: "service", subjectId: "external-scheduler" },
         }),
-        1_900_000_000,
+        1_999_996_400,
       ),
     ).toBeNull();
     expect(
-      await verifyDelegatedAccessToken(SECRET, rawDelegatedToken("ogd2_", BASE), 1_900_000_000),
+      await verifyDelegatedAccessToken(SECRET, rawDelegatedToken("ogd2_", BASE), 1_999_996_400),
     ).toBeNull();
   });
 
@@ -167,7 +167,7 @@ describe("delegated service initiator claims", () => {
       await verifyDelegatedAccessToken(
         SECRET,
         rawDelegatedToken("ogd_", missingPrincipalKind),
-        1_900_000_000,
+        1_999_996_400,
       ),
     ).toBeNull();
 

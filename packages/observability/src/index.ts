@@ -1,3 +1,11 @@
+export {
+  failureOrigin,
+  isCustomerManagedMetricProvider,
+  isProviderAccountRefusal,
+  PROVIDER_ACCOUNT_REFUSALS,
+  type FailureOrigin,
+  type ProviderAccountRefusal,
+} from "./failure-attribution";
 import { createHash, randomUUID } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 import { SandboxBackend } from "@opengeni/contracts";
@@ -19,10 +27,12 @@ import {
 } from "./trace-context";
 import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
-import { projectErrorCauseAttributes } from "./error-cause";
+import { projectErrorCauseAttributes, projectErrorCauseMessage } from "./error-cause";
 import { operationalErrorDiagnostic } from "./operational-error";
 export {
   errorCauseAttributes,
+  errorCauseMessage,
+  ERROR_CAUSE_MESSAGE_MAX_BYTES,
   PUBLIC_ERROR_CAUSE_NAMES,
   PUBLIC_INTERACTION_ERROR_CODES,
   type ErrorCauseAttributes,
@@ -456,6 +466,9 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "credentialToIndex",
   "credentialCandidates",
   "credentialStale",
+  // Refused realtime negotiations (apps/api codex-realtime.ts): the provider's
+  // HTTP status for the failed request.
+  "providerStatus",
 ]);
 
 /** Opaque correlation fields require both a reviewed name and a closed value
@@ -465,6 +478,8 @@ const HTTP_REJECTION_CODE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const CPU_PROFILE_FRAMES_PATTERN = /^[\w$<>()[\]:./@ |#*,-]{0,2000}$/;
 const HTTP_REJECTION_REASON_PATTERN =
   /^(?:permission:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*|control:[a-z][a-z0-9_]{0,31}|[A-Za-z][A-Za-z0-9_.-]{0,63})$/;
+const REALTIME_PROVIDER_ERROR_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _.:-]{0,63}$/;
+const REALTIME_PROVIDER_VALUE_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/i;
 
 const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["mcpCallKey", /^mcp_[0-9a-f]{32}$/],
@@ -491,6 +506,9 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   // Temporal SDK records (temporal-sdk-logger.ts): the SDK's closed component
   // enum and a code-registered workflow type name, never an identifier.
   ["sdkComponent", TEMPORAL_SDK_COMPONENT_PATTERN],
+  // Optional package-version diagnostics from SDK requests. Never metric labels.
+  ["sdkVersion", /^(?=.{1,80}$)\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/],
+  ["opengeni.sdk.version", /^(?=.{1,80}$)\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/],
   ["workflowType", TEMPORAL_TYPE_NAME_PATTERN],
   // CPU profile summaries: the report file under the temp directory, and
   // sampled code locations (function names and bundle file:line:column,
@@ -514,6 +532,23 @@ const PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS = new Map<string, RegExp>([
   ["databasePool", /^[a-z][a-z0-9-]{0,63}$/],
   ["credentialFile", /^(?:current|previous)$/],
   ["credentialFileErrorCode", /^[A-Z][A-Z0-9_]{0,31}$/],
+  // Refused realtime negotiations (apps/api codex-realtime.ts): the failing
+  // stage, the adapter's own code-authored failure message, identifier-shaped
+  // provider error fields, and the provider call parameters with their source.
+  // Never a provider response body, credential, account or request content.
+  ["realtimeStage", /^(?:request|config|call)$/],
+  [
+    "realtimeSetupPhase",
+    /^(?:owner|candidates|lease|history|token|config|fence|provider_call|release)$/,
+  ],
+  ["realtimeFailureMessage", /^[A-Za-z][A-Za-z0-9 ._:()/-]{0,159}$/],
+  ["providerErrorCode", REALTIME_PROVIDER_ERROR_TOKEN_PATTERN],
+  ["providerErrorType", REALTIME_PROVIDER_ERROR_TOKEN_PATTERN],
+  ["providerErrorParam", REALTIME_PROVIDER_ERROR_TOKEN_PATTERN],
+  ["realtimeConfigSource", /^(?:remote|fallback)$/],
+  ["realtimeAdvertisedVersion", REALTIME_PROVIDER_VALUE_PATTERN],
+  ["realtimeProviderModel", REALTIME_PROVIDER_VALUE_PATTERN],
+  ["realtimeProviderArchitecture", REALTIME_PROVIDER_VALUE_PATTERN],
 ]);
 
 /**
@@ -608,6 +643,7 @@ const PUBLIC_TELEMETRY_ERROR_CLASSES = new Set([
   "CodexCheckpointOperationError",
   "CodexFleetShadowOperationError",
   "ComputerActionTimeoutError",
+  "ContextCompactionError",
   "CredentialRenewalOperationError",
   "CredentialReadOperationError",
   "EventPublishOperationError",
@@ -657,6 +693,8 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "codex_lease_loss_checkpoint_failed",
   "codex_active_credential_read_failed",
   "command_yield_timeout",
+  "compaction_provider_request_failed",
+  "compaction_summary_empty",
   "conflict",
   "control_wake_dispatch_failed",
   "fenced_event_live_publish_failed",
@@ -682,6 +720,8 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "memory_edit_embedding_failed",
   "memory_hybrid_vector_failed",
   "memory_save_embedding_failed",
+  "model_context_window_exceeded",
+  "model_request_size_exceeded",
   "nats_auth_callout_start_failed",
   "nested_agent_depth_exceeded",
   "nested_agent_depth_override_forbidden",
@@ -744,7 +784,7 @@ const PUBLIC_TELEMETRY_ERROR_ORIGINS = new Set([
 export type SandboxOperationMetricObservation = {
   backend: string;
   op: string;
-  outcome: "ok" | "not_found" | "failed";
+  outcome: "ok" | "not_found" | "rejected" | "failed";
   durationMs: number;
   materializationFailureReason?: string;
 };
@@ -1917,21 +1957,59 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
       ...projectSnapshotDiagnosticAttributes(attributes),
       ...projectKnowledgeIndexDiagnosticAttributes(attributes),
       ...projectTemporalSdkDiagnosticAttributes(attributes),
+      ...projectContextCompactionAttributes(attributes),
       ...projectPublicDiagnosticAttributes(attributes),
     };
   }
-  return Object.fromEntries(
-    Object.entries(attributes).filter(([key, value]) => {
-      if (value === undefined) return false;
-      if (PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key)) return true;
-      const clientErrorField = PUBLIC_TELEMETRY_CLIENT_ERROR_TEXT_ATTRIBUTES.get(key);
-      if (clientErrorField) {
-        return typeof value === "string" && isProjectedClientErrorText(value, clientErrorField);
-      }
-      const pattern = PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get(key);
-      return typeof value === "string" && pattern?.test(value) === true;
-    }),
-  );
+  return {
+    ...projectContextCompactionAttributes(attributes),
+    ...Object.fromEntries(
+      Object.entries(attributes).filter(([key, value]) => {
+        if (value === undefined) return false;
+        if (PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key)) return true;
+        const clientErrorField = PUBLIC_TELEMETRY_CLIENT_ERROR_TEXT_ATTRIBUTES.get(key);
+        if (clientErrorField) {
+          return typeof value === "string" && isProjectedClientErrorText(value, clientErrorField);
+        }
+        const pattern = PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get(key);
+        return typeof value === "string" && pattern?.test(value) === true;
+      }),
+    ),
+  };
+}
+
+function projectContextCompactionAttributes(attributes: Attributes): Attributes {
+  if (attributes.op !== "context_compaction") return {};
+  const projected: Attributes = { op: "context_compaction" };
+  for (const [key, values] of [
+    ["reason", ["operator", "proactive", "overflow"]],
+    ["signalSource", ["provider", "operator", "history_footprint"]],
+    [
+      "historyFootprintDimension",
+      ["json_bytes", "rows", "json_nodes", "json_properties", "images"],
+    ],
+  ] as const) {
+    const value = attributes[key];
+    if (typeof value === "string" && (values as readonly string[]).includes(value))
+      projected[key] = value;
+  }
+  for (const key of [
+    "signalTokens",
+    "thresholdTokens",
+    "historyFootprintActual",
+    "historyFootprintThreshold",
+    "requestBytes",
+    "imageCount",
+    "imageBase64Bytes",
+    "systemBytes",
+    "toolsBytes",
+    "limitBytes",
+  ]) {
+    const value = attributes[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
+      projected[key] = value;
+  }
+  return projected;
 }
 
 function projectApiFatalDiagnosticAttributes(attributes: Attributes): Attributes {
@@ -1984,6 +2062,8 @@ function projectHttpDiagnosticAttributes(attributes: Attributes): Attributes {
       ? { diagnosticId }
       : {}),
     ...projectErrorCauseAttributes(attributes),
+    // Only an unclassified internal error logs its scrubbed cause message.
+    ...(attributes.errorCode === "internal_error" ? projectErrorCauseMessage(attributes) : {}),
   };
 }
 

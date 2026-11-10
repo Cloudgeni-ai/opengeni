@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DEFAULT_AGENT_INSTRUCTIONS } from "@opengeni/config";
 import { allAgentCapabilities, noneAgentCapabilities } from "@opengeni/contracts";
 import {
+  AGENT_INSTRUCTIONS_PREAMBLE,
   UNATTENDED_SESSION_GUIDANCE,
   appendSessionInstructions,
   appendWorkspaceMemory,
@@ -73,6 +74,50 @@ describe("standalone compaction instructions (AC16)", () => {
     expect(instructions).not.toContain("governance");
   });
 
+  test("a configured session with a search router keeps Tool discovery, as its turn does", () => {
+    const lazySettings = testSettings({ sandboxBackend: "docker", lazyToolSearchEnabled: true });
+    const config = agentConfig();
+    const session = { agent: config, instructions: "SESSION", resources: [] };
+    const turnOptions = {
+      agentConfig: config,
+      workspaceAgentIdentity: context.workspaceAgentIdentity,
+      workspaceMemory: "MEMORY",
+      sessionInstructions: "SESSION",
+      rig: context.rig,
+    };
+    // The turn installs the router: lazy search is on and the route has a transport.
+    const turn = inspectPersistentAgentInstructions(lazySettings, {
+      ...turnOptions,
+      lazyToolTransport: "generic_dispatch",
+      agentPromptToolAvailability: { unavailable: [] },
+    }).composed;
+    expect(turn).toContain("## Tool discovery");
+    expect(
+      standaloneCompactionInstructions({
+        settings: lazySettings,
+        session,
+        ...context,
+        lazyToolTransport: "generic_dispatch",
+        toolRouterInHistory: false,
+      }),
+    ).toBe(turn);
+    // Router history installs the router even with lazy search off.
+    const historyTurn = inspectPersistentAgentInstructions(settings, {
+      ...turnOptions,
+      toolRouterInHistory: true,
+      agentPromptToolAvailability: { unavailable: [] },
+    }).composed;
+    expect(historyTurn).toContain("## Tool discovery");
+    expect(
+      standaloneCompactionInstructions({
+        settings,
+        session,
+        ...context,
+        toolRouterInHistory: true,
+      }),
+    ).toBe(historyTurn);
+  });
+
   test("an unattended session keeps its guidance through compaction", () => {
     const metadata = { _opengeniUnattended: true };
     const legacy = { agent: null, instructions: "SESSION", resources: [], metadata };
@@ -113,5 +158,51 @@ describe("standalone compaction instructions (AC16)", () => {
         ...context,
       }),
     ).not.toContain(UNATTENDED_SESSION_GUIDANCE);
+  });
+
+  test("an agent chat carries its agent instructions exactly as its turns do", () => {
+    const agentInstructions = "Answer as a pirate.";
+    const config = agentConfig();
+    const configured = { agent: config, instructions: "SESSION", resources: [] };
+    const instructions = standaloneCompactionInstructions({
+      settings,
+      session: configured,
+      ...context,
+      agentInstructions,
+    });
+    expect(instructions).toBe(
+      inspectPersistentAgentInstructions(settings, {
+        agentConfig: config,
+        workspaceAgentIdentity: context.workspaceAgentIdentity,
+        workspaceMemory: "MEMORY",
+        sessionInstructions: "SESSION",
+        agentInstructions,
+        rig: context.rig,
+      }).composed,
+    );
+    expect(instructions).toContain(`${AGENT_INSTRUCTIONS_PREAMBLE}${agentInstructions}`);
+    const legacy = { agent: null, instructions: "SESSION", resources: [] };
+    expect(
+      standaloneCompactionInstructions({
+        settings,
+        session: legacy,
+        ...context,
+        agentInstructions,
+      }),
+    ).toBe(
+      appendWorkspaceMemory(
+        `${composeAgentInstructions(DEFAULT_AGENT_INSTRUCTIONS, undefined, context.rig)}\n\n${AGENT_INSTRUCTIONS_PREAMBLE}${agentInstructions}\n\nSESSION`,
+        "MEMORY",
+      ),
+    );
+    // A deleted agent (no instructions) composes the plain chat's text.
+    expect(
+      standaloneCompactionInstructions({
+        settings,
+        session: legacy,
+        ...context,
+        agentInstructions: null,
+      }),
+    ).toBe(standaloneCompactionInstructions({ settings, session: legacy, ...context }));
   });
 });

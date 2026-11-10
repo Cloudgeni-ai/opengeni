@@ -322,12 +322,21 @@ describe("insights route discipline", () => {
         await gate;
         return { snapshot: { privateSessionsVisibleTo: actor } } as never;
       });
-      const parse = spyOn(contracts.WorkspaceInsightsResponse, "parse").mockImplementation(
-        (value: unknown) => value as never,
-      );
+      // Zod exposes `parse` as a lazily bound accessor, which spyOn cannot
+      // wrap, so replace it with a plain value and put the accessor back after.
+      const schema = contracts.WorkspaceInsightsResponse;
+      const parseDescriptor = Object.getOwnPropertyDescriptor(schema, "parse");
+      Object.defineProperty(schema, "parse", {
+        configurable: true,
+        writable: true,
+        value: (value: unknown) => value as never,
+      });
       restores.push(
         () => insights.mockRestore(),
-        () => parse.mockRestore(),
+        () => {
+          if (parseDescriptor) Object.defineProperty(schema, "parse", parseDescriptor);
+          else delete (schema as { parse?: unknown }).parse;
+        },
       );
       const app = new Hono();
       registerInsightsRoutes(app, {

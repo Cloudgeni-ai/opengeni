@@ -3,9 +3,11 @@ import { OpenGeniApiError } from "@opengeni/sdk";
 
 import {
   apiErrorAdvice,
+  apiErrorDetailCode,
   apiErrorDetails,
   apiErrorFacts,
   isPermissionDenied,
+  serverRefusalText,
   userErrorText,
   userErrorTextWithoutReference,
 } from "./api-error";
@@ -144,12 +146,12 @@ describe("api errors in product words", () => {
     // The toast Bendik saw, from the archive refusal.
     const archive = apiError(
       409,
-      "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Agent tab first.",
+      "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Settings tab first.",
       "session_archive_blocked",
     );
     expect(archive.message).toStartWith("API 409: ");
     expect(userErrorText(archive)).toBe(
-      "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Agent tab first.",
+      "This chat can't be archived. \"Keep this chat active\" is on. Turn it off in the chat's Settings tab first.",
     );
     for (const status of [400, 401, 403, 404, 422, 429]) {
       expect(userErrorText(apiError(status, "nope"))).not.toContain(REFERENCE);
@@ -175,5 +177,35 @@ describe("api errors in product words", () => {
     expect(userErrorText(new TypeError("Failed to fetch"))).toBe(
       "Check your connection and try again.",
     );
+  });
+
+  test("a refusal a route words for people keeps its own sentence when the page knows its code", () => {
+    const sentence =
+      "Only a Microsoft 365 Global Administrator or Teams Administrator can connect your organization. Ask your admin to message Opengeni in Teams and select Connect your organization. If your admin role must be activated first, activate it and try again.";
+    const refusal = (status: number, details?: Record<string, unknown>) =>
+      new OpenGeniApiError(
+        status,
+        JSON.stringify({
+          error: { message: sentence, requestId: REFERENCE, code: "forbidden", details },
+        }),
+        { mutation: true },
+      );
+    const marked = refusal(403, { code: "teams_connection_refused", reason: "not_tenant_admin" });
+    expect(apiErrorDetailCode(marked)).toBe("teams_connection_refused");
+    expect(serverRefusalText(marked, ["teams_connection_refused"])).toBe(sentence);
+    // The generic advice is unchanged for every other page and code.
+    expect(userErrorText(marked)).toBe(
+      "You don't have permission to do this. Ask an admin for access.",
+    );
+    expect(serverRefusalText(marked, ["other_code"])).toBeUndefined();
+    expect(serverRefusalText(refusal(403), ["teams_connection_refused"])).toBeUndefined();
+    // Only an expected refusal: a server failure never shows its message.
+    expect(
+      serverRefusalText(refusal(500, { code: "teams_connection_refused" }), [
+        "teams_connection_refused",
+      ]),
+    ).toBeUndefined();
+    expect(serverRefusalText(new Error(sentence), ["teams_connection_refused"])).toBeUndefined();
+    expect(apiErrorDetailCode(new Error("x"))).toBeUndefined();
   });
 });

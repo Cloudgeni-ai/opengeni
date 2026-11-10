@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { Permission, SessionStatus } from "@opengeni/sdk";
 import type { SessionClientLike } from "../client";
 
@@ -32,7 +33,7 @@ export type Notice = { tone: "ok" | "error"; message: string };
 /** Everything a command handler can reach. Assembled by the composer. */
 export type CommandContext = {
   /** SDK-shaped client for server commands. */
-  client: SessionClientLike;
+  client: SessionClientLike<ChatClient>;
   workspaceId: string;
   /** Null before a session exists (server commands should guard on this). */
   sessionId: string | null;

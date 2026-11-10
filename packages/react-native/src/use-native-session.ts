@@ -1,3 +1,4 @@
+import type { ChatClient, OpenGeniClient } from "@opengeni/sdk";
 import { useCallback, useMemo } from "react";
 import { useOpenGeniText } from "@opengeni/react/messages";
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
@@ -24,10 +25,13 @@ import {
   type SessionReadClientLike,
   type TimelineGroup,
   type TimelineItem,
+  type UseSessionResult,
+  type UseSessionLineageResult,
 } from "@opengeni/react/session";
 import {
   promptSendDestination,
   sessionAdmissionBlocked,
+  sessionArchived,
   type SessionDisplayStatus,
 } from "@opengeni/react/timeline-model";
 import {
@@ -41,16 +45,17 @@ import {
   type SessionAttentionClientLike,
 } from "./read-acknowledgement";
 
-export type OpenGeniNativeSessionClient = SessionClientLike &
-  SessionReadClientLike &
-  HumanInputSessionClientLike &
-  SessionMcpApprovalPolicyClientLike &
-  FileAttachmentClientLike &
-  SessionAttentionClientLike &
-  GoalClientLike &
-  SessionLineageClientLike;
+export type OpenGeniNativeSessionClient<Client extends ChatClient = OpenGeniClient> =
+  SessionClientLike<Client> &
+    SessionReadClientLike<Client> &
+    HumanInputSessionClientLike<Client> &
+    SessionMcpApprovalPolicyClientLike<Client> &
+    FileAttachmentClientLike<Client> &
+    SessionAttentionClientLike &
+    GoalClientLike<Client> &
+    SessionLineageClientLike<Client>;
 
-export interface OpenGeniNativeSessionController {
+export interface OpenGeniNativeSessionController<Client extends ChatClient = OpenGeniClient> {
   sessionId: string;
   workspaceId: string;
   /**
@@ -58,8 +63,8 @@ export interface OpenGeniNativeSessionController {
    * the controller pass it to shared hooks explicitly: the native screens do
    * not require an `OpenGeniProvider` above them.
    */
-  client: OpenGeniNativeSessionClient;
-  session: ReturnType<typeof useSession>;
+  client: OpenGeniNativeSessionClient<Client>;
+  session: UseSessionResult<Awaited<ReturnType<Client["getSession"]>>>;
   events: SessionEvent[];
   timeline: TimelineItem[];
   timelineGroups: TimelineGroup[];
@@ -80,15 +85,20 @@ export interface OpenGeniNativeSessionController {
   /** The session goal and its pause/resume control (web session chrome). */
   goal: ReturnType<typeof useGoal>;
   /** Spawned sub-agent sessions, refreshed by spawn and completion events. */
-  lineage: ReturnType<typeof useSessionLineage>;
+  lineage: UseSessionLineageResult<Awaited<ReturnType<Client["getSessionLineage"]>>>;
   active: boolean;
   /**
    * The runtime refused to start the next turn (an admission block). Nothing
    * is asked of the person; Resume rechecks and starts the kept work again.
    */
   admissionBlocked: boolean;
-  /** `sessionStatus` as a person should read it: `blocked` instead of "Waiting on you". */
+  /**
+   * `sessionStatus` as a person should read it: `blocked` instead of "Waiting
+   * on you", and `archived` for an archived chat (never its `cancelled` status).
+   */
   displayStatus: SessionDisplayStatus | null;
+  /** The chat is archived: read-only, continuable in a new chat. */
+  archived: boolean;
   runActive: boolean;
   error: Error | null;
   refresh(): Promise<void>;
@@ -119,8 +129,8 @@ function latestStatusChange(
   return null;
 }
 
-export function useOpenGeniNativeSession(input: {
-  client: OpenGeniNativeSessionClient;
+type NativeSessionOptions<Client extends ChatClient = OpenGeniClient> = {
+  client: OpenGeniNativeSessionClient<Client>;
   workspaceId: string;
   sessionId: string;
   mcpApprovalPolicyServerId?: string;
@@ -136,7 +146,17 @@ export function useOpenGeniNativeSession(input: {
   busySend?: ComposerBusySend;
   /** Under `busySend: "steer"`, also offer Queue beside Send while the agent works. */
   offerQueue?: boolean;
-}): OpenGeniNativeSessionController {
+};
+
+export function useOpenGeniNativeSession(
+  input: NativeSessionOptions,
+): OpenGeniNativeSessionController;
+export function useOpenGeniNativeSession(
+  input: NativeSessionOptions<ChatClient>,
+): OpenGeniNativeSessionController<ChatClient>;
+export function useOpenGeniNativeSession(
+  input: NativeSessionOptions<ChatClient>,
+): OpenGeniNativeSessionController<ChatClient> {
   const environment = useOpenGeniReactNativeEnvironment();
   const events = useSessionEvents(input.sessionId, {
     client: input.client,
@@ -256,6 +276,7 @@ export function useOpenGeniNativeSession(input: {
     ? sessionAdmissionBlocked(detail)
     : sessionStatus === "requires_action" &&
       (latestChange?.blocked === true || (detail !== null && sessionAdmissionBlocked(detail)));
+  const archived = detail !== null && sessionArchived(detail);
 
   return {
     sessionId: input.sessionId,
@@ -268,7 +289,8 @@ export function useOpenGeniNativeSession(input: {
     connectionState: events.connectionState,
     sessionStatus,
     admissionBlocked,
-    displayStatus: admissionBlocked ? "blocked" : sessionStatus,
+    archived,
+    displayStatus: archived ? "archived" : admissionBlocked ? "blocked" : sessionStatus,
     initialLoading: events.initialLoading || session.loading,
     initialHistoryReady: events.initialHistoryReady,
     hasOlder: events.hasOlder,

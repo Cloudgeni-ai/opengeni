@@ -31,7 +31,7 @@ import {
   textVerbosityForTurn,
 } from "../src/activities/agent-turn/tool-policy";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
-import { createTurnEventLane } from "../src/activities/agent-turn/turn-event-lane";
+import { createTurnEventPublisher } from "../src/activities/agent-turn/turn-event-lane";
 import { createRuntimeBatcher } from "../src/activities/streaming";
 import { TurnAttemptFencedError } from "../src/activities/turn-attempt-fenced";
 import { streamSessionEvents, type SessionEvent } from "@opengeni/sdk";
@@ -207,7 +207,7 @@ function fencedPublisher(accept: boolean, stored: SessionEvent[]) {
     if (
       node.type === "VariableDeclarator" &&
       node.id.type === "Identifier" &&
-      (node.id.name === "append" || node.id.name === "eventLane") &&
+      (node.id.name === "append" || node.id.name === "publisher") &&
       node.init
     )
       declared.set(node.id.name, node.init);
@@ -225,12 +225,12 @@ function fencedPublisher(accept: boolean, stored: SessionEvent[]) {
   visit(parsed.program);
   if (!expression) throw new Error("Missing production fenced event publisher");
   const append = declared.get("append");
-  const eventLane = declared.get("eventLane");
-  if (!append || !eventLane) throw new Error("Missing production event append or event lane");
+  const publisher = declared.get("publisher");
+  if (!append || !publisher) throw new Error("Missing production event append or publisher");
   const compiled = new Bun.Transpiler({ loader: "ts" }).transformSync(
     [
       `const append = ${source.slice(append.start, append.end)};`,
-      `const eventLane = ${source.slice(eventLane.start, eventLane.end)};`,
+      `const publisher = ${source.slice(publisher.start, publisher.end)};`,
       `const publish = ${source.slice(expression.start, expression.end)};`,
     ].join("\n"),
   );
@@ -245,7 +245,7 @@ function fencedPublisher(accept: boolean, stored: SessionEvent[]) {
     activityContext: null,
     heartbeatDetails: {},
     TurnAttemptFencedError,
-    createTurnEventLane,
+    createTurnEventPublisher,
     recordSessionEventAppendLatency: noop,
     recordSessionEventAppendPhase: noop,
     recordSessionEventPublishLatency: noop,

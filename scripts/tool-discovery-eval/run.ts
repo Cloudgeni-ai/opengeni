@@ -72,6 +72,10 @@ const withTask = flag("with-task");
 const selectorEffort = option("selector-effort");
 const concurrency = Number(option("concurrency") ?? 4);
 const repeat = Number(option("repeat") ?? 1);
+// The result limit agents pass (they often pass 1 to 3); a scenario's own limit wins.
+const searchLimit = option("limit") === undefined ? undefined : Number(option("limit"));
+if (searchLimit !== undefined && !(Number.isInteger(searchLimit) && searchLimit > 0))
+  throw new Error("--limit must be a positive integer");
 const budget = new Budget(Number(option("budget-usd") ?? 2));
 // Experiment with the runtime's own selection policy, e.g. `candidates=20,unclearAbove=0.1`.
 // Policy values that do not change the selector's request replay from the cache for free.
@@ -311,18 +315,25 @@ for (const { strategy, sequential } of strategies) {
     for (let scenario = queue.shift(); scenario; scenario = queue.shift()) {
       const turn = strategy.turn?.() ?? strategy;
       for (const query of scenario.queries) {
+        const limit = scenario.limit ?? searchLimit;
         const record: SearchRecord = {
           scenario: scenario.id,
           tags: scenario.tags,
           query,
           ...(scenario.task ? { task: scenario.task } : {}),
           acceptable: scenario.acceptable,
+          ...(scenario.needs ? { needs: scenario.needs } : {}),
+          ...(limit !== undefined ? { limit } : {}),
           strategy: strategy.name,
         };
         try {
           const waits = { spans: [] as [number, number][] };
           record.trace = await rateLimitWait.run(waits, () =>
-            turn.search({ query, ...(scenario.task ? { task: scenario.task } : {}) }),
+            turn.search({
+              query,
+              ...(scenario.task ? { task: scenario.task } : {}),
+              ...(limit !== undefined ? { limit } : {}),
+            }),
           );
           // Waiting out the eval's own rate limits is not search latency.
           const waited = waitedMs(waits);
@@ -344,7 +355,7 @@ for (const { strategy, sequential } of strategies) {
   await Promise.all(Array.from({ length: sequential ? 1 : concurrency }, worker));
   const summary = summarize(records.filter((r) => r.strategy === strategy.name));
   console.error(
-    `${strategy.name}: first pick ${(summary.firstPick * 100).toFixed(1)}%, loaded or shown ${(summary.visible * 100).toFixed(1)}%`,
+    `${strategy.name}: first pick ${(summary.firstPick * 100).toFixed(1)}%, loaded or shown ${(summary.visible * 100).toFixed(1)}%, needs loaded ${(summary.needsLoaded * 100).toFixed(1)}%, wrong loaded ${summary.offLabelLoaded.toFixed(2)} per search, p95 ${Math.round(summary.p95LatencyMs)} ms, fallbacks ${summary.fallbacks}`,
   );
 }
 
@@ -359,6 +370,7 @@ const meta = {
   ...(embeddings ? { embeddings: embeddings.label } : {}),
   ...(withTask ? { task: "the user's request is given to strategies that use it" } : {}),
   ...(policyOverrides.length ? { selectionPolicy: policyOverrides.join(", ") } : {}),
+  ...(searchLimit !== undefined ? { limit: searchLimit } : {}),
   newSpendingUsd: Number(budget.spentUsd.toFixed(4)),
   ranAt: new Date().toISOString(),
 };

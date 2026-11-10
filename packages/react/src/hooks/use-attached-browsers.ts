@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import type { AttachedBrowserBridge, AttachedBrowserDevice } from "@opengeni/sdk/interaction";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { EmbeddedBrowserInteractionClientLike } from "../client";
@@ -7,7 +8,7 @@ import {
 } from "../session-context";
 import { useInteractionInvalidation } from "./use-interaction-invalidation";
 
-export type UseAttachedBrowsersOptions = EmbeddedBrowserInteractionClientOverride & {
+export type UseAttachedBrowsersOptions = EmbeddedBrowserInteractionClientOverride<ChatClient> & {
   enabled?: boolean | undefined;
   includeDisconnected?: boolean | undefined;
   pollIntervalMs?: number | undefined;
@@ -155,4 +156,4 @@ function timestamp(value: string): number {
 }
 
 /** Exported for narrow proxy implementations and tests. */
-export type AttachedBrowsersClient = EmbeddedBrowserInteractionClientLike;
+export type AttachedBrowsersClient = EmbeddedBrowserInteractionClientLike<ChatClient>;

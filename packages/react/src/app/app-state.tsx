@@ -5,6 +5,7 @@
 // machine: the web app with its own sign-in (`authority: "app"`), embeds with a
 // client the embedding page already authenticated (`authority: "host"`).
 import { t } from "./lib/console-text";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   createSessionEventFeedStore,
   useLatestCallback,
@@ -30,12 +31,14 @@ import { useConsoleSharedQueries } from "./lib/shared-query";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
 import { useEmbedded, useHostMessageContext, useHostMessageContextTools } from "./lib/app-host";
 import { createWithOpeningContext } from "./lib/message-context";
+import { personalGitHubAllRepositoriesEffectiveAccess } from "@opengeni/contracts/personal-github";
 import {
   resolveWorkspaceSessionDefaults,
   resolveWorkspaceSessionToolDefaults,
 } from "@opengeni/contracts";
 import type {
   McpConnectionAccountSelection,
+  PersonalGitHubRepositoryAccess,
   PersonalGitHubRepositorySelectionInput,
   UpdateSessionRequest,
 } from "@opengeni/sdk";
@@ -179,7 +182,7 @@ export type AppStateHost = Readonly<{
    * no sign-in step or access-key gate runs.
    */
   authority: "app" | "host";
-  createOpenGeniClient: (beginSharedRead?: () => number) => OpenGeniBrowserClient;
+  createOpenGeniClient: (beginSharedRead?: () => number) => ChatClient<OpenGeniBrowserClient>;
   fetchClientConfig: (signal?: AbortSignal, workspaceId?: string) => Promise<ClientConfig>;
   /** Product analytics for sign-in and sign-up outcomes. */
   captureProductEvent: (name: AnalyticsEventName, properties?: AnalyticsProperties) => void;
@@ -210,6 +213,12 @@ export type AppStateHost = Readonly<{
    */
   signInPasskey?: () => Promise<unknown>;
   signUpPasskey?: (input: { name: string; signupChallengeToken?: string }) => Promise<unknown>;
+  /**
+   * Calls the listener when an API request is refused because the page's
+   * sign-in is gone (a 401 that says the sign-in was missing or expired);
+   * absent: the app only learns of a lapsed sign-in when it next loads.
+   */
+  subscribeSignInLost?: ((listener: () => void) => () => void) | undefined;
   configureManagedActorEpoch: (epoch: string | null) => void;
   getStoredAccessKey: () => string | null;
   setStoredAccessKey: (value: string) => void;
@@ -405,6 +414,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     signInPasskey,
     signUpPasskey,
     slackLink,
+    subscribeSignInLost,
   } = host;
   const [session, setSessionState] = useState<Session | null>(null);
   const [sessionChannelProjectionAuthority] = useState(
@@ -907,6 +917,52 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       controller.abort();
     };
   }, [clientConfig, fetchAuthSession, managedAuthRequired, invalidatePrincipalWorkspaceState]);
+
+  // A request refused because the sign-in is gone (it expired, was revoked,
+  // or its cookie lapsed) means every other background read fails the same
+  // way. Confirm with the session read once, then leave the signed-in app at
+  // once: its pages unmount, so their polling and streams stop, and the
+  // sign-in surface shows (inside the desktop app it renews the window's
+  // sign-in first). A refusal while the session is still live changes nothing.
+  useEffect(() => {
+    if (!subscribeSignInLost || !managedAuthRequired || !authSession) return;
+    const signedInUserId = authSession.user.id;
+    const acceptedPrincipal = principalTransitionIdentity.current;
+    let cancelled = false;
+    let checking = false;
+    const unsubscribe = subscribeSignInLost(() => {
+      if (cancelled || checking) return;
+      checking = true;
+      void fetchAuthSession()
+        .then((current) => {
+          if (
+            cancelled ||
+            !ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal) ||
+            current?.user.id === signedInUserId
+          ) {
+            return;
+          }
+          invalidatePrincipalWorkspaceState();
+          authPrincipalIdRef.current = current?.user.id ?? null;
+          setAuthSession(current);
+        })
+        // Unreachable right now: the next refused request asks again.
+        .catch(() => undefined)
+        .finally(() => {
+          checking = false;
+        });
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [
+    subscribeSignInLost,
+    managedAuthRequired,
+    authSession,
+    fetchAuthSession,
+    invalidatePrincipalWorkspaceState,
+  ]);
 
   useEffect(() => {
     if (!clientConfig || !authReady) {
@@ -1713,12 +1769,31 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
             ...(cursor ? { cursor } : {}),
             limit: 100,
           });
-          repositories.push(...page.repositories);
+          repositories.push(...page.repositories.map(usablePersonalGitHubRepository));
           selection = page.selection;
           cursor = page.nextCursor ?? undefined;
         } while (cursor !== undefined && repositories.length < 1_000);
         if (signal?.aborted || !ownsRefresh()) return;
-        setPersonalGitHubRepositories(repositories);
+        setPersonalGitHubRepositories((current) => {
+          // In All my repositories, repositories found by search past the
+          // listed pages stay available.
+          const allRepositoriesAccess =
+            status.allRepositoriesAvailable === false ? null : selection?.allRepositoriesAccess;
+          if (!allRepositoriesAccess) return repositories;
+          const listed = new Set(repositories.map((repository) => repository.repositoryId));
+          // Their access follows the mode as it is now, not as it was found.
+          const found = current.flatMap((repository) => {
+            if (listed.has(repository.repositoryId)) return [];
+            const access = personalGitHubAllRepositoriesEffectiveAccess(
+              allRepositoriesAccess,
+              repository,
+            );
+            return access
+              ? [{ ...repository, selectedAccess: access, effectiveAccess: access }]
+              : [];
+          });
+          return [...repositories, ...found];
+        });
         setPersonalGitHubSelection(selection);
         setPersonalGitHubAuthorityCache((current) =>
           selection &&
@@ -1844,9 +1919,32 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     }
   }
 
+  /** Find more of the person's repositories on GitHub and add them to the catalog. */
+  async function searchPersonalGitHubRepositories(
+    workspaceId: string,
+    query: string,
+  ): Promise<void> {
+    const connection = personalGitHubStatus?.connection;
+    const trimmed = query.trim();
+    if (!connection || connection.status !== "active" || trimmed.length < 2) return;
+    const page = await client.listPersonalGitHubRepositories(workspaceId, connection.id, {
+      query: trimmed,
+      limit: 50,
+    });
+    if (page.repositories.length === 0) return;
+    setPersonalGitHubRepositories((current) => {
+      const known = new Set(current.map((repository) => repository.repositoryId));
+      const added = page.repositories
+        .filter((repository) => !known.has(repository.repositoryId))
+        .map(usablePersonalGitHubRepository);
+      return added.length > 0 ? [...current, ...added] : current;
+    });
+  }
+
   async function savePersonalGitHubRepositories(
     workspaceId: string,
     repositories: PersonalGitHubRepositorySelectionInput[],
+    allRepositoriesAccess?: PersonalGitHubRepositoryAccess | null,
   ): Promise<boolean> {
     const connection = personalGitHubStatus?.connection;
     const selection = personalGitHubSelection;
@@ -1858,6 +1956,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         expectedSelectionGeneration: selection.selectionGeneration,
         idempotencyKey: crypto.randomUUID(),
         repositories,
+        ...(allRepositoriesAccess !== undefined ? { allRepositoriesAccess } : {}),
       });
       await refreshPersonalGitHub(workspaceId, undefined, { userInitiated: true });
       toast.success("GitHub repository access updated");
@@ -2024,7 +2123,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           submission: effectiveSubmission,
           instructions: options?.instructions,
           installedSkillIds: options?.installedSkillIds,
-          bot: options?.bot,
+          agent: options?.agent,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,
           newSessionDraftToolPolicy: options?.newSessionDraftToolPolicy,
@@ -2683,6 +2782,9 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   );
   const contextDisconnectPersonalGitHub = useLatestCallback(disconnectPersonalGitHub);
   const contextSavePersonalGitHubRepositories = useLatestCallback(savePersonalGitHubRepositories);
+  const contextSearchPersonalGitHubRepositories = useLatestCallback(
+    searchPersonalGitHubRepositories,
+  );
   const contextEnsurePersonalGitHubAuthority = useLatestCallback(ensurePersonalGitHubAuthority);
   const contextTogglePersonalGitHubRepository = useLatestCallback(togglePersonalGitHubRepository);
   const contextStartSession = useLatestCallback(startSession);
@@ -2796,6 +2898,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           reconnectPersonalGitHub: contextReconnectPersonalGitHub,
           disconnectPersonalGitHub: contextDisconnectPersonalGitHub,
           savePersonalGitHubRepositories: contextSavePersonalGitHubRepositories,
+          searchPersonalGitHubRepositories: contextSearchPersonalGitHubRepositories,
           ensurePersonalGitHubAuthority: contextEnsurePersonalGitHubAuthority,
           togglePersonalGitHubRepository: contextTogglePersonalGitHubRepository,
           refreshWorkspaceMcpServers,
@@ -2830,6 +2933,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     contextRenameWorkspace,
     contextReconnectPersonalGitHub,
     contextSavePersonalGitHubRepositories,
+    contextSearchPersonalGitHubRepositories,
     contextSetWorkspaceInferenceControl,
     contextUpdateSessionProfile,
     contextSetWorkspaceDefaultRig,
@@ -2968,4 +3072,18 @@ function submitGitHubManifest(
   // A same-tab post leaves the page anyway; a new-tab post must not leave the
   // manifest behind in the host page.
   if (newTab) form.remove();
+}
+
+/**
+ * The console's catalog keeps the access Opengeni may use now in
+ * `selectedAccess`, which is what the pickers read. The saved choice is the
+ * selection state's `repositories`.
+ */
+function usablePersonalGitHubRepository(
+  repository: PersonalGitHubRepositoryCatalogItem,
+): PersonalGitHubRepositoryCatalogItem {
+  if (repository.effectiveAccess === undefined) return repository;
+  return repository.effectiveAccess === repository.selectedAccess
+    ? repository
+    : { ...repository, selectedAccess: repository.effectiveAccess };
 }

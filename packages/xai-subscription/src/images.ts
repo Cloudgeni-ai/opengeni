@@ -1,11 +1,11 @@
 import { pinnedFetch, readJsonBase64Field, readResponseTextBounded } from "@opengeni/network";
 
 import {
-  XAI_CLIENT_VERSION,
   XAI_IMAGE_MODEL,
   XAI_IMAGE_REQUEST_TIMEOUT_MS,
   XAI_PUBLIC_API_BASE_URL,
 } from "./constants";
+import { currentXaiClientVersion } from "./client-version";
 import { XaiSubscriptionError } from "./errors";
 import type { XaiFetchLike } from "./fetch";
 import type { XaiSubscriptionTokenSnapshot } from "./request-context";
@@ -70,8 +70,8 @@ export async function generateXaiSubscriptionImage(input: {
         accept: "application/json",
         authorization: `Bearer ${token.accessToken}`,
         "content-type": "application/json",
-        "user-agent": `opengeni/${XAI_CLIENT_VERSION}`,
-        "x-grok-client-version": XAI_CLIENT_VERSION,
+        "user-agent": `opengeni/${currentXaiClientVersion()}`,
+        "x-grok-client-version": currentXaiClientVersion(),
         "x-grok-client-identifier": "opengeni",
         ...(input.sessionId ? { "x-grok-session-id": input.sessionId } : {}),
       },

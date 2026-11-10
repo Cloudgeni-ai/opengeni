@@ -241,6 +241,9 @@ describe("the new-chat Send guard", () => {
       [{ uploadPending: true }, "upload"],
       [{ computeLoading: true }, "loading"],
       [{ computeReady: false }, "compute"],
+      // A chosen agent: Send waits for it, and never starts an ordinary chat instead.
+      [{ agentLoading: true }, "loading"],
+      [{ agentBlocked: true }, "agent"],
     ] as const) {
       expect(getNewSessionSendBlocker({ ...READY, ...change })).toBe(expected);
     }
@@ -252,6 +255,8 @@ describe("the new-chat Send guard", () => {
 
   test("voice skips the connected-tool accounts; a created session skips its setup", () => {
     expect(getNewSessionSendBlocker({ ...READY, voice: true, accountChoice: true })).toBeNull();
+    expect(getNewSessionSendBlocker({ ...READY, voice: true, agentBlocked: true })).toBe("agent");
+    expect(getNewSessionSendBlocker({ ...READY, created: true, agentBlocked: true })).toBeNull();
     expect(
       getNewSessionSendBlocker({
         ...READY,
@@ -286,6 +291,8 @@ describe("every blocker is visible", () => {
     "account_choice",
     "loading",
     "personal_loading",
+    // The agent chip and the setup strip say why.
+    "agent",
   ]);
   const ALL: ComposerSendBlocker[] = [
     "upload",
@@ -306,6 +313,7 @@ describe("every blocker is visible", () => {
     "account_choice",
     "resources",
     "compute",
+    "agent",
   ];
 
   test("each other blocker has one short line and at most one action", () => {

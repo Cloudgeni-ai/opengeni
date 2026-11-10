@@ -23,7 +23,7 @@ use compute_protocol::fleet::{Answered, Ruling, Verdict};
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, sleep};
 
-use super::{Delays, Lab, NEVER, PAUSE_SOON, id};
+use super::{Delays, Lab, NEVER, PAUSE_SOON, id, vm_name};
 
 fn config(sleep: SleepConfig) -> SandboxConfig {
     SandboxConfig {
@@ -566,6 +566,81 @@ async fn a_sandbox_being_handed_off_takes_no_wake() {
     .expect("the hand-off and the wakes end");
 }
 
+/// A hand-off whose copy takes longer to store than a hand-off may refuse
+/// wakes, as on a store that takes it at a trickle, keeps its sandbox from
+/// running no longer than that: the next wake cancels it, its waiters hear
+/// so, and the sandbox runs again here from its local copy, programs and
+/// all. A later hand-off, with the store fast again, goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wake_cancels_a_hand_off_that_stores_for_too_long() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let root = Lab::root();
+        let archives = Arc::new(Semaphore::new(0));
+        let gated = Gated {
+            inner: Directory::new(root.join("shelf")),
+            claims: Arc::new(Semaphore::new(OPEN)),
+            archives: Arc::clone(&archives),
+        };
+        let unwakeable = Duration::from_millis(300);
+        let one = Lab::start_stored_configured(root, Arc::default(), gated, |config| {
+            config.hand_off_unwakeable = unwakeable;
+        })
+        .await;
+        let sandbox = id(2);
+        one.create(sandbox, NEVER).await;
+        one.run(sandbox, &["set first"]).await;
+        one.sleep_to(sandbox, LevelName::Paused).await;
+        one.wait_level(sandbox, LevelName::Paused).await;
+        let handle = one.handle.clone();
+        let began = Instant::now();
+        let handing =
+            tokio::spawn(async move { handle.hand_off(sandbox, OwnerEpoch::FIRST, true).await });
+        one.wait_until("the hand-off to begin", |status| {
+            status
+                .sandboxes
+                .iter()
+                .any(|held| held.id == sandbox && held.step.is_some())
+        })
+        .await;
+        if began.elapsed() < unwakeable {
+            assert_eq!(
+                code(&one.wake(sandbox).await),
+                Some(ErrorCode::Busy),
+                "a wake early in the hand-off is refused"
+            );
+        }
+        sleep(unwakeable.saturating_sub(began.elapsed()) + Duration::from_millis(50)).await;
+        let woken = one.wake(sandbox).await;
+        assert!(
+            matches!(woken, Reply::Woken { .. }),
+            "a later wake cancels the hand-off: {woken:?}"
+        );
+        assert!(
+            matches!(
+                handing.await.unwrap(),
+                Err(HostError::HandOffCancelled(cancelled)) if cancelled == sandbox
+            ),
+            "the hand-off's waiter hears it was cancelled"
+        );
+        assert_eq!(
+            one.run(sandbox, &["get"]).await,
+            ["first"],
+            "it runs on from its local copy"
+        );
+        let held = one.current(sandbox).await;
+        assert_eq!((held.level, held.owner_epoch), (LevelName::Running, 1));
+
+        archives.add_permits(OPEN);
+        assert_eq!(one.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+        one.wait_level(sandbox, LevelName::Paused).await;
+        assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+        assert_eq!(one.status().await.sandboxes, Vec::new());
+        one.assert_clean();
+    })
+    .await
+    .expect("the hand-off and the wake end");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn requests_reach_only_the_ownership_the_host_holds() {
     let (one, _two, _shelf) = hosts().await;
@@ -697,6 +772,158 @@ async fn a_registering_host_keeps_what_the_service_rules_and_drops_the_rest() {
         );
     }
     assert_eq!(one.run(kept, &["get"]).await, [kept.to_string()]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// A copy the service rules set aside, as one from before its host was
+/// declared gone, is moved aside whole, newer writes and all, instead of
+/// deleted; the store's copy stays for whoever has the sandbox now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_ruled_set_aside_is_kept_on_disk_and_the_stores_copy_left() {
+    let (one, two, _shelf) = hosts().await;
+    let sandbox = id(10);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set archived", "write archived"]).await;
+    one.sleep_to(sandbox, LevelName::Archived).await;
+    one.wait_level(sandbox, LevelName::Archived).await;
+    // It changes here after its last archive, as on a host declared gone.
+    one.run(sandbox, &["set newer", "write newer"]).await;
+    let state = one.root.join("state/vm");
+    let dir = state.join("firecracker").join(sandbox.to_string());
+    assert!(dir.exists(), "{dir:?}");
+    one.handle
+        .reconcile(vec![ruling(sandbox, Verdict::SetAside)])
+        .await
+        .unwrap();
+    let status = one.status().await;
+    assert!(status.sandboxes.is_empty(), "{status:?}");
+    assert!(!dir.exists(), "no longer the host's sandbox");
+    let aside: Vec<_> = std::fs::read_dir(state.join("aside"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(aside.len(), 1, "{aside:?}");
+    assert!(aside[0].starts_with(&format!("{sandbox}-e1-")), "{aside:?}");
+    assert!(
+        std::fs::read_dir(state.join("aside").join(&aside[0]))
+            .unwrap()
+            .next()
+            .is_some(),
+        "its files are kept"
+    );
+    // Whoever has it now goes on from the store's copy.
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(two.run(sandbox, &["get"]).await, ["archived"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// A host whose agent restarts after its lease ran out finds its VMs held
+/// frozen by the guard, their VMMs unable to answer. It lists them under
+/// the owner epochs their records name, so it can register, and carries
+/// out the service's rulings on them before anything could thaw them:
+/// the VMs of those dropped or adopted again are ended, the store's copies
+/// kept, and the one kept is taken back, its guest still running, once
+/// the guard thaws it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_restarted_with_frozen_vms_lists_them_and_carries_out_the_rulings() {
+    let (one, two, shelf) = hosts().await;
+    let (kept, moved, refetched, unlisted) = (id(11), id(12), id(13), id(14));
+    let all = [kept, moved, refetched, unlisted];
+    for sandbox in all {
+        one.create(sandbox, NEVER).await;
+        one.run(sandbox, &[&format!("set {sandbox}")]).await;
+        one.sleep_to(sandbox, LevelName::Archived).await;
+    }
+    for sandbox in all {
+        one.wait_level(sandbox, LevelName::Archived).await;
+        // Running again, with its copy in the store.
+        assert_eq!(one.run(sandbox, &["get"]).await, [sandbox.to_string()]);
+    }
+    let owner = one.current(kept).await.owner_epoch;
+    let (root, world) = one.stop().await;
+    let started = world.boots.load(Ordering::Relaxed) + world.restores.load(Ordering::Relaxed);
+    // The lease ran out while no agent ran: the guard froze every VM.
+    world.held_frozen.lock().unwrap().extend(all.map(vm_name));
+
+    let one = Lab::start_stored(root, world, Directory::new(&shelf)).await;
+    let status = one.status().await;
+    assert!(status.sandboxes.is_empty(), "{status:?}");
+    let listed: Vec<(Id, Option<u64>)> = status
+        .blocked
+        .iter()
+        .map(|blocked| (blocked.id, blocked.frozen_owner_epoch))
+        .collect();
+    let mut expected: Vec<(Id, Option<u64>)> =
+        all.iter().map(|sandbox| (*sandbox, Some(owner))).collect();
+    expected.sort_by_key(|(sandbox, _)| *sandbox);
+    assert_eq!(listed, expected, "listed for the service to rule on");
+    let live = |lab: &Lab, sandbox: Id| lab.world.live.lock().unwrap().contains(&vm_name(sandbox));
+    assert!(
+        all.iter().all(|sandbox| live(&one, *sandbox)),
+        "left as they are"
+    );
+
+    one.handle
+        .reconcile(vec![
+            ruling(kept, Verdict::Keep { owner_epoch: 3 }),
+            ruling(moved, Verdict::Drop),
+            ruling(
+                refetched,
+                Verdict::Refetch {
+                    owner_epoch: 4,
+                    whole: true,
+                },
+            ),
+        ])
+        .await
+        .unwrap();
+    // Answered only once every VM not kept has ended, as the deadline
+    // that thaws the rest is written only then.
+    for sandbox in [moved, refetched, unlisted] {
+        assert!(!live(&one, sandbox), "{sandbox} still runs");
+    }
+    assert!(live(&one, kept), "the kept VM is left as it is");
+    let status = one.status().await;
+    let blocked: Vec<(Id, Option<u64>)> = status
+        .blocked
+        .iter()
+        .map(|blocked| (blocked.id, blocked.frozen_owner_epoch))
+        .collect();
+    assert_eq!(blocked, [(kept, Some(3))], "kept under its new epoch");
+    let held: Vec<(Id, u64, LevelName)> = status
+        .sandboxes
+        .iter()
+        .map(|sandbox| (sandbox.id, sandbox.owner_epoch, sandbox.level))
+        .collect();
+    assert_eq!(held, [(refetched, 4, LevelName::Remote)]);
+
+    // Thawed, the kept VM is taken back with its guest as it was.
+    one.world.held_frozen.lock().unwrap().clear();
+    one.wait_until("the kept VM to be taken back", |status| {
+        status.blocked.is_empty()
+            && status.sandboxes.iter().any(|sandbox| {
+                (sandbox.id, sandbox.owner_epoch, sandbox.level) == (kept, 3, LevelName::Running)
+            })
+    })
+    .await;
+    assert_eq!(one.run(kept, &["get"]).await, [kept.to_string()]);
+    assert_eq!(
+        one.world.boots.load(Ordering::Relaxed) + one.world.restores.load(Ordering::Relaxed),
+        started,
+        "nothing started again"
+    );
+    assert_eq!(
+        one.run(refetched, &["get"]).await,
+        [refetched.to_string()],
+        "adopted again from the store"
+    );
+    // What was dropped is still in the store for whoever gets it next.
+    for sandbox in [moved, unlisted] {
+        assert_eq!(adopt(&two, sandbox, 5).await, Reply::Done);
+        assert_eq!(two.run(sandbox, &["get"]).await, [sandbox.to_string()]);
+    }
     one.assert_clean();
     two.assert_clean();
 }
@@ -1110,7 +1337,11 @@ impl Store for Gated {
     ) -> impl Future<Output = Result<Archive, EngineError>> + Send {
         let archives = Arc::clone(&self.archives);
         async move {
-            archives.acquire().await.expect("never closed").forget();
+            // A cancel ends the wait, as a real store's upload ends.
+            tokio::select! {
+                permit = archives.acquire() => permit.expect("never closed").forget(),
+                () = cancel.cancelled() => return Ok(Archive::Cancelled),
+            }
             self.inner.archive(id, save, files, cancel).await
         }
     }

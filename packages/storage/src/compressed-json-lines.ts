@@ -28,7 +28,12 @@ export async function writeCompressedJsonLines(
     },
   });
   const piping = pipeline(zstd, meter, createWriteStream(path, { flags: "wx", mode: 0o600 }));
+  // A failure reaches the caller through write() or the await below; this keeps
+  // it from counting as unhandled while `produce` is still busy elsewhere.
+  piping.catch(() => undefined);
   const write = async (line: string) => {
+    // Once the file has failed, no "drain" will come: fail the write instead.
+    if (zstd.destroyed) throw zstd.errored ?? new Error("compressed JSON lines stream closed");
     if (!zstd.write(`${line}\n`)) await once(zstd, "drain");
   };
   try {

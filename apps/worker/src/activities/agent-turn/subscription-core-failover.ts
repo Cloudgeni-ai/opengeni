@@ -224,6 +224,7 @@ export async function failOverCoreSubscriptionTurn(
   await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
   control.activityStatus = "recovering";
   control.turnMetricOutcome = "recovering";
+  control.turnRecoveryCause = "provider";
   control.activityError = error;
   return claimedResult({ status: "recovering" });
 }

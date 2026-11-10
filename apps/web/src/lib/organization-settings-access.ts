@@ -41,6 +41,8 @@ export type OrganizationSettingsAccess = {
   administeredWorkspaceIds: readonly string[];
   canReadBilling: boolean;
   canManageBilling: boolean;
+  /** Recurring card charges require the directly signed-in organization owner. */
+  canManageAutomaticTopUp: boolean;
   canManageOrganizationKnowledge: boolean;
   canManageCompanyProfileAgentPolicy: boolean;
   /**
@@ -92,6 +94,11 @@ export function organizationSettingsAccess(input: {
       : null;
   const singleUser = input.clientConfig.productAccessMode === "local";
   const managedHumanSession = input.clientConfig.auth.mode === "managedSession";
+  const canManageAutomaticTopUp =
+    canManageBilling &&
+    managedHumanSession &&
+    actorRole === "owner" &&
+    accessContext.subjectId.startsWith("user:");
   const organizationAdministratorSession = managedHumanSession || singleUser;
   const canManageOrganizationIntegrations =
     organizationAdministratorSession && canAdministerOrganization(input);
@@ -175,6 +182,7 @@ export function organizationSettingsAccess(input: {
     administeredWorkspaceIds,
     canReadBilling,
     canManageBilling,
+    canManageAutomaticTopUp,
     canManageOrganizationKnowledge,
     canManageCompanyProfileAgentPolicy,
     canManageOrganizationApiKeys,

@@ -26,6 +26,7 @@ import {
 } from "./github-installation-proof";
 import { githubConnectFailureHtml } from "../routes/github-browser-pages";
 import { connectOwnerStateFields } from "../connection-ownership";
+import { requestGitHubInstallationRepositorySync } from "../github-installation-sync";
 
 const stateSchema = z.object({
   kind: z.literal("github_app_connect"),
@@ -201,6 +202,7 @@ export async function completeGitHubAppConnect(
       const provider = deps.githubAppApi;
       const settings = deps.settings;
       let prepared: PreparedConnectOperation;
+      let boundInstallationId: number | null = null;
       if (input.error || (state.phase !== "install" && !input.code)) {
         prepared = {
           commit: async (_tx, current) => ({
@@ -334,6 +336,7 @@ export async function completeGitHubAppConnect(
               eventRouteSecret: eventRouteSecret(deps.settings),
             });
             if (!bound) throw new Error("GitHub binding proof already consumed");
+            boundInstallationId = installationId;
             return {
               ...current,
               revision: current.revision + 1,
@@ -358,6 +361,10 @@ export async function completeGitHubAppConnect(
             state.providerId,
           )
         : await finishConnectOperation(deps.db, state, { ...operation, commit: prepared.commit });
+      // The owner's proof read GitHub's list before the bind; catch up on any
+      // change GitHub made since, once the bind is committed.
+      if (boundInstallationId !== null && completed.state === "complete")
+        void requestGitHubInstallationRepositorySync(deps, boundInstallationId);
       // Installation is only the first half of consent. Keep this browser on
       // the exact authorization stage committed above; polling still waits for
       // the final owner proof before reporting connection completion.

@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import type { ChatClient } from "@opengeni/sdk";
 import type { NativeConnectCatalog } from "./native-connect-readiness";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { toast } from "../../lib/toast";
@@ -58,7 +59,7 @@ export type CapabilitiesCatalog = {
 };
 
 type CatalogState = {
-  client: OpenGeniBrowserClient;
+  client: ChatClient<OpenGeniBrowserClient>;
   workspaceId: string;
   epoch: number;
   items: CapabilityCatalogItem[];
@@ -79,7 +80,7 @@ type CatalogState = {
 type ConnectionReadAccess = boolean | null;
 
 function emptyCatalogState(
-  client: OpenGeniBrowserClient,
+  client: ChatClient<OpenGeniBrowserClient>,
   workspaceId: string,
   epoch: number,
   readAccess: ConnectionReadAccess,

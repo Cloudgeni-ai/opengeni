@@ -27,6 +27,22 @@ for a channel to the same replica (consistent-hash / session affinity keyed on
 the channel) whenever more than one relay replica runs. See `docs/deployment.md`
 (Connected Machines) for the full relay/NATS/secret wiring.
 
+## Outbound connection capacity
+
+`aks_outbound_ports_allocated` sets SNAT ports per node on the existing static
+egress IP. The default `0` preserves Azure's automatic allocation; an explicit
+value must be a multiple of 8. Size it against **all** node-pool ceilings plus
+upgrade surge, not the current node count: one IP supplies 64,000 ports, so
+4,000 ports per node supports at most 16 nodes including surge. This root does
+not add outbound IPs when the budget is exceeded.
+
+When importing a cluster or reconciling an operational repair, pass the live
+explicit allocation so Terraform does not reset it to automatic. Monitor Azure
+`UsedSnatPorts`, `AllocatedSnatPorts` and failed `SnatConnectionCount`, together
+with actual application journeys. Change the cluster through AKS rather than
+editing its managed load balancer directly; network changes can affect flows.
+See [Microsoft's allocation guidance](https://learn.microsoft.com/en-us/azure/aks/configure-load-balancer-standard#configure-the-allocated-outbound-ports).
+
 ## Phases
 
 Use `deployment_phase = "bootstrap"` to create cloud substrate before runtime dependencies are known. Bootstrap mode does not require Temporal, object storage, or external Postgres endpoints unless those resources are being created by Terraform.

@@ -1,4 +1,12 @@
-import { ActivityFailure, ApplicationFailure, proxyActivities, sleep } from "@temporalio/workflow";
+import {
+  ActivityFailure,
+  ApplicationFailure,
+  continueAsNew,
+  patched,
+  proxyActivities,
+  sleep,
+  TimeoutFailure,
+} from "@temporalio/workflow";
 import type * as activities from "../activities";
 import type { BrowserRecordingVideoInput } from "../activities/browser-recordings";
 
@@ -23,6 +31,10 @@ export function recordingTranscriptWorkflowId(versionId: string): string {
 
 export function recordingDeletionWorkflowId(recordingId: string): string {
   return `recording-deletion:${recordingId}`;
+}
+
+export function recordingSpeakerScanWorkflowId(recordingId: string): string {
+  return `recording-speaker-scan:${recordingId}`;
 }
 
 export type BrowserRecordingVideoWorkflowInput = BrowserRecordingVideoInput;
@@ -58,7 +70,10 @@ const settleActivity = proxyActivities<Pick<typeof activities, "failRecordingTra
 });
 
 const deletionActivity = proxyActivities<
-  Pick<typeof activities, "deleteRecordingMedia" | "expireDictation">
+  Pick<
+    typeof activities,
+    "deleteRecordingMedia" | "expireDictation" | "archiveDeletedMeetingSummaries"
+  >
 >({
   startToCloseTimeout: "10 minutes",
   heartbeatTimeout: "2 minutes",
@@ -67,6 +82,26 @@ const deletionActivity = proxyActivities<
     backoffCoefficient: 2,
     maximumInterval: "1 hour",
     maximumAttempts: 50,
+  },
+});
+
+const stopChatActivity = proxyActivities<Pick<typeof activities, "stopArchivedSessionWork">>({
+  startToCloseTimeout: "2 minutes",
+  retry: { initialInterval: "5 seconds", backoffCoefficient: 2, maximumInterval: "2 minutes" },
+});
+
+/**
+ * A scan goes through a few minutes of new audio: seconds of CPU. Missing
+ * one only leaves more for the final transcript, so it isn't retried long.
+ */
+const speakerScanActivity = proxyActivities<Pick<typeof activities, "scanRecordingSpeakers">>({
+  startToCloseTimeout: "20 minutes",
+  heartbeatTimeout: "2 minutes",
+  retry: {
+    initialInterval: "30 seconds",
+    backoffCoefficient: 2,
+    maximumInterval: "5 minutes",
+    maximumAttempts: 3,
   },
 });
 
@@ -95,6 +130,7 @@ function failureCode(error: unknown): string {
   let cause: unknown = error;
   while (cause instanceof ActivityFailure) cause = cause.cause;
   if (cause instanceof ApplicationFailure && cause.type) return cause.type.slice(0, 128);
+  if (workerStopped(cause)) return "worker_stopped";
   return "processing_failed";
 }
 
@@ -102,7 +138,18 @@ function failureCode(error: unknown): string {
 function failureMessage(error: unknown): string {
   let cause: unknown = error;
   while (cause instanceof ActivityFailure) cause = cause.cause;
+  if (workerStopped(cause)) {
+    return "the worker stopped mid-attempt every time (most often for lack of memory)";
+  }
   return cause instanceof Error && cause.message ? cause.message : "processing failed";
+}
+
+/**
+ * The last attempt stopped sending heartbeats: its worker was killed (out
+ * of memory, most often) or lost, as each attempt before it was.
+ */
+function workerStopped(cause: unknown): boolean {
+  return cause instanceof TimeoutFailure && cause.timeoutType === "HEARTBEAT";
 }
 
 /**
@@ -161,5 +208,33 @@ export async function browserRecordingVideoWorkflow(
 export async function recordingDeletionWorkflow(
   input: RecordingDeletionWorkflowInput,
 ): Promise<void> {
+  // A deleted meeting's own summary chats are archived and stopped first, so
+  // one still waiting to run never wakes to a meeting that is gone.
+  if (patched("archive-deleted-meeting-summaries")) {
+    for (const archived of await deletionActivity.archiveDeletedMeetingSummaries(input)) {
+      await stopChatActivity.stopArchivedSessionWork(archived);
+    }
+  }
   await deletionActivity.deleteRecordingMedia(input);
+}
+
+/**
+ * Tell a meeting's speakers apart while it is still being recorded, about
+ * every half minute, so the transcript after it ends has little left to do.
+ * Ends with the recording; a failed scan only leaves more for the end.
+ */
+export async function recordingSpeakerScanWorkflow(
+  input: RecordingDeletionWorkflowInput,
+): Promise<void> {
+  for (let scans = 0; scans < 120; scans += 1) {
+    let again = true;
+    try {
+      ({ again } = await speakerScanActivity.scanRecordingSpeakers(input));
+    } catch {
+      // Tried again on the next round, from what was kept.
+    }
+    if (!again) return;
+    await sleep("30 seconds");
+  }
+  await continueAsNew<typeof recordingSpeakerScanWorkflow>(input);
 }

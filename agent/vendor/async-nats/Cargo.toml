@@ -70,7 +70,7 @@ aws-lc-rs = [
     "dep:aws-lc-rs",
     "tokio-rustls/aws-lc-rs",
     "tokio-websockets?/aws-lc-rs",
-    "rustls-webpki/aws_lc_rs",
+    "rustls-webpki/aws-lc-rs",
 ]
 compatibility_tests = []
 crypto = []
@@ -306,7 +306,7 @@ version = "0.7"
 version = "1"
 
 [dependencies.rustls-webpki]
-version = "0.102"
+version = "0.103.13"
 default-features = false
 package = "rustls-webpki"
 

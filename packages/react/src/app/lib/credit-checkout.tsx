@@ -1,4 +1,5 @@
 import type { BillingCheckoutStatus } from "@opengeni/sdk";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import type { PageHost } from "./navigation";
 
@@ -10,7 +11,7 @@ import type { PageHost } from "./navigation";
 // chat returns to that chat instead (`checkoutPageReturnUrl`).
 
 export type CreditCheckoutClient = Pick<
-  OpenGeniBrowserClient,
+  ChatClient<OpenGeniBrowserClient>,
   "createBillingCheckout" | "getBillingCheckout"
 >;
 

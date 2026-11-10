@@ -238,7 +238,7 @@ describe("settings rail", () => {
         // Every model setting, each workspace's included, lives on Organization > Models.
         "Models",
         "Integrations",
-        "Connected agents",
+        "Connected apps",
         "Insights",
         "Billing",
         "Developer",
@@ -297,7 +297,7 @@ describe("settings rail", () => {
         "Organization identity",
         "Models",
         // Every member connects their own coding agents.
-        "Connected agents",
+        "Connected apps",
         "Security & data",
       ]);
       // The organization and its people, then what it provides and protects.

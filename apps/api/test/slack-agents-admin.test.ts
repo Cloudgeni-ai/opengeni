@@ -349,13 +349,16 @@ describe("Slack agents administration", () => {
     expect(created.status).toBe(201);
     const { agent } = (await created.json()) as { agent: { id: string; version: number } };
     // An agent named before the stricter rules: its name is stored as is.
+    // (An older release's write: the legacy sync carries it into the agent.)
     await shared!
       .admin`update slack_agents set name = 'Test', name_key = 'test' where id = ${agent.id}`;
+    const [older] = await shared!.admin<{ version: number }[]>`
+      select version from agents where id = ${agent.id}`;
     const unchanged = await app().request(`${base}/${agent.id}`, {
       method: "PATCH",
       headers: admin,
       body: JSON.stringify({
-        expectedVersion: agent.version,
+        expectedVersion: older!.version,
         name: "Test",
         description: "Runs our test suite.",
       }),
@@ -393,7 +396,7 @@ describe("Slack agents administration", () => {
     ).toEqual(["C1", "C2"]);
   }, 90_000);
 
-  test("only an organization admin opens an agent to anyone in Slack", async () => {
+  test("only an organization admin opens an agent to the organization in Slack", async () => {
     if (!available) return;
     const install = await installation(`open-${Date.now()}`);
     const scope = { accountId: install.accountId, workspaceId: install.home };
@@ -439,6 +442,15 @@ describe("Slack agents administration", () => {
     const openAgent = ((await opened.json()) as { agent: { open: boolean; version: number } })
       .agent;
     expect(openAgent.open).toBe(true);
+
+    // A workspace admin keeping it open must name the version they saw open:
+    // naming another one (say, one an admin is about to close it at) could
+    // reopen it unchecked, so it is refused.
+    const raced = await setOpen(workspaceAdmin, openAgent.version + 1, true);
+    expect(raced.status).toBe(409);
+    const [stillOpen] = await shared!.admin<{ open: boolean; version: number }[]>`
+      select open, version from slack_agents where id = ${agent.id}`;
+    expect(stillOpen).toEqual({ open: true, version: openAgent.version });
 
     // Any admin of its workspace can close it again.
     const closed = await setOpen(workspaceAdmin, openAgent.version, false);

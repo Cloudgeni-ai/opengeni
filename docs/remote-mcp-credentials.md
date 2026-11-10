@@ -99,6 +99,33 @@ Connector-permissions discovery and explicit tool-name updates use the same
 count allowance, so an admitted catalog can be managed without a lower cutoff.
 Duplicate names and repeated pagination cursors remain rejected.
 
+## Account parameters
+
+Some servers require an identifier on most tools that the connected account
+already fixes, such as the Atlassian site (`cloudId`). The runtime fills it in
+(`packages/runtime/src/mcp-account-parameters.ts`). Each server adds only
+declarative data, keyed by exact MCP URL like the account identity verifiers:
+the parameter name, a read-only tool on the same server that lists the
+account's values, and the fields holding each value and its label. Nothing
+adds connector-specific prompt or tool-instruction text.
+
+When the server lists that lookup tool, every tool that required the parameter
+lists it as optional, with the same generic note on every server. A call that
+leaves it unset (missing, empty, or a phrase with spaces, which no identifier
+contains) gets the account's only value. If the account has several values, the
+call isn't sent and needs no approval: the model gets a recoverable error
+listing each name and id, recorded as not executed. Codemode gets the same text,
+and the HTTP tool gateway returns it as a 422 with details code
+`account_parameter_choice_required`. A phrase value that matches
+one of those names case-insensitively picks it. Any other supplied value,
+including one padded with whitespace, is sent unchanged, and a parameter the
+tool already treats as optional is left alone. The values are looked up once
+per attempt by the wrapper around the physical server, with a 10-second limit
+that the caller's abort also ends. A failed or empty lookup sends the call on
+unchanged, so the provider's own error reaches the model, and the lookup isn't
+retried for a minute. Tools in recoverable operations, which dispatch exactly
+one physical call, keep their schema and are never filled.
+
 ## Attached accounts
 
 An enabled native connector can attach multiple authorized connections, including
@@ -252,11 +279,13 @@ connection revocation.
 Each accepted turn also records its account intent: whose personal accounts it
 may use (the person who sent it, or nobody for work without a person behind it)
 and which accounts that person explicitly picked. Work that continues a turn,
-such as a goal continuation, a wait wake-up, a command or child result, or
-informational input delivered into it, carries the same intent and resolves it
-again when it is claimed, exactly as that person's next message with the same
-picks would be resolved now. A reconnected or newly connected account is
-therefore used, and a revoked one is not. A picked account that can no longer
+such as a goal continuation, a wait wake-up, a command or child result,
+informational input delivered into it, or a compaction-only turn that compacts
+after it, carries the same intent and resolves it again when it is claimed,
+exactly as that person's next message with the same picks would be resolved
+now (a compaction-only turn has a few exceptions of its own, described under
+manual compaction in `docs/context-compaction.md`). A reconnected or newly
+connected account is therefore used, and a revoked one is not. A picked account that can no longer
 be used is never replaced by another account: that connector is left out of the
 continued turn and recorded in the turn's internal `connectionAccountGaps`
 metadata. A carried intent that names someone other than the continued turn's
@@ -279,6 +308,31 @@ unselected tools are rejected. When a pinned account can no longer be used, the
 occurrence runs without that connector and records it in `degradedAccounts`;
 it never retries another identity. With `pinnedAccountsRequired` the
 occurrence is refused with `connection_account_unavailable` instead.
+
+A connector configured for a turn that runs without its tools is never
+silently missing. The turn's own input carries one notice naming each such
+connector with a plain reason category: not in this turn's registry
+(`not_available`), no account accepted with the turn (`no_account`, for
+example a personal sign-in not yet usable in the workspace after a membership
+change), accepted accounts that no longer fit its setup
+(`account_setup_changed`), or a superseded sign-in (`unsupported_sign_in`).
+Tool search and tool listing report the same connectors in
+`unavailableSources`, beside connectors that fail to connect or list at run
+time; a setup refused a credential there says why (for example an expired
+sign-in or a personal sign-in not usable in this workspace) instead of a bare
+HTTP 401. The notice is a new item of the current turn and never changes text
+an earlier request sent. Connectors the agent configuration excludes are not
+reported.
+
+An account whose refresh grant the provider rejected (status `needs_reauth`)
+is named, not hidden. The turn that first finds it broken posts one inbox
+notice to the person who started that turn, deduplicated per connection. The
+turn notice lists accounts that need reconnecting with the day they stopped
+working, and `capability_catalog_search` returns them in `setup.reconnect`.
+`capability_authorization_request` with that `connectionId` (chosen
+automatically when exactly one account fits) posts a card that reconnects the
+same account rather than a fresh Connect, which the already-connected account
+would refuse. An account added in another workspace is reconnected there.
 Later workspace participants cannot borrow the
 prior sender's personal accounts. Results posted in a shared session remain
 visible to that session's participants.

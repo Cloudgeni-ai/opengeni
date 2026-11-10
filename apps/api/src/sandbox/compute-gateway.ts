@@ -57,11 +57,12 @@ export type ComputeAgentLinkStore = {
   ): Promise<{ renewed: true } | { renewed: false; code: ClosedCode }>;
   release(input: ComputeAgentLinkClaim): Promise<void>;
   /** Record that the session's sandbox fell asleep or woke, for metering its
-   * awake time. Never decides delivery. `accepted: false` means the claim is
+   * awake time, and whether its host is handing it off, which keeps it from
+   * waking for a short, bounded time. Never decides delivery. `accepted: false` means the claim is
    * no longer the agent's current one, so it never speaks for the sandbox
    * again. */
   power(
-    input: ComputeAgentLinkClaim & { sandboxId: string; asleep: boolean },
+    input: ComputeAgentLinkClaim & { sandboxId: string; asleep: boolean; handingOff: boolean },
   ): Promise<{ accepted: boolean }>;
 };
 
@@ -152,7 +153,8 @@ type Session = {
   scope: string;
   subscriptions: Map<string, { sid: AgentLinkSid; unsubscribe: () => void }>;
   /** Reply subjects of the requests forwarded to the agent that it has not
-   * answered yet. When the session ends each gets an empty reply marked
+   * answered yet: the only `_INBOX` subjects the agent may publish to, once
+   * each. When the session ends each gets an empty reply marked
    * AGENT_LINK_LOST_HEADER, so no requester waits on a link that is gone. */
   unanswered: Set<string>;
   relayExpiresAtMs: number;
@@ -169,6 +171,10 @@ type Session = {
    * failed leaves it behind `reportedAsleep`, and the next renewal tick
    * writes again, without any message to the agent. */
   committedAsleep: boolean | null;
+  /** Whether the host last said it is handing the sandbox off, and what the
+   * store last committed of it, as with `reportedAsleep`. */
+  reportedHandingOff: boolean;
+  committedHandingOff: boolean;
   powerSyncing: boolean;
 };
 
@@ -410,18 +416,22 @@ export class ComputeAgentGateway {
     try {
       while (
         session.reportedAsleep !== null &&
-        session.reportedAsleep !== session.committedAsleep &&
+        (session.reportedAsleep !== session.committedAsleep ||
+          session.reportedHandingOff !== session.committedHandingOff) &&
         this.authorized(session)
       ) {
         const asleep = session.reportedAsleep;
+        const handingOff = session.reportedHandingOff;
         const result = await this.options.store.power({
           ...session.claim,
           sandboxId: session.sandboxId,
           asleep,
+          handingOff,
         });
         // A refused claim never speaks for the sandbox again; its renewal
         // ends the session.
         session.committedAsleep = asleep;
+        session.committedHandingOff = handingOff;
         if (!result.accepted) return;
       }
     } catch (error) {
@@ -694,6 +704,8 @@ class AgentLink implements ApiWebSocketConnection {
       sandboxId: ticket.sandbox,
       reportedAsleep: null,
       committedAsleep: null,
+      reportedHandingOff: false,
+      committedHandingOff: false,
       powerSyncing: false,
     };
     if (!this.gateway.adopt(session)) {
@@ -856,7 +868,7 @@ class AgentLink implements ApiWebSocketConnection {
           return;
         }
         if (
-          !mayPublish(scope, frame.subject) ||
+          !mayPublish(scope, frame.subject, session.unanswered) ||
           (frame.reply !== undefined && !mayReplyTo(scope, frame.reply))
         ) {
           this.send({
@@ -885,6 +897,7 @@ class AgentLink implements ApiWebSocketConnection {
       }
       case "state": {
         session.reportedAsleep = frame.state === "asleep";
+        session.reportedHandingOff = frame.busy === "handing_off";
         void this.gateway.syncPower(session);
         return;
       }

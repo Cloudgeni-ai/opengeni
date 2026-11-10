@@ -7,7 +7,7 @@ import type {
   RecordingTranscriptVersion,
 } from "@opengeni/contracts";
 
-import { useRecording, useTranscript } from "../src/hooks/use-recordings";
+import { isKeepingRecordingAudio, useRecording, useTranscript } from "../src/hooks/use-recordings";
 import { WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderHook } from "./render-hook";
 
@@ -229,4 +229,51 @@ describe("useRecording", () => {
     expect(hook.result.current.processing).toBe(true);
     await hook.unmount();
   }, 25_000);
+
+  test("waits for a ready meeting's audio while its compact copy is still being kept", () => {
+    const ended = Date.parse("2026-10-23T10:30:00.000Z");
+    const track = (playable: boolean): Recording["tracks"][number] => ({
+      trackNumber: 0,
+      kind: "audio",
+      source: "microphone",
+      mimeType: "audio/webm",
+      chunkCount: 12,
+      totalBytes: 1_000,
+      durationMilliseconds: 60_000,
+      unrecorded: [],
+      playable,
+      video: null,
+      live: null,
+    });
+    const meeting = (overrides: Partial<Recording>): Recording => ({
+      id: RECORDING_ID,
+      workspaceId: WORKSPACE_ID,
+      ownerSubjectId: "subject",
+      visibility: "private",
+      title: "Weekly sync",
+      purpose: "meeting",
+      state: "ready",
+      startedAt: "2026-10-23T10:00:00.000Z",
+      captureEndedAt: "2026-10-23T10:30:00.000Z",
+      durationMilliseconds: 1_800_000,
+      errorCode: null,
+      externalRef: null,
+      audioDeletedAt: null,
+      metadata: {},
+      transcription: {},
+      tracks: [track(false)],
+      transcript: version(),
+      createdAt: "2026-10-23T10:00:00.000Z",
+      updatedAt: "2026-10-23T10:31:00.000Z",
+      ...overrides,
+    });
+    expect(isKeepingRecordingAudio(meeting({}), ended + 60_000)).toBe(true);
+    expect(isKeepingRecordingAudio(meeting({ tracks: [track(true)] }), ended + 60_000)).toBe(false);
+    // Not forever: a track that never became playable stops being waited for.
+    expect(isKeepingRecordingAudio(meeting({}), ended + 11 * 60_000)).toBe(false);
+    expect(
+      isKeepingRecordingAudio(meeting({ audioDeletedAt: "2026-10-24T10:00:00.000Z" }), ended),
+    ).toBe(false);
+    expect(isKeepingRecordingAudio(meeting({ state: "processing" }), ended)).toBe(false);
+  });
 });

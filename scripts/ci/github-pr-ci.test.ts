@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import {
   docsOnly,
+  isVersionPr,
   mainReleaseApprovalOnly,
   priorityHold,
   supersededPrRuns,
@@ -35,7 +36,7 @@ test("cancellation selects only older heads of the exact PR CI workflow", () => 
       head_sha: "b".repeat(40),
     },
   ];
-  expect(supersededPrRuns(runs, 42, "b".repeat(40), "feature")).toEqual([1]);
+  expect(supersededPrRuns(runs, 42, "b".repeat(40), false)).toEqual([1]);
 });
 test("Version dispatch supersession cannot select main or batch runs", () => {
   expect(
@@ -47,9 +48,30 @@ test("Version dispatch supersession cannot select main or batch runs", () => {
       ],
       42,
       "b".repeat(40),
-      "changeset-release/main",
+      true,
     ),
   ).toEqual([1]);
+});
+test("Version dispatch runs belong only to a verified Version PR, not to a branch name", () => {
+  const dispatch = run(
+    1,
+    ".github/workflows/pr-ci.yml",
+    "workflow_dispatch",
+    "changeset-release/main",
+  );
+  expect(supersededPrRuns([dispatch], 42, "b".repeat(40), false)).toEqual([]);
+  const repo = "owner/repo",
+    version = {
+      head: { ref: "changeset-release/main", repo: { full_name: repo } },
+      user: { login: "github-actions[bot]" },
+    };
+  expect(isVersionPr(version, repo)).toBe(true);
+  expect(
+    isVersionPr({ ...version, head: { ...version.head, repo: { full_name: "fork/repo" } } }, repo),
+  ).toBe(false);
+  expect(isVersionPr({ ...version, head: { ...version.head, repo: null } }, repo)).toBe(false);
+  expect(isVersionPr({ ...version, user: { login: "contributor" } }, repo)).toBe(false);
+  expect(isVersionPr({ ...version, head: { ...version.head, ref: "feature" } }, repo)).toBe(false);
 });
 test("Version validation yields to main and batch CI only", () => {
   const main = { run: run(1, ".github/workflows/ci.yml"), jobs: [] };

@@ -1,7 +1,3 @@
-import {
-  isRetiredKnowledgeSourceSyncTask,
-  retiredKnowledgeSourceSyncTask,
-} from "@opengeni/contracts/knowledge-source-sync-retirement";
 /**
  * One automation's own page: back to Automations, the header with its
  * actions, then Overview (on/off, the events it listens for, instructions,
@@ -78,7 +74,6 @@ import {
   scheduledTaskDriftDismissal,
 } from "@/lib/scheduled-task-drift-dismissals";
 import {
-  knowledgeSyncSourceLabel,
   scheduledTaskAccessFailuresText,
   scheduledTaskDescription,
   scheduledTaskRunSessionAccess,
@@ -105,7 +100,6 @@ import {
   automationWhenWords,
   hasEventTriggers,
   isFinishedOnce,
-  isKnowledgeSync,
   nextRunOf,
   ownerName,
   runEventsLabel,
@@ -458,9 +452,7 @@ export function ScheduleDetailPage({
                     Edit
                   </Button>
                 ) : null}
-                {task.status === "paused" &&
-                perms.canPauseOrDelete &&
-                !isRetiredKnowledgeSourceSyncTask(task) ? (
+                {task.status === "paused" && perms.canPauseOrDelete ? (
                   <Button
                     type="button"
                     size="sm"
@@ -471,7 +463,7 @@ export function ScheduleDetailPage({
                     <PlayIcon aria-hidden="true" />
                     Resume
                   </Button>
-                ) : perms.canRun && !isRetiredKnowledgeSourceSyncTask(task) ? (
+                ) : perms.canRun ? (
                   <Button
                     type="button"
                     size="sm"
@@ -683,9 +675,7 @@ function Overview({
   onOpenSession: (sessionId: string) => void;
 }) {
   const perms = schedulePermissions(task, access);
-  const knowledge = isKnowledgeSync(task);
   const state = scheduledTaskStateLabel(task);
-  const retired = state.reason === "provider_retired";
   const next = nextRunOf(task, now);
   const sentence = automationWhenSentence(task, now);
   const listens = hasEventTriggers(task);
@@ -754,96 +744,67 @@ function Overview({
             rest wait and arrive together in its next run.
           </Notice>
         ) : null}
-        {retired ? (
-          <Notice tone="muted" title="Previous source sync retired">
-            {retiredKnowledgeSourceSyncTask(task)?.message}
-          </Notice>
-        ) : (
-          <SettingRow
-            label="Active"
-            description={
-              <>
-                <span className="block">{sentence}</span>
-                {status ? <span className="block">{status}</span> : null}
-              </>
-            }
-            control={
-              <Switch
-                aria-label={`${task.name} is active`}
-                checked={scheduleSwitchedOn(task)}
-                onCheckedChange={onActiveChange}
-                pending={busy}
-                disabled={!perms.canPauseOrDelete}
-                disabledReason={
-                  perms.own
-                    ? "You need permission to manage automations in this workspace."
-                    : `Only ${owner} can pause or resume it.`
-                }
-              />
-            }
-          />
-        )}
+        <SettingRow
+          label="Active"
+          description={
+            <>
+              <span className="block">{sentence}</span>
+              {status ? <span className="block">{status}</span> : null}
+            </>
+          }
+          control={
+            <Switch
+              aria-label={`${task.name} is active`}
+              checked={scheduleSwitchedOn(task)}
+              onCheckedChange={onActiveChange}
+              pending={busy}
+              disabled={!perms.canPauseOrDelete}
+              disabledReason={
+                perms.own
+                  ? "You need permission to manage automations in this workspace."
+                  : `Only ${owner} can pause or resume it.`
+              }
+            />
+          }
+        />
         {!perms.own ? (
           <InlineHelp icon className="mt-3">
-            {retired ? (
-              <>Only {firstName} can remove this retired sync.</>
-            ) : (
-              <>
-                It runs with {firstName}'s connected accounts, so only {firstName} can change, run,
-                pause or delete it. Duplicate it to make your own.
-              </>
-            )}
+            It runs with {firstName}'s connected accounts, so only {firstName} can change, run,
+            pause or delete it. Duplicate it to make your own.
           </InlineHelp>
         ) : null}
       </DetailSection>
-      {knowledge ? (
-        <DetailSection title="Source">
-          <p className="m-0 text-sm leading-5 text-fg">
-            {knowledgeSyncSourceLabel(
-              task.action as Extract<ScheduledTask["action"], { kind: "knowledge_source_sync" }>,
-            )}
-          </p>
-          <p className="mt-1 text-xs leading-4.5 text-fg-muted">
-            Previously synced into Knowledge. Its imported documents remain readable.
-          </p>
-        </DetailSection>
-      ) : (
-        <>
-          {listens ? (
-            <DetailSection
-              title="When"
-              description={
-                task.events?.once
-                  ? "The first matching event runs it once."
-                  : `Each matching event runs it, up to ${task.events?.maxRunsPerHour} runs an hour.`
-              }
-            >
-              <EventTriggerSummary
-                triggers={task.events?.triggers ?? []}
-                sources={eventSources}
-                sourceLogo={sourceLogo}
-                sourceHref={(sourceId) => eventSourcePath(workspaceId, sourceId)}
-                onOpenSource={(sourceId, event) => inAppClick(() => onOpenSource(sourceId))(event)}
-              />
-            </DetailSection>
-          ) : null}
-          <DetailSection title="Message">
-            <Instructions text={task.agentConfig.prompt} />
-          </DetailSection>
-        </>
-      )}
-      {knowledge ? null : (
-        <DetailSection title="Setup">
-          <Setup
-            task={task}
-            access={access}
-            workspaceId={workspaceId}
-            description={description}
-            onOpenSession={onOpenSession}
+      {listens ? (
+        <DetailSection
+          title="When"
+          description={
+            task.events?.once
+              ? "The first matching event runs it once."
+              : `Each matching event runs it, up to ${task.events?.maxRunsPerHour} runs an hour.`
+          }
+        >
+          <EventTriggerSummary
+            triggers={task.events?.triggers ?? []}
+            sources={eventSources}
+            sourceLogo={sourceLogo}
+            sourceHref={(sourceId) => eventSourcePath(workspaceId, sourceId)}
+            onOpenSource={(sourceId, event) => inAppClick(() => onOpenSource(sourceId))(event)}
           />
         </DetailSection>
-      )}
-      {knowledge ? null : accounts}
+      ) : null}
+      <DetailSection title="Message">
+        <Instructions text={task.agentConfig.prompt} />
+      </DetailSection>
+      <DetailSection title="Setup">
+        <Setup
+          task={task}
+          access={access}
+          workspaceId={workspaceId}
+          description={description}
+          onOpenSession={onOpenSession}
+        />
+      </DetailSection>
+      {accounts}
     </>
   );
 }
@@ -1027,11 +988,11 @@ function ScheduleAside({
   now: Date;
   workspaceId: string;
 }) {
-  const catalog = useWorkspaceModelCatalog(isKnowledgeSync(task) ? null : workspaceId);
+  const catalog = useWorkspaceModelCatalog(workspaceId);
   const machineId = task.agentConfig.machineTarget?.targetSandboxId;
   const fleet = useWorkspaceMachines({ enabled: Boolean(machineId) });
   const model = useMemo(() => {
-    if (isKnowledgeSync(task) || scheduleInheritsChatSettings(task)) return null;
+    if (scheduleInheritsChatSettings(task)) return null;
     const chosen = task.agentConfig.model;
     const id = chosen ?? catalog.defaultSelection?.model;
     const row = id ? catalog.rows.find((candidate) => candidate.id === id) : undefined;
@@ -1075,7 +1036,7 @@ function ScheduleAside({
           {catalog.loading ? "Loading…" : model}
         </DetailAsideItem>
       ) : null}
-      {isKnowledgeSync(task) ? null : scheduleInheritsChatSettings(task) ? (
+      {scheduleInheritsChatSettings(task) ? (
         <DetailAsideItem label="Settings">
           Uses the chat’s model, tools and machine.
         </DetailAsideItem>
@@ -1115,10 +1076,6 @@ function runOutcome(run: ScheduledTaskRun): string | undefined {
     return accessFailures ? `${error} ${accessFailures}` : error;
   }
   if (accessFailures) return accessFailures;
-  const summary = run.knowledgeSummary;
-  if (summary) {
-    return `${summary.imported} imported · ${summary.unchanged} unchanged · ${summary.failed} failed`;
-  }
   if (run.status === "skipped") return "Skipped because the previous run was still working.";
   if (run.status === "queued") return "Waiting to start.";
   return undefined;
@@ -1169,15 +1126,12 @@ function RunsList({
       />
     );
   }
-  const knowledge = isKnowledgeSync(task);
   return (
     <>
       <p className="m-0 mb-2 text-xs leading-4.5 text-fg-muted">
-        {knowledge
-          ? "Each run syncs the source into Knowledge."
-          : task.runMode === "new_session_per_run"
-            ? "Each run opens its own chat. Open a run to see what it did."
-            : "Runs continue in the same chat. Open a run to see what it did."}
+        {task.runMode === "new_session_per_run"
+          ? "Each run opens its own chat. Open a run to see what it did."
+          : "Runs continue in the same chat. Open a run to see what it did."}
       </p>
       <RowList label={`Runs of ${task.name}`} flush>
         {runs.runs.map((run) => {

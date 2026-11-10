@@ -25,6 +25,8 @@ workspaces, external users) in [`product-integration.md`](product-integration.md
   `GET /v1/workspaces/:workspaceId/models` (stateless OpenAI-compatible single
   model calls without tools; see [`chat-completions.md`](chat-completions.md))
 - `GET /v1/access/me`
+- `POST /v1/workspaces/:workspaceId/decisions` (stateless typed judgments;
+  see [`model-inference.md`](model-inference.md))
 - `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
 - `POST /v1/organizations/additional` (managed-human creation of another isolated organization with its first shared workspace)
 - bounded/keyset `GET /v1/organization-invitations` and exact subject-bound
@@ -65,10 +67,15 @@ the archive state); messages to an archived session return 409
 `GET /v1/config/client` reports `sessionArchive: { enabled, idleDays }` when the
 deployment archives idle sessions. `PUT
 /v1/workspaces/:workspaceId/sessions/:sessionId/archive` with
-`{ "archived": true }` archives a chat for everyone (`sessions:control`); within
-ten seconds `{ "archived": false }` undoes it, after that the archive is final
-(409 `session_archive_final`), and 409 `session_archive_blocked` lists what keeps
-a chat live. See
+`{ "archived": true }` archives a chat for everyone (`sessions:control`), and
+`{ "archived": false }` brings it back: exactly within ten seconds, and later
+by restoring its stored content in the background (`retention.archive.restoring`
+until done; 409 `session_archive_busy` while it is being stored or its stopped
+work is settling, 409 `session_archive_restore_root` for a sub-chat). A restored
+chat whose work the Archive stopped is idle and resumed again, so it takes new
+messages. 409 `session_archive_blocked`
+lists what keeps a chat live, including sub-chats still in use
+(`active_sub_chat`), which `confirmActiveSubChats` archives too. See
 [`session-storage-lifecycle.md`](session-storage-lifecycle.md).
 
 Session create accepts `unattended: true` for a session no person will follow
@@ -97,7 +104,7 @@ limits like any goal (see [goals](goals.md#unattended-single-requests)). Pass
 Session reads include `unattended`, whether the next turns run unattended.
 `PUT /v1/workspaces/:workspaceId/sessions/:id/unattended` with
 `{ "unattended": true | false }` turns it on or off from the next turn (the
-chat's **Work without me** switch in the Agent tab uses the same call; SDK
+chat's **Work without me** switch in the Settings tab uses the same call; SDK
 `updateSessionUnattended`). The switch changes only whether a person is waited
 for: while it is on, a call that needs approval is refused as above, and a
 question or hand-off to a person returns at once with a result saying no one

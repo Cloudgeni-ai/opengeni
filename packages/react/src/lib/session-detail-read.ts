@@ -1,4 +1,4 @@
-import type { GetSessionOptions, Session } from "@opengeni/sdk";
+import type { GetSessionOptions, ChatSession as Session } from "@opengeni/sdk";
 
 /**
  * `useSession` reads a conversation's detail fresh (`getSession` with

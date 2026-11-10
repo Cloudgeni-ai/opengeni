@@ -5,7 +5,6 @@ import {
 } from "@opengeni/testing/shared-pg";
 import {
   applyCreditDebitAfterUse,
-  applyCreditDebitUpToBalance,
   applyCreditLedgerEntry,
   ensureManagedAccessForUser,
   createDb,
@@ -88,11 +87,13 @@ const charge = (
   modelId?: string,
   key = crypto.randomUUID(),
 ) =>
-  applyCreditDebitUpToBalance(client!.db, {
+  applyCreditDebitAfterUse(client!.db, {
     accountId,
-    requestedAmountMicros: amountMicros,
-    ...(modelId ? { modelId } : {}),
+    amountMicros,
+    ...(modelId ? { usage: modelId } : {}),
     type: "model_debit",
+    sourceType: "model_response",
+    sourceId: key,
     idempotencyKey: key,
   });
 const ledger = (
@@ -125,7 +126,11 @@ test("Free is allocated first only for covered models; concurrency and replay ca
   // Free plan credit pays for app tools (no model), never for uncovered models.
   expect(spendableCreditMicros(balance)).toBe(10 * M);
   expect(spendableCreditMicros(balance, undefined, "api")).toBe(0);
-  expect((await charge(id, M, "claude-opus")).debitedMicros).toBe(0);
+  // An uncovered model is charged in full to general credit, never to Free.
+  expect(await charge(id, M, "claude-opus")).toMatchObject({
+    debitedMicros: M,
+    grantDebitedMicros: 0,
+  });
   const first = await charge(id, 6 * M, "model-a");
   expect(first.balance.plan?.creditRemainingMicros).toBe(4 * M);
   expect(first.balance.promotionalCredits?.find((g) => !g.planCredit)?.remainingMicros).toBe(
@@ -133,10 +138,13 @@ test("Free is allocated first only for covered models; concurrency and replay ca
   );
   const keys = Array.from({ length: 4 }, () => crypto.randomUUID());
   const results = await Promise.all(keys.map((key) => charge(id, 4 * M, "model-a", key)));
-  expect(results.reduce((sum, r) => sum + r.debitedMicros, 0)).toBe(14 * M);
+  // Charged in full: Free and the trial pay 14, general credit the other 2.
+  expect(results.reduce((sum, r) => sum + r.debitedMicros, 0)).toBe(16 * M);
+  expect(results.reduce((sum, r) => sum + r.grantDebitedMicros, 0)).toBe(14 * M);
   for (const key of keys) expect((await charge(id, 4 * M, "model-a", key)).debitedMicros).toBe(0);
   balance = await getBillingBalance(client.db, id);
-  expect(balance.balanceMicros).toBe(0);
+  expect(balance.balanceMicros).toBe(-3 * M);
+  expect(balance.generalBalanceMicros).toBe(-3 * M);
   expect(balance.plan?.creditRemainingMicros).toBe(0);
 }, 180_000);
 
@@ -296,21 +304,24 @@ test("missing scope refuses new Free funding, legacy receipts stay general, live
   expect(balance.promotionalCredits?.every((g) => g.eligibleModelIds.join() === "model-b")).toBe(
     true,
   );
-  expect((await charge(scopedId, M, "model-a")).debitedMicros).toBe(0);
+  expect(await charge(scopedId, M, "model-a")).toMatchObject({
+    debitedMicros: M,
+    grantDebitedMicros: 0,
+  });
   expect((await charge(scopedId, M, "model-b")).balance.plan?.creditRemainingMicros).toBe(9 * M);
   // An already admitted call can settle against its old policy revision (0).
-  expect(
-    (
-      await applyCreditDebitUpToBalance(client.db, {
-        accountId: scopedId,
-        requestedAmountMicros: M,
-        modelId: "model-a",
-        creditPolicyRevision: 0,
-        type: "model_debit",
-        idempotencyKey: crypto.randomUUID(),
-      })
-    ).debitedMicros,
-  ).toBe(M);
+  const admitted = await applyCreditDebitAfterUse(client.db, {
+    accountId: scopedId,
+    amountMicros: M,
+    usage: "model-a",
+    creditPolicyRevision: 0,
+    type: "model_debit",
+    sourceType: "model_response",
+    sourceId: crypto.randomUUID(),
+    idempotencyKey: crypto.randomUUID(),
+  });
+  expect(admitted).toMatchObject({ debitedMicros: M, grantDebitedMicros: M });
+  expect(admitted.balance.plan?.creditRemainingMicros).toBe(8 * M);
 }, 180_000);
 
 test("promotion holds preserve paid funding, historical receipts and in-flight settlement", async () => {

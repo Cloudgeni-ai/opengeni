@@ -1,5 +1,153 @@
 # @opengeni/events
 
+## 6.13.0
+
+### Patch Changes
+
+- Updated dependencies [b15212e]
+- Updated dependencies [1c7aa2a]
+  - @opengeni/db@6.13.0
+  - @opengeni/contracts@6.13.0
+
+## 6.12.0
+
+### Patch Changes
+
+- 26c2fbd: Reattach Connected Machine command output from its retained position as soon as the exact runner or controller reconnects, instead of waiting for the silence probe. Reuses the existing operation and receipt without restarting commands, extending deadlines, or changing credential expiry.
+- Updated dependencies [64fd53f]
+- Updated dependencies [2aa8ba4]
+- Updated dependencies [7332869]
+- Updated dependencies [34ff418]
+- Updated dependencies [d29c500]
+- Updated dependencies [831f2ef]
+- Updated dependencies [4eb53af]
+- Updated dependencies [281af3a]
+- Updated dependencies [2117a2d]
+- Updated dependencies [a898141]
+- Updated dependencies [85622d5]
+- Updated dependencies [e9222e0]
+- Updated dependencies [8cc1ddd]
+- Updated dependencies [a43ce53]
+- Updated dependencies [c63eeb2]
+- Updated dependencies [3929153]
+- Updated dependencies [752da12]
+- Updated dependencies [2e1e9c6]
+- Updated dependencies [2e749ad]
+- Updated dependencies [bd4f53a]
+- Updated dependencies [fcdf7de]
+- Updated dependencies [bee1e4c]
+- Updated dependencies [94360cf]
+- Updated dependencies [f1999bf]
+- Updated dependencies [c0b9f88]
+- Updated dependencies [00dd24b]
+- Updated dependencies [1445841]
+  - @opengeni/contracts@6.12.0
+  - @opengeni/db@6.12.0
+
+## 6.11.0
+
+### Patch Changes
+
+- Updated dependencies [9bb1b56]
+- Updated dependencies [10ee575]
+- Updated dependencies [7e92bda]
+- Updated dependencies [ee15e95]
+- Updated dependencies [71395d6]
+- Updated dependencies [88de211]
+- Updated dependencies [5dabaa2]
+- Updated dependencies [80ff42d]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [d8e2bbc]
+- Updated dependencies [276001c]
+- Updated dependencies [336970a]
+- Updated dependencies [0e8b3b2]
+- Updated dependencies [90b961f]
+- Updated dependencies [f12070a]
+- Updated dependencies [56801f4]
+- Updated dependencies [2a02889]
+- Updated dependencies [f21e253]
+- Updated dependencies [a505ce8]
+- Updated dependencies [9b96f0e]
+- Updated dependencies [1ee6ee2]
+- Updated dependencies [a2abf51]
+- Updated dependencies [06606ef]
+- Updated dependencies [8b01834]
+- Updated dependencies [d7252be]
+- Updated dependencies [b271f6d]
+- Updated dependencies [b631728]
+- Updated dependencies [217bd09]
+- Updated dependencies [8a8864c]
+- Updated dependencies [b05587f]
+- Updated dependencies [3345899]
+- Updated dependencies [b5d8da2]
+- Updated dependencies [11550b6]
+- Updated dependencies [d96bc4d]
+- Updated dependencies [ca69414]
+- Updated dependencies [9ea4868]
+- Updated dependencies [bb33f35]
+- Updated dependencies [a31cd5d]
+- Updated dependencies [650e54a]
+- Updated dependencies [432bccf]
+- Updated dependencies [7ab60df]
+- Updated dependencies [e10e748]
+- Updated dependencies [1b8dc89]
+- Updated dependencies [7d86f8b]
+- Updated dependencies [3f64150]
+- Updated dependencies [c663db0]
+- Updated dependencies [c8c10a8]
+- Updated dependencies [386586f]
+- Updated dependencies [9420c9b]
+- Updated dependencies [99e117e]
+- Updated dependencies [ba482ea]
+- Updated dependencies [6abf872]
+- Updated dependencies [b1b8f58]
+- Updated dependencies [9c65c34]
+- Updated dependencies [57748cf]
+- Updated dependencies [54e9620]
+- Updated dependencies [04d36ce]
+- Updated dependencies [1a207de]
+- Updated dependencies [3ef0bd4]
+- Updated dependencies [84647c6]
+- Updated dependencies [0b91aac]
+- Updated dependencies [a531446]
+- Updated dependencies [de1210c]
+- Updated dependencies [60a67e6]
+  - @opengeni/contracts@6.11.0
+  - @opengeni/db@6.11.0
+
+## 6.10.0
+
+### Patch Changes
+
+- Updated dependencies [2caf31f]
+- Updated dependencies [c9e5547]
+- Updated dependencies [25a0452]
+- Updated dependencies [b032ab0]
+- Updated dependencies [2e02796]
+- Updated dependencies [b5a7db4]
+- Updated dependencies [a143aaf]
+- Updated dependencies [fb37d99]
+- Updated dependencies [4fc9529]
+- Updated dependencies [b089060]
+- Updated dependencies [6674146]
+- Updated dependencies [116acad]
+- Updated dependencies [e551a50]
+- Updated dependencies [f45ab2f]
+- Updated dependencies [9cf9b58]
+- Updated dependencies [d717b72]
+  - @opengeni/db@6.10.0
+  - @opengeni/contracts@6.10.0
+
+## 6.9.0
+
+### Patch Changes
+
+- Updated dependencies [ff8b164]
+- Updated dependencies [8572155]
+- Updated dependencies [54bf495]
+  - @opengeni/db@6.9.0
+  - @opengeni/contracts@6.9.0
+
 ## 6.8.0
 
 ### Patch Changes

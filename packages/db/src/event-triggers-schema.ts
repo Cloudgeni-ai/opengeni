@@ -298,6 +298,9 @@ export const mcpEventSubscriptions = pgTable(
     eventName: text("event_name").notNull(),
     arguments: jsonb("arguments").$type<Record<string, unknown>>().notNull().default({}),
     mode: text("mode"),
+    // Migration 1296: why the subscription polls, and since when.
+    pollReason: text("poll_reason"),
+    pollReasonAt: timestamp("poll_reason_at", { withTimezone: true }),
     cursor: text("cursor"),
     gapPending: boolean("gap_pending").notNull().default(false),
     routeId: uuid("route_id"),

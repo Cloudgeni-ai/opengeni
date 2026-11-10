@@ -5,6 +5,7 @@ import {
   withSessionActivityRlsContext,
   type Database,
 } from "./database";
+import { PersonalMachineAuthorityNotLiveError } from "./personal-machine-access";
 import { registerSessionWorkflowWakeInTransaction } from "./session-control";
 
 // ---- the per-session active-sandbox pointer (epoch-fenced swap) -----------
@@ -211,7 +212,7 @@ export async function setActiveSandbox(
           ) as authorized`,
         );
         if (preUse?.authorized !== true) {
-          throw new Error("personal Connected Machine authority was not live after attach");
+          throw new PersonalMachineAuthorityNotLiveError();
         }
       }
       // Whether a queued message may start depends on the machine: one waiting

@@ -1,6 +1,7 @@
 // The models section renders the shared models page, which navigates through
 // the page's navigation host; the router mock below backs it.
 import "@/navigation-host";
+import type { ChatClient } from "@opengeni/sdk";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -170,7 +171,7 @@ const context = {
     listOrganizationMcpConnections,
     getOrganizationPrivacySettings,
     updateOrganizationPrivacySettings,
-  } as unknown as OpenGeniBrowserClient,
+  } as unknown as ChatClient<OpenGeniBrowserClient>,
   clientConfig: { auth: { mode: "managedSession" } },
   authSession: { user: { email: "owner@example.test" } },
   accessContext: {

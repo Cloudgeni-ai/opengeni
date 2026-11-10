@@ -57,9 +57,10 @@ function startDetector(): () => void {
   const onVisibility = () => {
     if (document.visibilityState !== "hidden") check();
   };
-  const onPageShow = (event: Event) => {
+  // `event` may be missing or partial outside a browser (a native host's shim).
+  const onPageShow = (event?: Partial<PageTransitionEvent>) => {
     lastTick = Date.now();
-    if ((event as PageTransitionEvent).persisted) emitPageWake();
+    if (event?.persisted === true) emitPageWake();
   };
   const onResume = () => {
     lastTick = Date.now();

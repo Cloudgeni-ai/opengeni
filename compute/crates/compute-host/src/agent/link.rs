@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use compute_engine::{Engine, VmSpec};
-use compute_protocol::link::{AGENT_LINK_PORT, Running};
+use compute_protocol::link::{AGENT_LINK_PORT, Busy, Running};
 
 use super::{HostAgent, Level, Toucher};
 use crate::guest_ports::{self, Activity, Listeners};
@@ -103,6 +103,11 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             Running::Asleep
         };
         hub.running(&id.to_string(), running);
+        let busy = self
+            .handing_off
+            .contains_key(&id.0)
+            .then_some(Busy::HandingOff);
+        hub.busy(&id.to_string(), busy);
     }
 
     /// Sandbox `id` leaves the host: its agent's session ends.

@@ -419,6 +419,12 @@ function boundedApiDetails(value: unknown): Record<string, unknown> | undefined 
       if (bounded !== undefined) details[key] = bounded;
     } else if (typeof entry === "number" || typeof entry === "boolean" || entry === null) {
       details[key] = entry;
+    } else if (Array.isArray(entry) && entry.every((item) => typeof item === "string")) {
+      // A short list of names (repositories, allowed modes), each bounded.
+      details[key] = entry
+        .slice(0, 16)
+        .map((item) => boundedApiField(item))
+        .filter((item): item is string => item !== undefined);
     } else if (
       key === "action" &&
       typeof entry === "object" &&
@@ -528,6 +534,9 @@ export function formatErrorMessage(
       message = "The conversation list changed. Refresh and try again.";
     } else if (error.status === 401) {
       message = "Sign in to continue.";
+    } else if (error.details?.code === "subscription_api_unavailable") {
+      message =
+        "Connected subscriptions are only available in the Opengeni apps. Choose a credit-billed model for API use.";
     } else if (error.status === 403) {
       message = "You don’t have permission to do that.";
     } else if (error.status === 404) {

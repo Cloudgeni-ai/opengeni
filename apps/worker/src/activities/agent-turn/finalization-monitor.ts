@@ -42,7 +42,7 @@ export function startTurnFinalizationMonitor(input: {
   observability: Observability;
   details: TurnHeartbeatDetails;
   heartbeat: (details: TurnHeartbeatDetails) => void;
-  requestWorkerDrain: () => void;
+  requestWorkerDrain: () => void | (() => void);
   execution?: { workspaceId: string; sessionId: string; attemptId: string };
   timeoutMs?: number;
   slowAfterMs?: number;
@@ -81,9 +81,15 @@ export function startTurnFinalizationMonitor(input: {
   let disarm = () => {};
   let stopped = false;
   let slowTimer: ReturnType<typeof setTimeout> | undefined;
+  // A contained stage holds the host's containment until it moves on: the host
+  // may stop early only while every in-flight activity is such a stall.
+  let releaseContainment: (() => void) | undefined;
   const leave = () => {
     disarm();
     clearTimeout(slowTimer);
+    const release = releaseContainment;
+    releaseContainment = undefined;
+    diagnose(() => release?.());
     if (stage) {
       const previous = stage;
       diagnose(() =>
@@ -117,7 +123,10 @@ export function startTurnFinalizationMonitor(input: {
             // Diagnostic failure must never disable physical containment.
           }
         },
-        terminateWorker: input.requestWorkerDrain,
+        terminateWorker: () => {
+          const release = input.requestWorkerDrain();
+          if (typeof release === "function") releaseContainment = release;
+        },
       });
       // Record the precursor while the process remains scrapeable.
       slowTimer = setTimeout(

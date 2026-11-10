@@ -107,6 +107,8 @@ unrestricted purchased credits. The current policy determines its coverage,
 including when an old checkout is completed after an operator update.
 
 Promotions do not fund embeddings, video generation or warm sandbox time.
-Post-use platform debt stays in general credits. There are no credit reservations
-or automatic card charges. Debits and grant allocations commit together under
-an account lock, with idempotent receipts including zero-cost settlements.
+Post-use platform debt stays in general credits: a model response is charged its
+full price after use, its covering grants pay what they can, and the rest may take
+general credit below zero. There are no credit reservations or automatic card
+charges. Debits and grant allocations commit together under an account lock,
+with idempotent receipts; zero-cost receipts from earlier releases stay settled.

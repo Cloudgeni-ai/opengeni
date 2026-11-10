@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { DEFAULT_BILLING_LEGACY_ACCOUNT_IDS } from "@opengeni/config";
 import { SUBSCRIPTION_PLAN_REQUIRED_CODE } from "@opengeni/contracts";
-import { checkOwnSubscriptionPlan, ownSubscriptionPlanAllows } from "@opengeni/core";
+import {
+  admitModelCall,
+  checkOwnSubscriptionPlan,
+  ownSubscriptionPlanAllows,
+} from "@opengeni/core";
 import {
   createDb,
   ensureManagedAccessForUser,
@@ -40,13 +44,17 @@ const settings = testSettings({
 });
 
 async function organization() {
+  return (await organizationWithWorkspace()).accountId;
+}
+
+async function organizationWithWorkspace() {
   const userId = crypto.randomUUID();
   const access = await ensureManagedAccessForUser(client!.db, {
     userId,
     email: `${userId}@example.test`,
     name: "Subscription owner",
   });
-  return access.defaultAccountId!;
+  return { accountId: access.defaultAccountId!, workspaceId: access.defaultWorkspaceId! };
 }
 
 async function onPlan(
@@ -94,6 +102,25 @@ test("Free is refused with the upgrade code; Pro and above are allowed while in 
     expect(await ownSubscriptionPlanAllows(client.db, settings, paid)).toBe(
       price(key) === null || price(key)! >= 20_000_000,
     );
+    expect(await checkOwnSubscriptionPlan({ db: client.db, settings }, paid, "api")).toMatchObject({
+      allowed: false,
+      code: "subscription_api_unavailable",
+    });
+    expect(
+      await admitModelCall(
+        { db: client.db, settings },
+        {
+          accountId: paid,
+          workspaceId: crypto.randomUUID(),
+          model: "codex/gpt-6-luna",
+          chargesOpenGeniCredits: false,
+          countsTowardTokenCap: false,
+          subjectId: null,
+          billingOrigin: "api",
+          ownSubscription: true,
+        },
+      ),
+    ).toMatchObject({ allowed: false, denial: "subscription_api_unavailable" });
   }
 
   const trialing = await organization();
@@ -112,3 +139,40 @@ test("internal accounts on legacy billing are never refused, even without a plan
     allowed: true,
   });
 });
+
+test("the operator opt-in lets API work use a subscription on a paid plan; Free still needs Pro", async () => {
+  if (!client) return;
+  const optedIn = { ...settings, apiConnectedSubscriptionsEnabled: true };
+  const call = async ({ accountId, workspaceId }: { accountId: string; workspaceId: string }) =>
+    await admitModelCall(
+      { db: client!.db, settings: optedIn },
+      {
+        accountId,
+        workspaceId,
+        model: "codex/gpt-6-luna",
+        chargesOpenGeniCredits: false,
+        countsTowardTokenCap: false,
+        subjectId: null,
+        billingOrigin: "api",
+        ownSubscription: true,
+      },
+    );
+  const pro = await organizationWithWorkspace();
+  await onPlan(pro.accountId, "pro");
+  // Titles, transcription and realtime voice share this plan check.
+  expect(
+    await checkOwnSubscriptionPlan({ db: client.db, settings: optedIn }, pro.accountId, "api"),
+  ).toEqual({ allowed: true });
+  expect(await call(pro)).toMatchObject({ allowed: true });
+  // Default off: the same account is refused for API work.
+  expect(
+    await checkOwnSubscriptionPlan({ db: client.db, settings }, pro.accountId, "api"),
+  ).toMatchObject({ allowed: false, code: "subscription_api_unavailable" });
+
+  const free = await organizationWithWorkspace();
+  await onPlan(free.accountId, "free");
+  expect(
+    await checkOwnSubscriptionPlan({ db: client.db, settings: optedIn }, free.accountId, "api"),
+  ).toMatchObject({ allowed: false, code: SUBSCRIPTION_PLAN_REQUIRED_CODE });
+  expect(await call(free)).toMatchObject({ allowed: false, subscriptionPlanRequired: true });
+}, 120_000);

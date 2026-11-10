@@ -54,14 +54,18 @@ function SharedAudioImport() {
 }
 
 /**
- * Meetings belong to a workspace. Until one is chosen (a new account, or the
- * workspace list still loading) say so instead of rendering the screen.
+ * Meetings and automations belong to a workspace. Until one is chosen (a new
+ * account, or the workspace list still loading) say so instead of rendering
+ * the screen.
  */
 export function WorkspaceGate({
   title,
+  message = "Choose a workspace to record and see its meetings.",
   children,
 }: {
   title: string;
+  /** What choosing a workspace lets the person do here. */
+  message?: string;
   children: (workspaceId: string) => ReactNode;
 }) {
   const theme = useNativeTimelineTheme();
@@ -92,7 +96,7 @@ export function WorkspaceGate({
               marginTop: 24,
             }}
           >
-            Choose a workspace to record and see its meetings.
+            {message}
           </Text>
         )}
       </View>

@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import { act, createContext, useContext, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import type { Session, SessionListPageOptions } from "@opengeni/sdk";
+import type { ChatSession as Session, SessionListPageOptions } from "@opengeni/sdk";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const siteId = "22222222-2222-4222-8222-222222222222";

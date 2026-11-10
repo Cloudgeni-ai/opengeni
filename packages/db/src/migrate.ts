@@ -45,6 +45,9 @@ const BATCHED_BACKFILL_SETTINGS: Readonly<Record<string, Readonly<Record<string,
   "1232_personal_workspace_owner_membership_backfill.sql": {
     "opengeni.organization_tenancy_lifecycle": "organization_membership_lifecycle",
   },
+  "1242_billing_credit_recipients_backfill.sql": {
+    "opengeni.organization_tenancy_lifecycle": "organization_membership_lifecycle",
+  },
 };
 const concurrentIndexDirective = /^-- opengeni:concurrent-index lock-timeout=(\d+(?:ms|s|min))$/;
 const concurrentIndexStatement =

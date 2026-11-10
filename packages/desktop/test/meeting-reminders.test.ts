@@ -569,4 +569,129 @@ describe("reminders before calendar meetings", () => {
     run.subject.shutdown();
     other.subject.shutdown();
   });
+
+  test("Not now on a call just before a meeting: no reminder for the meeting the person is in", async () => {
+    const run = reminders();
+    await run.at(START - 2 * MINUTE);
+    run.microphone([zoom], START - 2 * MINUTE);
+    run.microphone([zoom], START - 2 * MINUTE + PROMPT_AFTER_MS);
+    run.cards[0]!.done("dismissed");
+    await run.at(START - REMIND_BEFORE_MS);
+    await run.at(START + MINUTE);
+    expect(run.cards.map((card) => card.prompt.kind)).toEqual(["record"]);
+    run.subject.shutdown();
+  });
+
+  test("a call's question still up when the reminder is due: Not now doesn't bring the reminder", async () => {
+    const run = reminders();
+    await run.at(START - 2 * MINUTE);
+    run.microphone([zoom], START - 2 * MINUTE);
+    run.microphone([zoom], START - 2 * MINUTE + PROMPT_AFTER_MS);
+    await run.at(START - REMIND_BEFORE_MS);
+    expect(run.shown()).toHaveLength(0);
+    run.cards[0]!.done("dismissed");
+    await run.at(START - REMIND_BEFORE_MS + 15_000);
+    await run.at(START);
+    expect(run.cards.map((card) => card.prompt.kind)).toEqual(["record"]);
+    run.subject.shutdown();
+  });
+
+  test("Not now during a calendar meeting lasts until it ends, through any mute", async () => {
+    const run = reminders();
+    await run.at(START + MINUTE);
+    // The reminder showed; joining from the calendar instead asks about the call.
+    run.microphone([zoom], START + MINUTE);
+    run.microphone([zoom], START + MINUTE + PROMPT_AFTER_MS);
+    const record = run.cards.find((card) => card.prompt.kind === "record")!;
+    record.done("dismissed");
+    // Muted for a quarter of an hour, then back in the same meeting.
+    run.microphone([], START + 2 * MINUTE);
+    run.microphone([], START + 2 * MINUTE + ENDED_AFTER_MS + 1);
+    run.microphone([zoom], START + 17 * MINUTE);
+    run.microphone([zoom], START + 17 * MINUTE + PROMPT_AFTER_MS);
+    expect(run.cards.filter((card) => card.prompt.kind === "record")).toHaveLength(1);
+    // The meeting is over: the next call is asked about.
+    run.microphone([], START + 25 * MINUTE);
+    run.microphone([], START + 25 * MINUTE + ENDED_AFTER_MS + 1);
+    run.microphone([zoom], START + 31 * MINUTE);
+    run.microphone([zoom], START + 31 * MINUTE + PROMPT_AFTER_MS);
+    expect(run.cards.filter((card) => card.prompt.kind === "record")).toHaveLength(2);
+    run.subject.shutdown();
+  });
+
+  test("a mute just before the next meeting doesn't lose that meeting's reminder", async () => {
+    const run = reminders();
+    await run.at(START - 40 * MINUTE);
+    run.microphone([zoom], START - 40 * MINUTE);
+    run.microphone([zoom], START - 40 * MINUTE + PROMPT_AFTER_MS);
+    run.cards[0]!.done("dismissed");
+    // Muted long enough to end a call, 8 minutes before the next meeting.
+    run.microphone([], START - 8 * MINUTE);
+    run.microphone([], START - 8 * MINUTE + ENDED_AFTER_MS + 1);
+    run.microphone([zoom], START - 8 * MINUTE + 20_000);
+    await run.at(START - REMIND_BEFORE_MS);
+    expect(run.shown()).toHaveLength(1);
+    expect(run.cards.filter((card) => card.prompt.kind === "record")).toHaveLength(1);
+    run.subject.shutdown();
+  });
+
+  test("Not now on a short call before a meeting: once it has clearly ended, the meeting's reminder shows", async () => {
+    const run = reminders();
+    await run.at(START - 6 * MINUTE);
+    run.microphone([zoom], START - 6 * MINUTE);
+    run.microphone([zoom], START - 6 * MINUTE + PROMPT_AFTER_MS);
+    run.cards[0]!.done("dismissed");
+    run.microphone([], START - 4 * MINUTE);
+    run.microphone([], START - 4 * MINUTE + ENDED_AFTER_MS + 1);
+    // Off the microphone 3 minutes: a long mute or the end; it waits to tell.
+    await run.at(START - REMIND_BEFORE_MS);
+    expect(run.shown()).toHaveLength(0);
+    // Off 5 minutes: that call ended, and the meeting is still to join.
+    await run.at(START + MINUTE + 15_000);
+    expect(run.shown()).toHaveLength(1);
+    run.subject.shutdown();
+  });
+
+  test("Not now, then muted just as the reminder comes due: no reminder once the call is back", async () => {
+    const run = reminders();
+    await run.at(START - 5 * MINUTE);
+    run.microphone([zoom], START - 5 * MINUTE);
+    run.microphone([zoom], START - 5 * MINUTE + PROMPT_AFTER_MS);
+    run.cards[0]!.done("dismissed");
+    run.microphone([], START - 2 * MINUTE);
+    run.microphone([], START - 2 * MINUTE + ENDED_AFTER_MS + 1);
+    await run.at(START - REMIND_BEFORE_MS);
+    await run.at(START);
+    run.microphone([zoom], START + 30_000);
+    await run.at(START + 2 * MINUTE);
+    await run.at(START + 4 * MINUTE);
+    expect(run.cards.map((card) => card.prompt.kind)).toEqual(["record"]);
+    run.subject.shutdown();
+  });
+
+  test("Not now on a meeting that runs over: a mute after its scheduled end doesn't ask again", async () => {
+    const run = reminders();
+    await run.at(START + MINUTE);
+    run.microphone([zoom], START + MINUTE);
+    run.microphone([zoom], START + MINUTE + PROMPT_AFTER_MS);
+    run.cards.find((card) => card.prompt.kind === "record")!.done("dismissed");
+    // The meeting was booked until START + 30 minutes; at 35 the person mutes.
+    run.microphone([], START + 35 * MINUTE);
+    run.microphone([], START + 35 * MINUTE + ENDED_AFTER_MS + 1);
+    run.microphone([zoom], START + 35 * MINUTE + 20_000);
+    run.microphone([zoom], START + 35 * MINUTE + 20_000 + PROMPT_AFTER_MS);
+    expect(run.cards.filter((card) => card.prompt.kind === "record")).toHaveLength(1);
+    run.subject.shutdown();
+  });
+
+  test("a call from long before still gets the next meeting's reminder", async () => {
+    const run = reminders();
+    await run.at(START - 40 * MINUTE);
+    run.microphone([zoom], START - 40 * MINUTE);
+    run.microphone([zoom], START - 40 * MINUTE + PROMPT_AFTER_MS);
+    run.cards[0]!.done("dismissed");
+    await run.at(START - REMIND_BEFORE_MS);
+    expect(run.shown()).toHaveLength(1);
+    run.subject.shutdown();
+  });
 });

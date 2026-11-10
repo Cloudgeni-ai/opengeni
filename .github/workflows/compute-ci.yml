@@ -155,6 +155,8 @@ jobs:
           COMPUTE_TEST_POSTGRES: host=127.0.0.1 user=fleet password=fleet dbname=fleet_test
           COMPUTE_TEST_SHARED_EXTENTS_DIR: /mnt/xfs
           COMPUTE_TEST_REQUIRE: shared-extents
+          # Tests that need root (mknod) run again under sudo -n.
+          COMPUTE_GUEST_TEST_SUDO: "1"
         run: cargo test --locked --workspace
       - name: Smoke framework tests
         working-directory: compute/smoke
@@ -176,11 +178,18 @@ jobs:
             compute/deploy/host/compute-host-certificate \
             compute/deploy/host/test-compute-host-certificate \
             compute/deploy/host/agent-inputs compute/deploy/host/test-agent-inputs compute/ci/*.sh \
-            deploy/terraform/gcp-compute/host-startup.sh
+            compute/deploy/host/state-volume compute/deploy/host/test-state-volume \
+            deploy/terraform/gcp-compute/host-startup.sh deploy/terraform/gcp-compute/test-host-startup
       - name: host certificate script
         run: compute/deploy/host/test-compute-host-certificate
       - name: what the agent starts with (install.sh restarts it only when that changed)
         run: compute/deploy/host/test-agent-inputs
+      - name: a host reset during its startup install comes back whole (host-startup.sh and install.sh)
+        run: deploy/terraform/gcp-compute/test-host-startup
+      - name: the state volume (a host keeps a file system it finds, on loop devices)
+        run: |
+          command -v mkfs.xfs >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq xfsprogs; }
+          sudo compute/deploy/host/test-state-volume
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
       - name: Terraform (GCP host fleet)
         run: |

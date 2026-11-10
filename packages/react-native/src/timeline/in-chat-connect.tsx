@@ -1,7 +1,9 @@
 import { useOpenGeniText } from "@opengeni/react/messages";
+import type { ChatClient } from "@opengeni/sdk";
 import {
   authNeededPresentation,
   canFinishPreparedMcpSetup,
+  capabilityReconnectConnectionId,
   inChatConnectDecision,
   isInChatConnectRequest,
   isPreparedMcpSetup,
@@ -151,7 +153,7 @@ export function useNativeInChatConnect({
   items,
   options,
 }: {
-  client: OpenGeniClient | undefined;
+  client: ChatClient<OpenGeniClient> | undefined;
   workspaceId: string;
   sessionId: string;
   items: readonly TimelineItem[];
@@ -227,6 +229,7 @@ export function useNativeInChatConnect({
             capabilityId={decision.item.id}
             name={decision.item.name}
             personalOnly={decision.personalOnly}
+            reconnectConnectionId={capabilityReconnectConnectionId(item)}
             rationale={item.capability?.rationale ?? ""}
             options={host}
           />
@@ -966,7 +969,7 @@ function ScopedConnectSetup({
 /* -------------------------------------------------- reviewed integration -- */
 
 type CardProps = {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   capabilityId: string;
@@ -1128,8 +1131,9 @@ export function NativeMcpCapabilityCard({
   name,
   rationale,
   personalOnly: configuredPersonalOnly,
+  reconnectConnectionId,
   options,
-}: CardProps & { personalOnly: boolean }) {
+}: CardProps & { personalOnly: boolean; reconnectConnectionId?: string | undefined }) {
   const t = useOpenGeniText();
   const text = useText();
   const [windows] = useState(() => nativeConnectWindowHost(options.browser, options.attemptHints));
@@ -1141,7 +1145,9 @@ export function NativeMcpCapabilityCard({
     returnUrl: options.returnUrl,
     windows,
     personalOnly: configuredPersonalOnly,
+    reconnectConnectionId,
   });
+  const reconnecting = Boolean(reconnectConnectionId);
   const { item, personalOnly, busy, waiting, reconciling, connected, ownership } = flow;
   const title = item?.name ?? name;
   return (
@@ -1159,7 +1165,9 @@ export function NativeMcpCapabilityCard({
           label={
             connected
               ? t("sessionMcpCapabilityCard.useInThisConversation")
-              : t("sessionMcpCapabilityCard.connectName", { name: title })
+              : reconnecting
+                ? t("sessionMcpCapabilityCard.reconnectName", { name: title })
+                : t("sessionMcpCapabilityCard.connectName", { name: title })
           }
           busy={busy}
           onPress={flow.open}
@@ -1203,7 +1211,7 @@ export function NativeMcpCapabilityCard({
             )
           ) : !connected ? (
             <>
-              {!item.connectionRef && !personalOnly ? (
+              {!item.connectionRef && !personalOnly && !reconnecting ? (
                 <View
                   accessibilityRole="radiogroup"
                   accessibilityLabel={t("sessionMcpCapabilityCard.whoCanUseThisConnection")}
@@ -1226,11 +1234,13 @@ export function NativeMcpCapabilityCard({
                 </View>
               ) : null}
               <Line tone="small">
-                {personalOnly && ownership === "personal"
-                  ? t("sessionMcpCapabilityCard.connectsYourOwnAccountOnly")
-                  : ownership === "workspace"
-                    ? t("sessionMcpCapabilityCard.thisConnectionWillBeAvailable")
-                    : t("sessionMcpCapabilityCard.thisConnectionBelongsToYou")}
+                {reconnecting
+                  ? t("sessionMcpCapabilityCard.reconnectsTheSameAccount")
+                  : personalOnly && ownership === "personal"
+                    ? t("sessionMcpCapabilityCard.connectsYourOwnAccountOnly")
+                    : ownership === "workspace"
+                      ? t("sessionMcpCapabilityCard.thisConnectionWillBeAvailable")
+                      : t("sessionMcpCapabilityCard.thisConnectionBelongsToYou")}
               </Line>
               <Button
                 icon="external-link"
@@ -1285,7 +1295,7 @@ export function NativePreparedMcpSetupCard({
   canConfigure,
   options,
 }: {
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   item: AuthNeededItem;
@@ -1352,7 +1362,7 @@ function PreparedSetup({
   options,
 }: {
   controller: ConnectController;
-  client: OpenGeniClient;
+  client: ChatClient<OpenGeniClient>;
   workspaceId: string;
   sessionId: string;
   onRestart: (previousId: string) => void;

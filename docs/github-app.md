@@ -102,8 +102,8 @@ The transaction accepts proof for at most ten minutes, checks the database clock
 before and after all writes, and consumes the nonce globally once. Replays,
 cross-workspace nonce reuse, and concurrent duplicate commits fail closed. One
 GitHub installation may be deliberately bound to multiple Opengeni workspaces,
-but every workspace requires an independent owner proof and owns an independent
-repository allowlist.
+but every workspace requires its own owner proof and has its own binding, and
+its repository allowlist follows the installation's selection on GitHub.
 
 The proof expiry bounds the consent transaction; it is not an automatic expiry
 of the resulting delegation. After a successful owner consent, the binding is a
@@ -112,9 +112,70 @@ silently rewrite that delegation. GitHub installation suspension, deletion, or
 repository removal remains effective immediately through live listing and
 installation-token APIs.
 
+### The allowlist follows GitHub
+
+The owner's consent covers the repositories the installation shares, as GitHub
+reports them, not a frozen list. After binding, every workspace bound to an
+installation follows GitHub's selection for it without another proof:
+
+- A repository added to the installation, including a new repository of an
+  **All repositories** installation, becomes usable in each bound workspace.
+- A repository GitHub reports removed from the installation (an
+  `installation_repositories` removal or a `repository` deletion) stops being
+  usable as soon as the webhook arrives. An uninstalled App empties every
+  bound allowlist. A repository that leaves the installation without such a
+  webhook (for example one transferred out of an **All repositories**
+  installation) disappears at the next listing that reads GitHub.
+- Opengeni only adds repositories GitHub lists for the installation, and the
+  binding's owner proof and audit fields are unchanged. Only bindings with an
+  owner-authority receipt take GitHub's later lists; GitHub's removals narrow
+  every binding, including older ones without a receipt.
+
+GitHub reports changes in two ways, and either repairs the other:
+
+1. The App's signed webhooks to `/v1/webhooks/github` (`installation_repositories`,
+   `installation`, and `repository`; subscribe the App to **Repository** events
+   so new repositories of an **All repositories** installation arrive at once).
+   They apply whenever `OPENGENI_GITHUB_WEBHOOK_SECRET` is set, even with event
+   triggers off, and after the delivery reaches the workspaces' GitHub event
+   sources. Removals in the delivery apply before Opengeni answers. Each
+   binding stores a removal marker in the database, so a list read within
+   five minutes of the removal, on any API replica, does not add the
+   repository back (GitHub's list can lag its webhook). When a list still
+   names such a repository, the API replica that read it reads the
+   installation again once the window ends (best effort), so a repository
+   shared again shows up then; otherwise the next listing or webhook adds it.
+   Additions are never taken from the body:
+   Opengeni reads the installation's complete list from GitHub, one read per
+   installation and API replica at a time. A new binding, or a re-bind, also
+   reads it once committed; a re-bind keeps out repositories removed since
+   its proof was read.
+2. Every repository listing (the composer menu, the GitHub settings page, the
+   `github_repositories_list` tool) already reads GitHub's list through the
+   short-lived per-process cache. A list GitHub just returned is applied to the
+   allowlist where it differs, so a missed webhook is repaired by the next
+   listing. A passive listing that has a last good list waits at most three
+   seconds for GitHub, then answers with that list and applies GitHub's answer
+   when it arrives. A stale fallback list served during a GitHub outage is
+   never applied.
+
+The binding's `updated_at` orders these writes: a list read from GitHub before
+the binding last changed is ignored, a removal always advances it (just past
+the removal, so a list read in the same millisecond loses), a re-bind never
+moves it back, and every API replica re-reads GitHub for a binding that changed
+after its cached list. List times come from the API replica's clock (taken
+before GitHub is asked) and removals use the webhook's receipt time, while a
+bind stamps its proof time; the fence is sound while clock skew between API
+replicas and the database stays far below GitHub's webhook latency, as it does
+with ordinary NTP time sync.
+Cross-workspace lookup by installation uses the read-only installation lane of
+migration 1293 (`opengeni.github_installation_id`); each write runs in its
+workspace's own RLS scope. Suspension needs no allowlist change: the live
+lifecycle check makes the binding unusable while the installation is
+suspended, and the allowlist is kept for when it returns.
+
 An existing binding exposes a workspace-scoped **Change repositories** action
-that opens a new tab and preserves the current chat. The workspace refreshes
-GitHub status when the original tab regains focus. Opengeni
+that opens a new tab and preserves the current chat. Opengeni
 mints fresh signed browser state before opening GitHub's installation settings.
 The setup callback accepts that state from GitHub or the same-site browser
 cookie, then repeats exact OAuth authority proof before updating the binding.
@@ -200,9 +261,11 @@ organization. It is not a second App and has no second private key.
 
 ## Repository and token scope
 
-Audited bindings always use `repository_scope='selected'` and persist a nonempty
-set of GitHub repository IDs. Repository listing intersects live provider output
-with that exact workspace allowlist. Session admission and every direct or
+Audited bindings always use `repository_scope='selected'` and persist the set of
+GitHub repository IDs the installation shares, as last reported by GitHub. A
+binding GitHub has left with no repositories is unusable until GitHub shares
+some again. Repository listing intersects live provider output with that exact
+workspace allowlist. Session admission and every direct or
 brokered token-mint boundary recheck the current workspace allowlist. The
 exported GitHub installation-token mint refuses empty, duplicate, invalid, or
 omitted repository ID lists and sends the explicit allowlist to GitHub.
@@ -217,7 +280,9 @@ endpoint remains `410 Gone`; it is not an alternate binding path.
 Repository visibility is not the credential decision; the workspace allowlist
 is. Every repository in a bound installation's allowlist receives a short-lived
 installation token scoped to exactly that repository, whether the repository is
-public or private, so the sandbox can push and use `gh` against it. A
+public or private, so the sandbox can push and use `gh` against it (`gh` on
+repositories mounted as the person goes through the
+[personal GitHub gateway](personal-github.md#gh-in-managed-sandboxes) instead). A
 repository that is not in any of the workspace's allowlists (for example a
 public upstream project) is cloned anonymously and is read-only: no token is
 minted for it.
@@ -248,6 +313,36 @@ GitHub outage proceeds bare after the bound timeout.
 Connected Machines do not receive Opengeni GitHub App credentials and continue
 to use their machine's ambient Git authentication.
 
+## An agent asking for a repository
+
+An agent that needs a repository its chat does not have can ask for one with
+the first-party `github_repository_attach` tool (`repository` as `owner/name`
+from `github_repositories_list`, and an optional `ref`). The tool is offered on
+a chat's own signed attempts with `github:use`; open Slack agent chats do not
+get it.
+
+Every call waits for a person's approval through the ordinary tool approval
+card, in the app and in the Slack thread of a chat started from Slack. The card
+is titled `Attach owner/name to this chat` and names the repository, the branch
+(`Default branch` when none was given) and the access (`Workspace GitHub App`).
+When a person removed the repository from the chat earlier, the card also says
+`Removed from this chat earlier`, and approving attaches it again. Anyone who
+can control the chat can approve, as for other tool approvals. Where nobody can
+answer (a scheduled or unattended run, or a worker of one) the call is refused.
+
+The API attaches only a call a person (or an API caller acting for the
+workspace) approved for exactly that repository and branch and that the same
+attempt is running; an agent's decision, or a call that reached the tool any
+other way, attaches nothing. The repository must be one the workspace GitHub
+App offers now, the same catalog and permission as the repository picker, and
+neither archived nor empty. It is attached to the chat's own repositories as
+`optional` on the requested branch or its default branch, with a
+`session.resources.added` event, and from the next turn it is one of the
+chat's repositories, handled like the others: a managed sandbox clones it at
+`repos/github.com/<owner>/<name>`. A turn already running keeps the
+credentials it started with. Asking for a repository the chat already has
+changes nothing, and the result names the branch the chat has.
+
 ## Operational notes
 
 - Signed setup state (GitHub App setup, Codex sign-in and similar round trips)
@@ -259,8 +354,11 @@ to use their machine's ambient Git authentication.
   only and is logged as a warning at startup.
 - GitHub Enterprise hosts are not supported; provider URLs currently target
   github.com and api.github.com.
-- The generated App does not register webhooks. Live installation and repository
-  reads plus short-lived installation tokens enforce provider state.
+- A generated App on a public https deployment sends its webhooks to
+  `/v1/webhooks/github`, which keeps workspace allowlists in line with GitHub
+  (see [The allowlist follows GitHub](#the-allowlist-follows-github)). Live
+  installation and repository reads plus short-lived installation tokens still
+  enforce provider state.
 - A manifest with a setup URL sets `request_oauth_on_install=false`; GitHub does
   not support requesting OAuth-on-install together with a setup URL.
 - Managed deployments expose only install/connect UI and keep App registration
@@ -274,8 +372,9 @@ to use their machine's ambient Git authentication.
 The GitHub App integration is optional, but it is the recommended way to give
 agents scoped repository access. It lets the UI list installed repositories and
 lets the worker mint short-lived installation tokens only for repositories
-selected for a session. Each workspace binding owns an independent repository
-allowlist and can be unlinked without uninstalling the App from GitHub.
+selected for a session. Each workspace has its own binding and owner proof; its
+repository allowlist follows the installation's selection on GitHub, and the
+binding can be unlinked without uninstalling the App from GitHub.
 
 From the web app (configured/local deployments):
 

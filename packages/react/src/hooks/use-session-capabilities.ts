@@ -1,3 +1,4 @@
+import type { ChatClient } from "@opengeni/sdk";
 import {
   OpenGeniApiError,
   applyUrlRotation,
@@ -29,7 +30,7 @@ export type SessionCapabilitiesState =
   | "on-demand"
   | "error";
 
-export type UseSessionCapabilitiesOptions = ClientOverride & {
+export type UseSessionCapabilitiesOptions = ClientOverride<ChatClient> & {
   /**
    * Live event log to fold `stream.url.rotated` from (usually
    * `useSessionEvents().events`). When present the desktop socket stays fresh on

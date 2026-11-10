@@ -25,7 +25,9 @@ import {
   resolveTurnSummaryFacets,
   selectTurnSummaryFacets,
   turnSummaryFallbackLabel,
+  turnSummaryLiveMarkState,
   type TurnSummaryFacetConfiguration,
+  type TurnSummaryOptions,
   type TurnSummaryStatus,
 } from "./turn-summary-model";
 import type { ActivityItem, TurnOutcome } from "./types";
@@ -41,6 +43,7 @@ export type {
   TurnSummaryFacet,
   TurnSummaryFacetConfiguration,
   TurnSummaryFacetResult,
+  TurnSummaryLiveMarkState,
   TurnSummaryOptions,
   TurnSummaryStatus,
 } from "./turn-summary-model";
@@ -133,6 +136,8 @@ export type TurnSummaryProps = {
    * marker and the duration facet; a settled `worked` row reads as a separator.
    */
   status?: TurnSummaryStatus | undefined;
+  /** The host's mark at the leading edge of a live status row (`TurnSummaryOptions.renderLiveMark`). */
+  renderLiveMark?: TurnSummaryOptions["renderLiveMark"];
   /**
    * False when the fold has nothing to reveal: the row renders without a
    * chevron and is not a disclosure control. Defaults to true.
@@ -166,6 +171,7 @@ export function TurnSummary({
   copyText,
   contextCompactionCount,
   status,
+  renderLiveMark,
   expandable = true,
   unloadedSteps,
   onOpenStateChange,
@@ -391,6 +397,7 @@ export function TurnSummary({
   const settleChrome = settling || settlePhase || nestSuppressLatch;
 
   const statusLine = status ? turnSummaryStatusLine(t, status) : null;
+  const liveMarkState = renderLiveMark ? turnSummaryLiveMarkState(status) : null;
 
   // Copy only on the collapsed chip — when open, per-message copy is enough
   // and a second control on the summary row felt crowded / off.
@@ -448,6 +455,16 @@ export function TurnSummary({
       ) : (
         <span aria-hidden className="size-3.5 shrink-0" />
       )}
+      {/* The host's own mark leads the live row; decorative, the words say it. */}
+      {renderLiveMark && liveMarkState ? (
+        <span
+          aria-hidden
+          data-og-live-mark={liveMarkState.kind}
+          className="inline-flex h-5 shrink-0 items-center"
+        >
+          {renderLiveMark(liveMarkState)}
+        </span>
+      ) : null}
       {/* Completion is the quiet default and needs no repeated glyph. Failed,
       cancelled, and still-running folds retain a visible state marker. */}
       {status || outcome === "complete" || (!outcome && (liveHeader || context.settled)) ? null : (

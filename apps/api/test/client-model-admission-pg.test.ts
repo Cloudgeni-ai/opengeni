@@ -15,6 +15,7 @@ import {
   encryptEnvironmentValue,
   updateModelConnectionAccess,
   upsertWorkspaceModelPolicy,
+  withBillingOriginOverride,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -47,7 +48,10 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(overrides: Parameters<typeof testSettings>[0] = {}) {
+async function fixture(
+  overrides: Parameters<typeof testSettings>[0] = {},
+  billingOrigin: "app" | "api" = "app",
+) {
   if (!client || !shared) throw new Error("PostgreSQL fixture unavailable");
   const context = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test:client-model-admission",
@@ -86,18 +90,21 @@ async function fixture(overrides: Parameters<typeof testSettings>[0] = {}) {
     actor: AccessGrant = grant,
     method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   ): Promise<Response> {
-    return app.request(path, {
-      method: method ?? (body === undefined ? "GET" : "POST"),
-      headers: {
-        authorization: `Bearer ${await signDelegatedAccessToken(SECRET, {
-          ...actor,
-          principalKind: "human_session",
-          exp: Math.floor(Date.now() / 1_000) + 3_600,
-        })}`,
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    const token = await signDelegatedAccessToken(SECRET, {
+      ...actor,
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
     });
+    return withBillingOriginOverride(billingOrigin, () =>
+      app.request(path, {
+        method: method ?? (body === undefined ? "GET" : "POST"),
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+    );
   }
   async function config(actor: AccessGrant = grant) {
     const response = await request(
@@ -291,6 +298,42 @@ test("PG: ready Codex model permissions and workspace policy affect list and cre
   expect((await f.parity(["codex/gpt-6-sol", "gpt-5.6-luna"])).allowedModels).toEqual([
     "gpt-5.6-sol",
   ]);
+}, 180_000);
+
+test("PG: API client config excludes connected subscriptions and rejects an explicit selection", async () => {
+  if (!client || !shared) return;
+  const f = await fixture({}, "api");
+  await connectCoreCodex(f.grant, { allowedModelIds: ["codex/gpt-6-sol"] });
+  const config = await f.config();
+  expect(config.models.some(({ id }) => id.startsWith("codex/"))).toBe(false);
+  expect(config.allowedModels).not.toContain("codex/gpt-6-sol");
+  expect(config.defaultModel.startsWith("codex/")).toBe(false);
+  const response = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    model: "codex/gpt-6-sol",
+    initialMessage: "Test API subscription selection",
+    visibility: "workspace",
+    tools: [],
+  });
+  expect(response.status).toBe(403);
+  expect(await response.json()).toMatchObject({
+    error: { code: "forbidden", details: { code: "subscription_api_unavailable" } },
+  });
+}, 180_000);
+
+test("PG: with the operator opt-in, API client config lists connected subscriptions and creates on one", async () => {
+  if (!client || !shared) return;
+  const f = await fixture({ apiConnectedSubscriptionsEnabled: true }, "api");
+  await connectCoreCodex(f.grant, { allowedModelIds: ["codex/gpt-6-sol"] });
+  const config = await f.config();
+  expect(config.allowedModels).toContain("codex/gpt-6-sol");
+  const response = await f.request(`/v1/workspaces/${f.grant.workspaceId}/sessions`, {
+    model: "codex/gpt-6-sol",
+    initialMessage: "Test API subscription selection",
+    visibility: "workspace",
+    tools: [],
+  });
+  expect(response.status).toBe(202);
+  expect((await response.json()).model).toBe("codex/gpt-6-sol");
 }, 180_000);
 
 test("PG: a workspace's own list only narrows its organization's, in list, create and settings", async () => {

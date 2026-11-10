@@ -8,6 +8,7 @@ import {
   isPersonalGitHubConnection,
   PersonalGitHubConnectionMetadata,
 } from "@opengeni/contracts/personal-github";
+import { personalGitHubRepositoryAuthority } from "@opengeni/core";
 import {
   getConnectionMetadata,
   getPersonalGitHubRepositorySelectionState,
@@ -138,31 +139,27 @@ export function buildPersonalGitHubGitCredentials(
     });
     if (
       !currentSelection ||
-      currentSelection.connectionAuthorityGeneration !== snapshot.connectionAuthorityGeneration ||
-      currentSelection.selectionGeneration !== snapshot.selectionGeneration ||
       currentSelection.credentialBindingId !== snapshot.credentialBindingId ||
-      currentSelection.credentialBindingId !== metadata.credentialBindingId ||
-      currentSelection.providerPrincipalId !== metadata.providerPrincipalId ||
-      metadata.githubUserId !== metadata.providerPrincipalId
+      currentSelection.credentialBindingId !== metadata.credentialBindingId
     ) {
       throw new Error("personal GitHub repository authority changed");
     }
-    const currentById = new Map(
-      currentSelection.repositories.map((repository) => [repository.repositoryId, repository]),
-    );
+    // The shared Your GitHub allowlist decision (All my repositories or the
+    // saved list). The Git broker also asks GitHub on every Git request.
     for (const repository of repositories) {
-      const current = currentById.get(repository.repositoryId);
+      const decision = personalGitHubRepositoryAuthority({
+        current: currentSelection,
+        metadata,
+        accepted: snapshot,
+        repository: { repositoryId: repository.repositoryId, fullName: repository.fullName },
+        access: repository.access,
+      });
       if (
-        !current ||
-        current.fullName !== repository.fullName ||
-        current.canonicalUrl !== repository.canonicalUrl ||
-        current.selectionGeneration !== repository.selectionGeneration ||
-        current.disabled ||
-        (repository.access === "write" &&
-          (current.selectedAccess !== "write" ||
-            current.archived ||
-            !personalGitHubCanWrite(current.permissions))) ||
-        !personalGitHubCanRead(current.permissions)
+        !decision.allowed ||
+        (decision.mode === "selected" &&
+          (decision.selected.fullName !== repository.fullName ||
+            decision.selected.canonicalUrl !== repository.canonicalUrl ||
+            decision.selected.selectionGeneration !== repository.selectionGeneration))
       ) {
         throw new Error("personal GitHub repository authority changed");
       }
@@ -231,30 +228,6 @@ export function buildPersonalGitHubGitCredentials(
       },
     };
   };
-}
-
-function personalGitHubCanRead(permissions: {
-  pull: boolean;
-  triage: boolean;
-  push: boolean;
-  maintain: boolean;
-  admin: boolean;
-}): boolean {
-  return (
-    permissions.pull ||
-    permissions.triage ||
-    permissions.push ||
-    permissions.maintain ||
-    permissions.admin
-  );
-}
-
-function personalGitHubCanWrite(permissions: {
-  push: boolean;
-  maintain: boolean;
-  admin: boolean;
-}): boolean {
-  return permissions.push || permissions.maintain || permissions.admin;
 }
 
 let cachedDockerBridgeGateway: string | null | undefined;

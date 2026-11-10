@@ -1,5 +1,9 @@
 import { permissionSetCovers } from "@opengeni/contracts/personal-integration-setup";
-import { Permission } from "@opengeni/contracts";
+import {
+  Permission,
+  WORKSPACE_ADMIN_ROLE_PERMISSIONS,
+  workspaceAdminDelegates,
+} from "@opengeni/contracts";
 import { organizationAdministrationAccountIds } from "../../organization-model";
 
 import type { AccessContext } from "../types";
@@ -108,28 +112,18 @@ export function apiKeyPermissionGroups(): PermissionGroup[] {
   return cachedApiKeyPermissionGroups;
 }
 
-// Mirrors the API's ensureDelegablePermissions: workspace:admin delegates most
-// workspace scopes, but high-trust scopes require literal grants in the right
-// authority (workspace or organization). Other grants delegate only themselves.
+// The API's ensureDelegablePermissions rule (shared through contracts):
+// workspace:admin delegates most workspace scopes, but high-trust scopes require
+// literal grants in the right authority (workspace or organization). Other
+// grants delegate only themselves.
 export function delegableApiKeyPermissions(
   grantPermissions: readonly string[],
   accountGrantPermissions: readonly string[] = [],
 ): Set<string> {
   if (grantPermissions.includes("workspace:admin")) {
-    const accountLiteralPermissions = new Set<string>([
-      "account:read",
-      "account:admin",
-      "workspace:create",
-      "billing:read",
-      "billing:manage",
-    ]);
-    const workspaceLiteralPermissions = new Set<string>(["members:manage", "secrets:read"]);
     return new Set<string>(
-      Permission.options.filter(
-        (permission) =>
-          (!accountLiteralPermissions.has(permission) ||
-            accountGrantPermissions.includes(permission)) &&
-          (!workspaceLiteralPermissions.has(permission) || grantPermissions.includes(permission)),
+      Permission.options.filter((permission) =>
+        workspaceAdminDelegates(grantPermissions, accountGrantPermissions, permission),
       ),
     );
   }
@@ -310,42 +304,10 @@ export const workspaceAccessLevels: ReadonlyArray<WorkspaceAccessLevelDefinition
     role: "admin",
     label: "Workspace admin",
     description: "Can manage shared workspace settings, access, and integrations.",
-    permissions: [
-      "workspace:read",
-      "workspace:admin",
-      "members:manage",
-      "sessions:create",
-      "sessions:read",
-      "sessions:control",
-      "stream:view",
-      "stream:control",
-      "stream:acknowledge",
-      "terminal:attach",
-      "codemode:call",
-      "files:upload",
-      "files:read",
-      "files:write",
-      "documents:manage",
-      "documents:search",
-      "scheduled_tasks:manage",
-      "scheduled_tasks:run",
-      "github:manage",
-      "github:use",
-      "api_keys:manage",
-      "connections:read",
-      "connections:write",
-      "secrets:list",
-      "secrets:write",
-      "secrets:use",
-      "mcp_servers:attach",
-      "goals:manage",
-      "rigs:use",
-      "rigs:manage",
-      "enrollments:read",
-      "enrollments:manage",
-      "artifacts:read",
-      "artifacts:publish",
-    ],
+    // A getter, never a module-scope read of contracts (chunk evaluation order).
+    get permissions() {
+      return WORKSPACE_ADMIN_ROLE_PERMISSIONS;
+    },
   },
 ];
 

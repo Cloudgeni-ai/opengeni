@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test";
+import type { ChatClient } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   beginDriveConnect,
@@ -38,7 +39,7 @@ function fixture() {
   const client = {
     beginConnect,
     connectTransport: () => ({ advance: advanceConnectAttempt, get: getConnectAttempt }),
-  } as unknown as OpenGeniBrowserClient;
+  } as unknown as ChatClient<OpenGeniBrowserClient>;
   return {
     storage,
     values,

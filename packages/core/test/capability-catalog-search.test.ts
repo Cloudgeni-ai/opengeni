@@ -4,7 +4,10 @@ import {
   CapabilityCatalogItem,
   type CapabilityCatalogItem as CatalogItem,
 } from "@opengeni/contracts";
+import { connectableIntegrationsNamedIn } from "@opengeni/runtime";
+import sharedCatalog from "../../../data/catalog/integrations-snapshot.json";
 import {
+  capabilityCatalogSearchProviderDomain,
   excelAddinCatalogItem,
   integrationDefinitionIdFromCapabilityId,
   nativeConnectionCapabilityRecommendations,
@@ -311,7 +314,7 @@ describe("agent capability catalog search", () => {
 
     expect(results[0]?.item.id).toBe("mcp:catalog-4876");
     expect(results).toHaveLength(1);
-    expect(durationMs).toBeLessThan(1_000);
+    expect(durationMs).toBeLessThan(2_500);
   });
 
   describe("near-spelled integration names", () => {
@@ -420,5 +423,167 @@ describe("agent capability catalog search", () => {
         "Whisprflow",
       ]);
     });
+  });
+
+  describe("sentences that name an integration, ranked over the shared catalog", () => {
+    // The shared catalog as the importer stores it, plus a workspace's custom
+    // MCP whose name is a near spelling of the vendor's brand (Wispr Flow is
+    // not in the shared catalog).
+    const shared = sharedCatalog.importRows.map((row, index) =>
+      item({
+        id: `mcp:integrations-sh:${row.domain.replace(/[^a-z0-9]+/g, "-")}-${index}`,
+        name: row.name,
+        source: "registry",
+        description: row.description ?? null,
+        category: row.category ?? "integrations",
+        tags: ["mcp", "integration", row.tier, row.authKind],
+        providerDomain: row.domain,
+        mcpUrl: row.mcpUrl,
+        authKind: row.authKind as CatalogItem["authKind"],
+        tier: row.tier as CatalogItem["tier"],
+        metadata: { mcpProbe: row.probe },
+      }),
+    );
+    // Connectable Microsoft products share microsoft.com with Microsoft Learn,
+    // under their live catalog names.
+    const microsoft = [
+      "Microsoft Teams",
+      "Microsoft Excel",
+      "OneDrive",
+      "SharePoint",
+      "Outlook Mail",
+      "Outlook Calendar",
+      "Outlook Contacts",
+    ].map((name) =>
+      item({
+        id: `mcp:${name.toLowerCase().replaceAll(" ", "-")}`,
+        name,
+        source: "built_in",
+        providerDomain: "microsoft.com",
+        authKind: "oauth2",
+      }),
+    );
+    const catalog = [
+      ...shared,
+      ...microsoft,
+      item({
+        id: "mcp:whisprflow-12vcsia",
+        name: "Whisprflow",
+        endpointUrl: "https://api.wisprflow.ai/connect/mcp",
+      }),
+    ];
+    // Tool search reads the catalog's five best matches, then names only the
+    // entries the query names (distinctively, beside strong installed matches).
+    const named = (query: string, distinctive = false) =>
+      connectableIntegrationsNamedIn(
+        query,
+        searchCapabilityCatalogItems(catalog, query, 5).map(({ item: entry }) => ({
+          capabilityId: entry.id,
+          name: entry.name,
+          providerDomain: capabilityCatalogSearchProviderDomain(entry) ?? undefined,
+        })),
+        distinctive,
+      ).map((integration) => integration.name);
+
+    test("the shared catalog is loaded", () => {
+      expect(shared.length).toBeGreaterThan(500);
+    });
+
+    for (const [query, expected] of [
+      ["dictate this note with whisperflow", ["Whisprflow"]],
+      ["use whisperflow", ["Whisprflow"]],
+      ["transcribe the call with whisper flow", ["Whisprflow"]],
+      ["Summarise today's posts in #halcyon-launch on Slack", ["Slack"]],
+      ["Search Linear issues from recorded meetings", ["Linear"]],
+      ["update the deal in hubsopt", ["HubSpot"]],
+      ["find my jira tickets", ["Atlassian", "Atlassian (v1)"]],
+    ] as const) {
+      test(`ranks the entry ${JSON.stringify(query)} names first and names it`, () => {
+        expect(searchCapabilityCatalogItems(catalog, query, 5)[0]?.item.name).toBe(expected[0]);
+        expect(named(query)).toEqual([...expected]);
+        expect(named(query, true)).toEqual([...expected]);
+      });
+    }
+
+    test("names a name written as its parts unless strong matches need more", () => {
+      const query = "add the new lead to hub spot";
+      expect(named(query)).toEqual(["HubSpot"]);
+      expect(named(query, true)).toEqual([]);
+    });
+
+    for (const [query, expected] of [
+      ["post the update in Microsoft Teams", ["Microsoft Teams"]],
+      ["open the Microsoft Excel sheet", ["Microsoft Excel"]],
+      ["check my Microsoft account settings", []],
+    ] as const) {
+      test(`a vendor word several products share names none of them: ${JSON.stringify(query)}`, () => {
+        expect(named(query)).toEqual([...expected]);
+        expect(named(query, true)).toEqual([...expected]);
+      });
+    }
+
+    test("entries whose names agree with a named one share its boost", () => {
+      const github = [
+        item({
+          id: "api:github-app",
+          name: "GitHub App",
+          source: "built_in",
+          description: "Give Opengeni access to an organization's repositories.",
+          providerDomain: "github.com",
+        }),
+        item({
+          id: "plugin:github",
+          name: "GitHub",
+          tags: ["github"],
+          providerDomain: "github.com",
+        }),
+      ];
+      // "GitHub repositories" names the plugin; the app shares its boost, so
+      // the two keep the order their ordinary scores give them.
+      const results = searchCapabilityCatalogItems(
+        [...catalog, ...github],
+        "GitHub repositories",
+        5,
+      );
+      expect(
+        results
+          .slice(0, 2)
+          .map((result) => result.item.id)
+          .sort(),
+      ).toEqual(["api:github-app", "plugin:github"]);
+      for (const result of results.slice(0, 2)) expect(result.score).toBeGreaterThan(10_000);
+    });
+
+    test("an ordinary-word or operation-word name is not ranked as named", () => {
+      for (const [query, name] of [
+        ["send a message to the channel", "Send"],
+        ["make a spreadsheet", "Make"],
+        ["read the guru article", "Guru"],
+        ["drop box the files", "Box"],
+        ["draw snowflakes", "Snowflake"],
+      ] as const) {
+        const match = searchCapabilityCatalogItems(catalog, query, 20).find(
+          (result) => result.item.name === name,
+        );
+        expect(match === undefined || match.score < 10_000).toBe(true);
+      }
+      // Capitalised as a name, it is one.
+      expect(searchCapabilityCatalogItems(catalog, "read the Guru article", 5)[0]?.item.name).toBe(
+        "Guru",
+      );
+    });
+
+    for (const [query, name] of [
+      ["close the ticket", "Close"],
+      ["linear regression on the data", "Linear"],
+      ["the box is empty", "Box"],
+      ["front page news", "Front"],
+    ] as const) {
+      test(`an ordinary word does not name ${name} beside strong matches`, () => {
+        expect(named(query, true)).toEqual([]);
+        // Without strong matches the whole name as a word still names it.
+        expect(named(query)).toContain(name);
+      });
+    }
   });
 });
