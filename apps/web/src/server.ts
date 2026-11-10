@@ -160,6 +160,12 @@ export function createWebHandler(
   const renderedPages = new Map<string, Promise<RenderedPage>>();
   const contentSecurity = options.contentSecurity;
   const currentSources = () => contentSecurity?.current() ?? null;
+  // The frame host's own policy must leave agent HTML unrestricted (only
+  // `sandbox` and `frame-ancestors`), so the console origin serves it only
+  // when no Sites frame host exists. With one, this path is the SPA shell under
+  // the strict policy; a tab opened before a Sites domain was configured
+  // needs a reload to use it.
+  const sameOriginFrameHost = () => !currentSources()?.htmlFrameHost;
 
   return async function webHandler(request: Request): Promise<Response> {
     const response = await routeRequest(request);
@@ -175,11 +181,10 @@ export function createWebHandler(
     // The first page waits for the deployment's sources (bounded by the
     // loader's own timeout), so it gets the deployment's policy.
     if (contentSecurity?.ready) await contentSecurity.ready;
-    // Always served (it is inert), so frames rendered before a frame-host
-    // configuration change keep working.
     if (
       url.pathname === SAME_ORIGIN_HTML_FRAME_HOST_PATH &&
-      (request.method === "GET" || request.method === "HEAD")
+      (request.method === "GET" || request.method === "HEAD") &&
+      sameOriginFrameHost()
     ) {
       const frame = withShellSecurityHeaders(
         url.pathname,

@@ -2136,8 +2136,9 @@ console) does not run under the console policy: it renders in an
 opaque-origin sandboxed frame of the HTML frame host page
 (`/_og/html-frame`), which the Sites gateway serves on `og.<sites domain>`
 (deploy the gateway with or before a web release that uses it) and the web
-server always serves on the console origin as well (used when there is no
-Sites domain). Both frame hosts may be framed by the console and by Office's
+server serves on the console origin only when there is no Sites domain (its
+policy cannot restrict the agent's HTML, so a deployment with a Sites domain
+keeps every console page under the strict policy). Both frame hosts may be framed by the console and by Office's
 hosts. Images from hosts the policy does not list load through the API's
 signed-in image proxy `GET /v1/image-proxy?url=`: public HTTPS images only,
 SSRF-checked on every redirect, magic-byte sniffed (SVG is served with

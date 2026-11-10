@@ -191,24 +191,27 @@ describe("console Content-Security-Policy", () => {
     expect(contentHostingFor(null, undefined).htmlFrameHost).toBe("self");
   });
 
-  test("the console always serves its same-origin frame host, framable inside Office", async () => {
-    // Served whether or not a Sites frame host is configured, so open tabs
-    // keep working when the configuration changes under them.
-    for (const sources of [{ ...PRODUCTION_SOURCES, htmlFrameHost: null }, PRODUCTION_SOURCES]) {
-      const handler = await served(sources);
-      const frame = await handler(
-        new Request("https://app.opengeni.ai/_og/html-frame?parent=https%3A%2F%2Fapp.opengeni.ai"),
-      );
-      expect(frame.status).toBe(200);
-      const policy = frame.headers.get("content-security-policy")!;
-      expect(policy).toStartWith("sandbox ");
-      expect(policy).not.toContain("allow-same-origin");
-      expect(directives(policy).get("frame-ancestors")).toEqual([
-        "'self'",
-        ...OFFICE_FRAME_ANCESTOR_ORIGINS,
-      ]);
-      expect(frame.headers.get("x-frame-options")).toBeNull();
-    }
+  test("without a Sites domain the console serves the same-origin frame host, framable inside Office", async () => {
+    const handler = await served({ ...PRODUCTION_SOURCES, htmlFrameHost: null });
+    const frame = await handler(
+      new Request("https://app.opengeni.ai/_og/html-frame?parent=https%3A%2F%2Fapp.opengeni.ai"),
+    );
+    expect(frame.status).toBe(200);
+    const policy = frame.headers.get("content-security-policy")!;
+    expect(policy).toStartWith("sandbox ");
+    expect(policy).not.toContain("allow-same-origin");
+    expect(directives(policy).get("frame-ancestors")).toEqual([
+      "'self'",
+      ...OFFICE_FRAME_ANCESTOR_ORIGINS,
+    ]);
+    expect(frame.headers.get("x-frame-options")).toBeNull();
+    // With a Sites frame host the console origin serves no page whose policy
+    // leaves scripts unrestricted: the path is the SPA under the strict policy.
+    const withSites = await served(PRODUCTION_SOURCES);
+    const spa = await withSites(new Request("https://app.opengeni.ai/_og/html-frame"));
+    expect(directives(spa.headers.get("content-security-policy")!).get("default-src")).toEqual([
+      "'self'",
+    ]);
   });
 
   test("styles: a fresh nonce per response, no 'unsafe-inline' for elements", async () => {
