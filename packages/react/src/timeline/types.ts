@@ -716,6 +716,12 @@ export type TurnEndItem = {
   failureText: string | null;
   /** The recorded diagnostic text `failureText` replaced, for a Details disclosure. */
   failureDetail?: string;
+  /**
+   * The failure has its own row (its notice, a compaction landmark or a
+   * usage-limit row). That row then stands for the attempt once a Retry
+   * replaces it, so no "retried" step repeats it.
+   */
+  ownRow?: true;
   occurredAt: string;
 };
 

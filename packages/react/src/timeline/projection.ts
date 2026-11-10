@@ -282,6 +282,25 @@ export function buildTimeline(
   // Failure notices of turns that failed before any work, by turn. A Retry
   // turns them into quiet "retried" steps, like a failed attempt with work.
   const noWorkFailureNotices = new Map<string, NoticeItem[]>();
+  // The notices a Retry made quiet, by turn, so a refused Retry can undo it.
+  const retriedNoticesByTurn = new Map<string, NoticeItem[]>();
+  // A Retry refused before it started (a failed status with nothing of the
+  // turn since the Retry reopened it) never replaced the attempt: the failure
+  // stays the turn's outcome.
+  const revertRefusedRetry = (turnId: string) => {
+    let index = items.length - 1;
+    for (; index >= 0; index -= 1) {
+      const item = items[index]!;
+      if ("turnId" in item && item.turnId === turnId) break;
+    }
+    const last = items[index];
+    if (last?.kind !== "turn-end" || last.outcome !== "failed" || !last.resumedAt) return;
+    delete last.resumedAt;
+    const notices = retriedNoticesByTurn.get(turnId) ?? [];
+    for (const notice of notices) delete notice.retriedAttempt;
+    retriedNoticesByTurn.delete(turnId);
+    if (notices.length > 0) noWorkFailureNotices.set(turnId, notices);
+  };
   let presentationTurnId: string | null = null;
   const rememberPresentationWait = (
     item: NoticeItem | SessionStatusItem,
@@ -1314,6 +1333,7 @@ export function buildTimeline(
         }
         const blocked = status === "requires_action" && payload.code === "admission_blocked";
         const archived = sessionStatusChangeIsArchive(payload);
+        if (status === "failed" && turnId) revertRefusedRetry(turnId);
         if (!blocked && openAdmissionBlocks.length > 0) {
           for (const open of openAdmissionBlocks) open.resolvedAt = event.occurredAt;
           openAdmissionBlocks = [];
@@ -1655,6 +1675,7 @@ export function buildTimeline(
             for (const notice of noWorkFailureNotices.get(turnId) ?? []) {
               notice.retriedAttempt = true;
             }
+            retriedNoticesByTurn.set(turnId, noWorkFailureNotices.get(turnId) ?? []);
             noWorkFailureNotices.delete(turnId);
           }
         }
@@ -1923,7 +1944,8 @@ export function buildTimeline(
                   : t("timeline.projection.theTurnStoppedUnexpectedly")
                 : null,
             );
-        items.push(turnEndItem(event, "failed", failure?.summary ?? failureText, failure?.detail));
+        const end = turnEndItem(event, "failed", failure?.summary ?? failureText, failure?.detail);
+        items.push(end);
         // A "failed" status recorded just before this event repeats it.
         {
           const key = turnId ?? presentationTurnId;
@@ -1961,6 +1983,7 @@ export function buildTimeline(
         }
         if (allowance) {
           allowanceNotice(event, turnId);
+          end.ownRow = true;
         } else if (!hadActivity && !landmark) {
           const notice: NoticeItem = {
             kind: "notice",
@@ -1973,9 +1996,10 @@ export function buildTimeline(
             occurredAt: event.occurredAt,
           };
           items.push(notice);
+          end.ownRow = true;
           if (turnId !== null)
             noWorkFailureNotices.set(turnId, [...(noWorkFailureNotices.get(turnId) ?? []), notice]);
-        }
+        } else if (landmark) end.ownRow = true;
         break;
       }
 
@@ -3024,14 +3048,8 @@ export function groupTimeline(
         : [],
     ),
   );
-  // Where each turn's last settlement or step is: an attempt a Retry replaced
-  // folds with the attempt that followed it only when one did.
-  const lastOfTurn = new Map<string, number>();
-  items.forEach((item, index) => {
-    if ((item.kind === "turn-end" || isActivityItem(item)) && item.turnId !== null)
-      lastOfTurn.set(item.turnId, index);
-  });
-  for (const [index, item] of items.entries()) {
+  const replaced = replacedAttemptEnds(items);
+  for (const item of items) {
     // A recovered capacity wait is over; it leaves no warning behind.
     if (item.kind === "notice" && item.capacityWait && item.resolvedAt) continue;
     if (isActivityItem(item)) {
@@ -3050,26 +3068,12 @@ export function groupTimeline(
     if (item.kind === "turn-end") {
       const ownNotice =
         item.outcome === "failed" && failureNoticeIds.has(item.id.replace(/-turn-end$/, ""));
-      // An attempt a Retry replaced, followed by more of the same turn, is one
-      // quiet step; the turn's final settlement folds both attempts together.
-      // Its own steps keep its own outcome.
-      if (
-        item.resumedAt &&
-        item.outcome === "failed" &&
-        item.turnId !== null &&
-        (lastOfTurn.get(item.turnId) ?? -1) > index
-      ) {
-        const hadWork = groups.some(
-          (group) =>
-            group.kind === "activity" &&
-            group.outcome === undefined &&
-            group.items.some((activity) => activity.turnId === item.turnId),
-        );
+      // An attempt a Retry replaced is one quiet step; the turn's final
+      // settlement folds both attempts together. Its own steps keep its own
+      // outcome, and a failure with its own row needs no second step.
+      if (replaced.has(item.id)) {
         stampTurnOutcome(groups, item);
-        // Without work, the failure's own row (its notice, a compaction
-        // landmark or a usage-limit row) is already that step.
-        if (hadWork && !ownNotice)
-          groups.push({ kind: "item", item: retriedAttemptNotice(t, item) });
+        if (!item.ownRow) groups.push({ kind: "item", item: retriedAttemptNotice(t, item) });
         continue;
       }
       const settled = ownNotice ? withoutFailureText(item) : item;
@@ -3090,24 +3094,37 @@ function withoutPresentedFailureText(
 ): TimelineItem[] {
   const ids = new Set(eventIds);
   const turnEnds = new Set(eventIds.map((id) => `${id}-turn-end`));
+  // An attempt a Retry really replaced keeps its own text on its quiet step.
+  const replaced = replacedAttemptEnds(items);
   return items.flatMap((item): TimelineItem[] => {
     if (
       item.kind === "notice" &&
       item.tone === "failed" &&
       ids.has(item.id) &&
-      !item.retriedAttempt &&
+      !(item.retriedAttempt && replaced.has(`${item.id}-turn-end`)) &&
       !item.allowance &&
       !item.sessionUsageLimit &&
       !item.learningRefusal
     )
       return [];
     if (item.kind === "turn-end" && item.outcome === "failed" && turnEnds.has(item.id)) {
-      // A retried attempt keeps its own text on its quiet step.
-      if (item.resumedAt) return [item];
+      if (replaced.has(item.id)) return [item];
       return [withoutFailureText(item)];
     }
     return [item];
   });
+}
+
+/**
+ * Failed settlements of attempts a Retry replaced (`resumedAt`). A Retry
+ * refused before it started is no replacement: `buildTimeline` reverts it.
+ */
+function replacedAttemptEnds(items: readonly TimelineItem[]): Set<string> {
+  const replaced = new Set<string>();
+  for (const item of items)
+    if (item.kind === "turn-end" && item.outcome === "failed" && item.resumedAt)
+      replaced.add(item.id);
+  return replaced;
 }
 
 /** A failed settlement that keeps its outcome but leaves its text to another row. */
@@ -3140,6 +3157,8 @@ function groupReadableTurns(
   type Work = Extract<TimelineGroup, { kind: "activity" }>;
   let groups: TimelineGroup[] = [];
   const turns = new Map<string, Work>();
+  // Attempts a Retry replaced; a Retry that never ran leaves the turn's outcome.
+  const replaced = replacedAttemptEnds(items);
   // Turn identity and settlement exist even when a final-only turn has no
   // disclosure. A late receipt must not become a new turn or revive its clock.
   const seenTurns = new Set<string>();
@@ -3287,10 +3306,11 @@ function groupReadableTurns(
       }
     } else if (item.kind === "turn-end") {
       if (item.handedOver) handedOverTurns.add(key);
-      if (item.resumedAt) {
+      const retried = Boolean(item.resumedAt) && replaced.has(item.id);
+      if (retried) {
         idleSpans.set(key, [
           ...(idleSpans.get(key) ?? []),
-          { startedAt: item.occurredAt, endedAt: item.resumedAt },
+          { startedAt: item.occurredAt, endedAt: item.resumedAt! },
         ]);
       } else {
         settlements.set(key, {
@@ -3302,11 +3322,11 @@ function groupReadableTurns(
       }
       const group = turns.get(key);
       if (group?.work) {
-        if (item.resumedAt) {
-          group.work.details.push({
-            kind: "item",
-            item: retriedAttemptNotice(t, item),
-          });
+        if (retried) {
+          // A failure with its own row (a compaction landmark or usage-limit
+          // row) already stands for the attempt.
+          if (!item.ownRow)
+            group.work.details.push({ kind: "item", item: retriedAttemptNotice(t, item) });
           continue;
         }
         group.outcome = item.outcome;

@@ -335,6 +335,83 @@ describe("the non-rolling timeline", () => {
     expect(clusters).toHaveLength(2);
     expect(JSON.stringify(clusters[0])).not.toContain(second);
   });
+
+  test("an attempt with work whose failure has its own usage-limit row gets no retried step", () => {
+    sequence = 0;
+    const limit = () =>
+      event("turn.failed", {
+        error: "Usage allowance exhausted",
+        code: "allowance_exhausted",
+        message: "Usage allowance exhausted",
+        scope: "workspace",
+        resetsAt: "2026-11-11T00:00:00.000Z",
+      });
+    const events = [
+      event("user.message", { text: "Go" }, null),
+      event("turn.started", {}),
+      event("agent.toolCall.created", { id: "a", name: "exec_command", arguments: {} }),
+      event("agent.toolCall.output", { id: "a", output: "ok" }),
+      limit(),
+      event("turn.recovery.requested", { reason: "human_retry" }),
+      event("agent.toolCall.created", { id: "b", name: "exec_command", arguments: {} }),
+      event("agent.toolCall.output", { id: "b", output: "ok" }),
+      event("turn.completed", { output: "" }),
+    ];
+    for (const readableTurns of [true, false]) {
+      const notices = flatten(groupTimeline(t, buildTimeline(t, events), { readableTurns }));
+      expect(notices.filter((item) => item.kind === "notice" && item.retriedAttempt)).toEqual([]);
+      expect(notices.some((item) => item.kind === "notice" && item.allowance)).toBe(true);
+    }
+  });
+
+  test("an attempt that failed before any work after an earlier attempt's work keeps a step", () => {
+    sequence = 0;
+    const work = (id: string) => [
+      event("agent.toolCall.created", { id, name: "exec_command", arguments: {} }),
+      event("agent.toolCall.output", { id, output: "ok" }),
+    ];
+    const events = [
+      event("user.message", { text: "Go" }, null),
+      event("turn.started", {}),
+      ...work("a"),
+      event("turn.failed", { error: "FIRST" }),
+      event("turn.recovery.requested", { reason: "human_retry" }),
+      event("turn.failed", { error: "SECOND" }),
+      event("turn.recovery.requested", { reason: "human_retry" }),
+      ...work("b"),
+      event("turn.completed", { output: "" }),
+    ];
+    for (const readableTurns of [true, false]) {
+      const retried = flatten(groupTimeline(t, buildTimeline(t, events), { readableTurns })).filter(
+        (item) => item.kind === "notice" && item.retriedAttempt,
+      );
+      expect(
+        retried.map((item) => (item.kind === "notice" ? item.details?.value : undefined)),
+      ).toEqual(["FIRST", "SECOND"]);
+    }
+  });
+
+  test("a Retry that never ran leaves the failure as the turn's outcome, shown once", () => {
+    sequence = 0;
+    const events = [
+      event("user.message", { text: "Go" }, null),
+      ...attempt(),
+      ...failure(),
+      event("turn.recovery.requested", { reason: "human_retry" }),
+      event("session.status.changed", { status: "failed", code: "pre_claim_failure" }),
+    ];
+    const failureId = events.filter((e) => e.type === "turn.failed").at(-1)!.id;
+    for (const readableTurns of [true, false]) {
+      const groups = groupTimeline(t, buildTimeline(t, events), {
+        readableTurns,
+        presentedFailureEventIds: [failureId],
+      });
+      expect(JSON.stringify(groups)).not.toContain(ERROR);
+      expect(flatten(groups).some((item) => item.kind === "notice" && item.retriedAttempt)).toBe(
+        false,
+      );
+    }
+  });
 });
 
 describe("the rendered timeline (web and the desktop app)", () => {
