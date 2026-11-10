@@ -57,6 +57,13 @@ An env file exporting `F598_AZURE_OPENAI_API_KEY` / `F598_AZURE_OPENAI_BASE_URL`
 (the secrets-overhaul localstack `keys/cloud.env`) maps onto the built-in Azure
 provider; pass the deployment names, for example `--model gpt-6-sol --judge-model gpt-6-sol`.
 
+To run another Gateway model as the agent, add a `gatewayModels` entry to
+`OPENGENI_MANAGED_MODELS_JSON` whose `productId` contains a `/` (for example
+`eval/claude-sonnet-5.5` for upstream `anthropic/claude-sonnet-5.5`), list it in
+`OPENGENI_GATEWAY_MODELS`, give it a price in `OPENGENI_MODEL_PRICING_JSON` when the
+code catalog has none, and pass `--model eval/claude-sonnet-5.5`. With only a Gateway
+key, `--judge-model` takes the Gateway's upstream id (for example `anthropic/claude-opus-5.5`).
+
 Behind a TLS-intercepting proxy, run with the proxy variables unset
 (`env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy …`) or make sure
 `NODE_EXTRA_CA_CERTS` points at the proxy CA; the harness appends its own

@@ -8,14 +8,15 @@ import { dirname, join, resolve } from "node:path";
  * with `--no-env-file`), so the eval reads ONE explicit env file and copies only
  * the model-provider keys into the settings it builds. Values are never logged.
  * The Vercel AI Gateway rail is accepted too (OPENGENI_VERCEL_AI_GATEWAY_API_KEY,
- * OPENGENI_GATEWAY_MODELS, OPENGENI_MANAGED_MODELS_JSON); a bare
+ * OPENGENI_GATEWAY_MODELS, OPENGENI_MANAGED_MODELS_JSON, plus OPENGENI_MODEL_PRICING_JSON
+ * for a catalog entry without a reviewed price); a bare
  * VERCEL_AI_GATEWAY_API_KEY (the shell-export form) maps onto the OPENGENI_ name.
  * The localstack Azure pair (F598_AZURE_OPENAI_API_KEY / _BASE_URL, as exported by
  * the f598 keys/cloud.env) maps onto the built-in Azure provider names and selects
  * OPENGENI_OPENAI_PROVIDER=azure unless the file sets a provider itself.
  */
 const MODEL_ENV_KEY =
-  /^OPENGENI_((OPENAI|AZURE_OPENAI)_[A-Z0-9_]+|VERCEL_AI_GATEWAY_API_KEY|GATEWAY_MODELS|MANAGED_MODELS_JSON)$/u;
+  /^OPENGENI_((OPENAI|AZURE_OPENAI)_[A-Z0-9_]+|VERCEL_AI_GATEWAY_API_KEY|GATEWAY_MODELS|MANAGED_MODELS_JSON|MODEL_PRICING_JSON)$/u;
 const MODEL_ENV_ALIASES: Readonly<Record<string, string>> = {
   VERCEL_AI_GATEWAY_API_KEY: "OPENGENI_VERCEL_AI_GATEWAY_API_KEY",
   F598_AZURE_OPENAI_API_KEY: "OPENGENI_AZURE_OPENAI_API_KEY",

@@ -31,6 +31,8 @@ export type SessionObservation = {
   eventTypes: Record<string, number>;
   humanInputRequests: number;
   usage: UsageTotals;
+  /** `turn.failed` payloads (truncated), so a failed run shows why. */
+  turnFailures: string[];
   /** System prompt (instructions) size of the last captured model request, when captured. */
   systemPromptChars: number | null;
   /** Estimated instructions + tool-schema prefix tokens of the last captured request. */

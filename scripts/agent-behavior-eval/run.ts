@@ -219,7 +219,7 @@ function transcriptOf(observation: RunObservation): NonNullable<ScenarioRunResul
       })),
       availableTools: session.availableTools,
       driveStop: session.drive.stop,
-      driveErrors: session.drive.errors,
+      driveErrors: [...session.drive.errors, ...session.turnFailures],
     })),
   };
 }
