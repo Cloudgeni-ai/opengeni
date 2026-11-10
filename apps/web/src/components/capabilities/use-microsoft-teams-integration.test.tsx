@@ -513,3 +513,33 @@ test("a failed bot status stays visible with retry and recovers without reconnec
     await view.cleanup();
   }
 });
+
+test("the bot card is named after the deployment's Teams app, with Opengeni as the default", async () => {
+  window.history.replaceState(null, "", `/workspaces/${ws}/plugins`);
+  for (const [appName, expected] of [
+    ["Example Assistant", "Example Assistant"],
+    [undefined, "Opengeni"],
+  ] as const) {
+    prepare(async () => ({
+      enabled: true,
+      configured: true,
+      ...(appName ? { appName } : {}),
+      setupAvailable: true,
+      installation: { active: true, workspaceId: ws, tenantId: "tenant" },
+      linked: false,
+    }));
+    let adapter: ReturnType<typeof useTeamsBotIntegration> | undefined;
+    function Harness() {
+      adapter = useTeamsBotIntegration({ workspaceId: ws });
+      return adapter.dialogs;
+    }
+    const view = await render(<Harness />);
+    try {
+      expect(adapter?.model.name).toBe(expected);
+      const link = adapter?.model.options.find((option) => option.id === "teams-account-link");
+      expect(link?.kind === "link" ? link.description : undefined).toBe(`Message ${expected} in Teams to link your account.`);
+    } finally {
+      await view.cleanup();
+    }
+  }
+});
