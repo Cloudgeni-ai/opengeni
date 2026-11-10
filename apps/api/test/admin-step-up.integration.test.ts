@@ -279,6 +279,9 @@ describe("admin passkey step-up", () => {
     expect(await confirmed.json()).toEqual({ confirmed: true });
     expect((await rename(rt, owner.cookie, organization)).status).toBe(200);
     expect((await rename(rt, owner.cookie, organization)).status).toBe(200);
+    // A confirmed owner creates a personal key.
+    const key = await createPersonalKey(rt, owner.cookie, organization.id);
+    expect(key.status, await key.clone().text()).toBe(201);
 
     // The mark belongs to that session: the same person's other session is asked.
     const other = await passwordSession(rt, owner.userId);
@@ -424,9 +427,8 @@ describe("admin passkey step-up", () => {
     ).not.toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
 
     // A member's own personal key needs no confirmation either.
-    expect(await stepUpCode(await createPersonalKey(rt, member.cookie, organization.id))).not.toBe(
-      ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE,
-    );
+    const memberKey = await createPersonalKey(rt, member.cookie, organization.id);
+    expect(memberKey.status, await memberKey.clone().text()).toBe(201);
 
     await unconfirm(owner.userId);
     expect((await rename(runtime("off"), owner.cookie, organization)).status).toBe(200);
@@ -468,7 +470,7 @@ describe("admin passkey step-up", () => {
       "sec-fetch-site": "same-origin",
       authorization: "Bearer not-a-credential",
     });
-    expect(strayBearer.status).not.toBe(200);
+    expect(await stepUpCode(strayBearer)).toBe(ADMIN_PASSKEY_STEP_UP_REQUIRED_CODE);
     // Once created, a personal API key acts under its owner's authority and
     // isn't asked.
     const personalKey = await renameWith(`/v1/organizations/${organization.id}`, {

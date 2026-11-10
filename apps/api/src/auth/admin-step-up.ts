@@ -10,6 +10,7 @@ import {
 import { getConnectionMetadata, getWorkspace, withAccountRls } from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import type { Context, MiddlewareHandler } from "hono";
+import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
 import { managedPasskeySignInOffered } from "../routes/managed-passkeys";
 
@@ -244,10 +245,15 @@ async function billingAccountIds(c: Context, context: AccessContext): Promise<st
  * admin then is only an extra confirmation. No JSON body (the Slack bot
  * install takes none) names no person, so it is shared too.
  */
-export function createsSharedConnection(body: Record<string, unknown> | null): boolean {
+export function createsSharedConnection(
+  body: Record<string, unknown> | null,
+  ownSubjectId: string,
+): boolean {
   if (!body) return true;
   if (body.ownership === "personal" || body.ownership === "user") return false;
-  if (body.ownership === undefined && typeof body.subjectId === "string") return false;
+  // Named for themselves; one named for someone else is an admin act.
+  if (body.ownership === undefined && typeof body.subjectId === "string")
+    return body.subjectId !== ownSubjectId;
   return true;
 }
 
@@ -355,7 +361,10 @@ async function administers(
       return workspaceAdmin || accountIds.some((id) => organizationAdmin(access, id));
     }
     if (!workspace || workspace.kind === "personal") return false;
-    if (matched.route.shared === "created" && !createsSharedConnection(await jsonBody(c)))
+    if (
+      matched.route.shared === "created" &&
+      !createsSharedConnection(await jsonBody(c), context.subjectId)
+    )
       return false;
     if (
       matched.route.shared === "existing" &&
@@ -391,9 +400,11 @@ export function adminStepUpGuard(deps: ApiRouteDeps): MiddlewareHandler {
     let context: AccessContext;
     try {
       context = await requireAccessContext(c, deps);
-    } catch {
-      // Not signed in, or refused: the route answers that itself.
-      return await next();
+    } catch (error) {
+      // Not signed in, or refused: the route answers that itself (from the
+      // same memoized resolution). Anything else is not skipped.
+      if (error instanceof HTTPException) return await next();
+      throw error;
     }
     const person = stepUpPerson(context);
     if (!person || !(await administers(c, deps, context, person, matched))) return await next();

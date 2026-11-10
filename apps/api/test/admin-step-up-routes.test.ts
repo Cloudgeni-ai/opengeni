@@ -116,13 +116,15 @@ describe("admin step-up routes", () => {
     expect(existing?.route.shared).toBe("existing");
     expect(existing?.connectionId).toBe(CONNECTION_ID);
     // As the routes read it: shared unless it names the person as owner.
-    expect(createsSharedConnection({})).toBe(true);
-    expect(createsSharedConnection(null)).toBe(true);
-    expect(createsSharedConnection({ ownership: "workspace" })).toBe(true);
-    expect(createsSharedConnection({ ownership: "organization" })).toBe(true);
-    expect(createsSharedConnection({ subjectId: null })).toBe(true);
-    expect(createsSharedConnection({ ownership: "personal" })).toBe(false);
-    expect(createsSharedConnection({ ownership: "user" })).toBe(false);
-    expect(createsSharedConnection({ subjectId: "user:abc" })).toBe(false);
+    expect(createsSharedConnection({}, "user:abc")).toBe(true);
+    expect(createsSharedConnection(null, "user:abc")).toBe(true);
+    expect(createsSharedConnection({ ownership: "workspace" }, "user:abc")).toBe(true);
+    expect(createsSharedConnection({ ownership: "organization" }, "user:abc")).toBe(true);
+    expect(createsSharedConnection({ subjectId: null }, "user:abc")).toBe(true);
+    expect(createsSharedConnection({ ownership: "personal" }, "user:abc")).toBe(false);
+    expect(createsSharedConnection({ ownership: "user" }, "user:abc")).toBe(false);
+    expect(createsSharedConnection({ subjectId: "user:abc" }, "user:abc")).toBe(false);
+    // Named for someone else: an admin act.
+    expect(createsSharedConnection({ subjectId: "user:other" }, "user:abc")).toBe(true);
   });
 });
