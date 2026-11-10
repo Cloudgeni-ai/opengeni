@@ -28,10 +28,17 @@ share the overlap equally:
 
 1. human and capacity waits
 2. hosted web search
-3. model requests
-4. sandbox operations
-5. tool calls
-6. pre-dispatch work
+3. context compactions inside the turn
+4. model requests
+5. sandbox operations
+6. tool calls
+7. pre-dispatch work
+
+A compaction owns its whole interval, from `session.context.compaction.started`
+until the context was compacted or the compaction was skipped, including its
+own model call: not every provider path audits that call as a model request,
+and without its own category it would show up as the gap after the tool call
+that preceded it.
 
 Time no step covers is named by what came before it. The segments are whole
 milliseconds that always add up to `wall_ms` exactly.
@@ -46,6 +53,7 @@ milliseconds that always add up to `wall_ms` exactly.
 | `model_network_ms` | The rest of a request with server timing: transport and streaming. |
 | `model_unsplit_ms` | Model requests whose provider sent no server timing. |
 | `model_stalled_ms` | Failed, timed-out or unfinished model requests. |
+| `compaction_ms` | Compacting the conversation's context inside the turn, its model call included (version 2 on). |
 | `web_search_ms` | Hosted web search calls. |
 | `mcp_tool_ms` | Remote MCP tool calls (connected integrations and custom MCP servers). |
 | `sandbox_tool_ms` | Shell, file patch and code mode tools. |

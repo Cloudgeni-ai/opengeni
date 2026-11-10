@@ -26,6 +26,7 @@ const FIXTURES = [
   "responses-mcp-tools",
   "capacity-wait-recovery",
   "messages-provider-no-server-timing",
+  "messages-in-turn-compaction",
 ] as const;
 
 let shared: SharedTestDatabase | null = null;

@@ -143,6 +143,8 @@ export function projectTurnTimingPayload(
     case "sandbox.operation.completed":
     case "sandbox.operation.failed":
       return pick(payload, ["name"]);
+    case "session.context.compaction.started":
+      return pick(payload, ["trigger"]);
     default:
       return {};
   }

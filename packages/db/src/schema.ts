@@ -10223,6 +10223,7 @@ export const turnTimingProfiles = pgTable(
     modelNetworkMs: bigint("model_network_ms", { mode: "number" }).notNull(),
     modelUnsplitMs: bigint("model_unsplit_ms", { mode: "number" }).notNull(),
     modelStalledMs: bigint("model_stalled_ms", { mode: "number" }).notNull(),
+    compactionMs: bigint("compaction_ms", { mode: "number" }).notNull().default(0),
     webSearchMs: bigint("web_search_ms", { mode: "number" }).notNull(),
     mcpToolMs: bigint("mcp_tool_ms", { mode: "number" }).notNull(),
     sandboxToolMs: bigint("sandbox_tool_ms", { mode: "number" }).notNull(),
