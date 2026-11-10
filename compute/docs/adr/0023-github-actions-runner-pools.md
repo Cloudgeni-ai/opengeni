@@ -112,6 +112,17 @@ delivery can be late or missed.
   failed refresh leaves the last good template in use. The clone's token
   is given to that one command, never written to the disk the template
   keeps.
+  A refresh outlives restarts of the control service, which come with
+  every release and cut every stream through it while sandboxes run on.
+  Each command runs under a tag and records in the guest's `/dev/shm`
+  (memory, never on the template's disk) that it started and then its
+  exit code. A cut stream is followed again by the tag, a command that
+  ended meanwhile ends as its record says, and only one that never
+  started is started again. A save cut short is found by its name or
+  asked again (a name is made once), and a create cut short is asked
+  again, any builder it made after all ended. So a restart costs the
+  refresh nothing; only what its commands did, or compute staying away
+  past the time they were given, fails it.
   The builder takes one of the pool's places, so the pool and its builder
   never hold more sandboxes than `--max` and a host sized for the pool is
   never asked for one more. It takes a place only while GitHub has

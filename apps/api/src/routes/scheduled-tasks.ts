@@ -267,6 +267,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       authorizationSurface: "http",
       verifySlackChannel: slackChannelVerifier(grant),
       eventSourceFetch: deps.eventSourceFetch,
+      githubPersonalFetch: deps.githubPersonalFetch,
     });
     await syncCreatedScheduledTask({ db, workflowClient, task });
     const [created] = await withScheduledTaskEvents(db, [task]);
@@ -429,6 +430,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       })
     ).settings;
     const update = await validatedScheduledTaskUpdate({
+      githubPersonalFetch: deps.githubPersonalFetch,
       settings: catalogSettings,
       db,
       objectStorage,
@@ -490,6 +492,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       })
     ).settings;
     const update = await validatedScheduledTaskUpdate({
+      githubPersonalFetch: deps.githubPersonalFetch,
       settings: catalogSettings,
       db,
       objectStorage,

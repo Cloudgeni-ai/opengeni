@@ -981,9 +981,7 @@ for (const width of [1280, 390]) {
         .waitFor();
       await startup.getByText("A little longer than usual…", { exact: true }).waitFor();
       await startup.getByRole("button", { name: "Behind the magic" }).click();
-      await page
-        .getByText("Your messages are saved. No agent turn is running yet.", { exact: true })
-        .waitFor();
+      await page.getByText("No agent turn is running yet.", { exact: true }).waitFor();
       await page
         .getByText("The start request was accepted; a worker has not started the turn yet.", {
           exact: true,
@@ -1000,7 +998,7 @@ for (const width of [1280, 390]) {
       await page.reload();
       await startup
         .getByRole("status")
-        .getByText("Unable to start yet. Your messages are saved.", { exact: true })
+        .getByText("Unable to start yet.", { exact: true })
         .waitFor();
       await startup.getByRole("button", { name: "Behind the magic" }).click();
       await page.getByText("3 dispatch attempts.", { exact: true }).waitFor();
@@ -1021,12 +1019,7 @@ for (const width of [1280, 390]) {
       await page.locator("header [data-status=running]:visible").waitFor();
       await transcript.getByText("Start this next step.", { exact: true }).waitFor();
       assert.equal(await page.locator("[data-og-startup-dispatch-details]").count(), 0);
-      assert.equal(
-        await page
-          .getByText("Unable to start yet. Your messages are saved.", { exact: true })
-          .count(),
-        0,
-      );
+      assert.equal(await page.getByText("Unable to start yet.", { exact: true }).count(), 0);
       await capture("running");
       state.turns = [
         {

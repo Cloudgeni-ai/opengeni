@@ -87,6 +87,31 @@ describe("sign-ins the person never came back from", () => {
     expect([...memory.values.values()][0]).not.toContain("signed-state");
   });
 
+  test("the remembered approval covers every service the server's link names", async () => {
+    const everyService =
+      "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=app-1" +
+      "&scope=https%3A%2F%2Fgraph.microsoft.com%2FMail.ReadWrite+https%3A%2F%2Fgraph.microsoft.com%2FCalendars.ReadWrite" +
+      "&redirect_uri=https%3A%2F%2Fapi.example.com%2Fv1%2Fintegrations%2Fprovider-oauth%2Fcallback" +
+      "&state=microsoft_admin_consent";
+    const memory = memoryStore();
+    const started = attemptFor({
+      nextAction: {
+        type: "authorize",
+        url: MICROSOFT_SIGN_IN,
+        organizationApprovalUrl: everyService,
+      },
+    });
+    rememberSignIn(memory, started);
+    const expired = attemptFor({ state: "expired", nextAction: { type: "none" } });
+    const approval = await unreturnedSignIn(
+      memory,
+      transportFor({ "attempt-1": expired }, expired),
+      "workspace",
+      "microsoft-outlook-mail",
+    );
+    expect(approval?.approvalUrl).toBe(everyService);
+  });
+
   test("an attempt still waiting, expired or stopped from this side never came back", async () => {
     for (const state of ["requires_user_action", "expired", "cancelled"] as const) {
       const memory = memoryStore();

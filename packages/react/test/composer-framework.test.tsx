@@ -787,9 +787,7 @@ describe("compound composer framework", () => {
       return null;
     }
     mounted = await renderComponent(<Harness canBuyCredits={false} />);
-    expect(seen.at(-1)).toBe(
-      "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
-    );
+    expect(seen.at(-1)).toBe("Ask an organization owner to add credits to use your own key.");
     await mounted.unmount();
     mounted = await renderComponent(<Harness canBuyCredits={undefined} />);
     expect(seen.at(-1)).toContain("Add credits to use your own key");

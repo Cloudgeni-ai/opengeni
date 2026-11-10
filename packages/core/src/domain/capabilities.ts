@@ -2847,6 +2847,8 @@ export function nativeConnectionCapabilityRecommendations(
     connectedMachines?: boolean;
     /** Personal GitHub OAuth is enabled: offer the person's own GitHub identity. */
     personalGitHub?: boolean;
+    /** All my repositories is offered: the person may allow all their repositories. */
+    personalGitHubAllRepositories?: boolean;
     browserExtension?: BrowserExtension;
     /** Reviewed API integration definitions this deployment can connect here. */
     integrationDefinitions?: readonly IntegrationDefinition[];
@@ -2899,8 +2901,7 @@ export function nativeConnectionCapabilityRecommendations(
         kind: "api",
         source: "built_in",
         name: "Your GitHub",
-        description:
-          "The person's own GitHub account: commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose. Use for 'connect my GitHub', 'use my account' or 'do it as me'.",
+        description: `The person's own GitHub account: commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose${options.personalGitHubAllRepositories ? " or all of theirs" : ""}. Use for 'connect my GitHub', 'use my account' or 'do it as me'.`,
         category: "source-control",
         tags: [
           "github",
