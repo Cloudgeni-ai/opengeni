@@ -7,9 +7,11 @@ import {
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   FileResourceRef,
   resourceMountPath,
+  readRepositorySkillsContext,
   readTurnExecutionPolicyV1,
   readTurnServingPolicyV1,
   renderAppShotForModel,
+  repositorySkillsContextItem,
   type FileAsset,
   type ResourceRef,
 } from "@opengeni/contracts";
@@ -1055,6 +1057,83 @@ async function openSuffixMessageInput(
   );
 }
 
+type StoredHistoryRow = Awaited<ReturnType<ActiveHistoryLoader>>["items"][number];
+
+/**
+ * Find where the current turn begins in the model input. Context stored
+ * during the run (the Repository skills index) is inserted before the turn's
+ * first active history row, or at the end of the history without one, and
+ * later turns load it from there through the same projections. A placeholder
+ * of the same shape at that place goes through those projections now; where
+ * it ends up is the turn start, and it is then removed.
+ */
+function turnStartPlaceholder(
+  rows: readonly StoredHistoryRow[],
+  turnId: string,
+): { rows: StoredHistoryRow[]; marker: string } {
+  const marker = `turn start ${crypto.randomUUID()}`;
+  const first = rows.findIndex((row) => row.turnId === turnId);
+  const at = first === -1 ? rows.length : first;
+  const placeholder: StoredHistoryRow = {
+    id: crypto.randomUUID(),
+    position: at < rows.length ? rows[at]!.position : (rows.at(-1)?.position ?? 0) + 1,
+    turnId,
+    item: repositorySkillsContextItem(marker),
+    providerArtifactInvalidatedAt: null,
+  };
+  return { rows: [...rows.slice(0, at), placeholder, ...rows.slice(at)], marker };
+}
+
+/**
+ * Remove the placeholder and record its index, with a renderer that gives an
+ * index the placeholder's projected form (for example the Responses wrapper
+ * or Claude's system role). None when a projection dropped it.
+ */
+function withTurnStartIndex(
+  prepared: PreparedTurnInput["input"],
+  marker: string | null,
+): PreparedTurnInput["input"] {
+  if (marker === null) return prepared;
+  const {
+    turnStartIndex: _defaultIndex,
+    renderRepositorySkillsItem: _defaultRender,
+    ...rest
+  } = prepared;
+  const items = Array.isArray(prepared.input) ? (prepared.input as unknown[]) : null;
+  const index =
+    items?.findIndex(
+      (item) =>
+        Boolean(item) &&
+        typeof item === "object" &&
+        readRepositorySkillsContext(item as Record<string, unknown>) === marker,
+    ) ?? -1;
+  if (index === -1 || !items) return rest;
+  const projected = items[index];
+  return {
+    ...rest,
+    input: [...items.slice(0, index), ...items.slice(index + 1)] as typeof prepared.input,
+    persistedHistoryCount:
+      index < prepared.persistedHistoryCount
+        ? prepared.persistedHistoryCount - 1
+        : prepared.persistedHistoryCount,
+    turnStartIndex: index,
+    renderRepositorySkillsItem: (text) =>
+      replaceText(projected, marker, text) as ReturnType<
+        NonNullable<PreparedTurnInput["input"]["renderRepositorySkillsItem"]>
+      >,
+  };
+}
+
+function replaceText(value: unknown, from: string, to: string): unknown {
+  if (typeof value === "string") return value.split(from).join(to);
+  if (Array.isArray(value)) return value.map((entry) => replaceText(entry, from, to));
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, replaceText(entry, from, to)]),
+    );
+  return value;
+}
+
 /** Build one inference from canonical history plus attempt-local operational context. */
 async function messageInput(
   db: Database,
@@ -1072,7 +1151,8 @@ async function messageInput(
   preparationOptions: Pick<
     TurnInputOptions,
     "onPreparationPhase" | "servingProviderId" | "omitRemoteCompactionItems" | "searchRecords"
-  > = {},
+  > &
+    Partial<Pick<TurnInputOptions, "turnId">> = {},
 ): Promise<PreparedTurnInput> {
   const currentAttachmentRefs = currentAttachments.map((attachment) => attachment.resource);
   const [activeHistory, envelope] = await Promise.all([
@@ -1086,6 +1166,10 @@ async function messageInput(
   const stored = preparationOptions.omitRemoteCompactionItems
     ? activeHistory.items.filter((row) => row.item.type !== "compaction")
     : activeHistory.items;
+  const turnStart = preparationOptions.turnId
+    ? turnStartPlaceholder(stored, preparationOptions.turnId)
+    : null;
+  const projected = turnStart?.rows ?? stored;
   const canonicalView = await measureHistoryPreparationPhase(
     preparationOptions,
     "canonical_projection",
@@ -1101,7 +1185,7 @@ async function messageInput(
       const active =
         provenance && preparationOptions.servingProviderId
           ? projectServingProviderArtifacts(
-              stored.map((row) => ({
+              projected.map((row) => ({
                 ...row,
                 turnId: provenance.turnByHistoryId.get(row.id) ?? null,
               })),
@@ -1111,7 +1195,7 @@ async function messageInput(
                 turnMetadata: provenance.turnMetadata,
               },
             )
-          : projectRejectedProviderArtifacts(stored);
+          : projectRejectedProviderArtifacts(projected);
       return projectCanonicalHistory ? await projectCanonicalHistory(active) : active;
     },
   );
@@ -1159,14 +1243,17 @@ async function messageInput(
     preparationOptions,
     "runtime_input_assembly",
     async () =>
-      await runtime.prepareInput(agent, {
-        kind: "message",
-        ...(text ? { text } : {}),
-        ...(internalContext ? { internalContext } : {}),
-        historyItems: historyItems as any,
-        sandboxEnvelope: envelope,
-        ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
-      }),
+      withTurnStartIndex(
+        await runtime.prepareInput(agent, {
+          kind: "message",
+          ...(text ? { text } : {}),
+          ...(internalContext ? { internalContext } : {}),
+          historyItems: historyItems as any,
+          sandboxEnvelope: envelope,
+          ...(projectModelHistory ? { modelInputAlreadyProjected: true } : {}),
+        }),
+        turnStart?.marker ?? null,
+      ),
   );
   const providerArtifactCandidates = await measureHistoryPreparationPhase(
     preparationOptions,

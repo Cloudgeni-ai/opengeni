@@ -38,7 +38,21 @@ import {
   ChannelAUnavailableError,
   ChannelAValidationError,
 } from "../src/sandbox/channel-a";
-import { discoverWorkspaceSkills, workspaceSkills } from "../src/workspace-skills";
+import {
+  discoverWorkspaceSkills,
+  workspaceSkills,
+  type RepositorySkillsIndex,
+  type WorkspaceSkillsCapability,
+} from "../src/workspace-skills";
+
+/** The index a run publishes, as the model reads it; null when there is nothing to show. */
+function indexText(index: RepositorySkillsIndex | null): string | null {
+  return index && !index.empty ? index.text : null;
+}
+
+async function publishedIndex(capability: WorkspaceSkillsCapability): Promise<string | null> {
+  return indexText(await capability.index());
+}
 
 describe("workspace repository skills", () => {
   test("bounded discovery preserves deterministic output and reduces remote critical path", async () => {
@@ -143,7 +157,7 @@ describe("workspace repository skills", () => {
       const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
         fakeSession({ ".agents/skills/example/SKILL.md": markdown }),
       );
-      const instructions = await capability.instructions();
+      const instructions = await publishedIndex(capability);
       const descriptor = JSON.parse(
         instructions!
           .split("\n")
@@ -188,7 +202,7 @@ describe("workspace repository skills", () => {
         const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
           session,
         );
-        const instructions = await capability.instructions();
+        const instructions = await publishedIndex(capability);
         expect(instructions).not.toContain('"name":"linked"');
         expect(instructions).toContain('"name":"ordinary"');
         const reader = capability.tools()[0]!;
@@ -246,8 +260,9 @@ describe("workspace repository skills", () => {
 
     const instructions = await capability.instructions();
     expect(operations).toBe(0);
+    expect(await capability.index()).toBeNull();
     expect(instructions).toContain("## Repository skills");
-    expect(instructions).toContain("may not be ready until a tool first uses the workspace");
+    expect(instructions).toContain("look in those folders yourself");
     expect(instructions).toContain(".agents/skills, repos/app/.claude/skills");
     // No skill is listed, and the notice says how to name one: repository:
     // and the SKILL.md path from the workspace root, shown with a real folder.
@@ -256,7 +271,7 @@ describe("workspace repository skills", () => {
     expect(instructions).toContain("such as repository:.agents/skills/<folder>/SKILL.md");
 
     // The reader still discovers live when a tool asks for an exact skill, and
-    // its description names skills the way the notice does, not by an index.
+    // its description names skills the way the notice does.
     const tool = capability
       .tools()
       .find(
@@ -383,11 +398,10 @@ describe("workspace repository skills", () => {
       structuredToolTransport: false,
     });
     const capability = capabilities.find((entry) => entry.type === "workspace-skills")!;
-    const instructions = await capability
-      .clone()
-      .bind(session)
-      .instructions(new Manifest({ root: "/workspace" }));
-    expect(instructions).toContain("may not be ready until a tool first uses the workspace");
+    const bound = capability.clone().bind(session) as WorkspaceSkillsCapability;
+    const instructions = await bound.instructions();
+    expect(instructions).toContain("## Repository skills");
+    expect(await bound.index()).toBeNull();
   });
 
   test("advertised repository skills have an explicit live reader", async () => {
@@ -398,8 +412,8 @@ describe("workspace repository skills", () => {
     const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
       session,
     );
-    const instructions = await capability.instructions();
-    expect(instructions).toContain("repository_skill_read");
+    const instructions = await publishedIndex(capability);
+    expect(instructions).toContain('"reader":"repository_skill_read"');
     const tool = capability
       .tools()
       .find(
@@ -407,9 +421,7 @@ describe("workspace repository skills", () => {
       );
     expect(tool).toBeDefined();
     if (tool?.type !== "function") throw new Error("missing reader");
-    expect(tool.description).toContain(
-      "Use the exact repository: identifier from the Repository skills index.",
-    );
+    expect(tool.description).toContain("Name a skill by its exact repository: identifier");
     const result = JSON.parse(
       (await tool.invoke(
         undefined!,
@@ -427,7 +439,7 @@ describe("workspace repository skills", () => {
     const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }])
       .bind(session)
       .bindRunAs("agent");
-    await capability.instructions();
+    await publishedIndex(capability);
     const read = session.readFile!;
     const calls: string[] = [];
     session.readFile = async (args) => {
@@ -506,9 +518,9 @@ describe("workspace repository skills", () => {
     const capability = workspaceSkills([{ path: ".agents/skills", source: "repository" }]).bind(
       fakeSession({ ".agents/skills/example/SKILL.md": "# Example" }),
     );
-    expect(await capability.instructions()).toContain("example");
-    const rebound = capability.clone().bind(fakeSession({}));
-    expect(await rebound.instructions(new Manifest({ root: "/workspace" }))).toBeNull();
+    expect(await publishedIndex(capability)).toContain("example");
+    const rebound = capability.clone().bind(fakeSession({})) as WorkspaceSkillsCapability;
+    expect(await publishedIndex(rebound)).toBeNull();
   });
 
   for (const Missing of [SandboxFilesystemNotFoundError, SandboxWorkspaceReadNotFoundError]) {
@@ -769,7 +781,7 @@ description: Prepare a safe release.
       { path: ".claude/skills", source: ".claude/skills" },
       { path: ".third/skills", source: ".third/skills" },
     ]).bind(session);
-    const instructions = await capability.instructions();
+    const instructions = await publishedIndex(capability);
     expect(instructions).toContain('"name":"good"');
     expect(instructions).not.toContain('"id":"repository:.agents/skills/release/SKILL.md"');
     expect(instructions).not.toContain('"id":"repository:.third/skills/release/SKILL.md"');
@@ -822,7 +834,7 @@ description: Prepare a safe release.
       [{ path: ".agents/skills", source: "agents" }],
       ["release"],
     ).bind(session);
-    expect(await capability.instructions()).toContain('"code":"configured_name_conflict"');
+    expect(await publishedIndex(capability)).toContain('"code":"configured_name_conflict"');
   });
 
   test("lets native tool-bound Skills deterministically shadow workspace copies", async () => {
@@ -875,12 +887,12 @@ description: Prepare a safe release.
         { path: ".agents/skills", source: "agents" },
         { path: ".claude/skills", source: "claude" },
       ]).bind(session);
-      const instructions = await capability.instructions();
+      const instructions = await publishedIndex(capability);
       expect(instructions).toContain("Repository skills could not be indexed");
       expect(instructions).not.toContain("repository_skill_read");
       // The run memoizes the degraded index: later model requests in the same
       // binding neither re-pay the unreachable cost nor change the prefix.
-      expect(await capability.instructions()).toBe(instructions);
+      expect(await publishedIndex(capability)).toBe(instructions);
       expect(calls).toBe(2);
       const reader = capability.tools()[0]!;
       if (reader.type !== "function") throw new Error("missing reader");
@@ -917,7 +929,7 @@ description: Prepare a safe release.
           session,
         );
         // Observe the outcome now: it may settle while the reads are released.
-        const outcome = capability.instructions().then(
+        const outcome = publishedIndex(capability).then(
           () => undefined,
           (error: unknown) => error,
         );
@@ -967,7 +979,7 @@ description: Prepare a safe release.
     const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
       session,
     );
-    expect(await capability.instructions()).toContain("Repository skills could not be indexed");
+    expect(await publishedIndex(capability)).toContain("Repository skills could not be indexed");
   });
 
   test("a later run discovers repository skills once the workspace is reachable again", async () => {
@@ -980,12 +992,12 @@ description: Prepare a safe release.
     };
     const template = workspaceSkills([{ path: ".agents/skills", source: "agents" }]);
     const first = template.clone().bind(session);
-    expect(await first.instructions()).toContain("Repository skills could not be indexed");
+    expect(await publishedIndex(first)).toContain("Repository skills could not be indexed");
     offline = false;
     // The SDK clones and rebinds capabilities for every run; the degraded
     // result must not carry over as an authoritative empty index.
     const second = first.clone().bind(session);
-    const instructions = await second.instructions();
+    const instructions = await publishedIndex(second);
     expect(instructions).toContain("repository:.agents/skills/example/SKILL.md");
     expect(instructions).not.toContain("could not be indexed");
   });
@@ -1018,7 +1030,7 @@ description: Prepare a safe release.
       const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
         session,
       );
-      await expect(capability.instructions()).rejects.toBe(error);
+      await expect(publishedIndex(capability)).rejects.toBe(error);
     });
   }
 
@@ -1086,7 +1098,7 @@ description: Prepare a safe release.
         { path: ".claude/skills", source: "claude" },
         { path: ".agents/skills", source: "agents" },
       ]).bind(session);
-      const instructions = await capability.instructions();
+      const instructions = await publishedIndex(capability);
       expect(instructions).toContain("repository:.agents/skills/example/SKILL.md");
       expect(instructions).toContain(
         `### Skipped repository skills\nThese repository entries were omitted because their folders could not be read or their metadata or names conflict. Other skills remain available; correct the source files to use the omitted entries.\n- {"code":"unreadable_search_path","paths":[".claude/skills"],"reason":"${errorClass}"}`,
@@ -1104,7 +1116,7 @@ description: Prepare a safe release.
         expect.objectContaining({ outcome: "completed", skipped: [errorClass] }),
       ]);
       const callsAfterFirst = calls;
-      expect(await capability.instructions()).toBe(instructions);
+      expect(await publishedIndex(capability)).toBe(instructions);
       expect(calls).toBe(callsAfterFirst);
     });
   }
@@ -1128,7 +1140,8 @@ description: Prepare a safe release.
           { path: ".agents/skills", source: "agents" },
         ])
           .bind(session)
-          .instructions(),
+          .index()
+          .then(indexText),
     );
     expect(instructions).toContain("repository:.agents/skills/example/SKILL.md");
     expect(instructions).not.toContain("Skipped repository skills");
@@ -1158,7 +1171,8 @@ description: Prepare a safe release.
       { path: "repo/.claude/skills", source: "claude" },
     ])
       .bind(session)
-      .instructions();
+      .index()
+      .then(indexText);
     expect(instructions).toContain("repository:repo/.claude/skills/example/SKILL.md");
     // The workspace root has no indexed sibling; the repository does.
     expect(instructions).toContain(
@@ -1179,7 +1193,8 @@ description: Prepare a safe release.
     };
     const instructions = await workspaceSkills([{ path: ".agents/skills", source: "agents" }])
       .bind(session)
-      .instructions();
+      .index()
+      .then(indexText);
     expect(instructions).toContain("repository:.agents/skills/open/SKILL.md");
     expect(instructions).not.toContain("repository:.agents/skills/locked/SKILL.md");
     expect(instructions).toContain(
@@ -1197,10 +1212,10 @@ description: Prepare a safe release.
     const measurements: ModelPreparationMeasurement[] = [];
     const instructions = await withModelPreparationObserver(
       (measurement) => measurements.push(measurement),
-      () => capability.instructions(),
+      () => publishedIndex(capability),
     );
     expect(instructions).toBe(
-      "## Repository skills\n\nRepository skills are not indexed for this run (too many skill folders or files). If a repository skill matters, try reading its SKILL.md directly.",
+      "Repository skills could not be indexed (too many skill folders or files). If a repository skill matters, try reading its SKILL.md directly.",
     );
     expect(measurements).toEqual([
       expect.objectContaining({
@@ -1215,8 +1230,8 @@ description: Prepare a safe release.
     const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind({
       state: { manifest: new Manifest({ root: "/workspace" }) },
     } as SandboxSessionLike);
-    expect(await capability.instructions()).toBe(
-      "## Repository skills\n\nRepository skills are not indexed for this run (this workspace cannot list files).",
+    expect(await publishedIndex(capability)).toBe(
+      "Repository skills could not be indexed (this workspace cannot list files).",
     );
   });
 
@@ -1237,9 +1252,10 @@ description: Prepare a safe release.
       { path: "b", source: "b" },
     ])
       .bind(session)
-      .instructions();
+      .index()
+      .then(indexText);
     expect(instructions).toBe(
-      "## Repository skills\n\nRepository skills are not indexed for this run (permission denied). If a repository skill matters, try reading its SKILL.md directly.",
+      "Repository skills could not be indexed (permission denied). If a repository skill matters, try reading its SKILL.md directly.",
     );
   });
 
@@ -1353,7 +1369,7 @@ description: Prepare a safe release.
       await expect(
         withModelPreparationObserver(
           (measurement) => measurements.push(measurement),
-          () => capability.instructions(),
+          () => publishedIndex(capability),
         ),
       ).rejects.toBe(error);
       expect(measurements).toEqual([
@@ -1377,7 +1393,7 @@ description: Prepare a safe release.
     const capability = workspaceSkills(
       ["root0", "root1"].map((path) => ({ path, source: path })),
     ).bind(session);
-    await expect(capability.instructions()).rejects.toBe(infrastructure);
+    await expect(publishedIndex(capability)).rejects.toBe(infrastructure);
   });
 
   test("an unreachable workspace wins over a skipped search path", async () => {
@@ -1389,7 +1405,7 @@ description: Prepare a safe release.
     const capability = workspaceSkills(
       ["root0", "root1"].map((path) => ({ path, source: path })),
     ).bind(session);
-    expect(await capability.instructions()).toContain("the workspace was unreachable");
+    expect(await publishedIndex(capability)).toContain("the workspace was unreachable");
   });
 
   test("failed discovery telemetry carries the bounded error class and handling", async () => {
@@ -1417,7 +1433,7 @@ description: Prepare a safe release.
     const capability = workspaceSkills([{ path: ".agents/skills", source: "agents" }]).bind(
       fakeSession({ ".agents/skills/bad/SKILL.md": "---\nname: bad name!\n---\n" }),
     );
-    expect(await capability.instructions()).toContain('"code":"invalid_name"');
+    expect(await publishedIndex(capability)).toContain('"code":"invalid_name"');
   });
 
   test.each([
@@ -1438,7 +1454,7 @@ description: Prepare a safe release.
           ".agents/skills/good/SKILL.md": "# Good",
         }),
       );
-      const instructions = await capability.instructions();
+      const instructions = await publishedIndex(capability);
       expect(instructions).toContain('"name":"good"');
       expect(instructions).toContain(`"code":"${code}"`);
       expect(instructions).toContain(`"reason":"${reason}`);
@@ -1446,7 +1462,7 @@ description: Prepare a safe release.
       expect(instructions).toContain("### Skipped repository skills");
       expect(instructions).not.toContain("invalid YAML");
       expect(instructions).not.toContain("deploying");
-      expect(await capability.instructions()).toBe(instructions);
+      expect(await publishedIndex(capability)).toBe(instructions);
     },
   );
 
@@ -1507,7 +1523,7 @@ description: Prepare a safe release.
       const capability = workspaceSkills([{ path: ".claude/skills", source: "claude" }]).bind(
         fakeSession({ ".claude/skills/deploy/SKILL.md": markdown }),
       );
-      const instructions = await capability.instructions();
+      const instructions = await publishedIndex(capability);
       const descriptor = JSON.parse(
         instructions!
           .split("\n")
@@ -1541,7 +1557,7 @@ description: Prepare a safe release.
             '---\nname: deploy\ndescription: "Use when: shipping"\nallowed-tools: Bash\n---\n',
         }),
       );
-      expect(await capability.instructions()).toContain('"description":"Use when: shipping"');
+      expect(await publishedIndex(capability)).toContain('"description":"Use when: shipping"');
     } finally {
       console.info = info;
     }
@@ -1596,6 +1612,106 @@ description: Prepare a safe release.
         ),
       ]),
     ).toThrow('Conflicting Skill definitions for "release"');
+  });
+});
+
+// The system prompt carries only a stable notice; the live index is published
+// as a history item. A changed prompt invalidates the prompt cache and the
+// provider's binding of earlier reasoning to it (Claude rejects replayed
+// thinking once the system prompt differs).
+describe("repository skills keep the system prompt stable", () => {
+  const searchPaths = [
+    { path: ".agents/skills", source: "agents" },
+    { path: "repos/app/.claude/skills", source: "claude" },
+  ];
+  const skill = (name: string) =>
+    `---\nname: ${name}\ndescription: ${name} guidance\n---\n# ${name}`;
+
+  /** One run: a fresh clone bound to `session`, as the SDK prepares it. */
+  async function run(
+    session: SandboxSessionLike,
+    options: { deferred?: boolean } = {},
+  ): Promise<{ instructions: string | null; published: RepositorySkillsIndex[] }> {
+    const published: RepositorySkillsIndex[] = [];
+    const capability = workspaceSkills(searchPaths, [], [], {
+      ...options,
+      publish: async (index) => {
+        published.push(index);
+      },
+    })
+      .clone()
+      .bind(session) as WorkspaceSkillsCapability;
+    const instructions = await capability.instructions();
+    // Every model request of the run reads the instructions again.
+    expect(await capability.instructions()).toBe(instructions);
+    return { instructions, published };
+  }
+
+  test("a skill added mid-chat, an unreachable or degraded workspace, and a deferred turn keep one prompt", async () => {
+    const one = await run(fakeSession({ ".agents/skills/alpha/SKILL.md": skill("alpha") }));
+    const two = await run(
+      fakeSession({
+        ".agents/skills/alpha/SKILL.md": skill("alpha"),
+        "repos/app/.claude/skills/beta/SKILL.md": skill("beta"),
+      }),
+    );
+    const offline = fakeSession({ ".agents/skills/alpha/SKILL.md": skill("alpha") });
+    offline.listDir = async () => {
+      throw agentErrorToControlError(offlineAgentError(undefined, true));
+    };
+    const unreachable = await run(offline);
+    const degraded = await run({
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+    } as SandboxSessionLike);
+    const deferred = await run(fakeSession({ ".agents/skills/alpha/SKILL.md": skill("alpha") }), {
+      deferred: true,
+    });
+    const restored = await run(fakeSession({ ".agents/skills/alpha/SKILL.md": skill("alpha") }));
+    const empty = await run(fakeSession({}));
+
+    for (const other of [two, unreachable, degraded, deferred, restored, empty])
+      expect(other.instructions).toBe(one.instructions);
+    expect(one.instructions).toContain("## Repository skills");
+    expect(one.instructions).toContain(".agents/skills, repos/app/.claude/skills");
+    expect(one.instructions).toContain("repository:.agents/skills/<folder>/SKILL.md");
+    expect(one.instructions).toContain("Repository skills context message");
+    expect(one.instructions).not.toContain("alpha");
+
+    // Each indexed run publishes its index exactly once; a deferred run none.
+    expect(one.published).toHaveLength(1);
+    expect(one.published[0]!.text).toContain("repository:.agents/skills/alpha/SKILL.md");
+    expect(one.published[0]!.text).not.toContain("beta");
+    expect(two.published[0]!.text).toContain("repository:repos/app/.claude/skills/beta/SKILL.md");
+    expect(unreachable.published[0]!.text).toContain("the workspace was unreachable");
+    expect(degraded.published[0]!.text).toContain("this workspace cannot list files");
+    expect(deferred.published).toEqual([]);
+    expect(restored.published).toEqual(one.published);
+    expect(empty.published).toEqual([
+      { text: "No repository skills were found in the workspace.", empty: true },
+    ]);
+  });
+
+  test("the reader description does not depend on the mode", async () => {
+    const description = (deferred: boolean) => {
+      const reader = workspaceSkills(searchPaths, [], [], deferred ? { deferred } : {})
+        .tools()
+        .find((tool) => tool.type === "function" && tool.name === "repository_skill_read");
+      if (reader?.type !== "function") throw new Error("missing reader");
+      return reader.description;
+    };
+    expect(description(true)).toBe(description(false));
+  });
+
+  test("a failed publication fails the run's instructions and is retried", async () => {
+    let attempts = 0;
+    const capability = workspaceSkills(searchPaths, [], [], {
+      publish: async () => {
+        if (++attempts === 1) throw new Error("history write failed");
+      },
+    }).bind(fakeSession({ ".agents/skills/alpha/SKILL.md": skill("alpha") }));
+    await expect(capability.instructions()).rejects.toThrow("history write failed");
+    expect(await capability.instructions()).toContain("## Repository skills");
+    expect(attempts).toBe(2);
   });
 });
 

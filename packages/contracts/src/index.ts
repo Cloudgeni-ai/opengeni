@@ -23933,6 +23933,7 @@ export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./workspace-governance-context";
 export * from "./agent-instructions-context";
+export * from "./repository-skills-context";
 export * from "./prompt-cache-diagnostics";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";

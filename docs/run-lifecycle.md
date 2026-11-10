@@ -2485,9 +2485,22 @@ repository skills" notice carries a `reason` for every omitted entry. Managed
 and inline Skill admission stay strict.
 Discovery, inventories, and reading accept ordinary files and directories;
 symlink Skill entrypoints are excluded because portable filesystem APIs cannot
-prove target containment. The repository index remains a separate sandbox-SDK instruction source, outside
-the configured-catalog history lifecycle above. It is fixed for the bound capability; reads
-observe live edits or report missing files, and rebinding refreshes discovery.
+prove target containment. The repository index is discovered by the sandbox-SDK
+capability, but the system prompt only carries a stable "Repository skills"
+notice built from the search-path folders. The rendered index (a listing, an
+empty, unreachable or degraded notice) is a durable developer history item on
+its own session context channel (`ensureSessionRepositorySkills`,
+`packages/contracts/src/repository-skills-context.ts`): the worker writes it
+only when it differs from the latest item, freezes it per turn for retries, and
+inserts it before the turn's first active history item. The current run splices
+the same item at that turn-start index of its model input, so this turn's
+requests and later turns' loaded history share one byte-identical prefix; a
+mid-run rewrite of the input skips the splice. Deferred runs discover nothing up
+front and keep the earlier item. A Skill added mid-chat, an unreachable
+workspace or a deferred turn therefore never changes the system prompt, which
+Claude binds signed thinking to and both providers cache. The index is fixed for
+the bound capability; reads observe live edits or report missing files, and
+rebinding refreshes discovery.
 When discovery meets a typed unreachable workspace (a Connected Machine
 `agentOffline` or control-timeout `SelfhostedControlError`), the bound
 capability memoizes an explicitly unavailable, empty index and contributes a

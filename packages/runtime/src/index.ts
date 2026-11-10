@@ -658,8 +658,19 @@ import {
   recordRuntimeMcpToolCallMetric,
   resolveTurnModel,
 } from "./model-provider";
-import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
+import {
+  workspaceSkills,
+  type RepositorySkillsIndex,
+  type WorkspaceSkillSearchPath,
+} from "./workspace-skills";
+import {
+  repositorySkillsContextInputFilter,
+  type PublishRepositorySkills,
+  type RepositorySkillsContextState,
+} from "./repository-skills-context";
 export { REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES } from "./workspace-skills";
+export type { RepositorySkillsIndex } from "./workspace-skills";
+export type { PublishRepositorySkills } from "./repository-skills-context";
 import {
   composeRuntimeSkills,
   readRuntimeSkill,
@@ -1248,6 +1259,18 @@ export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
   /** Canonical durable prefix already present before this attempt adds items. */
   persistedHistoryCount: number;
+  /**
+   * Index in `input` where the current turn begins: where context the run
+   * stores before this turn's first history item (the Repository skills
+   * index) is shown, matching where later turns load it. Defaults to the end
+   * of the durable history.
+   */
+  turnStartIndex?: number;
+  /**
+   * Renders a Repository skills index the way this input renders its history
+   * items (the caller's provider projection). Defaults to the stored item.
+   */
+  renderRepositorySkillsItem?: (index: string) => AgentInputItem;
   sandboxSessionState?: SandboxSessionState;
   modelInputAlreadyProjected?: boolean;
 };
@@ -2901,6 +2924,13 @@ export type BuildAgentOptions = {
    */
   deferRepositorySkillIndex?: boolean;
   /**
+   * Stores the run's repository Skill index durably (see
+   * `PublishRepositorySkills`). Called once per run when discovery finishes,
+   * before the first model request; never for a deferred index. Without it
+   * the run still shows its index at the turn start, but nothing keeps it.
+   */
+  publishRepositorySkills?: PublishRepositorySkills;
+  /**
    * Receives the physical sandbox-tool fence at agent construction time. A
    * cancelled/fenced worker attempt must await it before publishing its durable
    * attempt-quiesced receipt.
@@ -3518,6 +3548,9 @@ const agentCodemodeClientDownload = new WeakMap<object, ManagedCodemodeClientDow
 // freshly-built agent. It must not remain in Agent.instructions: those
 // instructions are presented again on every internal model/tool loop.
 const agentsNeedingGenesisTitleDirective = new WeakSet<object>();
+// The repository Skill index each agent's runs published (see
+// repositorySkillsContextInputFilter).
+const agentRepositorySkillsContext = new WeakMap<object, RepositorySkillsContextState>();
 // Per-turn model modality used by the literal pre-provider input filter. The
 // durable session history remains canonical; only the request clone is shaped.
 const agentSupportsImageInput = new WeakMap<object, boolean>();
@@ -4171,6 +4204,7 @@ export function buildOpenGeniAgent(
   if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
     throw new Error("A Connected Machine agent requires its reported workspace root");
   }
+  const repositorySkillsContext: RepositorySkillsContextState = { visible: null };
   const agent = new SandboxAgent({
     ...baseConfig,
     baseInstructions: sandboxBaseInstructions(),
@@ -4197,6 +4231,13 @@ export function buildOpenGeniAgent(
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
+      publishRepositorySkills: async (index) => {
+        repositorySkillsContext.visible = options.publishRepositorySkills
+          ? await options.publishRepositorySkills(index)
+          : index.empty
+            ? null
+            : index.text;
+      },
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -4220,6 +4261,7 @@ export function buildOpenGeniAgent(
   });
   agentSkillSelections.set(agent, skillComposition.selections);
   agentRuntimeSkillIndex.set(agent, skillComposition.index);
+  agentRepositorySkillsContext.set(agent, repositorySkillsContext);
   if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
   agentInstructionInspection.set(agent, instructionInspection);
   if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
@@ -5734,6 +5776,7 @@ function buildAgentCapabilitiesFromComposition(
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     deferRepositorySkillIndex?: boolean;
+    publishRepositorySkills?: (index: RepositorySkillsIndex) => Promise<void>;
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
     computerToolMode?: ComputerToolMode;
@@ -5831,7 +5874,10 @@ function buildAgentCapabilitiesFromComposition(
         options.workspaceSkillPaths,
         skillComposition.configuredNames,
         skillComposition.nativeToolNames,
-        options.deferRepositorySkillIndex ? { deferred: true } : {},
+        {
+          ...(options.deferRepositorySkillIndex ? { deferred: true } : {}),
+          ...(options.publishRepositorySkills ? { publish: options.publishRepositorySkills } : {}),
+        },
       ),
     );
   }
@@ -11327,6 +11373,7 @@ export async function prepareRunInput(
           ? input.text
           : assembled,
       persistedHistoryCount: sanitizedHistory.length,
+      turnStartIndex: sanitizedHistory.length,
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
       ...(input.modelInputAlreadyProjected ? { modelInputAlreadyProjected: true } : {}),
     };
@@ -11506,6 +11553,21 @@ export function oneShotGenesisTitleInputFilter(): CallModelInputFilter {
         : GENESIS_TITLE_DIRECTIVE,
     };
   };
+}
+
+function repositorySkillsInputFilterForRun(
+  agent: Agent<any, any>,
+  prepared: PreparedAgentInput,
+): CallModelInputFilter | undefined {
+  const state = agentRepositorySkillsContext.get(agent);
+  return state
+    ? repositorySkillsContextInputFilter(
+        state,
+        prepared.input,
+        prepared.turnStartIndex,
+        prepared.renderRepositorySkillsItem,
+      )
+    : undefined;
 }
 
 function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilter | undefined {
@@ -11843,6 +11905,9 @@ async function runAgentStreamInternal(
     );
     const ownedFilter = composeCallModelInputFilters(
       [
+        // First, over the SDK's own input: the index takes the place later
+        // turns load it from, and every filter below treats it like history.
+        repositorySkillsInputFilterForRun(agent, prepared),
         inputWaitYield?.modelInputFilter,
         commandCompletionModelCallFilter(agent),
         measuredModelInputFilter(
@@ -12024,6 +12089,7 @@ async function runAgentStreamInternal(
   // pass an SDK session and reconciles durable truth from the untouched input.
   const callModelInputFilter = composeCallModelInputFilters(
     [
+      repositorySkillsInputFilterForRun(agent, prepared),
       inputWaitYield?.modelInputFilter,
       commandCompletionModelCallFilter(agent),
       measuredModelInputFilter(
