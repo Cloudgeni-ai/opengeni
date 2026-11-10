@@ -122,7 +122,9 @@ function basePolicy(): Policy {
     "img-src": ["'self'", "data:", "blob:"],
     "media-src": ["'self'", "data:", "blob:"],
     "font-src": ["'self'", "data:"],
-    "connect-src": ["'self'"],
+    // pdf.js and other previews fetch the blob: URLs the console creates for
+    // downloaded file bytes.
+    "connect-src": ["'self'", "blob:"],
     "frame-src": ["'self'"],
     "child-src": ["'self'", "blob:"],
     "worker-src": ["'self'", "blob:"],

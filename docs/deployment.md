@@ -2100,6 +2100,7 @@ rendered, so they never drift from the build); `object-src 'none'`;
 hosts for the Excel add-in pages under `/office/`, which also get
 `https://appsforoffice.microsoft.com` and Office's other script hosts);
 `img-src`/`media-src 'self' data: blob:`; `font-src 'self' data:`;
+`connect-src 'self' blob:` (pdf.js reads downloaded bytes from a blob: URL);
 `worker-src`/`child-src 'self' blob:`; and `style-src 'self' 'unsafe-inline'`
 (see the comment in `csp.ts`: style attributes set through markup by the
 terminal, diff, toast and Radix libraries and highlighted code cannot be

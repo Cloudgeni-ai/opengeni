@@ -99,6 +99,7 @@ describe("console Content-Security-Policy", () => {
       "https://og.opengeni.site",
     ]);
     expect(policy.get("connect-src")).toContain("wss://app.opengeni.ai");
+    expect(policy.get("connect-src")).toContain("blob:");
     expect(policy.get("connect-src")).toContain("https://acct.blob.core.windows.net");
     expect(policy.get("img-src")).toEqual([
       "'self'",
