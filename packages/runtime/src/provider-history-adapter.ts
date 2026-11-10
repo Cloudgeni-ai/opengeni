@@ -192,8 +192,14 @@ function chatReasoningText(item: Record<string, unknown>): string {
     .join("");
 }
 
-function historicalReasoningContent(text: string) {
-  return { type: "output_text", text: `[Historical reasoning from another model]\n${text}` };
+/**
+ * The readable form of reasoning a provider cannot accept natively: its text
+ * marked as historical, or an explicit unavailable marker when it has none.
+ */
+export function historicalReasoningText(text: string): string {
+  return text
+    ? `[Historical reasoning from another model]\n${text}`
+    : "[Historical reasoning from another model is unavailable.]";
 }
 
 function historicalReasoningMessage(text: string): Record<string, unknown> {
@@ -201,14 +207,7 @@ function historicalReasoningMessage(text: string): Record<string, unknown> {
     type: "message",
     role: "assistant",
     status: "completed",
-    content: [
-      text
-        ? historicalReasoningContent(text)
-        : {
-            type: "output_text",
-            text: "[Historical reasoning from another model is unavailable.]",
-          },
-    ],
+    content: [{ type: "output_text", text: historicalReasoningText(text) }],
   };
 }
 
@@ -375,7 +374,13 @@ function portableChatMetadata(
   return changed
     ? {
         ...item,
-        content: [...Array.from(legacyReasons, historicalReasoningContent), ...content],
+        content: [
+          ...Array.from(legacyReasons, (reason) => ({
+            type: "output_text",
+            text: historicalReasoningText(reason),
+          })),
+          ...content,
+        ],
       }
     : item;
 }

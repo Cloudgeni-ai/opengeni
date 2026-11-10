@@ -27,6 +27,25 @@ import { createOpenGeniText } from "../src/messages/runtime";
 const englishText = createOpenGeniText();
 
 describe("failure presentation", () => {
+  test("a refused Claude reasoning replay shows the short message, never Claude's signature text", () => {
+    const error =
+      "Claude couldn't reuse earlier reasoning from this chat. Try again, or choose another model.";
+    const payload = {
+      error,
+      code: "anthropic_reasoning_replay_rejected",
+      retryable: false,
+      // The ae0245f3 failure detail, kept on the event for operators.
+      detail:
+        'invalid_request_error: messages.7.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to "drop_block".',
+      requestId: "req_011CguQf5TQuNQgLey4zxpQp",
+    };
+    expect(presentFailure(englishText, payload)).toEqual({
+      reason: error,
+      safetyRefusal: false,
+      diagnostic: false,
+    });
+  });
+
   test("database failures show a safe explanation without altering stored diagnostics", () => {
     for (const classification of [
       { code: "db_deadlock" },

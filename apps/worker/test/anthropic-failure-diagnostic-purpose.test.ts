@@ -199,3 +199,23 @@ describe("Anthropic failure diagnostic purpose", () => {
     expect(agentRunRecoveryFailurePayload(error, failure)).toBe(failure);
   });
 });
+
+test("a refused Claude reasoning replay settles with its short message and keeps the provider text as detail", () => {
+  const providerMessage =
+    "messages.7.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation.";
+  const error = new AnthropicRequestError(
+    "Claude couldn't reuse earlier reasoning from this chat. Try again, or choose another model.",
+    400,
+    "anthropic_reasoning_replay_rejected",
+    { type: "invalid_request_error", message: providerMessage },
+    new Headers({ "request-id": "req_replay" }),
+  );
+  expect(agentRunFailurePayload(error)).toMatchObject({
+    error:
+      "Claude couldn't reuse earlier reasoning from this chat. Try again, or choose another model.",
+    code: "anthropic_reasoning_replay_rejected",
+    retryable: false,
+    detail: `invalid_request_error: ${providerMessage}`,
+    requestId: "req_replay",
+  });
+});
