@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  assertAnthropicApiKey,
   assertClaudeWorkspaceCredential,
   prepareClaudeSubscriptionCredential,
   prepareClaudeWorkspaceCredential,
@@ -71,6 +72,37 @@ test("other providers remain outside Claude-specific validation", () => {
       { ...connection("anthropic"), metadata: { credentialRole: "openrouter" }, credential: {} },
     ),
   ).not.toThrow();
+});
+test("pasted Anthropic API keys are cleaned up and only setup tokens are refused", () => {
+  const body = "AbC_dEf-123";
+  for (const [pasted, stored] of [
+    [`sk-ant-api03-${body}\n`, `sk-ant-api03-${body}`],
+    [`  sk-ant-api03-${body.slice(0, 5)}\r\n${body.slice(5)}  `, `sk-ant-api03-${body}`],
+    [`"sk-ant-api03-${body}"`, `sk-ant-api03-${body}`],
+    [`\uFEFFsk-ant-api03-${body}\u200B`, `sk-ant-api03-${body}`],
+    [`sk-ant-admin01-${body}`, `sk-ant-admin01-${body}`],
+    [`sk-ant-${body}`, `sk-ant-${body}`],
+  ] as const) {
+    expect(assertAnthropicApiKey(pasted)).toBe(stored);
+    expect(() =>
+      assertClaudeWorkspaceCredential(
+        { claudeSubscriptionEnabled: false },
+        { ...connection("anthropic"), credential: { apiKey: pasted } },
+      ),
+    ).not.toThrow();
+    expect(
+      prepareClaudeWorkspaceCredential(
+        testSettings(),
+        "one",
+        { credentialRole: "anthropic" },
+        { apiKey: pasted },
+      ),
+    ).toEqual({ apiKey: stored });
+  }
+  for (const refused of ["", " \n ", " sk-ant-oat01-token\n", "SK-ANT-OAT01-token"])
+    expect(() => assertAnthropicApiKey(refused)).toThrow(
+      "Use Claude subscription for setup tokens",
+    );
 });
 test("token-only setup creates an encrypted-bundle identity stable across retries and replacement", () => {
   const settings = testSettings({

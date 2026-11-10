@@ -3,6 +3,32 @@ import { requireEnvironmentEncryption } from "@opengeni/core";
 import { ClaudeSubscriptionCredential, type Settings } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 
+const ANTHROPIC_API_KEY_MESSAGE =
+  "Enter an Anthropic API key. Use Claude subscription for setup tokens.";
+
+/**
+ * Clean up a pasted Anthropic API key. Keys never contain whitespace or
+ * quotes, so a line break from a wrapped copy, invisible characters, or quotes
+ * copied from an env file are removed instead of failing the connection.
+ */
+export function normalizeAnthropicApiKey(apiKey: string): string {
+  const compact = apiKey.replace(/[\s\u200B-\u200D\u2060\uFEFF]+/gu, "");
+  return compact.replace(/^(["'`])(.+)\1$/u, "$2");
+}
+
+/**
+ * Accept any plausible Anthropic API key; Anthropic itself decides whether it
+ * works, and a rejected key surfaces at use. Only an empty value or a Claude
+ * subscription setup/OAuth token (`sk-ant-oat…`) is refused here, because
+ * those are clearly the wrong kind of credential for this connection.
+ */
+export function assertAnthropicApiKey(apiKey: string): string {
+  const key = normalizeAnthropicApiKey(apiKey);
+  if (!key || /^sk-ant-oat/iu.test(key))
+    throw new HTTPException(422, { message: ANTHROPIC_API_KEY_MESSAGE });
+  return key;
+}
+
 /** Validate the canonical model lane before it bypasses integration acquisition. */
 export function assertClaudeWorkspaceCredential(
   settings: Pick<Settings, "claudeSubscriptionEnabled">,
@@ -36,10 +62,7 @@ export function assertClaudeWorkspaceCredential(
   if (typeof key !== "string")
     throw new HTTPException(422, { message: "Claude connection credential is required" });
   if (role === "anthropic") {
-    if (!/^sk-ant-api[0-9]+-\S+$/.test(key))
-      throw new HTTPException(422, {
-        message: "Enter an Anthropic API key. Use Claude subscription for setup tokens.",
-      });
+    assertAnthropicApiKey(key);
     return;
   }
 }
@@ -75,6 +98,8 @@ export function prepareClaudeWorkspaceCredential(
   metadata: Record<string, unknown> | undefined,
   credential: Record<string, unknown>,
 ): Record<string, unknown> {
+  if (metadata?.credentialRole === "anthropic" && typeof credential.apiKey === "string")
+    return { ...credential, apiKey: normalizeAnthropicApiKey(credential.apiKey) };
   if (metadata?.credentialRole !== "claude_subscription") return credential;
   if (!settings.claudeSubscriptionEnabled)
     throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
