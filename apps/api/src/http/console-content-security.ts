@@ -95,12 +95,17 @@ export async function consoleContentSecuritySources(
   if (relay) add(["connect-src"], httpOriginOf(relay), webSocketOrigin(relay));
   // Any served backend counts, not only the default: a session may pick one.
   if (sandboxBackendServed(settings, "modal")) add(["connect-src"], ...MODAL_TUNNEL_HOSTS);
-  // OpenSandbox hands browsers endpoints on its public ingress (rewritten to
-  // the channel B base URL when one is set).
+  // OpenSandbox hands browsers the endpoint host it reports, rewritten (as in
+  // the runtime adapter's channelBRewriteTarget) to the channel B base URL
+  // for signed endpoints, or to the base URL behind the server proxy. When it
+  // is not rewritten the reported host is OpenSandbox's own ingress, which is
+  // assumed to share the base URL's origin.
   if (sandboxBackendServed(settings, "opensandbox")) {
-    const ingress = httpsOrHttpOrigin(
-      settings.openSandboxChannelBPublicBaseUrl ?? settings.openSandboxBaseUrl,
-    );
+    const target =
+      settings.openSandboxSignedEndpoints && settings.openSandboxChannelBPublicBaseUrl
+        ? settings.openSandboxChannelBPublicBaseUrl
+        : settings.openSandboxBaseUrl;
+    const ingress = httpsOrHttpOrigin(target);
     if (ingress) add(["connect-src"], ingress, webSocketOrigin(ingress));
   }
 

@@ -310,7 +310,12 @@ const IMAGE_PROXY_TICKET_REFRESH_MS = 60 * 60 * 1000;
  * images the page's policy does not list load through the API's image proxy
  * with a ticket instead of the sign-in cookie.
  */
-function useImageProxyTicket(token: string): void {
+/**
+ * Keeps this pane's image proxy ticket current. Returns false until the first
+ * attempt settles, so images never render (and fail) before the ticket exists.
+ */
+function useImageProxyTicket(token: string): boolean {
+  const [settled, setSettled] = useState(false);
   useEffect(() => {
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -324,6 +329,7 @@ function useImageProxyTicket(token: string): void {
       } catch {
         // Images from unlisted origins stay unavailable until the next try.
       }
+      if (!stopped) setSettled(true);
       if (!stopped) timer = setTimeout(() => void refresh(), IMAGE_PROXY_TICKET_REFRESH_MS);
     };
     void refresh();
@@ -333,11 +339,12 @@ function useImageProxyTicket(token: string): void {
       setImageProxyTicket(null);
     };
   }, [token]);
+  return settled;
 }
 
 function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }) {
   const client = useMemo(() => new OpenGeniClient({ baseUrl: apiBaseUrl, apiKey: token }), [token]);
-  useImageProxyTicket(token);
+  const imageTicketSettled = useImageProxyTicket(token);
   const [workspaces, setWorkspaces] = useState<Workspace[] | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(remembered(WORKSPACE_KEY));
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -453,7 +460,7 @@ function Pane({ token, onSignedOut }: { token: string; onSignedOut: () => void }
       />
     );
   }
-  if (!workspaces) return null;
+  if (!workspaces || !imageTicketSettled) return null;
   if (!workspaceId) {
     return (
       <PaneNotice

@@ -248,18 +248,26 @@ describe("image proxy", () => {
   });
 
   test("a ticket stands in for the sign-in cookie, only while valid", async () => {
-    const now = 1_800_000_000_000;
-    const { app } = proxy(
-      () => new Response(PNG),
-      {},
-      { ticketSecret: "s3cret", now: () => now },
-    );
+    let now = 1_800_000_000_000;
+    const { app } = proxy(() => new Response(PNG), {}, { ticketSecret: "s3cret", now: () => now });
     const issued = await app.request("http://console.test/v1/image-proxy/ticket");
     expect(issued.status).toBe(200);
     expect(issued.headers.get("cache-control")).toBe("no-store");
     const { ticket, expiresAt } = (await issued.json()) as { ticket: string; expiresAt: string };
-    expect(Date.parse(expiresAt)).toBe(now + 12 * 60 * 60 * 1000);
+    // At least 12 hours, ending on a 6-hour boundary, so refreshes within a
+    // window return the same ticket and image URLs stay cacheable.
+    const expiresMs = Date.parse(expiresAt);
+    expect(expiresMs).toBeGreaterThanOrEqual(now + 12 * 60 * 60 * 1000);
+    expect(expiresMs).toBeLessThan(now + 18 * 60 * 60 * 1000);
+    expect(expiresMs % (6 * 60 * 60 * 1000)).toBe(0);
     expect(readImageProxyTicket("s3cret", ticket, now / 1000)).toBe("person-1");
+    const later = now;
+    now += 60 * 60 * 1000;
+    const again = (await (
+      await app.request("http://console.test/v1/image-proxy/ticket")
+    ).json()) as { ticket: string };
+    expect(again.ticket).toBe(ticket);
+    now = later;
     const withTicket = (value: string) =>
       app.request(
         `http://console.test/v1/image-proxy?url=${encodeURIComponent("https://images.example.com/a.png")}&ticket=${encodeURIComponent(value)}`,

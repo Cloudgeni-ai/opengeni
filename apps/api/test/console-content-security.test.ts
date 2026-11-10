@@ -79,6 +79,28 @@ describe("console Content-Security-Policy sources", () => {
     expect(result.directives["connect-src"]).toEqual(
       expect.arrayContaining(["https://sandboxes.example.com", "wss://sandboxes.example.com"]),
     );
+    // The channel B URL counts only where the adapter rewrites to it: signed endpoints.
+    const sources = async (signed: boolean) =>
+      (
+        await consoleContentSecuritySources({
+          settings: testSettings({
+            productAccessMode: "managed",
+            sandboxBackend: "opensandbox",
+            openSandboxBaseUrl: "https://sandboxes.example.com/api",
+            openSandboxSignedEndpoints: signed,
+            openSandboxChannelBPublicBaseUrl: "https://ingress.example.com",
+          } as never),
+          objectStorage: null,
+        })
+      ).directives["connect-src"];
+    expect(await sources(true)).toEqual(
+      expect.arrayContaining(["https://ingress.example.com", "wss://ingress.example.com"]),
+    );
+    expect(await sources(true)).not.toContain("https://sandboxes.example.com");
+    expect(await sources(false)).toEqual(
+      expect.arrayContaining(["https://sandboxes.example.com", "wss://sandboxes.example.com"]),
+    );
+    expect(await sources(false)).not.toContain("https://ingress.example.com");
   });
 
   test("the route is public and uncached", async () => {

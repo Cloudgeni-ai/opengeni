@@ -132,11 +132,15 @@ const LOADER_SCRIPT = [
   `done=true;`,
   `removeEventListener("message",receive);`,
   // A still may not leave its frame: drop refresh redirects (parsed inertly,
-  // so entity-encoded attributes are caught too) before writing it.
+  // so entity-encoded attributes are caught too) before writing it. The inert
+  // parse runs without scripting, which is the only thing that changes how
+  // HTML parses (inside <noscript>), so <noscript> goes too: the reparse in
+  // this scripted frame then reads exactly the checked tree (and a scripted
+  // frame never shows <noscript> content anyway).
   `let html=data.html;`,
   `if(data.mode==="still"){`,
   `try{const doc=new DOMParser().parseFromString(html,"text/html");`,
-  `for(const meta of doc.querySelectorAll("meta[http-equiv]"))if((meta.getAttribute("http-equiv")||"").trim().toLowerCase()==="refresh")meta.remove();`,
+  `for(const el of doc.querySelectorAll("noscript,meta[http-equiv]"))if(el.localName==="noscript"||(el.getAttribute("http-equiv")||"").trim().toLowerCase()==="refresh")el.remove();`,
   `html=doc.documentElement.outerHTML;}catch{html="";}`,
   `html='<!doctype html><meta http-equiv="Content-Security-Policy" content="'+S+'"><meta name="color-scheme" content="light">'+html;}`,
   `const target=window.parent,origin=parentOrigin;`,

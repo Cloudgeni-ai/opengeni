@@ -52,6 +52,11 @@ export const IMAGE_PROXY_SVG_RESPONSE_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; sandbox";
 export const IMAGE_PROXY_TICKET_PATH = "/v1/image-proxy/ticket";
 export const IMAGE_PROXY_TICKET_TTL_SECONDS = 12 * 60 * 60;
+/**
+ * Tickets expire on a fixed boundary, so every ticket minted for a person
+ * within one window is the same and image URLs stay cacheable across refreshes.
+ */
+export const IMAGE_PROXY_TICKET_WINDOW_SECONDS = 6 * 60 * 60;
 
 export type ImageProxyOptions = {
   /** Test seams for the pinned transport. */
@@ -197,7 +202,11 @@ export function registerImageProxyRoutes(
     const subject = options.subject
       ? await options.subject(c)
       : (await requireAccessContext(c, deps)).subjectId;
-    const expiresAt = nowSeconds() + IMAGE_PROXY_TICKET_TTL_SECONDS;
+    // At least the TTL left, rounded up to the next window boundary.
+    const expiresAt =
+      Math.ceil(
+        (nowSeconds() + IMAGE_PROXY_TICKET_TTL_SECONDS) / IMAGE_PROXY_TICKET_WINDOW_SECONDS,
+      ) * IMAGE_PROXY_TICKET_WINDOW_SECONDS;
     c.header("cache-control", "no-store");
     return c.json({
       ticket: createImageProxyTicket(ticketSecret, subject, expiresAt),
