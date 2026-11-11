@@ -6,6 +6,7 @@ import {
   createTurnEventPublisher,
 } from "../src/activities/agent-turn/turn-event-lane";
 import {
+  publishModelRequestAudit,
   publishStartupProgress,
   type TurnBackgroundEventPublisher,
   type TurnEventPublisher,
@@ -341,5 +342,55 @@ describe("startup progress receipts", () => {
     expect(await observability.prometheusMetrics()).toMatch(
       /opengeni_turn_startup_phase_duration_seconds_count\{[^}]*outcome="completed"[^}]*phase="startup_phase_delivery"[^}]*\} 1\b/,
     );
+  });
+});
+
+describe("model request audits", () => {
+  const request = (phase: string) => ({ type: "agent.model.request" as const, payload: { phase } });
+
+  test("streaming phases never hold the provider's bytes behind a database append", async () => {
+    const delivery = gate();
+    const committed: string[] = [];
+    const stamps: Array<Date | undefined> = [];
+    const publisher = createTurnEventPublisher(async (events) => {
+      const phases = events.map((entry) => (entry.payload as { phase: string }).phase);
+      if (phases.includes("headers")) await delivery.promise;
+      committed.push(...phases);
+      stamps.push(...events.map((entry) => entry.occurredAt));
+      return { accepted: true, events: [], canonicalStartupMilestones: [] };
+    });
+    await publishModelRequestAudit(publisher, "started", [request("started")]);
+    // Headers and the first byte return while their append is still blocked.
+    await publishModelRequestAudit(publisher, "headers", [request("headers")]);
+    await publishModelRequestAudit(publisher, "first_byte", [request("first_byte")]);
+    expect(committed).toEqual(["started"]);
+    // The terminal audit is awaited and still commits after them.
+    const terminal = publishModelRequestAudit(publisher, "completed", [request("completed")]);
+    await flush();
+    expect(committed).toEqual(["started"]);
+    delivery.release();
+    await terminal;
+    expect(committed).toEqual(["started", "headers", "first_byte", "completed"]);
+    // Background audits keep the time they were observed, not the time they landed.
+    expect(stamps[0]).toBeUndefined();
+    expect(stamps[1]).toBeInstanceOf(Date);
+    expect(stamps[2]).toBeInstanceOf(Date);
+    expect(stamps[3]).toBeUndefined();
+  });
+
+  test("stay awaited without a background lane", async () => {
+    const published: string[] = [];
+    await publishModelRequestAudit(
+      {
+        publish: async (events) => {
+          published.push(...events.map((entry) => (entry.payload as { phase: string }).phase));
+          return { accepted: true, events: [], canonicalStartupMilestones: [] };
+        },
+        publishInBackground: null,
+      },
+      "first_byte",
+      [request("first_byte")],
+    );
+    expect(published).toEqual(["first_byte"]);
   });
 });
