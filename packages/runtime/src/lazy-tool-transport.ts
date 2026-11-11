@@ -240,6 +240,13 @@ type GenericSearchMarker = {
   notice?: string;
 };
 
+/** A search decided but not yet recorded in the turn's search state. */
+type SearchDecision = {
+  result: GenericSearchMarker;
+  query: string;
+  names: readonly string[] | undefined;
+};
+
 /**
  * A catalog integration the person can connect from a card in this chat, and
  * its vendor domain when the catalog names one.
@@ -1144,7 +1151,21 @@ export class LazyToolRuntime {
   }
 
   /** One decision and one detached receipt per call; never recompute historical output. */
-  async prepareSearch(rawArguments: unknown, signal?: AbortSignal): Promise<GenericSearchMarker> {
+  async prepareSearch(
+    rawArguments: unknown,
+    signal?: AbortSignal,
+    decided?: Promise<SearchDecision>,
+  ): Promise<GenericSearchMarker> {
+    return this.commitSearch(await (decided ?? this.decideSearch(rawArguments, signal)));
+  }
+
+  /**
+   * The slow part of a search: ranking, the decision model and the catalog
+   * lookup. It reads this turn's search state but never writes it, so a
+   * stream may start it as soon as the call is complete and drop it if the
+   * response never finishes; only {@link commitSearch} records the search.
+   */
+  async decideSearch(rawArguments: unknown, signal?: AbortSignal): Promise<SearchDecision> {
     signal?.throwIfAborted();
     // The decision is replayed verbatim when the call executes, so it must
     // read the prepared catalog. Preparation can settle while the model is
@@ -1157,22 +1178,12 @@ export class LazyToolRuntime {
     if (parsed.names !== undefined) {
       const resolve = this.exactMcpNameResolver();
       const exact = { ...parsed, names: parsed.names.map((name) => resolve(name) ?? name) };
-      const loaded = this.withCandidatesNotice({
+      const result = this.withCandidatesNotice({
         version: 2,
         output: this.genericSearchOutput(exact),
         tools: structuredClone(this.searchDisclosure(exact)),
       });
-      // Loading one account's tools by exact name (after browsing a group,
-      // say) names the person's other accounts once per turn, as a ranked
-      // search reaching that account does.
-      const accounts = this.connectedAccountsNotice(loaded);
-      return this.remembered(
-        this.withAlreadyAvailable(
-          accounts ? this.withNotice(loaded, "connectedAccounts", accounts) : loaded,
-          query,
-          parsed.names,
-        ),
-      );
+      return { result, query, names: parsed.names };
     }
     const pool = this.searchableTools(this.currentTools);
     this.searchIndex ??= new ToolSearchIndex(pool);
@@ -1232,17 +1243,29 @@ export class LazyToolRuntime {
         ? ranked
         : this.withCandidatesNotice(ranked);
     const connectable = await lookup;
-    const withConnectable = connectable.length
-      ? this.withNotice(result, "notConnected", connectableIntegrationNotice(connectable))
-      : result;
-    const accounts = this.connectedAccountsNotice(withConnectable);
+    return {
+      result: connectable.length
+        ? this.withNotice(result, "notConnected", connectableIntegrationNotice(connectable))
+        : result,
+      query,
+      names: undefined,
+    };
+  }
+
+  /**
+   * Finish a decided search when its call is accepted: name the person's
+   * other connected accounts (once per turn), note tools every request
+   * already carries, and record what it loaded and showed for later searches.
+   * Loading one account's tools by exact name (after browsing a group, say)
+   * names the other accounts too, as a ranked search reaching that account does.
+   */
+  private commitSearch({ result, query, names }: SearchDecision): GenericSearchMarker {
+    const accounts = this.connectedAccountsNotice(result);
     return this.remembered(
       this.withAlreadyAvailable(
-        accounts
-          ? this.withNotice(withConnectable, "connectedAccounts", accounts)
-          : withConnectable,
+        accounts ? this.withNotice(result, "connectedAccounts", accounts) : result,
         query,
-        undefined,
+        names,
       ),
     );
   }
@@ -2396,6 +2419,7 @@ async function transformResponseItem(
   received: unknown,
   runtime: LazyToolRuntime,
   signal?: AbortSignal,
+  decided?: EarlySearchDecisions,
 ): Promise<unknown[]> {
   const item = await withProviderValidCallName(received, runtime);
   if (isRecord(item) && item.type === "tool_search_call") {
@@ -2409,7 +2433,11 @@ async function transformResponseItem(
           ...item,
           providerData: {
             ...providerData,
-            [SEARCH_MARKER_KEY]: await runtime.prepareSearch(item.arguments, signal),
+            [SEARCH_MARKER_KEY]: await runtime.prepareSearch(
+              item.arguments,
+              signal,
+              decided?.take(item),
+            ),
           },
         },
       ];
@@ -2433,7 +2461,7 @@ async function transformResponseItem(
   const items = transformGenericDispatchCall(
     item,
     runtime,
-    search ? await runtime.prepareSearch(item.arguments, signal) : undefined,
+    search ? await runtime.prepareSearch(item.arguments, signal, decided?.take(item)) : undefined,
   );
   return items.map((candidate) => withFamilyDisclosure(candidate, runtime));
 }
@@ -2468,14 +2496,72 @@ async function transformResponseOutput(
   output: ModelResponse["output"],
   runtime: LazyToolRuntime,
   signal?: AbortSignal,
+  decided?: EarlySearchDecisions,
 ): Promise<ModelResponse["output"]> {
   const transformed = (
-    await Promise.all(output.map((item) => transformResponseItem(item, runtime, signal)))
+    await Promise.all(output.map((item) => transformResponseItem(item, runtime, signal, decided)))
   ).flat();
   const unchanged =
     transformed.length === output.length &&
     transformed.every((item, index) => item === output[index]);
   return unchanged ? output : (transformed as ModelResponse["output"]);
+}
+
+/**
+ * Searches one streamed response started deciding while the provider was
+ * still finishing it. A client search call is complete at its
+ * `response.output_item.done`; the response's terminal event can follow
+ * hundreds of milliseconds later, and ranking or the decision model would
+ * otherwise only begin then, delaying the response's settlement and the next
+ * request by the whole search. Each decision is recorded in the turn's
+ * search state only when its call is transformed, and one the response never
+ * completes is dropped unrecorded.
+ */
+class EarlySearchDecisions {
+  private readonly pending = new Map<string, Promise<SearchDecision>>();
+
+  constructor(
+    private readonly runtime: LazyToolRuntime,
+    private readonly signal: AbortSignal | undefined,
+  ) {}
+
+  /** Start deciding the search a raw Responses stream event completes, if any. */
+  observe(event: StreamEvent): void {
+    if (event.type !== "model") return;
+    const raw = (event as { event?: unknown }).event;
+    if (!isRecord(raw) || raw.type !== "response.output_item.done") return;
+    const item = raw.item;
+    if (!isRecord(item)) return;
+    const isClientSearch = item.type === "tool_search_call" && item.execution === "client";
+    const isGenericSearch =
+      this.runtime.transport === "generic_dispatch" &&
+      item.type === "function_call" &&
+      item.name === TOOL_SEARCH_NAME &&
+      typeof item.arguments === "string";
+    if (!isClientSearch && !isGenericSearch) return;
+    const key = earlySearchKey(item);
+    if (key === null || this.pending.has(key)) return;
+    const decision = this.runtime.decideSearch(item.arguments, this.signal);
+    // Observed when the call is transformed; a dropped response leaves it unobserved.
+    decision.catch(() => undefined);
+    this.pending.set(key, decision);
+  }
+
+  /** The decision started for this call, once; undefined decides it now. */
+  take(item: Record<string, unknown>): Promise<SearchDecision> | undefined {
+    const key = earlySearchKey(item);
+    if (key === null) return undefined;
+    const decision = this.pending.get(key);
+    this.pending.delete(key);
+    return decision;
+  }
+}
+
+/** The same call in the raw stream and in the SDK's converted output. */
+function earlySearchKey(item: Record<string, unknown>): string | null {
+  const id = callId(item);
+  if (!id) return null;
+  return `${String(item.type)}\u0000${id}\u0000${JSON.stringify(item.arguments ?? null)}`;
 }
 
 /**
@@ -2750,6 +2836,7 @@ class LazyToolModel implements Model {
     rememberPreparedModelRequest(prepared);
     void notifyModelRequestCapture(prepared);
     let responseStartedPreparation = false;
+    const decided = new EarlySearchDecisions(this.runtime, request.signal);
     for await (const event of streamPreemptibleModelRequest(prepared, (preemptible) =>
       this.inner.getStreamedResponse(preemptible),
     )) {
@@ -2759,6 +2846,7 @@ class LazyToolModel implements Model {
         responseStartedPreparation = true;
         this.runtime.startPreparation();
       }
+      decided.observe(event);
       if (event.type === "response_done") {
         if (responseRequiresToolPreparation(event.response, this.runtime)) {
           await this.runtime.ensurePrepared();
@@ -2774,6 +2862,7 @@ class LazyToolModel implements Model {
                   event.response.output as ModelResponse["output"],
                   this.runtime,
                   request.signal,
+                  decided,
                 )) as typeof event.response.output,
               },
             } as StreamEvent)

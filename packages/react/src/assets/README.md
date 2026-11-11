@@ -15,6 +15,10 @@ These provider-owned marks identify the connected service; they do not imply end
   `apps/web/src/assets/integration-logos/` (originally
   `https://res-1.cdn.office.net/files/fabric-cdn-prod_20230815.002/assets/brand-icons/product/svg/<product>_48x1.svg`).
 
+- `dynamics-365.svg`: Microsoft's Dynamics 365 product mark, the icon part of
+  https://commons.wikimedia.org/wiki/File:Microsoft_Dynamics_365_Logo_(2021%E2%80%93present).svg
+  (retrieved 2026-11-11; the wordmark groups removed and the view box squared).
+
 Every reviewed Microsoft integration definition needs a mark here, or its chat setup card falls back
 to a letter monogram.
 
