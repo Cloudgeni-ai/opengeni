@@ -19,11 +19,11 @@ batch, after the priority PRs and without waiting for the batching window, so
 priority PRs that arrive one at a time do not each take a round alone. A
 priority CI or batcher change still runs alone. While a failed batch is being
 split, a priority batch has no fill, and priority batches and those halves
-take turns: after a priority batch goes ahead of a half, that half goes next,
-and the halves run in the order they were split off, oldest first. A priority
-batch that is cancelled (say a member got a new head) is rebuilt ahead of the
-halves; it never becomes one of them. So neither priority PRs that keep
-arriving nor PRs queued later can stall a bisection.
+take turns: after a priority batch or a Version PR goes ahead of a half, that
+half goes next, and the halves run in the order they were split off, oldest
+first. A priority batch that is cancelled (say a member got a new head) is
+rebuilt ahead of the halves; it never becomes one of them. So neither priority
+PRs that keep arriving nor PRs queued later can stall a bisection.
 
 ## Model request review
 

@@ -384,13 +384,12 @@ export function readyAt(pull: QueuedPull): number {
  * once it is green and current with main, and nothing else builds before it
  * lands, so a release operator gets a stable main. Then priority PRs go
  * first, and ready PRs in queue order fill the rest of their batch, so
- * priority PRs that arrive one at a time do not each take a round alone; the
- * fill leaves out the PRs a failed batch's split still holds. While a failed
- * batch is being split, a priority batch has no fill, and priority batches and
- * its halves take turns: after a priority batch went ahead of a half, that half
- * goes next, and the halves run oldest first, so neither a steady stream of
- * priority PRs nor PRs queued later can hold a bisection back. Then ready PRs
- * in queue order.
+ * priority PRs that arrive one at a time do not each take a round alone.
+ * While a failed batch is being split, a priority batch has no fill, and
+ * priority batches and its halves take turns: after a priority batch or a
+ * Version PR went ahead of a half, that half goes next, and the halves run
+ * oldest first, so neither a steady stream of priority PRs nor PRs queued
+ * later can hold a bisection back. Then ready PRs in queue order.
  * CI and batcher changes run alone; while a failed batch is being split, the
  * oldest one outside its halves takes turns with them when no priority PR
  * waits. A priority PR already in a failed batch's
@@ -663,8 +662,8 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
   let pulls = observation.pulls;
   let pending: number[][] = [];
   let blame: string[] = [];
-  // A finished priority batch that went ahead of a bisection hands the next
-  // turn to the bisection.
+  // A finished priority batch or Version PR that went ahead of a bisection
+  // hands the next turn to the bisection.
   let halvesFirst = false;
   const byNumber = new Map(pulls.map((p) => [p.number, p]));
 
@@ -758,6 +757,8 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     pending =
       manifest.aheadOfBisection === true ? manifest.pending : [numbers, ...manifest.pending];
     blame = manifest.blame ?? [];
+    // A Version PR always builds ahead of any halves, as a priority batch can.
+    const wentAhead = manifest.aheadOfBisection === true || manifest.members[0]?.version === true;
     // A new head that tests to the same tree (main merged in again, a rebase)
     // changes nothing this batch tests, so it does not restart it. A member
     // that now conflicts with main is rebuilt out of it, though it stays queued.
@@ -816,7 +817,7 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         actions.push({ kind: "retry", batch, runs: result.runs });
         return ahead(batch);
       } else if (result.kind === "passed") {
-        halvesFirst = manifest.aheadOfBisection === true;
+        halvesFirst = wentAhead;
         actions.push({ kind: "land", batch });
         // The batch built on it is judged once it landed, in the next round.
         if (stacked) return actions;
@@ -838,7 +839,7 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         // What a batch built ahead of a bisection failed in says nothing about
         // the bisection's halves.
         if (manifest.aheadOfBisection !== true) blame = blamed(blame, result.runs);
-        halvesFirst = manifest.aheadOfBisection === true;
+        halvesFirst = wentAhead;
         if (numbers.length === 1) {
           const final = result.runs.find((r) => r.final);
           const run = result.runs.find((r) => r.workflow === CI_WORKFLOW) ?? result.runs[0]!;

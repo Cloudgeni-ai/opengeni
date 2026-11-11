@@ -774,6 +774,20 @@ describe("decide", () => {
     expect(first?.kind === "build" && first.members.map((p) => p.number)).toEqual([1]);
   });
 
+  test("a Version PR built ahead of a bisection hands the next turn to its oldest half", () => {
+    const pulls = [pull(1), pull(2), pull(3), pull(5, { priority: true })];
+    // It landed, or failed and was ejected: either way the half goes next.
+    for (const runs of [[run()], [run({ conclusion: "failure", attempt: 2 })]]) {
+      const release = batch([9], { runs }, [[1, 2], [3]]);
+      release.manifest.members[0]!.version = true;
+      const actions = decide(observe([...pulls, pull(9, { version: true })], [release]));
+      const next = actions.at(-1);
+      expect(next).toMatchObject({ kind: "build", pending: [[3]] });
+      expect(next).not.toHaveProperty("aheadOfBisection");
+      expect(next?.kind === "build" && next.members.map((p) => p.number)).toEqual([1, 2]);
+    }
+  });
+
   test("an interrupted batch that went ahead of a bisection does not become one of its halves", () => {
     const older = [[1, 2], [3]];
     const ahead = batch([5, 6, 7], {}, older);
