@@ -5668,8 +5668,11 @@ The existing
 children still cover atomic initialization, post-commit fanout,
 immediate workflow signal plus wake-ledger acknowledgement, and response reload.
 The initial turn, authority, event log and wake outbox still commit atomically
-before either notification. Initial live fanout and the immediate durable-revision
-workflow wake then overlap; both settle before response reload or error propagation.
+before either notification. Create then answers once that commit and the response
+reload finish: initial live fanout and the immediate durable-revision workflow
+wake start right after commit but run detached from the request, so Temporal
+latency delays only when the run starts. A failed or lost immediate wake leaves
+the outbox revision owed, and the control worker's wake dispatcher delivers it.
 Wake-ledger acknowledgement stays after signal acceptance, and ordinary fanout
 transport failures remain best-effort. Durable SSE replay handles later committed
 events arriving ahead of initial live fanout. Worker child phases

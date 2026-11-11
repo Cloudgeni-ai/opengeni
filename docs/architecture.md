@@ -1366,8 +1366,8 @@ provider require boundaries without requiring a full runtime dependency tree.
 1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.
 2. Routes call `@opengeni/core`; validated state/events/queue/control/audit/wake
    intent commit in Postgres.
-3. Child spans time creation; fanout/wake overlap post-commit;
-   both settle before response reload. Notifications never prove admission:
+3. Child spans time creation; fanout/wake start post-commit, detached from
+   the response; the wake outbox repairs a lost wake. Notifications never prove admission:
    queued turns/pending Agent Steer cannot acknowledge durable wakes without
    attempt-fenced Postgres claims.
 4. Workflows dispatch durable obligations. Workers claim turns/register attempts

@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { createObservability } from "@opengeni/observability";
 import type { Settings } from "@opengeni/config";
 import type { AccessGrant, McpMutationReceiptType } from "@opengeni/contracts";
 import {
@@ -180,14 +179,12 @@ afterAll(async () => {
 }, 60_000);
 
 describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
-  test("create reads committed state while fanout and workflow wake are still held", async () => {
-    if (!available) throw new Error("Session-create overlap proof requires PostgreSQL");
+  test("create answers once committed while fanout and workflow wake are still held", async () => {
+    if (!available) throw new Error("Session-create post-commit proof requires PostgreSQL");
     const grant = await freshGrant();
     const settings = testSettings({ databaseUrl: shared!.appUrl, sandboxBackend: "none" });
     const workflow = new FakeWorkflowClient();
     const deps = buildDeps(workflow, settings);
-    const observability = createObservability(settings, { component: "api" });
-    deps.observability = observability;
     let releaseFanout!: () => void;
     let releaseWake!: () => void;
     const fanoutHeld = new Promise<void>((resolve) => {
@@ -205,62 +202,38 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
       workflow.wakeups.push(input);
       await wakeHeld;
     };
-    let completedReload!: () => void;
-    const reloaded = new Promise<void>((resolve) => {
-      completedReload = resolve;
-    });
-    const startSpan = observability.startSpan.bind(observability);
-    observability.startSpan = (name, attributes, options) => {
-      const span = startSpan(name, attributes, options);
-      return {
-        ...span,
-        end: (input) => {
-          span.end(input);
-          if (name === "core.session_start.session_reload") completedReload();
-        },
-      };
-    };
     const server = buildOpenGeniMcpServer(deps, grant);
-    let settled = false;
-    const creating = callMcpTool<McpMutationReceiptType>(server, "session_create", {
-      initialMessage: "Synthetic create, never invoke a model",
-      model: "scripted-model",
-      sandboxBackend: "none",
-    });
-    void creating.then(
-      () => {
-        settled = true;
-      },
-      () => {
-        settled = true;
-      },
-    );
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      await Promise.race([
-        reloaded,
+      // A held Temporal signal and live fanout delay only the run start:
+      // the receipt arrives once acceptance has committed.
+      const receipt = await Promise.race([
+        callMcpTool<McpMutationReceiptType>(server, "session_create", {
+          initialMessage: "Synthetic create, never invoke a model",
+          model: "scripted-model",
+          sandboxBackend: "none",
+        }),
         new Promise<never>((_, reject) => {
-          timeout = setTimeout(() => reject(new Error("Response read waited for transport")), 5000);
+          timeout = setTimeout(() => reject(new Error("Create waited for transport")), 10_000);
         }),
       ]);
-      expect(settled).toBe(false);
+      expect(receipt).toMatchObject({
+        committed: true,
+        resource: { state: "queued" },
+      });
+      // Both deliveries started before the answer, so start latency is unchanged.
       expect(workflow.wakeups).toHaveLength(1);
-      expect(fanoutSessionId).toBeDefined();
-      expect(await durableCounts(grant.workspaceId, fanoutSessionId!)).toMatchObject({
+      expect(workflow.wakeups[0]).toMatchObject({
+        sessionId: receipt.resource.id,
+        wakeRevision: 1,
+      });
+      expect(fanoutSessionId).toBe(receipt.resource.id);
+      expect(await durableCounts(grant.workspaceId, receipt.resource.id)).toMatchObject({
         workspaceSessions: 1,
         events: 4,
         turns: 1,
         wakeRows: 1,
         wakeRevision: 1,
-      });
-      releaseFanout();
-      await Promise.resolve();
-      expect(settled).toBe(false);
-      releaseWake();
-      const receipt = await creating;
-      expect(receipt).toMatchObject({
-        committed: true,
-        resource: { id: fanoutSessionId, state: "queued" },
       });
       const session = await getSession(client.db, grant.workspaceId, receipt.resource.id);
       expect(session).toMatchObject({ status: "queued", lastSequence: 4 });
@@ -268,7 +241,6 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
       clearTimeout(timeout);
       releaseFanout();
       releaseWake();
-      await creating.catch(() => undefined);
     }
   }, 30_000);
 

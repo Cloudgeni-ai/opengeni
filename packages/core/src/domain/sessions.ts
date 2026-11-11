@@ -1068,6 +1068,11 @@ export async function createAndStartSessionWithOutcome(input: {
   metrics?: ProductUsageMetricsSink | null;
   /** Optional content-free child spans; never a lifecycle dependency. */
   startupObservability?: SessionStartObservability | null;
+  /**
+   * Runs the post-commit live fanout and immediate workflow wake. Defaults to
+   * starting them without waiting; the create returns once acceptance commits.
+   */
+  schedulePostCommit?: (task: () => Promise<void>) => void;
   /** Create the session shell without an initial user event/agent turn. */
   deferInitialTurn?: boolean;
   modelContext?: string | null;
@@ -1621,6 +1626,7 @@ async function finishStartSession(
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     startupObservability?: SessionStartObservability | null;
+    schedulePostCommit?: (task: () => Promise<void>) => void;
     initialMessage: string;
     captureInitialTurnAuthority?: (
       tx: Database,
@@ -1759,48 +1765,105 @@ async function finishStartSession(
       deferInitialTurn: input.deferInitialTurn === true,
     }),
   );
-  // Initialization committed the initial turn, events and wake outbox together.
-  // Notifications and the response read depend on that commit, not on one
-  // another. Read authoritative state while the immediate delivery attempts run;
-  // retain and fully join all work before returning (including on failure).
-  const wakeRevision = started.workflowWakeRevision;
-  const [fanout, wake, response] = await Promise.allSettled([
-    measureSessionStartPhase(input.startupObservability, "event_fanout", () =>
-      publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events),
-    ),
-    wakeRevision === null
-      ? Promise.resolve()
-      : measureSessionStartPhase(input.startupObservability, "workflow_wake", () =>
-          input.workflowClient.wakeSessionWorkflow({
-            accountId: session.accountId,
-            workspaceId: session.workspaceId,
-            sessionId: session.id,
-            workflowId: started.temporalWorkflowId,
-            wakeRevision,
-          }),
-        ),
-    (async () => {
-      const persisted = await measureSessionStartPhase(
-        input.startupObservability,
-        "session_reload",
-        () => requireSession(input.db, session.workspaceId, session.id),
-      );
-      const initialTurnId =
-        started.turn?.id ??
-        (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
-        null;
-      return { ...persisted, initialTurnId };
-    })(),
-  ]);
-  // Keep the prior serial error priority without detaching attempt work. Normal
-  // transport failure remains best-effort inside publishDurableSessionEvents.
-  if (fanout.status === "rejected") throw fanout.reason;
-  if (wake.status === "rejected") throw wake.reason;
-  if (response.status === "rejected") throw response.reason;
+  // Initialization committed the initial turn, events and wake outbox together:
+  // that commit is the acceptance. Live fanout and the immediate workflow wake
+  // only shorten propagation; durable replay and the wake outbox recover them.
+  // Start both before the response read, so start latency is unchanged, but
+  // never wait on them: a stalled Temporal or NATS delays the run, not the caller.
+  scheduleSessionStartPostCommit(input, session, {
+    events: started.events,
+    temporalWorkflowId: started.temporalWorkflowId,
+    wakeRevision: started.workflowWakeRevision,
+  });
+  const persisted = await measureSessionStartPhase(
+    input.startupObservability,
+    "session_reload",
+    () => requireSession(input.db, session.workspaceId, session.id),
+  );
+  const initialTurnId =
+    started.turn?.id ??
+    (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
+    null;
   return {
-    session: response.value,
+    session: { ...persisted, initialTurnId },
     changed: started.changed,
   };
+}
+
+/**
+ * Deliver a committed session start's live events and immediate workflow wake
+ * after the request returns. Both are replayable: SSE replays the event log and
+ * the wake outbox keeps the revision until the worker claims the turn, so a
+ * failure here is logged, never returned to a caller whose work was accepted.
+ */
+function scheduleSessionStartPostCommit(
+  input: {
+    bus: EventBus;
+    workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+    startupObservability?: SessionStartObservability | null;
+    schedulePostCommit?: (task: () => Promise<void>) => void;
+  },
+  session: Pick<Session, "accountId" | "workspaceId" | "id">,
+  started: {
+    events: SessionEvent[];
+    temporalWorkflowId: string;
+    wakeRevision: number | null;
+  },
+): void {
+  const { wakeRevision } = started;
+  if (started.events.length === 0 && wakeRevision === null) return;
+  const task = async () => {
+    await Promise.all([
+      (async () => {
+        if (started.events.length === 0) return;
+        try {
+          await measureSessionStartPhase(input.startupObservability, "event_fanout", () =>
+            publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events),
+          );
+        } catch {
+          console.warn("[sessions] start event fanout failed; durable rows remain replayable", {
+            errorClass: "PromptEventFanoutOperationError",
+            errorCode: "session_start_event_fanout_failed",
+            origin: "core",
+          });
+        }
+      })(),
+      (async () => {
+        if (wakeRevision === null) return;
+        try {
+          await measureSessionStartPhase(input.startupObservability, "workflow_wake", () =>
+            input.workflowClient.wakeSessionWorkflow({
+              accountId: session.accountId,
+              workspaceId: session.workspaceId,
+              sessionId: session.id,
+              workflowId: started.temporalWorkflowId,
+              wakeRevision,
+            }),
+          );
+        } catch {
+          console.warn("[sessions] start workflow wake failed; durable outbox will retry", {
+            errorClass: "WorkflowWakeOperationError",
+            errorCode: "session_workflow_wake_failed",
+            origin: "core",
+          });
+        }
+      })(),
+    ]);
+  };
+  const schedulePostCommit =
+    input.schedulePostCommit ??
+    ((pending: () => Promise<void>) => {
+      void pending();
+    });
+  try {
+    schedulePostCommit(task);
+  } catch {
+    console.warn("[sessions] start post-commit scheduling failed; durable recovery remains", {
+      errorClass: "PromptPostCommitScheduleError",
+      errorCode: "session_start_post_commit_schedule_failed",
+      origin: "core",
+    });
+  }
 }
 
 export function workflowIdForSession(sessionId: string): string {
@@ -2995,13 +3058,23 @@ async function createSessionForRequestInFileScope(
           retainedKeyedShellExecution = initializedReplay.session;
         } else {
           if (initializedReplay.workflowWakeRevision !== null) {
-            await unresolvedDeps.workflowClient.wakeSessionWorkflow({
-              accountId: grant.accountId,
-              workspaceId,
-              sessionId: initializedReplay.session.id,
-              workflowId: initializedReplay.temporalWorkflowId,
-              wakeRevision: initializedReplay.workflowWakeRevision,
-            });
+            // The replay recommitted its wake revision; like a first create,
+            // the response waits for the commit, not for Temporal.
+            scheduleSessionStartPostCommit(
+              {
+                bus: unresolvedDeps.bus,
+                workflowClient: unresolvedDeps.workflowClient,
+                ...(unresolvedDeps.schedulePromptPostCommit
+                  ? { schedulePostCommit: unresolvedDeps.schedulePromptPostCommit }
+                  : {}),
+              },
+              { accountId: grant.accountId, workspaceId, id: initializedReplay.session.id },
+              {
+                events: [],
+                temporalWorkflowId: initializedReplay.temporalWorkflowId,
+                wakeRevision: initializedReplay.workflowWakeRevision,
+              },
+            );
           }
           return await withSessionCreateUsageRecording({
             deps: unresolvedDeps,
@@ -4234,6 +4307,9 @@ async function createSessionForRequestInFileScope(
       db,
       bus,
       workflowClient,
+      ...(unresolvedDeps.schedulePromptPostCommit
+        ? { schedulePostCommit: unresolvedDeps.schedulePromptPostCommit }
+        : {}),
       codeSearchDeploymentPolicy: codeSearchDeploymentPolicy(deps.settings),
       accountId: grant.accountId,
       workspaceId,
