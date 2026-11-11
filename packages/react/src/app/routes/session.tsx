@@ -84,8 +84,8 @@ import {
 } from "../components/session/session-admission-notice";
 import {
   sessionAdmissionNeedsDifferentMachine,
-  sessionAdmissionNeedsMachineAccess,
   sessionAdmissionReason,
+  sessionAdmissionShowsMachineAccess,
 } from "../../session-admission-model";
 import {
   connectorSelectionUpdate,
@@ -2657,7 +2657,7 @@ function SessionChatPane(props: {
   // says the workspace will see the work, so the heads-up would repeat it.
   const ownerAskedToAllow =
     machineAccess?.isOwner === true &&
-    sessionAdmissionNeedsMachineAccess(sessionAdmissionReason(props.session), machineAccess);
+    sessionAdmissionShowsMachineAccess(sessionAdmissionReason(props.session), machineAccess);
   const showMachineAccess =
     machineAccess !== null && (!machineAccess.isOwner || (sharedChat && !ownerAskedToAllow));
   const connectionAccounts = useConnectionAccounts(

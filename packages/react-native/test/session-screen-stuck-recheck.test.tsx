@@ -368,7 +368,7 @@ test("without machine access the same refusal reads as a permission check that s
   expect(view.container.textContent).toContain("Permission needed");
   expect(view.container.textContent).toContain("A permission check stopped your next message.");
   expect(view.container.textContent).toContain(
-    "or a workspace admin, can fix it. It starts by itself once they do.",
+    "or a workspace admin, can fix this. Your message starts by itself once they do.",
   );
   expect(view.container.querySelector("button")).toBeNull();
   await view.unmount();
@@ -495,7 +495,7 @@ for (const [kind, sharedLine] of [
       const text = view.container.textContent ?? "";
       expect(text).toContain("Machine access needed");
       const line =
-        "This chat is shared, so people in this workspace will see what the agent does on “Kari's laptop”.";
+        "This chat is shared, so people in this workspace will see what the agent does on the machine.";
       if (sharedLine) expect(text).toContain(line);
       else expect(text).not.toContain("This chat is shared");
       await view.unmount();

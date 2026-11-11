@@ -4525,7 +4525,7 @@ export const englishMessages = {
   "sessionAdmission.grantBody":
     "Your next message needs a machine or other personal resource that isn’t allowed for this chat.",
   "sessionAdmission.grantNext":
-    "The person it belongs to can allow it for this chat. It starts by itself once they do.",
+    "Its owner can allow it for this chat. Your message starts by itself once they do.",
   "sessionAdmission.grantTitle": "Not allowed for this chat",
   "sessionAdmission.machineAccessBody": "This chat isn’t allowed to use “{machine}”.",
   "sessionAdmission.machineAccessOthersBody":
@@ -4541,7 +4541,7 @@ export const englishMessages = {
   "sessionAdmission.machineAccessOwnerSettingsPausedNext":
     "Allow it in the machine’s settings. Your message starts when the chat is resumed.",
   "sessionAdmission.machineAccessSharedNote":
-    "This chat is shared, so people in this workspace will see what the agent does on “{machine}”.",
+    "This chat is shared, so people in this workspace will see what the agent does on the machine.",
   "sessionAdmission.machineAccessTitle": "Machine access needed",
   "sessionAdmission.machineChangeFailed":
     "The machine change could not be confirmed. Refresh and try again.",
@@ -4550,7 +4550,7 @@ export const englishMessages = {
   "sessionAdmission.membershipBody":
     "The person who sent this message no longer has access to this workspace.",
   "sessionAdmission.membershipNext":
-    "A workspace admin can restore their access. It starts by itself once they do.",
+    "A workspace admin can restore their access. The message starts by itself once they do.",
   "sessionAdmission.membershipTitle": "Workspace access needed",
   "sessionAdmission.messagesWaitingExplanation":
     "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start work there, so messages from other people wait for {owner}.",
@@ -4577,7 +4577,7 @@ export const englishMessages = {
   "sessionAdmission.otherMachineExplanation":
     "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start new work there.",
   "sessionAdmission.otherMachineQueuedNext":
-    "Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. It starts by itself once the chat is on a machine you can use.",
+    "Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. Your message starts by itself once the chat is on a machine you can use.",
   "sessionAdmission.otherMachineWorkNote":
     "Updates from agents you start here also wait for {owner}.",
   "sessionAdmission.othersApprovedElsewhereBody":
@@ -4603,7 +4603,7 @@ export const englishMessages = {
   "sessionAdmission.ownMachineExplanation":
     "This chat runs on your personal machine “{machine}”. Messages from other people cannot start work on it.",
   "sessionAdmission.ownMachineQueuedNext":
-    "Choose a workspace or cloud machine, or ask a workspace admin to share this machine. It starts by itself once the chat is on a machine its sender can use.",
+    "Choose a workspace or cloud machine, or ask a workspace admin to share this machine. The message starts by itself once the chat is on a machine its sender can use.",
   "sessionAdmission.ownMachineSharedHeadsUp":
     "This chat runs on your personal machine “{machine}”. People in this workspace see what the agent does on it.",
   "sessionAdmission.ownerRequest":
@@ -4611,7 +4611,7 @@ export const englishMessages = {
   "sessionAdmission.pausedNote": "This chat is also paused. Your message starts when it’s resumed.",
   "sessionAdmission.permissionBody": "A permission check stopped your next message.",
   "sessionAdmission.permissionNext":
-    "The owner of this chat’s machine or resources, or a workspace admin, can fix it. It starts by itself once they do.",
+    "The owner of this chat’s machine or resources, or a workspace admin, can fix this. Your message starts by itself once they do.",
   "sessionAdmission.permissionTitle": "Permission needed",
   "sessionAdmission.preSendTitle": "Choose a machine before sending",
   "sessionAdmission.refreshFailed": "Session status could not be refreshed. Try refreshing again.",

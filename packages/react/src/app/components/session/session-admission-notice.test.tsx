@@ -5,6 +5,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { englishMessages } from "../../../messages/en";
 import {
+  sessionAdmissionReason,
+  sessionAdmissionShowsMachineAccess,
+} from "../../../session-admission-model";
+import {
   admissionRecheckControl,
   admissionControlNeedsRefresh,
   recheckSessionAdmission,
@@ -119,7 +123,7 @@ describe("session admission notice", () => {
     expect(container.textContent).toContain("Alex’s personal machine");
     expect(container.textContent).not.toMatch(/saved/i);
     expect(container.textContent).toContain(
-      "It starts by itself once the chat is on a machine you can use",
+      "Your message starts by itself once the chat is on a machine you can use",
     );
     expect([...container.querySelectorAll("button")].map((button) => button.textContent)).toEqual([
       "Choose machine",
@@ -261,7 +265,7 @@ describe("session admission notice", () => {
       onAllowMachine: async () => {},
     });
     expect(container.textContent).toContain(
-      "This chat is shared, so people in this workspace will see what the agent does on “My machine”.",
+      "This chat is shared, so people in this workspace will see what the agent does on the machine.",
     );
     await act(async () => root!.unmount());
     root = undefined;
@@ -271,12 +275,31 @@ describe("session admission notice", () => {
     expect(container.textContent).not.toContain("This chat is shared");
   });
 
-  test("route: the shared line follows the heads-up's rule, and the heads-up steps aside", async () => {
+  test("route: the shared line follows the heads-up's rule, and the heads-up steps aside only for it", async () => {
     const route = await Bun.file(`${import.meta.dir}/../../routes/session.tsx`).text();
     expect(route).toContain("sharedChat={sharedChat}");
     // While the owner is asked to allow the machine, the notice carries the
     // shared line, so the composer heads-up doesn't repeat it.
     expect(route).toContain("(sharedChat && !ownerAskedToAllow)");
+    expect(route).toContain("sessionAdmissionShowsMachineAccess(");
+    // When other people's waiting updates are explained instead, the notice
+    // has no shared line, so the heads-up stays.
+    const reason = sessionAdmissionReason(session());
+    expect(sessionAdmissionShowsMachineAccess(reason, ownMachine)).toBe(true);
+    expect(
+      sessionAdmissionShowsMachineAccess(reason, {
+        ...ownMachine,
+        waitingWork: [{ name: "Alex", isYou: false, results: 1 }],
+      }),
+    ).toBe(false);
+    const shared = { ...session(), tenancy: { visibility: "workspace" } } as unknown as Session;
+    await render({
+      session: shared,
+      sharedChat: true,
+      machineAccess: { ...ownMachine, waitingWork: [{ name: "Alex", isYou: false, results: 1 }] },
+      onAllowMachine: async () => {},
+    });
+    expect(container.textContent).not.toContain("This chat is shared");
   });
 
   test("someone else in a paused chat still sees the paused note", async () => {
@@ -472,7 +495,7 @@ describe("session admission notice", () => {
     expect(container.textContent).toContain("Permission needed");
     expect(container.textContent).toContain("machine or resources");
     expect(container.textContent).toContain(
-      "or a workspace admin, can fix it. It starts by itself once they do.",
+      "or a workspace admin, can fix this. Your message starts by itself once they do.",
     );
     expect(container.querySelector("button")).toBeNull();
     expect(onRecheck).not.toHaveBeenCalled();
@@ -482,7 +505,7 @@ describe("session admission notice", () => {
     await render({ session: session("initiator_membership_required") });
     expect(container.textContent).toContain("Workspace access needed");
     expect(container.textContent).toContain(
-      "A workspace admin can restore their access. It starts by itself once they do.",
+      "A workspace admin can restore their access. The message starts by itself once they do.",
     );
     expect(container.querySelector("button")).toBeNull();
   });

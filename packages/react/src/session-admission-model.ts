@@ -138,7 +138,6 @@ export function savedMessageApprovedMachines(
 export type ApprovedElsewhereCopy = {
   title: string;
   body: string;
-  /** What happens next; empty when the body already says it. */
   next: string;
   /** "Run it on …" for the machine the chat can move to now; null when there is none. */
   action: string | null;
@@ -214,6 +213,7 @@ export async function runSavedMessageOnMachine({
 export type SessionAdmissionCopy = {
   title: string;
   body: string;
+  /** What happens next; empty when the body already says it. */
   next: string;
   /**
    * The one action that fixes it here ("Try again", "Allow for this chat"),
@@ -289,6 +289,19 @@ export function sessionAdmissionNeedsMachineAccess(
 }
 
 /**
+ * The blocked-message notice is showing the machine-access words: the message
+ * waits for approval to use the chat's personal machine, and other people's
+ * waiting updates aren't explained instead (`SessionWaitingWorkNotice`).
+ */
+export function sessionAdmissionShowsMachineAccess(
+  reason: SessionAdmissionReason | null,
+  access: SessionMachineAccess | null | undefined,
+): boolean {
+  if (!sessionAdmissionNeedsMachineAccess(reason, access)) return false;
+  return !(access?.waitingWork?.length && sessionWaitingWorkExplainsBlock(reason));
+}
+
+/**
  * Words for a saved message waiting for approval to use the chat's personal
  * machine. The owner gets "Allow for this chat", which starts it right away
  * (or when a paused chat is resumed); everyone else learns who can allow it
@@ -322,9 +335,7 @@ export function sessionAdmissionMachineAccessCopy(
     return {
       title: t("sessionAdmission.machineAccessTitle"),
       body: t("sessionAdmission.machineAccessBody", { machine }),
-      next: options.shared
-        ? `${next} ${t("sessionAdmission.machineAccessSharedNote", { machine })}`
-        : next,
+      next: options.shared ? `${next} ${t("sessionAdmission.machineAccessSharedNote")}` : next,
       action: canAllowHere ? t("sessionAdmission.allowForThisChat") : null,
     };
   }

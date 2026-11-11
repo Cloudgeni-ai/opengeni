@@ -99,8 +99,9 @@ export type UseSessionStartResult = {
    */
   continueWaitingWork: (() => Promise<void>) | undefined;
   /**
-   * Other people in the workspace can see this chat: workspace visibility,
-   * outside a Personal workspace. False while the workspace kind is unknown.
+   * While the machine's owner is asked to allow it: other people in the
+   * workspace can see this chat (workspace visibility, outside a Personal
+   * workspace). False otherwise, and while the workspace kind is unknown.
    */
   sharedChat: boolean;
 };
