@@ -976,6 +976,11 @@ const SettingsSchema = z.object({
   // When set, GET /metrics is served only on this dedicated internal listener
   // and never on the public API port that an ingress forwards to.
   apiMetricsPort: z.coerce.number().int().positive().optional(),
+  // Time the API process has between SIGTERM and being killed: the pod's
+  // termination grace minus its preStop drain (the Helm chart renders it).
+  // In-flight requests drain for this less a ten-second exit margin, then the
+  // process closes its clients and exits within it.
+  apiShutdownGraceMs: z.coerce.number().int().min(0).max(3_600_000).default(30_000),
   workerHttpPort: z.coerce.number().int().positive().default(8001),
   // Worker-side first-party MCP traffic stays on the deployment's internal
   // network. OPENGENI_MCP_URL remains the sandbox/external route used by
@@ -6066,6 +6071,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     apiHost: optional("OPENGENI_API_HOST"),
     apiPort: optional("OPENGENI_API_PORT"),
     apiMetricsPort: optional("OPENGENI_API_METRICS_PORT"),
+    apiShutdownGraceMs: optional("OPENGENI_API_SHUTDOWN_GRACE_MS"),
     workerHttpPort: optional("OPENGENI_WORKER_HTTP_PORT"),
     opengeniMcpInternalUrl: optional("OPENGENI_MCP_INTERNAL_URL"),
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),

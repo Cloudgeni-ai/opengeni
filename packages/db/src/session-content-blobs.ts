@@ -19,7 +19,10 @@ import * as schema from "./schema";
  *
  * Blobs are owned by one session (never shared across sessions or workspaces),
  * so their lifecycle is the session's: they cascade with it and move with it
- * into a session archive.
+ * into a session archive. A blob that no stored row names any more (a
+ * snapshot's chunks after the next request replaced it) is deleted by the
+ * collector in `session-content-garbage.ts`; writers and snapshot readers hold
+ * the session's content lock shared so that never races them.
  */
 
 export const SESSION_CONTENT_REFS_VERSION = 1 as const;
@@ -179,16 +182,37 @@ export function encodeModelContextSnapshotContent(
 }
 
 type BlobReader = Pick<Database, "select">;
-type BlobWriter = Pick<Database, "select" | "insert">;
+type BlobWriter = Pick<Database, "select" | "insert" | "execute">;
 const BLOB_STATEMENT_BATCH = 500;
 
-/** Insert the values this session does not already hold. Idempotent and race-safe. */
+/**
+ * Hold the session's content lock shared until the transaction ends. The
+ * unreferenced-blob collector takes it exclusively (and only when free), so a
+ * transaction holding it can rely on a blob it found staying until it commits
+ * the row that refers to it, and on reading the blobs of a snapshot row it
+ * read. Call it inside a transaction, before the first read it protects.
+ */
+export async function lockSessionContentShared(
+  tx: Pick<Database, "execute">,
+  sessionId: string,
+): Promise<void> {
+  await tx.execute(
+    sql`select pg_advisory_xact_lock_shared(hashtextextended(${`session-content-blobs:${sessionId}`}, 0))`,
+  );
+}
+
+/**
+ * Insert the values this session does not already hold. Idempotent and
+ * race-safe; must run in the transaction that writes the row referring to them.
+ */
 export async function writeSessionContentBlobs(
   tx: BlobWriter,
   scope: SessionContentScope,
   blobs: ReadonlyMap<string, unknown>,
 ): Promise<number> {
   const digests = [...blobs.keys()];
+  if (digests.length === 0) return 0;
+  await lockSessionContentShared(tx, scope.sessionId);
   let inserted = 0;
   for (let offset = 0; offset < digests.length; offset += BLOB_STATEMENT_BATCH) {
     const batch = digests.slice(offset, offset + BLOB_STATEMENT_BATCH);
