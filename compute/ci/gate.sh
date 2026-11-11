@@ -159,7 +159,13 @@ fi
 guest_built=true
 if wants guest || wants conformance; then
   if ! command -v musl-gcc >/dev/null; then
-    sudo apt-get install -y -qq musl-tools >/dev/null 2>&1
+    # A runner's package index can be stale, so a failed install refreshes
+    # it and tries once more, showing why if that fails too.
+    apt_log=$(mktemp)
+    sudo apt-get install -y -qq musl-tools >/dev/null 2>&1 ||
+      { sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools; } >/dev/null 2>"$apt_log" ||
+      tail -n 5 "$apt_log" >&2
+    rm -f "$apt_log"
   fi
   step "guest build ($GUEST)"
   # Without a guest the guest and conformance tests fail for that reason
