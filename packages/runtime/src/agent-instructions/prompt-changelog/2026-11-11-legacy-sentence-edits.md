@@ -37,7 +37,7 @@ ordinary search receipts and `tool_invoke` apply to the existing generic routes.
 
 ```diff
 + Deferred tool schemas are omitted from the first request; absence there does not prove a tool is unavailable.
-+ Describe the action, resource and useful context in `tool_search`; it loads the strongest match, with optional decision-model selection for ambiguous searches.
++ Describe the action, resource and useful context in `tool_search`; it loads the strongest few matches, with optional decision-model selection for ambiguous searches.
 + Check the match: ranking is not certainty.
 + Native search returns loaded function definitions directly.
 + In ordinary search receipts, `schemasLoaded: true` means `tools` have loaded schemas but `suggestions` are unloaded alternatives; with `schemasLoaded: false`, load chosen exact names with `tool_search({query: '', names: [...]})` before calling them.

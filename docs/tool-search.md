@@ -31,8 +31,12 @@ call. This page describes what a search does and how a deployment configures it.
    suggestions. If none is, the most likely one is loaded anyway. When the choice
    was not clear, up to five next candidates are listed by name.
 5. **Without a decision model**, or when it fails or has not answered within 8
-   seconds, the best candidate for each request is loaded and the next candidates
-   are listed by name. A selection not answered within 2.5 seconds sends one
+   seconds, each request's best candidate is loaded together with the next ones
+   that score close to it (at least 0.7 of the best), up to three per request, and
+   the remaining candidates are listed by name. A task usually needs a tool with its
+   siblings (create a session, then message it), so one search brings them instead
+   of one search each. Another connection's copy of the same operation is not
+   loaded with it; the account notice names it instead. A selection not answered within 2.5 seconds sends one
    identical request beside it; the first answer wins and the other is cancelled.
    Each fallback is counted in `opengeni_tool_search_selection_fallbacks_total` by
    reason (`deadline`, `rate_limited`, `provider_error`, `request_failed`,
@@ -55,7 +59,7 @@ and then what the tool does.
 
 | Capability | Setting | Without it |
 | --- | --- | --- |
-| Selection | The decision-model category (`OPENGENI_DECISION_MODEL_*`), see [decision models](decision-models.md). | The best candidate per request is loaded and the others are listed. |
+| Selection | The decision-model category (`OPENGENI_DECISION_MODEL_*`), see [decision models](decision-models.md). | The strongest few candidates per request are loaded and the others are listed. |
 | Meaning ranking | The document embedding model Knowledge uses (`OPENGENI_DOCUMENT_EMBEDDING_*`, see [embedding](embedding.md)). There is no separate tool-search setting. | Keywords alone. |
 
 Meaning ranking is off when the embedding provider is the local `deterministic`

@@ -73,6 +73,12 @@ const TOOL_LIST_NAME = "tool_list";
 const TOOL_INVOKE_NAME = "tool_invoke";
 /** How deep each keyword ranking reaches when it is fused with a meaning ranking. */
 const FUSION_DEPTH = 300;
+/**
+ * The most tools a search loads for one request without a decision model. One
+ * search then usually brings what a task needs next, instead of one model
+ * round trip per tool.
+ */
+const STRONGEST_PER_REQUEST = 3;
 
 /** A search's independent requests: semicolon- or line-separated clauses with search words. */
 function searchClauses(query: string): string[] {
@@ -167,7 +173,7 @@ export function isOpeningToolLoadResponse(value: unknown): boolean {
 const INTERNAL_DISPATCH_REGISTRATION_CALL_PREFIX = "opengeni:lazy-dispatch:register:";
 
 const SEARCH_DESCRIPTION =
-  "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. Loads the strongest match and returns compact alternatives; ranking is not certainty, so check the match. If a decision model is configured, it can select tools for ambiguous searches. With schemasLoaded:true, only tools have loaded schemas; suggestions are unloaded alternatives. With schemasLoaded:false, load chosen exact names with query:'' before invoking. Known exact names bypass ranking and inference. Call loaded tools by name or through tool_invoke. Search is not exhaustive: tool_list view:'groups' shows available groups. Discovery never grants access.";
+  "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. Loads the strongest few matches and returns compact alternatives; ranking is not certainty, so check the match. If a decision model is configured, it can select tools for ambiguous searches. With schemasLoaded:true, only tools have loaded schemas; suggestions are unloaded alternatives. With schemasLoaded:false, load chosen exact names with query:'' before invoking. Known exact names bypass ranking and inference. Call loaded tools by name or through tool_invoke. Search is not exhaustive: tool_list view:'groups' shows available groups. Discovery never grants access.";
 const NATIVE_SEARCH_DESCRIPTION =
   "Find currently authorized tools by capability. Describe the action and resource you need; separate independent tasks with semicolons and include useful context. Loads complete schemas for the strongest matches; ranking is not certainty, so check the match. If a decision model is configured, it can select tools for ambiguous searches. Call loaded functions directly. For compact alternatives or an empty result, use tool_list view:'groups' and browse a group, then load chosen exact names with query:''. Known exact names bypass ranking and inference. Discovery never grants access.";
 const INVOKE_DESCRIPTION =
@@ -1182,7 +1188,7 @@ export class LazyToolRuntime {
       .filter(isFunctionTool)
       .map((t) => t.name);
     const strongest = this.searchIndex
-      .bestMatches(query)
+      .strongestMatches(query, STRONGEST_PER_REQUEST)
       .filter(isFunctionTool)
       .map((t) => t.name);
     // Either integration setup tool brings the other. A search that names an
@@ -1613,15 +1619,15 @@ export class LazyToolRuntime {
             : keywordRanking(unit.text, depth),
         ),
       );
-    // Without a selector, the best match for each request is loaded: the top
-    // of its fused ranking, else the best keyword match. When keyword ranking
-    // cannot tell (a tie, or a clause without resource words) the top-ranked
-    // candidate still is, since an empty result hides candidates that fit.
+    // Without a selector, the strongest few matches for each request are
+    // loaded: the top of its fused ranking, else its best keyword match and
+    // those close to it. When nothing ranks, the top-ranked candidate still
+    // is, since an empty result hides candidates that fit.
     const lexical = () =>
       named.length
         ? named
         : fused
-          ? [...new Set(fused.flatMap((ranking) => ranking.slice(0, 1)))]
+          ? [...new Set(fused.flatMap((ranking) => ranking.slice(0, STRONGEST_PER_REQUEST)))]
           : strongest.length
             ? strongest
             : keywordRanking(query, 1);

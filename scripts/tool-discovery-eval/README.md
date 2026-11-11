@@ -193,3 +193,31 @@ October 2026, two catalogs of roughly 760 and 1,100 tools:
   such as "for X, use Y instead" usually lives), not only its first sentence.
 
 The scripts that produced these numbers were replaced by this harness.
+
+## Whole turns: discovery round trips
+
+`turns.ts` measures what search changes cost an agent end to end: how many model
+requests a fresh chat spends only on `tool_search` or `tool_list` before it acts, and
+the wall time of the turn. Each scenario is one person message in a fresh chat. The
+turn runs through the real Agents SDK runner, the runtime's progressive tool disclosure
+on the chosen route and the real composed system prompt, against a real Responses
+model. Calls to other tools get a fixed simulated success, so the result measures the
+path to the right tools, not the tools themselves.
+
+```sh
+TOOL_EVAL_AGENT_BASE_URL=https://<resource>.openai.azure.com/openai/v1 \
+TOOL_EVAL_AGENT_API_KEY_FILE=/path/to/key TOOL_EVAL_AGENT_MODEL=<deployment> \
+bun scripts/tool-discovery-eval/turns.ts --catalog catalog.json --out turns.json \
+  --repeat 3 --concurrency 2 --max-turns 12
+```
+
+The default scenarios are in `fixtures/turn-scenarios.ts`: ten everyday requests
+(notify me, schedule a check, start a worker and message it, remember a fact, Linear,
+Sentry and Slack, an email draft, a saved login, Grafana alerts, recent chats). Each
+lists the tools that meet it, by name without the server prefix; a catalog without
+them cannot meet that need. The catalog is `ogtool list --full` output from a real
+deployment; keep it outside the repository, since it can hold private tool names.
+
+Per run it prints the model requests, how many were discovery-only, whether the needs
+were met and the call sequence; the JSON keeps every request's new input items, calls,
+duration and token usage, and a summary across runs.

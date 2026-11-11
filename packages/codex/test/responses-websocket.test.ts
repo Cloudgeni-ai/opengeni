@@ -976,6 +976,87 @@ describe("continuing the previous response on a connection", () => {
     await (await third).text();
   });
 
+  test("a client tool search sent back without its id and status still continues incrementally", async () => {
+    // The backend reports a client-executed search with its item id and a
+    // completed status; the request normalizer strips both before replaying
+    // it, and the backend pairs the call with its output by call_id.
+    const search = {
+      type: "tool_search_call",
+      id: "tsc_1",
+      status: "completed",
+      call_id: "search_1",
+      execution: "client",
+      arguments: { query: "send a phone notification" },
+    };
+    const searchBack = {
+      type: "tool_search_call",
+      call_id: "search_1",
+      execution: "client",
+      arguments: { query: "send a phone notification" },
+    };
+    const searchOutput = {
+      type: "tool_search_output",
+      call_id: "search_1",
+      execution: "client",
+      status: "completed",
+      tools: [{ type: "function", name: "notify_user", parameters: { type: "object" } }],
+    };
+    const { transport, sockets } = harness();
+    const first = transport(URL, request({ ...base, input: [user] }));
+    const socket = await nextSend(() => sockets[0]);
+    socket.emit({ type: "response.output_item.done", output_index: 0, item: reasoning });
+    socket.emit({ type: "response.output_item.done", output_index: 1, item: search });
+    socket.emit({ type: "response.completed", response: { id: "resp_1" } });
+    await (await first).text();
+
+    const { pending, sent } = await sendNext(transport, socket, {
+      ...base,
+      input: [user, sentBack[0], searchBack, searchOutput],
+    });
+    expect(sent).toEqual({
+      ...base,
+      type: "response.create",
+      previous_response_id: "resp_1",
+      input: [searchOutput],
+    });
+    socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+    const second = await pending;
+    expect(second.headers.get(CODEX_TRANSPORT_HEADER)).toBe(
+      "websocket; connection=reused; input=incremental",
+    );
+    await second.text();
+  });
+
+  test("a tool search sent back with different arguments starts a full request", async () => {
+    const search = {
+      type: "tool_search_call",
+      id: "tsc_1",
+      status: "completed",
+      call_id: "search_1",
+      execution: "client",
+      arguments: { query: "send a phone notification" },
+    };
+    const { transport, sockets } = harness();
+    const first = transport(URL, request({ ...base, input: [user] }));
+    const socket = await nextSend(() => sockets[0]);
+    socket.emit({ type: "response.output_item.done", output_index: 0, item: search });
+    socket.emit({ type: "response.completed", response: { id: "resp_1" } });
+    await (await first).text();
+    const changed = {
+      type: "tool_search_call",
+      call_id: "search_1",
+      execution: "client",
+      arguments: { query: "something else" },
+    };
+    const { pending, sent } = await sendNext(transport, socket, {
+      ...base,
+      input: [user, changed],
+    });
+    expect(sent).not.toHaveProperty("previous_response_id");
+    socket.emit({ type: "response.completed", response: { id: "resp_2" } });
+    await (await pending).text();
+  });
+
   test("empty terminal output reconstructs completed items in index order", async () => {
     const { transport, sockets } = harness();
     const first = transport(URL, request({ ...base, input: [user] }));

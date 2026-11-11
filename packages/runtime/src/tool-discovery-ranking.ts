@@ -9,9 +9,13 @@ const STOPWORDS = new Set(
 /** Normalize inflections symmetrically (schedule/scheduled, create/creating). */
 function stem(word: string): string {
   if (word.length > 4 && word.endsWith("ies")) word = `${word.slice(0, -3)}y`;
+  else if (word.length > 4 && word.endsWith("ied")) word = `${word.slice(0, -3)}y`;
   else if (word.length > 4 && /(?:sses|xes|ches|shes)$/.test(word)) word = word.slice(0, -2);
   else if (word.length > 3 && word.endsWith("s") && !/(?:ss|us|is)$/.test(word))
     word = word.slice(0, -1);
+  // A noun in -ification names its verb's act: notification/notify,
+  // verification/verify, modification/modify.
+  if (word.length > 9 && word.endsWith("ification")) return `${word.slice(0, -9)}ify`;
   if (word.length > 5 && word.endsWith("ing")) {
     word = word.slice(0, -3);
     if (/([b-df-hj-np-tv-z])\1$/.test(word)) word = word.slice(0, -1);
@@ -133,6 +137,13 @@ const OPERATIONS = [
   "send post deliver",
   "run execute trigger",
 ].map((group) => new Set(words(group)));
+/**
+ * How close to a request's best keyword match another match must score to load
+ * with it. Measured on intent-labelled searches over a real catalog: the tool a
+ * task needed next (a sibling of the best match) usually scored 0.7 to 1.0 of
+ * it, while unrelated runners-up mostly scored below 0.7.
+ */
+const CLOSE_MATCH_RATIO = 0.7;
 const GENERIC_QUERY_TERMS = new Set(words("tool capability operation details available"));
 const isResourceTerm = (token: string) =>
   !OPERATIONS.some((group) => group.has(token)) && !GENERIC_QUERY_TERMS.has(token);
@@ -203,6 +214,12 @@ export function descriptionPreview(description: string, maxCharacters: number): 
   const { account, own } = splitAccountLine(description);
   const text = account === undefined ? description : `Account: ${account}. ${own}`.trimEnd();
   return Array.from(text).slice(0, maxCharacters).join("");
+}
+
+/** A tool's name without its source or connection prefix: the operation it performs. */
+function operationName(tool: Tool): string {
+  const name = "name" in tool && typeof tool.name === "string" ? tool.name : "";
+  return name.slice(name.lastIndexOf("__") + 2);
 }
 
 function document(tool: Tool): Document {
@@ -314,15 +331,40 @@ export class ToolSearchIndex {
     return selected;
   }
 
-  /** Best-match-first disclosure without pretending rank is calibrated certainty. */
-  bestMatches(query: string): Tool[] {
+  /**
+   * The strongest few matches of each request, best first: its best match and
+   * the next ones that score close to it, up to `perRequest`. A task usually
+   * needs a tool together with its siblings (create a session, then message
+   * it; prepare a Knowledge save, then save), and keyword rank alone cannot
+   * tell which of several close matches the agent means, so loading the close
+   * ones together saves the agent a search for each. A clear winner loads
+   * alone. A sibling covers every resource word of the request, as its best
+   * match does; a request its best match does not fully cover loads only that
+   * best match. The
+   * same operation from another connection (a second account's copy of a
+   * tool) is not a sibling: only the best-ranked copy loads, and the account
+   * notices name the others.
+   */
+  strongestMatches(query: string, perRequest: number): Tool[] {
     const selected: Tool[] = [];
+    const operations = new Set<string>();
     for (const clause of query.split(/[;\n]+/).filter((part) => words(part).length > 0)) {
       const hits = this.rankClause(clause);
       const best = hits[0];
-      // Operation-only/no-resource queries and exact ties remain compact.
-      if (!best || best.resourceCoverage === 0 || hits[1]?.score === best.score) return [];
-      if (!selected.includes(best.tool)) selected.push(best.tool);
+      if (!best) continue;
+      // Only a request its best match fully covers is sure enough of its
+      // subject to load siblings; a vague one (or a trailing remark the agent
+      // set off with a semicolon) loads just its best match.
+      let take = best.resourceCoverage >= 1 ? perRequest : 1;
+      for (const hit of hits) {
+        if (take === 0) break;
+        if (hit !== best && hit.score < best.score * CLOSE_MATCH_RATIO) break;
+        const operation = operationName(hit.tool);
+        if (hit !== best && (operations.has(operation) || hit.resourceCoverage < 1)) continue;
+        take -= 1;
+        operations.add(operation);
+        if (!selected.includes(hit.tool)) selected.push(hit.tool);
+      }
     }
     return selected;
   }
