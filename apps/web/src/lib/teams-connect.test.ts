@@ -10,6 +10,7 @@ import {
   teamsErrorText,
   teamsOwnAccountLinkedElsewhere,
   teamsFragmentToken,
+  teamsFragmentWorkspace,
   teamsMicrosoftFailureText,
   teamsMicrosoftReturn,
   teamsMicrosoftSignInPurpose,
@@ -30,6 +31,17 @@ describe("Teams setup and account-link continuation", () => {
       expect(teamsFragmentToken(hash, "teams_setup")).toBeNull();
     }
     expect(teamsFragmentToken("#teams_link=abc", "teams_setup")).toBeNull();
+  });
+
+  test("an organization-level link carries one well-formed workspace id", () => {
+    const id = "44444444-4444-4444-8444-444444444444";
+    expect(teamsFragmentWorkspace(`#teams_link=a&teams_workspace=${id}`)).toBe(id);
+    for (const hash of [
+      "#teams_link=a",
+      `#teams_workspace=${id}&teams_workspace=${id}`,
+      "#teams_workspace=../x",
+    ])
+      expect(teamsFragmentWorkspace(hash)).toBeNull();
   });
 
   test("preserves signed setup and link fragments through auth callbacks", () => {

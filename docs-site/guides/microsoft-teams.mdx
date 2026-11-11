@@ -15,10 +15,11 @@ check them before you rely on them.
 
 ## Requirements
 
-- **An Opengeni account with access to the workspace** your organization
-  connected to Teams, and permission to start chats there. Ask a workspace
-  administrator to invite you. Installing the Teams app does not create an
-  account.
+- **An Opengeni account in the organization that connected Teams**, with
+  permission to start chats in a workspace Teams can use: the connected
+  workspace, or, where your organization lets Teams reach more workspaces, any
+  of those you belong to. Ask an Opengeni administrator to invite you.
+  Installing the Teams app does not create an account.
 - **A Microsoft 365 work or school account** in Teams. Personal Microsoft
   accounts can't connect to Opengeni.
 - **Your organization connected once.** An administrator connects your
@@ -33,8 +34,9 @@ check them before you rely on them.
 
 ## Connect your organization
 
-Each Microsoft 365 organization is connected once, to one shared Opengeni
-workspace. The person who connects it needs:
+Each Microsoft 365 organization is connected once, from one shared Opengeni
+workspace, to that workspace's Opengeni organization. The person who connects
+it needs:
 
 - the **Global Administrator** or **Teams Administrator** role in Microsoft 365,
   and
@@ -68,7 +70,7 @@ connect it. Send `help` at any time to get the button again.
 
 1. In Teams, open a 1:1 chat with Opengeni and send a message.
 2. Choose **Link account**. Opengeni opens in your browser.
-3. Sign in to Opengeni if asked, check the workspace, and choose
+3. Sign in to Opengeni if asked, check the details shown, and choose
    **Sign in with Microsoft**.
 4. Sign in to Microsoft with the account you use in Teams. This proves the
    Teams account is yours; Opengeni asks only for your basic profile.
@@ -86,9 +88,10 @@ Opengeni directly first; it never posts account links in shared conversations.
 - **1:1 chats.** Send a message describing what you need. When a new task
   starts, Opengeni replies with a link to follow it in Opengeni, then sends its
   answer in Teams when it finishes. Your 1:1 chats are private to you. They are
-  saved in your Personal workspace in Opengeni when your organization uses
-  Personal workspaces, and otherwise in the connected workspace, visible only
-  to you.
+  saved in the workspace they use, visible only to you: by default your
+  Personal workspace in Opengeni when your organization uses Personal
+  workspaces, and otherwise the connected workspace. See
+  [Workspaces and agents](#workspaces-and-agents).
 - **Group chats and channels.** Mention **@Opengeni**. Only messages that
   mention it start work. In a channel, Opengeni replies in the thread, and a
   later mention in the same thread continues the same task. Everyone in a group
@@ -103,6 +106,36 @@ Opengeni directly first; it never posts account links in shared conversations.
 Opengeni uses the same tools, connections and Knowledge in Teams as in the
 Opengeni app, within your own access.
 
+## Workspaces and agents
+
+Where your organization lets Teams reach more than one workspace, your 1:1
+chat can start work in any of those workspaces you belong to, and you can ask
+any agent there that you're allowed to use.
+
+- **Where a chat starts.** Opengeni uses your Personal workspace, or your only
+  workspace. If it can't tell, it shows a card with your workspaces and agents,
+  and your message waits until you pick one.
+- **Switch.** Send `switch` to see the list and pick another workspace or
+  agent, or `switch Design` to pick one by name. New messages go there until
+  you switch again.
+- **One message elsewhere.** Start a message with `in Design:` to send just
+  that message to the Design workspace.
+- **Ask an agent.** Start a message with an agent's name and a colon
+  (`Researcher: …`) or with `+researcher`. Later messages go to the same agent
+  until you switch. Start with `Opengeni:` to go back to the main assistant.
+- **Where a reply came from.** An agent's replies start with its name and
+  workspace, and the first reply in a workspace says where the chat is saved.
+- **Lost access.** If you can no longer use a workspace or agent, Opengeni says
+  so and starts nothing. It never answers from another workspace instead. Send
+  `switch` to choose again.
+
+An organization owner or administrator chooses which workspaces Teams can
+reach. In Opengeni, open **Capabilities** in the connected workspace, find the
+card with your Teams app's name, and under **Available in Opengeni** choose all
+workspaces or selected ones, and whether Personal workspaces are included. The
+connected workspace is always included. Group chats and channels always use the
+connected workspace.
+
 ## Commands
 
 Type a command in a 1:1 chat with Opengeni, or pick it from the command menu
@@ -111,6 +144,7 @@ above the message box.
 | Command  | What it does                                                                         |
 | -------- | ------------------------------------------------------------------------------------ |
 | `help`   | Shows what Opengeni can do in Teams and how to get started, without starting a task. |
+| `switch` | Lets you choose the workspace or agent your new messages go to.                      |
 | `link`   | Links your Teams account to your Opengeni account, or says it is already linked.     |
 | `unlink` | Unlinks your Teams account from your Opengeni account, after you confirm.            |
 
@@ -211,8 +245,9 @@ data, where it is stored, and the providers that process it.
 - Conversation context covers standard channels and group chats only, not
   private or shared channels, and never messages posted before it was turned
   on.
-- One Microsoft 365 organization connects to one Opengeni workspace. Moving it
-  to another workspace is not supported.
+- One Microsoft 365 organization connects to one Opengeni organization, from one
+  shared workspace. Group chats and channels use that workspace. Moving the
+  connection to another workspace is not supported.
 - Long replies may arrive as several Teams messages.
 - If Teams did not confirm that a reply arrived, Opengeni does not send it
   again, so it cannot appear twice. Open the task link to see the full answer in
@@ -222,16 +257,18 @@ data, where it is stored, and the providers that process it.
 
 - **Opengeni doesn't reply at all.** Opengeni may not be turned on for that
   group chat or channel, the message may have had an attachment, or your
-  Opengeni account may not be allowed to start chats in the connected
-  workspace. Ask your Teams or Opengeni workspace administrator, or email
-  support.
+  Opengeni account may not be allowed to start chats in the workspace the chat
+  uses. Ask your Teams or Opengeni workspace administrator, or email support.
 - **Opengeni keeps asking you to link your account.** Open the link from your
-  latest 1:1 message with Opengeni and finish linking, signed in to the
-  Opengeni account that has access to the connected workspace.
+  latest 1:1 message with Opengeni and finish linking, signed in to your
+  Opengeni account in the organization that connected Teams.
 - **"I couldn't verify this chat's access."** Everyone in the group chat needs a
   linked Opengeni account and access to the connected workspace.
 - **"Opengeni could not start this task."** Check that you still have access to
-  the connected workspace and can start chats there.
+  the workspace the chat uses and can start chats there.
+- **"You can no longer start chats in … from Teams."** You lost access to that
+  workspace, or an administrator removed it from the workspaces Teams can
+  reach. Send `switch` to choose another.
 
 ## Support
 

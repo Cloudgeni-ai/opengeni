@@ -6150,6 +6150,24 @@
     },
     {
       "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/reach",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/reach",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "GET",
       "path": "/v1/workspaces/:workspaceId/interaction-events/stream",
       "sdk": [
         "OpenGeniClient.openWorkspaceInteractionRevisionStream"
@@ -39162,7 +39180,8 @@
       "TeamsInstallOptions": "type",
       "TeamsLinkSignInStart": "type",
       "TeamsMicrosoftSignInResult": "type",
-      "TeamsMicrosoftSignInStart": "type"
+      "TeamsMicrosoftSignInStart": "type",
+      "TeamsReach": "type"
     },
     "@opengeni/sdk/tenant-workspaces": {
       "createWorkspaceIdResolver": "value",

@@ -116,6 +116,12 @@ const REFUSALS = {
     403,
     "Opengeni can only link a work or school Microsoft account. Sign in to Teams with one and message Opengeni again.",
   ],
+  // With workspace routing, any active full member of the organization that
+  // connected Teams can link; nobody else can.
+  link_not_organization_member: [
+    403,
+    "You need an Opengeni account in the organization that connected Teams. Ask your Opengeni administrator for an invite.",
+  ],
   // Replaced by a message that names both accounts when they are known.
   link_identity_mismatch: [
     403,

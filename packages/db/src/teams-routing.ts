@@ -356,11 +356,43 @@ async function organizationSharedWorkspaceIds(
   return new Set(rows.map((row) => row.workspace_id.toLowerCase()));
 }
 
+/** A workspace's name in the organization, for telling a person what they lost access to. */
+export async function teamsWorkspaceName(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<string | null> {
+  const [row] = await withRlsContext(db, { accountId: input.accountId }, (tx) =>
+    rawRows<{ name: string }>(
+      tx,
+      sql`select name from workspaces where id=${input.workspaceId}::uuid and account_id=${input.accountId}::uuid`,
+    ),
+  );
+  return row?.name ?? null;
+}
+
+/** An agent's name and its workspace's name, for the header on its Teams replies. */
+export async function teamsAgentLabel(
+  db: Database,
+  input: { accountId: string; agentId: string },
+): Promise<{ name: string; workspaceName: string } | null> {
+  const [row] = await withRlsContext(db, { accountId: input.accountId }, (tx) =>
+    rawRows<{ name: string; workspace_name: string }>(
+      tx,
+      sql`select a.name,w.name as workspace_name from agents a
+        join workspaces w on w.id=a.workspace_id and w.account_id=a.account_id
+        where a.id=${input.agentId}::uuid and a.account_id=${input.accountId}::uuid`,
+    ),
+  );
+  return row ? { name: row.name, workspaceName: row.workspace_name } : null;
+}
+
 /** A shared agent Teams can offer: ids, names and where it works. */
 export type TeamsAgentDirectoryEntry = {
   id: string;
   accountId: string;
   workspaceId: string;
+  /** The agent's workspace's name, for replies and refusals. */
+  workspaceName: string;
   name: string;
   nameKey: string;
   avatar: unknown;
@@ -368,30 +400,36 @@ export type TeamsAgentDirectoryEntry = {
 
 /**
  * The shared (workspace-visible) agents of an organization whose home is one
- * of `workspaceIds`, by name. Only me agents are never listed. Whether the
- * person may use one is decided by the caller from their live access to its
- * workspace; this only lists.
+ * of `workspaceIds` (null: any shared workspace), by name. Only me agents and
+ * agents of Personal workspaces are never listed. Whether the person may use
+ * one is decided by the caller from their live access to its workspace; this
+ * only lists.
  */
 export async function listTeamsAgentDirectory(
   db: Database,
-  input: { accountId: string; workspaceIds: readonly string[] },
+  input: { accountId: string; workspaceIds: readonly string[] | null },
 ): Promise<TeamsAgentDirectoryEntry[]> {
-  if (input.workspaceIds.length === 0) return [];
+  if (input.workspaceIds?.length === 0) return [];
+  const within =
+    input.workspaceIds === null
+      ? sql`true`
+      : sql`a.workspace_id = any(${uuidArray(input.workspaceIds.filter((id) => UUID.test(id)))})`;
   const rows = await withRlsContext(db, { accountId: input.accountId }, (tx) =>
     rawRows<{
       id: string;
       account_id: string;
       workspace_id: string;
+      workspace_name: string;
       name: string;
       name_key: string;
       avatar: unknown;
     }>(
       tx,
-      sql`select a.id,a.account_id,a.workspace_id,a.name,a.name_key,a.avatar from agents a
+      sql`select a.id,a.account_id,a.workspace_id,w.name as workspace_name,a.name,a.name_key,a.avatar from agents a
         join workspaces w on w.id=a.workspace_id and w.account_id=a.account_id
         where a.account_id=${input.accountId}::uuid and a.visibility='workspace'
           and w.external_source is distinct from ${PERSONAL_WORKSPACE_EXTERNAL_SOURCE}
-          and a.workspace_id = any(${uuidArray(input.workspaceIds.filter((id) => UUID.test(id)))})
+          and ${within}
         order by a.name_key, a.created_at, a.id
         limit 500`,
     ),
@@ -400,6 +438,7 @@ export async function listTeamsAgentDirectory(
     id: row.id,
     accountId: row.account_id,
     workspaceId: row.workspace_id,
+    workspaceName: row.workspace_name,
     name: row.name,
     nameKey: row.name_key,
     avatar: row.avatar,

@@ -12,6 +12,23 @@ export type TeamsBotStatus = {
   installation: { tenantId: string; workspaceId: string; active: boolean } | null;
   linked: boolean;
   delivery?: { pending: number; unknown: number; failed: number };
+  /**
+   * Whether people's 1:1 chats can start work in other workspaces of the
+   * organization (see `TeamsReach`). Absent from servers that predate it.
+   */
+  workspaceRouting?: boolean;
+};
+
+/**
+ * Where people's Teams 1:1 chats can start work: every workspace of the
+ * organization (`workspaceIds: null`) or the selected ones, plus members' own
+ * Personal workspaces when `personalWorkspaces` is on. The connected
+ * workspace is always included. `version` guards concurrent changes.
+ */
+export type TeamsReach = {
+  workspaceIds: string[] | null;
+  personalWorkspaces: boolean;
+  version: number;
 };
 
 export type TeamsMicrosoftSignInStart = { authorizationUrl: string | null };
@@ -72,5 +89,21 @@ export function teamsApi(client: Pick<OpenGeniClient, "requestJson">, workspaceI
         ...(microsoft ? { microsoft } : {}),
       }),
     unlinkAccount: () => client.requestJson<{ ok: true }>("DELETE", `${base}/link`),
+    /** Where people's Teams chats can start work. */
+    getReach: (signal?: AbortSignal) =>
+      client.requestJson<TeamsReach>(
+        "GET",
+        `${base}/reach`,
+        undefined,
+        {},
+        signal ? { signal } : {},
+      ),
+    /** Organization owners and admins who manage this workspace's integrations change it. */
+    setReach: (reach: Omit<TeamsReach, "version">, expectedVersion?: number) =>
+      client.requestJson<TeamsReach>("PUT", `${base}/reach`, {
+        workspaceIds: reach.workspaceIds,
+        personalWorkspaces: reach.personalWorkspaces,
+        ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+      }),
   };
 }

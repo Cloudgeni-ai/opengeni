@@ -38,6 +38,11 @@ export type TeamsExperienceState = {
    * default). Text about the service and accounts always says Opengeni.
    */
   appName?: string;
+  /**
+   * With workspace routing, the workspace (and agent) a linked person's 1:1
+   * chat uses now, or null when they choose on their first message.
+   */
+  routing?: { workspaceLabel: string | null; agentName: string | null };
 };
 
 /** The app name when none is configured. */
@@ -47,9 +52,18 @@ export const TEAMS_DEFAULT_APP_NAME = "Opengeni";
 export type TeamsExperienceReply = {
   text: string;
   action?: { kind: "link"; title: string } | { kind: "command"; title: string; command: string };
+  /** Buttons that each send a command back, one per row (a switch card). */
+  choices?: Array<{ title: string; command: string }>;
 };
 
 export type TeamsCommand = "help" | "link" | "unlink" | "unlink_confirm";
+
+/** Help lines for workspace routing, in a 1:1 chat where it is on. */
+export const TEAMS_ROUTING_HELP_COMMANDS = [
+  "- **switch**: choose the workspace or agent this chat uses",
+  "- **in Workspace: …**: send one message to another workspace",
+  "- **Agent name: …** or **+name …**: ask one of your agents",
+];
 
 /**
  * The fixed commands. Only the whole message counts, so "help me write a
@@ -130,7 +144,17 @@ function nextStep(state: TeamsExperienceState, reply: "welcome" | "help"): NextS
         }
       : null;
   }
-  if (state.linked) return state.personal ? { text: "Send a message to start a task." } : null;
+  if (state.linked) {
+    if (!state.personal) return null;
+    const routing = state.routing;
+    if (!routing) return { text: "Send a message to start a task." };
+    const where = routing.workspaceLabel
+      ? `Chats go to ${routing.agentName ? `**${routing.agentName}** in ` : ""}**${routing.workspaceLabel}**. `
+      : "";
+    return {
+      text: `Send a message to start a task. ${where}Send **switch** to use another workspace or one of your agents.`,
+    };
+  }
   if (!state.personal)
     return {
       text: "Send me a direct message to link your Opengeni account, then mention me here again.",
@@ -176,6 +200,7 @@ export function teamsHelp(state: TeamsExperienceState): TeamsExperienceReply {
   const appName = state.appName ?? TEAMS_DEFAULT_APP_NAME;
   const commands = [
     "- **help**: show this message",
+    ...(state.routing && state.personal ? TEAMS_ROUTING_HELP_COMMANDS : []),
     ...(state.personal
       ? [
           "- **link**: link your Teams account to Opengeni",

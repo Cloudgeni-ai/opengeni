@@ -424,6 +424,7 @@ import { registerCompanyProfileRoutes } from "./routes/company-profile";
 import { registerCompanyBrainRoutes } from "./routes/company-brain";
 import { registerSlackTaskPolicyRoutes } from "./routes/slack-task-policy";
 import { registerSlackBotAccessRoutes } from "./routes/slack-bot-access";
+import { registerTeamsBotReachRoutes } from "./routes/teams-bot-reach";
 import { registerSlackAgentRoutes } from "./routes/slack-agents";
 import { registerSlackAgentUpdateRoutes } from "./routes/slack-agent-updates";
 import { registerWorkspaceStateRoutes } from "./routes/workspace-state";
@@ -2742,6 +2743,7 @@ export function createAppComposition(
   registerUserResourceAuthorityRoutes(app, routeDeps);
   registerSlackInteractionRoutes(app, routeDeps);
   registerTeamsBotRoutes(app, routeDeps);
+  registerTeamsBotReachRoutes(app, routeDeps);
 
   app.notFound((c) => {
     if (!new URL(c.req.url).pathname.startsWith("/v1/")) return c.text("Not Found", 404);

@@ -1014,4 +1014,68 @@ describe("Teams self-serve setup", () => {
     });
     expect(await getTeamsActor(client.db, installation, memberActor)).toBe(member.subjectId);
   }, 60_000);
+
+  test("with workspace routing, any active full member of the organization links, and nobody else", async () => {
+    const provider = microsoft();
+    const d = deps(provider, { teamsWorkspaceRoutingEnabled: true });
+    const owner = await person();
+    const tenantId = crypto.randomUUID();
+    const installation = await installTeamsBot(client.db, {
+      accountId: owner.grant.accountId,
+      workspaceId: owner.grant.workspaceId,
+      tenantId,
+      actorId: crypto.randomUUID(),
+      subjectId: owner.subject,
+      nonce: crypto.randomUUID(),
+    });
+    const proofFor = (actorId: string) =>
+      mintTeamsProof(STATE_SECRET, {
+        purpose: "link",
+        tenantId,
+        actorId,
+        workspaceId: owner.grant.workspaceId,
+        generation: installation.generation,
+      });
+    // A member of the organization with no access to the connected workspace.
+    const memberSubject = `user:teams-setup:${crypto.randomUUID()}`;
+    const personal = crypto.randomUUID();
+    await shared.admin`insert into workspaces(id,account_id,name) values(${personal},${owner.grant.accountId},'Personal')`;
+    await shared.admin`insert into organization_memberships(account_id,subject_id,role,status,personal_workspace_id)
+      values(${owner.grant.accountId},${memberSubject},'member','active',${personal})`;
+    const member = { subjectId: memberSubject, workspaceId: owner.grant.workspaceId };
+    const memberActor = crypto.randomUUID();
+    const memberProof = proofFor(memberActor);
+    await linkTeamsAccount(d, member, {
+      token: memberProof,
+      microsoft: await linkSignIn(provider, d, member as AccessGrant, memberProof, {
+        oid: memberActor,
+      }),
+    });
+    expect(await getTeamsActor(client.db, installation, memberActor)).toBe(memberSubject);
+
+    // Someone outside the organization can't even start the Microsoft sign-in.
+    const stranger = { ...member, subjectId: `user:teams-setup:${crypto.randomUUID()}` };
+    const strangerActor = crypto.randomUUID();
+    const strangerProof = proofFor(strangerActor);
+    expect(await refusal(startTeamsLinkSignIn(d, stranger, strangerProof))).toEqual({
+      status: 403,
+      reason: "link_not_organization_member",
+      message:
+        "You need an Opengeni account in the organization that connected Teams. Ask your Opengeni administrator for an invite.",
+    });
+    expect(await refusal(linkTeamsAccount(d, stranger, { token: strangerProof }))).toMatchObject({
+      status: 403,
+      reason: "link_not_organization_member",
+    });
+    expect(await getTeamsActor(client.db, installation, strangerActor)).toBeNull();
+
+    // A suspended member is no longer a member.
+    await shared.admin`update organization_memberships set status='suspended'
+      where account_id=${owner.grant.accountId} and subject_id=${memberSubject}`;
+    const again = proofFor(crypto.randomUUID());
+    expect(await refusal(startTeamsLinkSignIn(d, member, again))).toMatchObject({
+      status: 403,
+      reason: "link_not_organization_member",
+    });
+  }, 60_000);
 });

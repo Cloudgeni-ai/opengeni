@@ -11,6 +11,24 @@ export function teamsFragmentToken(
   return token && token.length <= 16_384 && !/\s/.test(token) ? token : null;
 }
 
+/**
+ * The connected workspace an organization-level account link (on the Teams
+ * page) is for. The API checks it against the signed link; this only carries it.
+ */
+export function teamsFragmentWorkspace(hash: string): string | null {
+  const values = new URLSearchParams(hash.replace(/^#/, "")).getAll("teams_workspace");
+  const value = values.length === 1 ? values[0] : null;
+  return value && /^[0-9a-f-]{36}$/iu.test(value) ? value : null;
+}
+
+/** Where an account link opens again: the Teams page, which any organization member can use. */
+export function teamsLinkRetryPath(pending: TeamsPendingLink): string {
+  return `/teams/connect#${new URLSearchParams({
+    teams_link: pending.linkToken,
+    teams_workspace: pending.workspaceId,
+  })}`;
+}
+
 export function teamsAuthReturnPath(
   location: Pick<Location, "pathname" | "search" | "hash">,
 ): string | null {

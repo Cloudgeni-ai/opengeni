@@ -652,3 +652,157 @@ test("the bot card is named after the deployment's Teams app, with Opengeni as t
     }
   }
 });
+
+test("an organization member without access to the connected workspace links on the Teams page", async () => {
+  const connected = "44444444-4444-4444-8444-444444444444";
+  const requests: any[][] = [];
+  const authorizationUrl = "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize?x=2";
+  prepare(async (...args) => {
+    requests.push(args);
+    if (String(args[1]).endsWith("/link/microsoft-sign-in")) return { authorizationUrl };
+    throw setupRefusal(403, "link_identity_mismatch", "Wrong account.");
+  });
+  window.history.replaceState(
+    null,
+    "",
+    `/teams/connect#teams_link=link-proof&teams_workspace=${connected}`,
+  );
+  const assigned: string[] = [];
+  const assign = window.location.assign;
+  Object.defineProperty(window.location, "assign", {
+    configurable: true,
+    value: (url: string) => assigned.push(url),
+  });
+  const view = await render(<TeamsConnectRoute />);
+  try {
+    // Nothing is sent until the person confirms.
+    expect(requests).toHaveLength(0);
+    expect(view.container.textContent).toContain("Link your Teams account?");
+    await act(async () =>
+      view.container.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true })),
+    );
+    expect(requests.map((r) => r.slice(0, 3))).toEqual([
+      [
+        "POST",
+        `/v1/workspaces/${connected}/integrations/teams/link/microsoft-sign-in`,
+        { token: "link-proof" },
+      ],
+    ]);
+    expect(assigned).toEqual([authorizationUrl]);
+  } finally {
+    await view.cleanup();
+  }
+  // A refused sign-in retries on the Teams page: the person can't open the
+  // connected workspace.
+  window.history.replaceState(
+    null,
+    "",
+    `/teams/connect?code=microsoft-code&state=${encodeURIComponent(signedState("teams-account-link"))}`,
+  );
+  assigned.length = 0;
+  const returned = await render(<TeamsConnectRoute />);
+  try {
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(returned.container.textContent).not.toContain("Manage connection");
+    await act(async () =>
+      [...returned.container.querySelectorAll("button")]
+        .find((b) => b.textContent === "Try again")!
+        .click(),
+    );
+    expect(assigned).toEqual([`/teams/connect#teams_link=link-proof&teams_workspace=${connected}`]);
+  } finally {
+    await returned.cleanup();
+    Object.defineProperty(window.location, "assign", { configurable: true, value: assign });
+    window.history.replaceState(null, "", "/teams/connect");
+  }
+});
+
+test("with workspace routing, an organization admin sees and saves where Teams chats can start work", async () => {
+  window.history.replaceState(null, "", `/workspaces/${ws}/plugins`);
+  const requests: any[][] = [];
+  let routing = true;
+  context.current = {
+    client: {
+      requestJson: async (...args: any[]) => {
+        requests.push(args);
+        if (String(args[1]).endsWith("/reach"))
+          return args[0] === "PUT"
+            ? { ...args[2], version: 4 }
+            : {
+                workspaceIds: null,
+                personalWorkspaces: true,
+                version: 3,
+              };
+        return {
+          enabled: true,
+          configured: true,
+          setupAvailable: true,
+          installation: { active: true, workspaceId: ws, tenantId: "tenant" },
+          linked: true,
+          workspaceRouting: routing,
+        };
+      },
+    },
+    clientConfig: { productAccessMode: "managed", auth: { mode: "managedSession" } },
+    accessContext: {
+      subjectId,
+      accountGrants: [
+        {
+          accountId: "org",
+          subjectId,
+          role: "owner",
+          permissions: [],
+          metadata: { accountName: "Acme" },
+        },
+      ],
+      workspaceGrants: [
+        {
+          workspaceId: ws,
+          subjectId,
+          accountId: "org",
+          permissions: ["workspace:admin", "connections:write", "capabilities:manage"],
+        },
+      ],
+    },
+    workspaces: [
+      { id: ws, accountId: "org", name: "Engineering", kind: "shared" },
+      { id: "research", accountId: "org", name: "Research", kind: "shared" },
+    ],
+  };
+  function Harness() {
+    return useTeamsBotIntegration({ workspaceId: ws }).sections;
+  }
+  const view = await render(<Harness />);
+  try {
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(view.container.textContent).toContain(
+      "All workspaces in this organization and members' Personal workspaces",
+    );
+    await act(async () =>
+      [...view.container.querySelectorAll("button")]
+        .find((b) => b.textContent === "Edit access")!
+        .click(),
+    );
+    await act(async () =>
+      [...view.container.querySelectorAll("button")].find((b) => b.textContent === "Save")!.click(),
+    );
+    expect(requests.filter((r) => r[0] === "PUT").map((r) => r.slice(0, 3))).toEqual([
+      [
+        "PUT",
+        `/v1/workspaces/${ws}/integrations/teams/reach`,
+        { workspaceIds: null, personalWorkspaces: true, expectedVersion: 3 },
+      ],
+    ]);
+  } finally {
+    await view.cleanup();
+  }
+  // Without routing, Teams works in its own workspace only: nothing to choose.
+  routing = false;
+  const plain = await render(<Harness />);
+  try {
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(plain.container.textContent).not.toContain("Available in Opengeni");
+  } finally {
+    await plain.cleanup();
+  }
+});

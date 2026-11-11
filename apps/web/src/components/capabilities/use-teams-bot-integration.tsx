@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { teamsApi, type TeamsBotStatus } from "@opengeni/sdk/teams";
 import { useAppContext } from "@opengeni/react/app/app-context";
@@ -8,6 +8,7 @@ import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import type { IntegrationAdapter } from "./use-api-integration-accounts";
 import { MICROSOFT_TEAMS_LOGO_URL } from "./use-microsoft-teams-integration";
+import { IntegrationReachSection } from "./integration-reach-section";
 import {
   clearTeamsFragment,
   savePendingTeamsLink,
@@ -21,8 +22,8 @@ export function useTeamsBotIntegration({
 }: {
   workspaceId: string;
   refreshRevision?: number;
-}): IntegrationAdapter & { visible: boolean } {
-  const { client, accessContext } = useAppContext();
+}): IntegrationAdapter & { visible: boolean; sections: ReactNode } {
+  const { client, accessContext, workspaces } = useAppContext();
   const api = useMemo(() => teamsApi(client, workspaceId), [client, workspaceId]);
   const scope = `${workspaceId}:${accessContext.subjectId}`;
   const currentScope = useRef(scope);
@@ -182,9 +183,39 @@ export function useTeamsBotIntegration({
         }
       : {}),
   };
+  // With workspace routing, where people's Teams chats can start work; the
+  // same control Slack uses to share its bot with the organization.
+  const accountId = workspaces.find((workspace) => workspace.id === workspaceId)?.accountId;
+  const reachVersion = useRef<number | undefined>(undefined);
+  const sections =
+    installed && status?.workspaceRouting && accountId ? (
+      <IntegrationReachSection
+        accountId={accountId}
+        workspaceId={workspaceId}
+        personalWorkspaces="choice"
+        reloadKey={`${scope}:${status.installation?.tenantId ?? ""}`}
+        load={async () => {
+          const reach = await api.getReach();
+          reachVersion.current = reach.version;
+          return reach;
+        }}
+        save={async (next) => {
+          const reach = await api.setReach(
+            {
+              workspaceIds: next.workspaceIds ? [...next.workspaceIds] : null,
+              personalWorkspaces: next.personalWorkspaces,
+            },
+            reachVersion.current,
+          );
+          reachVersion.current = reach.version;
+          return reach;
+        }}
+      />
+    ) : null;
   return {
     visible,
     model,
+    sections,
     dialogs: (
       <>
         <ConfirmDialog
