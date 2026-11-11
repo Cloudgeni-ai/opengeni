@@ -1,4 +1,10 @@
-import type { ModelId, QuotaBlockClaim, SubscriptionConnection, SubscriptionQuota } from "./types";
+import type {
+  ModelId,
+  QuotaBlockClaim,
+  QuotaProviderDetail,
+  SubscriptionConnection,
+  SubscriptionQuota,
+} from "./types";
 
 /**
  * What the shared quota model says about a connection's capacity now
@@ -115,6 +121,8 @@ export type StoredQuotaDocument = Pick<
   | "exhaustedKind"
   | "exhaustedClaim"
   | "source"
+  | "constrainedUntil"
+  | "providerDetails"
 >;
 
 /** The stored document of one quota (a claim that no longer explains its block is dropped). */
@@ -133,7 +141,28 @@ export function storedQuotaDocument(quota: SubscriptionQuota): StoredQuotaDocume
     exhaustedKind: quota.exhaustedKind,
     ...(exhaustedClaim ? { exhaustedClaim } : {}),
     source: quota.source,
+    ...(quota.constrainedUntil != null ? { constrainedUntil: quota.constrainedUntil } : {}),
+    ...(quota.providerDetails && Object.keys(quota.providerDetails).length > 0
+      ? { providerDetails: quota.providerDetails }
+      : {}),
   };
+}
+
+/**
+ * Provider detail parts merged one by one: the newer of each part wins, and
+ * a part only one side carries is kept (a model response's headers never
+ * erase the reset grants a usage read stored).
+ */
+export function mergeQuotaProviderDetails(
+  current: SubscriptionQuota["providerDetails"],
+  incoming: SubscriptionQuota["providerDetails"],
+): Record<string, QuotaProviderDetail> | undefined {
+  const merged: Record<string, QuotaProviderDetail> = { ...current };
+  for (const [key, part] of Object.entries(incoming ?? {})) {
+    const previous = merged[key];
+    if (!previous || previous.observedAt <= part.observedAt) merged[key] = part;
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
 /**
@@ -326,6 +355,12 @@ export function applyQuotaObservation(
   delete merged.exhaustedClaim;
   if (Object.keys(modelCooldownClaims).length > 0) merged.modelCooldownClaims = modelCooldownClaims;
   if (exhaustedClaim) merged.exhaustedClaim = exhaustedClaim;
+  const providerDetails = mergeQuotaProviderDetails(
+    current.providerDetails,
+    observation.providerDetails,
+  );
+  delete merged.providerDetails;
+  if (providerDetails) merged.providerDetails = providerDetails;
   return merged;
 }
 

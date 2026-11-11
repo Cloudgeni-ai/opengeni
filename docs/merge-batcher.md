@@ -141,7 +141,10 @@ and members of the running batch are never regenerated.
    (`impact.ts --full`, every unit, real-service, end-to-end and browser lane),
    deployment artifacts, the artifact runtime and every workload image. Images
    are built but never pushed or signed, and the API image builds beside the
-   lanes instead of waiting for the release-approval gate. A batch passes only
+   lanes (in its own `batch-api-image` job) instead of waiting for the
+   release-approval gate. The sandbox and desktop images build every layer
+   that does not need the artifact runtime while it is still being produced,
+   then add its verified inputs. A batch passes only
    when `Typecheck and unit tests`, `Deployment artifacts` and
    `Workload image builds` all passed, the same jobs canary admission requires
    on a `main` SHA. Failed jobs are retried once to absorb flaky tests. A run

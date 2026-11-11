@@ -1795,10 +1795,11 @@ observability:
     # when healthy.
     modelRequestPreDispatchP95Seconds: 2
     modelRequestMinSamples: 20
-    # Provider time-to-first-token (dispatch -> first streamed delta) alerts only
-    # relative to that provider's own trailing 24h p90, never on an absolute
-    # number: the 30m p90 must exceed ratio x baseline AND the floor, with
-    # enough recent and baseline requests.
+    # Provider latency alerts only relative to that provider's own trailing 24h
+    # p90, never on an absolute number: the 30m p90 must exceed ratio x baseline
+    # AND the floor, with enough recent and baseline requests. The signal is
+    # response start (headers or first socket event) where the provider reports
+    # it, otherwise dispatch -> first streamed delta.
     providerTtftRegressionRatio: 2
     providerTtftRegressionFloorSeconds: 5
     providerTtftRecentMinSamples: 30

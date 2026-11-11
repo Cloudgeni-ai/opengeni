@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test as bunTest } from "bun:test";
+import { quarantineTest } from "@opengeni/testing/quarantine";
 import AxeBuilder from "@axe-core/playwright";
 import {
   appendSessionEventsAndUpdateSession,
@@ -37,6 +38,9 @@ import postgres from "postgres";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// Tests listed in packages/testing/quarantine.json still run but do not fail the lane.
+const test = quarantineTest(bunTest, import.meta.path);
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const ownerHeaders = { "x-opengeni-subject": "sessionpin-owner" };

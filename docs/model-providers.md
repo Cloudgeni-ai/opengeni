@@ -1558,9 +1558,17 @@ newer replies with a separate reasoning item do not duplicate it.
 Chat Completions receives one request-local transcript view for
 canonical record types that its SDK converter cannot represent; that view is
 never persisted. Historical `tool_search` calls/outputs remain inert completed
-facts. A session frozen to `remote_v2` compaction admits only Codex models;
-portable sessions may use any supported route whose request adapter can express
-their canonical history. Responses output items may carry `status`
+facts. A historical fact (or any other assistant message) never separates a
+function call from its result: one that falls before every call of its step
+has a result moves to just after the step's last result, keeping its order,
+because Chat Completions requires each tool result to follow the assistant
+message that made the call. System notices, hoisted tool disclosures and
+search records there move the same way; only a person's message ends a step
+early. Native Claude keeps such text inside its reply and moves an item only
+from between two results of one step, to just before the step's first result
+(`withItemsAfterOpenCalls`). A session frozen to `remote_v2` compaction admits
+only Codex models; portable sessions may use any supported route whose request
+adapter can express their canonical history. Responses output items may carry `status`
 (`completed` / `in_progress` / `incomplete`); that field is not conversation
 meaning for function/message annotations — pairing is `call_id` — and Codex's input schema rejects it
 (`400 Unknown parameter: 'input[N].status'`). New `session_history_items` rows
@@ -2857,3 +2865,56 @@ Cached usage reads are available to workspace readers; live refresh requires
 connection-management permission. Organization usage follows the existing
 organization provider administration boundary. Credentials and identities are
 never returned in usage responses.
+
+#### Limit resets, limits and service state
+
+Claude offers some plans limit reset grants. The usage refresh reads
+`/api/oauth/usage?cedar_ember=1&skip_spend=1` the way Claude Code does, presenting
+its CLI surface (user agent `claude-cli/<version> (external, cli)`): with any other
+user agent Claude reports the program ineligible (`surface`) and lists no grants.
+Only usage reads and claims present that surface; model requests keep their own
+identity, so cached prefixes are unaffected. While the account is at a limit, a
+second read (`?at_wall=1&skip_spend=1`) adds the at-limit reset program; its
+failure never fails the reading.
+
+Grants are stored with the connection's quota (`providerDetails`, each part
+stamped with its observation time, so a model response never erases what a usage
+read stored). The usage API returns them as `limitResets` (and `wallReset`), and
+the account page lists each grant with its name, the limits it clears, the resets
+left, its expiry, and whether it can be used now or why not, in Claude Code's terms.
+
+A claim (`requestSubscriptionCoreClaudeLimitResetClaim`) reads the account's
+organization from the OAuth profile and sends
+`POST /api/organizations/{organization}/reset_rate_limits` with
+`{ program: "cedar_ember", grant_id, request_id }`. The request id is the caller's
+idempotency key: Claude settles each id once, so an unsettled claim (`retryable`)
+is retried with the same id and can never use two resets. Every claim that reached
+Claude is followed by a usage read past the refresh throttle; a reading below the
+limit ends each stored exhaustion or cooldown whose claimed limits it shows below
+the limit, and waiting turns are woken. Setup tokens cannot claim (no
+`user:profile`).
+
+Opengeni never claims a grant on its own. Claude Code itself only offers a reset
+to the person at the limit; grants are scarce and expire, and whether one is worth
+spending depends on how soon the limit resets anyway, which is a person's call.
+
+The rest of the usage body is decoded too: the `limits` list with each scoped
+limit's share of the weekly limit (`weekly_scoped_shares`), `extra_usage`, and the
+weekly limits of other Claude surfaces (shown for information; they never decide
+placement). `seven_day_overage_included`, as model responses name it, is the
+weekly Fable limit (the usage endpoint reports the same limit as a scoped `limits`
+entry): it limits only Fable models, and a reading of either name ends a block
+claimed under the other. From model response headers Opengeni keeps the service
+state: fallback availability and percentage, why paid overage is off
+(`overage-disabled-reason`), surpassed warning thresholds, upgrade paths,
+`retry-after`, and the slow tier and grace zone.
+
+The slow tier and grace zone are reduced service, neither exhaustion nor plain
+availability. A response served in the grace zone (not refused) or by the slow tier
+blocks nothing but marks the connection constrained until the limit it passed
+resets: placement prefers accounts with plain capacity, then constrained ones, then
+paid extra credits, and a bound session moves to an account with plain capacity
+when one can serve. A refusal because the slow tier's slots are busy rests the
+connection as a short rate limit (the slow tier's `retry-after`), not as the weekly
+limit. Claude sends these headers only to requests that opt in, which Opengeni's
+model requests do not do today.

@@ -308,6 +308,13 @@ COPY --from=node-target /usr/local/bin/node /out/node
 RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
   bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/node
 
+# CI passes the verified runtime inputs as this named build context
+# (--build-context artifact-runtime-inputs=<dir>), outside the main context,
+# so every `COPY . .` layer is the same with or without them and CI can build
+# them before the inputs exist. Without it the stage is empty and the inputs
+# come from the main context at OPENGENI_ARTIFACT_RUNTIME_BUNDLE, as before.
+FROM scratch AS artifact-runtime-inputs
+
 FROM oven/bun:${BUN_VERSION} AS artifact-runtime-builder
 COPY --from=bun-runtime /out/bun /usr/local/bin/bun
 
@@ -336,6 +343,7 @@ ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
 WORKDIR /src
 COPY . .
 COPY --from=node-runtime /out/node /usr/local/bin/node
+COPY --from=artifact-runtime-inputs / /src/${OPENGENI_ARTIFACT_RUNTIME_BUNDLE}/
 RUN --mount=type=cache,id=opengeni-sandbox-bun-artifact-runtime-${TARGETARCH},target=/root/.bun/install/cache,sharing=locked \
     set -eux; \
     case "$TARGETARCH" in \
@@ -374,8 +382,8 @@ ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 certifi==2026.10.19 pandas==3.0.6
 ARG OPENGENI_PYTHON_EXCLUDE_NEWER=2026-09-25T00:00:00Z
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
-ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.47-1~deb13u1
-ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261022T170820Z
+ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.79-1~deb13u1
+ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261103T013555Z
 
 # Agents' shell loops mint idempotency keys with $(uuidgen); on Debian it comes
 # from uuid-runtime, not util-linux, and the build proves it prints a v4 UUID.

@@ -5,7 +5,7 @@ import {
   parseNativeIncomingCall,
   type RawNativeCallEvent,
 } from "./call-events";
-import type { NativeCallAdapter } from "./native-call";
+import type { NativeCallAdapter, NativeCallCommand, NativeCallStartRequest } from "./native-call";
 
 type OpenGeniCallNativeModule = {
   configure(includeInRecents: boolean): void;
@@ -14,9 +14,19 @@ type OpenGeniCallNativeModule = {
   endCall(callId: string, failed: boolean): Promise<void>;
   setMuted(callId: string, muted: boolean): Promise<void>;
   setSpeaker(on: boolean): Promise<void>;
-  takePendingStartRequest(): Promise<{ target: string | null } | null>;
-  /** Android: whether calls are system calls and agents can ring (absent before them). */
-  capabilities?(): { systemCall: boolean; incoming: boolean };
+  takePendingStartRequest(): Promise<NativeCallStartRequest | null>;
+  // Voice commands (absent in builds before them).
+  setCallCommands?(commands: NativeCallCommand[]): Promise<void>;
+  /** Android: pin a voice command to the home screen; false where the launcher can't. */
+  pinCallCommand?(command: NativeCallCommand): Promise<boolean>;
+  /**
+   * Android: whether calls are system calls and agents can ring (absent
+   * before them), and whether a ring may show full screen now (absent before
+   * that check).
+   */
+  capabilities?(): { systemCall: boolean; incoming: boolean; fullScreenRing?: boolean };
+  /** Android: open the setting that lets rings show full screen (absent before it). */
+  openFullScreenRingSettings?(): Promise<boolean>;
   // Agent calls (absent in builds before them).
   getVoipToken?(): Promise<string | null>;
   takeIncomingCalls?(): Promise<RawNativeCallEvent[]>;
@@ -30,6 +40,17 @@ type OpenGeniCallNativeModule = {
 };
 
 export { parseNativeCallEvent };
+
+/** A command as the native module takes it: plain fields only. */
+function nativeCommand(command: NativeCallCommand): NativeCallCommand {
+  return {
+    id: command.id,
+    workspaceId: command.workspaceId,
+    sessionId: command.sessionId,
+    name: command.name,
+    synonyms: [...(command.synonyms ?? [])],
+  };
+}
 
 /**
  * Calls for Expo hosts, from the native module this package ships (linked by
@@ -52,6 +73,21 @@ export function createExpoCallAdapter(
   const ios = Platform.OS === "ios";
   const capabilities = ios ? null : (native.capabilities?.() ?? null);
   const canRing = ios || capabilities?.incoming === true;
+  // Android 14 and later may need the person to allow full-screen rings; a
+  // build before the check, or iOS (CallKit), always rings full screen.
+  const fullScreenCheck =
+    !ios && typeof capabilities?.fullScreenRing === "boolean" && native.openFullScreenRingSettings
+      ? {
+          canRingFullScreen: () => {
+            try {
+              return native.capabilities?.().fullScreenRing !== false;
+            } catch {
+              return true;
+            }
+          },
+          openFullScreenRingSettings: () => native.openFullScreenRingSettings!(),
+        }
+      : {};
   // Call ids are UUIDs; CallKit reports them upper-case, the hook compares lower-case.
   const id = (callId: string) => callId.toLowerCase();
   return {
@@ -61,7 +97,28 @@ export function createExpoCallAdapter(
     endCall: (callId, reason = "ended") => native.endCall(id(callId), reason === "failed"),
     setMuted: (callId, muted) => native.setMuted(id(callId), muted),
     setSpeaker: (on) => native.setSpeaker(on),
-    takePendingStartRequest: () => native.takePendingStartRequest(),
+    takePendingStartRequest: async () => {
+      const pending = await native.takePendingStartRequest();
+      if (!pending) return null;
+      const target = pending.target ?? null;
+      return {
+        target,
+        workspaceId: target ? (pending.workspaceId ?? null) : null,
+        ...(pending.requestId ? { requestId: pending.requestId } : {}),
+      };
+    },
+    ...(native.setCallCommands
+      ? {
+          setCallCommands: (commands: readonly NativeCallCommand[]) =>
+            native.setCallCommands!(commands.map(nativeCommand)),
+        }
+      : {}),
+    ...(!ios && native.pinCallCommand
+      ? {
+          pinCallCommand: (command: NativeCallCommand) =>
+            native.pinCallCommand!(nativeCommand(command)),
+        }
+      : {}),
     incoming:
       canRing && native.getVoipToken && native.takeIncomingCalls && native.endIncomingCall
         ? {
@@ -73,6 +130,7 @@ export function createExpoCallAdapter(
               }),
             endIncomingCall: (callId, reason) => native.endIncomingCall!(id(callId), reason),
             connectsBeforeAnswer: native.connectsBeforeAnswer?.() === true,
+            ...fullScreenCheck,
           }
         : undefined,
     subscribe(listener) {

@@ -50,6 +50,21 @@ not cookies, IndexedDB, service-worker storage, downloads, or total profile size
 Chromium manages eviction; this is not a hard filesystem quota and does not
 retroactively clean running profiles. Attached human browsers are unchanged.
 
+Launches also name the cache directory: `browser-cache` next to the profile,
+inside the session directory. Without it, Chromium on Linux keeps the caches
+of a profile under `~/.config` (where the native agent keeps browser state) at
+the same path under `~/.cache`, which nothing removed when a session ended.
+The caches follow the session's lifecycle, not a size limit: they go when the
+session directory is removed, and when a browser stops while its session is
+kept (an idle stop, or an end that keeps the profile) only the caches go. The
+profile, journals and downloads that a resume, a saved identity or a working
+copy needs stay. A checkpoint never carried the caches, and a working copy
+leaves `browser-cache` out. At startup the controller drops the caches of
+every session whose browser is not running, including those earlier launches
+kept in the profile or under `~/.cache`, and removes the `~/.cache` folders of
+sessions that already ended. A browser still running from before (handed off
+across an agent update) keeps its caches until it stops.
+
 On Linux, managed Chrome stderr drains through a FIFO and retains its final
 65,536 diagnostic bytes. Browserd prefers `gnutail` on PATH when installed,
 then uses `tail` on PATH or the existing `/usr/bin/tail` / `/bin/tail`

@@ -14,9 +14,9 @@ import { MODULAR_PARITY_CASES, PARITY_SETTINGS } from "./modular-parity-cases";
  * They also have workspace connectors, a setup-card source, since the
  * setup-card sentence began to follow those; that added no other text.
  * Every case lost the wait rules that the `wait_for_input` description now
- * states once (PROMPT_CHANGELOG.md); nothing else changed.
+ * states once (the prompt changelog); nothing else changed.
  * The cases without compute (`/none`) later lost the sandbox-only text of the
- * documents, files and session-coordination guidance (PROMPT_CHANGELOG.md).
+ * documents, files and session-coordination guidance (the prompt changelog).
  * Every locked case has goals on, so every case with a sandbox or Connected
  * Machine kept its bytes; a session with compute but without goals gets the
  * goal-free verification rule (compose.test.ts). Every case then gained the

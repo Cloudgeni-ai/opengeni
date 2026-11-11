@@ -31,10 +31,14 @@ rejects any other approval so a run never writes outside its fixtures.
 
 1. An organization that can run the chosen models. With an API key, credit
    models are paid from purchased API credits only (a plan's monthly credit
-   never pays for API use). Models served through a connected subscription
-   (`codex/*` with a connected ChatGPT account) run without credits. A
-   signed-in test person (`OPENGENI_EVAL_LOGIN_EMAIL` and
-   `OPENGENI_EVAL_LOGIN_PASSWORD` instead of the key) is billed as app use.
+   never pays for API use; without credits, creating a chat returns `402
+   api_credits_required`). Connected-subscription models (`codex/*` with a
+   connected ChatGPT account, and other subscriptions) serve app use only:
+   with an API key, creating a chat returns `403 subscription_api_unavailable`
+   unless the deployment sets `OPENGENI_API_CONNECTED_SUBSCRIPTIONS_ENABLED`
+   (see `docs/billing-origin.md`). A signed-in test person
+   (`OPENGENI_EVAL_LOGIN_EMAIL` and `OPENGENI_EVAL_LOGIN_PASSWORD` instead of
+   the key) is billed as app use.
 2. Two workspaces: one with the integrations connected, one with none.
 3. In the connected workspace, set each connection's change tools to **Ask
    first** (Capabilities → the connection → Tool permissions). Connector
@@ -92,14 +96,14 @@ bun run eval:integrations report --out results/grid
 ```
 
 `--cells` takes `all` (credit models at every effort), `subscription`
-(connected-subscription models at every effort), or comma-separated
+(connected-subscription models at every effort; app use only, see Setup), or comma-separated
 `model@effort`, where the effort may be `*` (every effort the model offers)
 or `default`. A smaller grid sweeps every effort for one or two models and
 runs the others at their defaults:
 
 ```sh
-bun run eval:integrations run --out results/codex --cases core --repeats 2 \
-  --cells 'codex/gpt-6.1-sol@*,codex/gpt-6-luna@*,codex/gpt-6.1-terra@default,codex/gpt-6-astra@default'
+bun run eval:integrations run --out results/sweep --cases core --repeats 2 \
+  --cells 'azure-sol/gpt-6.1-sol@*,gpt-6-luna@*,azure-terra/gpt-6.1-terra@default,azure-astra/gpt-6-astra@default'
 ```
 
 `--cases` takes `core`, `all`, or comma-separated ids or prefixes

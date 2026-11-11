@@ -1,9 +1,36 @@
 import {
+  ClaudeExtraUsage,
+  ClaudeLimitResetClaim,
+  ClaudeLimitResetGrant,
+  ClaudeLimitResets,
+  ClaudeServiceState,
+  ClaudeSurfaceUsageWindow,
+  ClaudeUsageLimit,
   ClaudeUsageWindowId,
+  ClaudeWallReset,
   type ClaudeSubscriptionUsage,
   type ClaudeUsageWindow,
   type ClaudeUsageRequestStatus,
 } from "@opengeni/contracts";
+
+/**
+ * The Claude Code release whose account-API surface usage reads and limit
+ * reset claims present. Claude reports reset grants only to its CLI surface
+ * (`ineligible_reason: "surface"` for any other user agent). Model requests
+ * keep their own identity (`claude-code-identity.ts` in the runtime).
+ */
+export const CLAUDE_CLI_SURFACE_VERSION = "2.1.322";
+export const CLAUDE_CLI_SURFACE_USER_AGENT = `claude-cli/${CLAUDE_CLI_SURFACE_VERSION} (external, cli)`;
+
+/** What a usage read or response reported beyond the plan windows. */
+export type ClaudeUsageDetails = {
+  limitResets?: ClaudeLimitResets | null;
+  wallReset?: ClaudeWallReset | null;
+  limits?: ClaudeUsageLimit[];
+  extraUsage?: ClaudeExtraUsage | null;
+  surfaceWindows?: ClaudeSurfaceUsageWindow[];
+  serviceState?: ClaudeServiceState;
+};
 
 export type ClaudeUsageObservation = {
   windows: ClaudeUsageWindow[];
@@ -17,6 +44,8 @@ export type ClaudeUsageObservation = {
    * omitted key is not evidence of anything and is never listed here.
    */
   noLimitWindows?: ClaudeUsageWindow["id"][];
+  /** Everything else the read reported (reset grants, limit list, service state). */
+  details?: ClaudeUsageDetails;
 };
 const prefixes: Record<string, string[]> = {
   five_hour: ["5h"],
@@ -106,6 +135,7 @@ export function parseClaudeUsageHeaders(
     if (usedPercent === null && resetsAt === null && windowStatus === null) return [];
     return [{ id, usedPercent, resetsAt, status: windowStatus, observedAt }];
   });
+  const serviceState = parseClaudeServiceState(headers, now);
   return windows.length || claimedStatus || overageStatus
     ? {
         windows,
@@ -120,14 +150,433 @@ export function parseClaudeUsageHeaders(
           upstreamModelId: upstreamModelId ?? null,
           observedAt,
         },
+        ...(serviceState ? { details: { serviceState } } : {}),
       }
     : null;
+}
+
+function finiteHeader(headers: Headers, name: string): number | null {
+  const value = headers.get(name);
+  if (value === null || !value.trim()) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function tokenHeader(headers: Headers, name: string): string | null {
+  const value = headers.get(name)?.trim();
+  return value && value.length <= 64 ? value : null;
+}
+
+const SLOW_STATUSES = new Set([
+  "active",
+  "not_needed",
+  "slot_busy",
+  "weekly_limit",
+  "budget_exhausted",
+  "ineligible",
+  "off",
+]);
+const THRESHOLD_WINDOWS = [
+  ["five_hour", "5h"],
+  ["seven_day", "7d"],
+  ["seven_day_overage_included", "7d_oi"],
+  ["overage", "overage"],
+] as const;
+
+/**
+ * The service state one model response's headers report (as Claude Code
+ * 2.1.322 reads them): fallback, overage detail, upgrade paths, surpassed
+ * thresholds, retry-after, the slow tier (sent only to a request that asked
+ * for it with `anthropic-usage-limit: slow`) and grace (only with
+ * `anthropic-usage-limit: extended`; utilization above zero means the
+ * response was served in the grace zone). Null when the response reported
+ * none of it.
+ */
+export function parseClaudeServiceState(
+  headers: Headers,
+  now = new Date(),
+): ClaudeServiceState | null {
+  const prefix = "anthropic-ratelimit-unified-";
+  const fallback = headers.get(`${prefix}fallback`);
+  const fallbackPercentage = finiteHeader(headers, `${prefix}fallback-percentage`);
+  const flag = (name: string) => {
+    const value = headers.get(`${prefix}${name}`);
+    return value === null ? null : value === "true";
+  };
+  const surpassedThresholds = THRESHOLD_WINDOWS.flatMap(([windowId, short]) => {
+    const threshold = finiteHeader(headers, `${prefix}${short}-surpassed-threshold`);
+    return threshold === null ? [] : [{ windowId, threshold }];
+  });
+  const upgradePaths = (headers.get(`${prefix}upgrade-paths`) ?? "")
+    .split(",")
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0 && path.length <= 64)
+    .slice(0, 16);
+  const slowStatusHeader = headers.get(`${prefix}slow-status`);
+  const slowOffer = headers.get(`${prefix}slow-offer`);
+  const slowRetryAfter = finiteHeader(headers, `${prefix}slow-retry-after`);
+  const slowMaxWait = finiteHeader(headers, `${prefix}slow-max-wait`);
+  const slowBudget = finiteHeader(headers, `${prefix}slow-budget-utilization`);
+  const slowBudgetReset = epoch(headers.get(`${prefix}slow-budget-reset`));
+  const slow =
+    slowStatusHeader !== null ||
+    slowOffer !== null ||
+    slowRetryAfter !== null ||
+    slowMaxWait !== null ||
+    slowBudget !== null ||
+    slowBudgetReset !== null
+      ? {
+          status:
+            slowStatusHeader === null
+              ? null
+              : SLOW_STATUSES.has(slowStatusHeader)
+                ? slowStatusHeader
+                : "unrecognized",
+          offer: slowOffer === "treatment" || slowOffer === "control" ? slowOffer : null,
+          retryAfterSeconds: slowRetryAfter,
+          maxWaitSeconds: slowMaxWait,
+          budgetUtilization: slowBudget === null ? null : Math.min(1, slowBudget),
+          budgetResetsAt: slowBudgetReset,
+        }
+      : null;
+  const graceFive = finiteHeader(headers, `${prefix}grace-5h-utilization`);
+  const graceSeven = finiteHeader(headers, `${prefix}grace-7d-utilization`);
+  const state = {
+    observedAt: now.toISOString(),
+    fallbackAvailable: fallback === null ? null : fallback === "available",
+    fallbackPercentage,
+    overageDisabledReason: tokenHeader(headers, `${prefix}overage-disabled-reason`),
+    overageInUse: flag("overage-in-use"),
+    overageDailyCapPaused: flag("overage-daily-cap-paused"),
+    overageScope: tokenHeader(headers, `${prefix}overage-scope`),
+    upgradePaths,
+    surpassedThresholds,
+    retryAfterSeconds: finiteHeader(headers, "retry-after"),
+    slow,
+    grace:
+      graceFive === null && graceSeven === null
+        ? null
+        : { fiveHourUtilization: graceFive, sevenDayUtilization: graceSeven },
+  };
+  const reported =
+    state.fallbackAvailable !== null ||
+    fallbackPercentage !== null ||
+    state.overageDisabledReason !== null ||
+    state.overageInUse !== null ||
+    state.overageDailyCapPaused !== null ||
+    state.overageScope !== null ||
+    upgradePaths.length > 0 ||
+    surpassedThresholds.length > 0 ||
+    state.retryAfterSeconds !== null ||
+    slow !== null ||
+    state.grace !== null;
+  if (!reported) return null;
+  const parsed = ClaudeServiceState.safeParse(state);
+  return parsed.success ? parsed.data : null;
+}
+
+/** Whether a response was served in the grace zone past a plan limit. */
+export function claudeServiceStateInGrace(state: ClaudeServiceState | null | undefined): boolean {
+  return (
+    (state?.grace?.fiveHourUtilization ?? 0) > 0 || (state?.grace?.sevenDayUtilization ?? 0) > 0
+  );
 }
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function isoOrNull(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? new Date(time).toISOString() : null;
+}
+
+function tokenOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= 64 ? value : null;
+}
+
+function tokens(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .filter(
+          (item): item is string =>
+            typeof item === "string" && item.length > 0 && item.length <= 64,
+        )
+        .slice(0, 16)
+    : [];
+}
+
+function countOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function numberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function percentOrNull(value: unknown): number | null {
+  const number = numberOrNull(value);
+  return number !== null && number >= 0 ? number : null;
+}
+
+/**
+ * What a grant gives back, the way Claude Code 2.1.322 names it: `fable`
+ * when it gives back the weekly limit it spent, else its `type`, else
+ * derived from what it clears.
+ */
+export function claudeLimitResetGrantKind(grant: {
+  type: string | null;
+  clears: readonly string[];
+  givesBackWeekly: boolean;
+}): ClaudeLimitResetGrant["kind"] {
+  if (grant.givesBackWeekly) return "fable";
+  if (grant.type === "session" || grant.type === "weekly" || grant.type === "full")
+    return grant.type;
+  const session = grant.clears.includes("five_hour");
+  const weekly = grant.clears.some((id) => id.startsWith("seven_day"));
+  return session && weekly ? "full" : session ? "session" : "weekly";
+}
+
+function parseGrant(value: unknown): ClaudeLimitResetGrant | null {
+  const grant = record(value);
+  if (!grant) return null;
+  const percentUsed: Record<string, number> = {};
+  for (const [id, used] of Object.entries(record(grant.percent_used) ?? {})) {
+    const number = percentOrNull(used);
+    if (number !== null && id.length > 0 && id.length <= 64) percentUsed[id] = number;
+  }
+  const type = tokenOrNull(grant.type);
+  const clears = tokens(grant.clears);
+  const givesBackWeekly = grant.gives_back_weekly === true;
+  const parsed = ClaudeLimitResetGrant.safeParse({
+    id: grant.id,
+    label: typeof grant.label === "string" ? grant.label.slice(0, 300) : null,
+    type,
+    kind: claudeLimitResetGrantKind({ type, clears, givesBackWeekly }),
+    resetsTotal: countOrNull(grant.resets_total),
+    resetsLeft: countOrNull(grant.resets_left),
+    startsAt: isoOrNull(grant.starts_at),
+    endsAt: isoOrNull(grant.ends_at),
+    clears,
+    paused: grant.paused === true,
+    usableNow: grant.usable_now === true,
+    // Claude Code's default: a grant is used at a limit unless it says otherwise.
+    useRequiresLimit: grant.use_requires_limit !== false,
+    givesBackWeekly,
+    percentUsed,
+    blocking: tokens(grant.blocking),
+    unavailableReason: tokenOrNull(grant.unavailable_reason),
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * The account's limit reset status (the usage body's `cedar_ember` block).
+ * A malformed grant is dropped, as Claude Code drops it; a malformed block
+ * is no reading (null). Undefined when the body has no such block.
+ */
+export function parseClaudeLimitResets(
+  value: unknown,
+  now = new Date(),
+): ClaudeLimitResets | null | undefined {
+  if (value === undefined) return undefined;
+  const program = record(value);
+  if (!program || typeof program.eligible !== "boolean") return null;
+  const grants = (Array.isArray(program.grants) ? program.grants : [])
+    .map(parseGrant)
+    .filter((grant): grant is ClaudeLimitResetGrant => grant !== null)
+    .slice(0, 32);
+  const nextGrantId =
+    typeof program.next_grant_id === "string" && grants.some((g) => g.id === program.next_grant_id)
+      ? program.next_grant_id
+      : null;
+  const parsed = ClaudeLimitResets.safeParse({
+    eligible: program.eligible,
+    ineligibleReason: tokenOrNull(program.ineligible_reason),
+    atLimit: program.at_limit === true,
+    exhausted: tokens(program.exhausted),
+    grants,
+    nextGrantId,
+    weeklyResetsAt: isoOrNull(program.weekly_resets_at),
+    cooldownUntil: isoOrNull(program.cooldown_until),
+    observedAt: now.toISOString(),
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+/** The at-the-limit reset program (`juniper_tide`); undefined when the body has none. */
+export function parseClaudeWallReset(
+  value: unknown,
+  now = new Date(),
+): ClaudeWallReset | null | undefined {
+  if (value === undefined || value === null) return undefined;
+  const program = record(value);
+  if (!program || typeof program.eligible !== "boolean") return null;
+  const parsed = ClaudeWallReset.safeParse({
+    eligible: program.eligible,
+    ineligibleReason: tokenOrNull(program.ineligible_reason),
+    inExperiment: program.in_experiment === true,
+    available: program.available === true,
+    nextAvailableAt: isoOrNull(program.next_available_at),
+    weeklyResetsAt: isoOrNull(program.weekly_resets_at),
+    resetsPerWeek: countOrNull(program.resets_per_week),
+    observedAt: now.toISOString(),
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+/** The usage body's `limits` list with each scoped limit's weekly share; undefined without one. */
+export function parseClaudeUsageLimits(
+  body: Record<string, unknown>,
+): ClaudeUsageLimit[] | undefined {
+  if (!Array.isArray(body.limits)) return undefined;
+  const shares = new Map<number, Record<string, unknown>>();
+  if (Array.isArray(body.weekly_scoped_shares))
+    for (const entry of body.weekly_scoped_shares) {
+      const share = record(entry);
+      const index = countOrNull(share?.limit_index);
+      if (share && index !== null) shares.set(index, share);
+    }
+  return body.limits.slice(0, 16).flatMap((entry, index) => {
+    const limit = record(entry);
+    if (!limit) return [];
+    const model = record(record(limit.scope)?.model);
+    const share = shares.get(index);
+    const parsed = ClaudeUsageLimit.safeParse({
+      kind: limit.kind,
+      group: tokenOrNull(limit.group),
+      percent: percentOrNull(limit.percent ?? limit.utilization),
+      severity: tokenOrNull(limit.severity),
+      resetsAt: isoOrNull(limit.resets_at),
+      modelName: typeof model?.display_name === "string" ? model.display_name.slice(0, 100) : null,
+      modelId: typeof model?.id === "string" ? model.id.slice(0, 200) : null,
+      surface: tokenOrNull(record(limit.scope)?.surface),
+      isActive: limit.is_active === true,
+      allowancePercentOfWeekly: percentOrNull(share?.allowance_percent_of_weekly),
+      usedPercentOfWeekly: percentOrNull(share?.used_percent_of_weekly),
+    });
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+/** The usage body's `extra_usage`; undefined when absent, null when the provider reports none. */
+export function parseClaudeExtraUsage(value: unknown): ClaudeExtraUsage | null | undefined {
+  if (value === undefined) return undefined;
+  const extra = record(value);
+  if (!extra) return null;
+  const parsed = ClaudeExtraUsage.safeParse({
+    isEnabled: typeof extra.is_enabled === "boolean" ? extra.is_enabled : null,
+    monthlyLimit: numberOrNull(extra.monthly_limit),
+    usedCredits: numberOrNull(extra.used_credits),
+    utilization: percentOrNull(extra.utilization),
+    currency: typeof extra.currency === "string" ? extra.currency.slice(0, 16) : null,
+    disabledReason: tokenOrNull(extra.disabled_reason),
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+const SURFACE_WINDOWS = ["seven_day_cowork", "seven_day_omelette", "seven_day_oauth_apps"] as const;
+
+function parseSurfaceWindows(body: Record<string, unknown>): ClaudeSurfaceUsageWindow[] {
+  return SURFACE_WINDOWS.flatMap((id) => {
+    const window = record(body[id]);
+    if (!window) return [];
+    const parsed = ClaudeSurfaceUsageWindow.safeParse({
+      id,
+      usedPercent: percentOrNull(window.utilization),
+      resetsAt: isoOrNull(window.resets_at),
+    });
+    return parsed.success && (parsed.data.usedPercent !== null || parsed.data.resetsAt !== null)
+      ? [parsed.data]
+      : [];
+  });
+}
+
+/**
+ * Everything a usage body reports beyond the plan windows. Each part is
+ * read on its own: a part that cannot be read is left out and never breaks
+ * the reading or another part.
+ */
+export function parseClaudeUsageDetails(
+  body: Record<string, unknown>,
+  now = new Date(),
+): ClaudeUsageDetails {
+  const details: ClaudeUsageDetails = {};
+  const part = <T>(read: () => T | undefined): T | undefined => {
+    try {
+      return read();
+    } catch {
+      return undefined;
+    }
+  };
+  const limitResets = part(() => parseClaudeLimitResets(body.cedar_ember, now));
+  if (limitResets !== undefined) details.limitResets = limitResets;
+  const wallReset = part(() => parseClaudeWallReset(body.juniper_tide, now));
+  if (wallReset !== undefined) details.wallReset = wallReset;
+  const limits = part(() => parseClaudeUsageLimits(body));
+  if (limits !== undefined) details.limits = limits;
+  const extraUsage = part(() => parseClaudeExtraUsage(body.extra_usage));
+  if (extraUsage !== undefined) details.extraUsage = extraUsage;
+  const surfaceWindows = part(() =>
+    SURFACE_WINDOWS.some((id) => Object.hasOwn(body, id)) ? parseSurfaceWindows(body) : undefined,
+  );
+  if (surfaceWindows !== undefined) details.surfaceWindows = surfaceWindows;
+  return details;
+}
+
+const CLAIM_RESULTS = new Set([
+  "reset",
+  "already_used",
+  "not_limited",
+  "cooldown",
+  "ineligible",
+  "unavailable",
+]);
+
+/**
+ * A limit reset claim's HTTP answer, as Claude Code 2.1.322 reads it: a
+ * readable 2xx body is the provider's result (an unknown result is
+ * `unavailable`, and `unavailable` is retried with the same request id); a
+ * 429 is `rate_limited`, a 401 or 403 `auth_error`, anything else `error`.
+ * Every unsettled outcome is `retryable`.
+ */
+export function parseClaudeLimitResetClaim(
+  httpStatus: number,
+  body: unknown,
+): ClaudeLimitResetClaim {
+  const unsettled = (result: "rate_limited" | "auth_error" | "error"): ClaudeLimitResetClaim => ({
+    result,
+    reason: null,
+    resetsLeft: null,
+    cleared: [],
+    weeklyResetsAt: null,
+    cooldownUntil: null,
+    retryable: true,
+  });
+  if (httpStatus === 429) return unsettled("rate_limited");
+  if (httpStatus === 401 || httpStatus === 403) return unsettled("auth_error");
+  const answer = httpStatus >= 200 && httpStatus < 300 ? record(body) : null;
+  if (!answer || typeof answer.result !== "string") return unsettled("error");
+  const result = (CLAIM_RESULTS.has(answer.result) ? answer.result : "unavailable") as
+    | "reset"
+    | "already_used"
+    | "not_limited"
+    | "cooldown"
+    | "ineligible"
+    | "unavailable";
+  const parsed = ClaudeLimitResetClaim.safeParse({
+    result,
+    reason: tokenOrNull(answer.reason),
+    resetsLeft: countOrNull(answer.resets_left),
+    cleared: tokens(answer.cleared),
+    weeklyResetsAt: isoOrNull(answer.weekly_resets_at),
+    cooldownUntil: isoOrNull(answer.cooldown_until),
+    retryable: result === "unavailable",
+  });
+  return parsed.success ? parsed.data : unsettled("error");
 }
 
 /**
@@ -180,12 +629,14 @@ export function parseClaudeUsageResponse(
   const noLimitWindows = ClaudeUsageWindowId.options.filter(
     (id) => Object.hasOwn(value, id) && (value as Record<string, unknown>)[id] === null,
   );
+  const details = parseClaudeUsageDetails(body, now);
   return windows.length
     ? {
         windows,
         observedAt,
         source: "provider",
         ...(noLimitWindows.length ? { noLimitWindows } : {}),
+        ...(Object.keys(details).length ? { details } : {}),
       }
     : null;
 }

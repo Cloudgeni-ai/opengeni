@@ -86,6 +86,7 @@ import {
 import {
   sessionAdmissionNeedsDifferentMachine,
   sessionAdmissionReason,
+  sessionAdmissionShowsMachineAccess,
 } from "../../session-admission-model";
 import {
   connectorSelectionUpdate,
@@ -2658,7 +2659,13 @@ function SessionChatPane(props: {
       context.workspaces.find((candidate) => candidate.id === props.session.workspaceId) ?? null,
       context.managedSelfContext,
     );
-  const showMachineAccess = machineAccess !== null && (!machineAccess.isOwner || sharedChat);
+  // While the owner is asked to allow the machine, the blocked-message notice
+  // says the workspace will see the work, so the heads-up would repeat it.
+  const ownerAskedToAllow =
+    machineAccess?.isOwner === true &&
+    sessionAdmissionShowsMachineAccess(sessionAdmissionReason(props.session), machineAccess);
+  const showMachineAccess =
+    machineAccess !== null && (!machineAccess.isOwner || (sharedChat && !ownerAskedToAllow));
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -4497,6 +4504,7 @@ function SessionChatPane(props: {
                 key={`${props.session.workspaceId}:${props.session.id}`}
                 session={props.session}
                 machineAccess={machineAccess}
+                sharedChat={sharedChat}
                 machineAction={
                   <SessionMachinePickerAction
                     queuedWork
