@@ -79,6 +79,42 @@ describe("shared OAuth account policy", () => {
       reason: "account_already_connected",
     });
   });
+  // A deployment that replaces its registered OAuth client (staging's Google
+  // client changed twice) left people with logins made under an earlier
+  // client. The account is the same: the issuer names it, not the client.
+  describe("a login made with an earlier OAuth client of the same issuer", () => {
+    const newerClient = { ...metadata, clientId: "replacement-client" };
+    test("connecting the same account again reuses it instead of saving a duplicate", () => {
+      expect(decide({ metadata: newerClient })).toEqual({
+        kind: "reuse",
+        connection: account(),
+      });
+    });
+    test("reconnecting it is the same account, not a mismatch", () => {
+      expect(decide({ requestedConnectionId: "existing", metadata: newerClient })).toEqual({
+        kind: "write",
+      });
+    });
+    test("a removed duplicate is not revived beside the live login", () => {
+      const removed = account({ id: "removed", status: "revoked", createdAt: "2026-02-01" });
+      expect(
+        decide({
+          accounts: [removed, account()],
+          requestedConnectionId: "removed",
+          metadata: newerClient,
+        }),
+      ).toEqual({ kind: "reject", reason: "account_already_connected" });
+    });
+    test("a different account is still a different account", () => {
+      expect(
+        decide({
+          requestedConnectionId: "existing",
+          metadata: { ...newerClient, subject: "other" },
+        }),
+      ).toEqual({ kind: "reject", reason: "account_mismatch" });
+      expect(decide({ metadata: { ...newerClient, subject: "other" } }).kind).toBe("write");
+    });
+  });
   test("reconnect of an unknown legacy row cannot adopt another live identity", () => {
     expect(
       decide({

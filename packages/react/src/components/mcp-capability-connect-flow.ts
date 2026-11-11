@@ -43,6 +43,29 @@ const PERSONAL_ONLY_MCP_URLS = new Set([
 ]);
 const RESTART_STATES = ["failed", "expired", "cancelled"];
 
+/**
+ * The person's own login a subject-scoped connector's card reconnects: their
+ * one login for this endpoint, or none to connect a new one. A removed
+ * (revoked) login is no account at all, as on the Connected accounts list, so
+ * a removed duplicate never makes the choice ambiguous; only two logins that
+ * still exist do.
+ */
+export function personalReconnectTarget(
+  connections: readonly ConnectionMetadata[],
+  mcpUrl: string,
+): { ambiguous: true } | { ambiguous: false; connectionId: string | undefined } {
+  const logins = connections.filter(
+    (entry) =>
+      entry.subjectId !== null &&
+      entry.kind === "oauth2" &&
+      entry.status !== "revoked" &&
+      entry.metadata.mcpUrl === mcpUrl,
+  );
+  return logins.length > 1
+    ? { ambiguous: true }
+    : { ambiguous: false, connectionId: logins[0]?.id };
+}
+
 function personalOnlyService(item: Pick<CapabilityCatalogItem, "mcpUrl" | "endpointUrl"> | null) {
   const url = item?.mcpUrl ?? item?.endpointUrl;
   return !!url && PERSONAL_ONLY_MCP_URLS.has(url);
@@ -460,16 +483,11 @@ export function useMcpCapabilityConnect({
         // stays on its exact native connection ID.
         let reconnectAccountId = lapsed?.id ?? resolved.connectionRef?.connectionId ?? undefined;
         if (!lapsed && resolved.connectionRef?.subjectScope === "subject") {
-          const connections = (await client.listConnections(workspaceId)).filter(
-            (entry) =>
-              entry.subjectId !== null &&
-              entry.kind === "oauth2" &&
-              entry.metadata.mcpUrl === mcpUrl,
-          );
+          const target = personalReconnectTarget(await client.listConnections(workspaceId), mcpUrl);
           if (!active()) return;
-          if (connections.length > 1)
+          if (target.ambiguous)
             throw new ConnectCardMessage(t("sessionMcpCapabilityCard.moreThanOnePersonalAccount"));
-          reconnectAccountId = connections[0]?.id;
+          reconnectAccountId = target.connectionId;
         }
         // A closed request can still have reached the server. Keep its key for
         // an exact replay, but never reuse it when ownership or another input
