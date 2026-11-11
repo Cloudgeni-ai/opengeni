@@ -33,11 +33,11 @@ describe("GitHub gateway REST classification", () => {
     expect(rest("POST", "/repos/acme/widgets/pulls").action).toMatchObject({
       kind: "write",
       tools: ["pull_request_create"],
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(rest("PUT", "/repos/acme/widgets/pulls/3/merge").action).toMatchObject({
       tools: ["pull_request_merge"],
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(rest("POST", "/repos/acme/widgets/pulls/3/reviews").action).toMatchObject({
       tools: ["pull_request_review_submit"],
@@ -50,24 +50,24 @@ describe("GitHub gateway REST classification", () => {
     });
     expect(rest("POST", "/repos/acme/widgets/actions/runs/9/rerun").action).toMatchObject({
       tools: GITHUB_GATEWAY_ROUTINE_TOOLS,
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(
       rest("POST", "/repos/acme/widgets/actions/workflows/ci.yml/dispatches").action,
-    ).toMatchObject({ title: "Run workflow", alwaysAsk: false });
+    ).toMatchObject({ title: "Run workflow", sensitive: false });
     expect(rest("POST", "/repos/acme/widgets/releases").action).toMatchObject({
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(rest("POST", "/repos/acme/widgets/git/refs").action).toMatchObject({
       tools: ["ref_create"],
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(rest("POST", "/repos/acme/widgets/releases/1/assets?name=a.zip").action).toMatchObject({
-      alwaysAsk: false,
+      sensitive: false,
     });
   });
 
-  test("destructive and settings changes always ask", () => {
+  test("destructive and settings changes are sensitive", () => {
     for (const [method, path, body] of [
       ["DELETE", "/repos/acme/widgets", null],
       ["PATCH", "/repos/acme/widgets", { private: false }],
@@ -83,7 +83,7 @@ describe("GitHub gateway REST classification", () => {
       ["DELETE", "/orgs/acme/members/bob", null],
       ["POST", "/repos/acme/widgets/something-new", {}],
     ] as const) {
-      expect(rest(method, path, body).action).toMatchObject({ kind: "write", alwaysAsk: true });
+      expect(rest(method, path, body).action).toMatchObject({ kind: "write", sensitive: true });
     }
   });
 
@@ -91,7 +91,7 @@ describe("GitHub gateway REST classification", () => {
     expect(
       rest("PATCH", "/repos/acme/widgets/git/refs/heads/feature", { sha: "a", force: false })
         .action,
-    ).toMatchObject({ alwaysAsk: false });
+    ).toMatchObject({ sensitive: false });
   });
 });
 
@@ -117,30 +117,46 @@ describe("GitHub gateway GraphQL classification", () => {
     expect(result.action).toMatchObject({
       kind: "write",
       tools: ["pull_request_create"],
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(result.nodeIds).toEqual(["R_kgDOAbCdEf"]);
     expect(result.mutations).toEqual(["createPullRequest"]);
   });
 
-  test("merges follow the merge policy; deletions and unknown mutations always ask", () => {
+  test("requests the gateway can't read or scope are unscoped", () => {
+    expect(classifyGitHubGraphqlRequest({ query: "mutation {" }).action).toMatchObject({
+      sensitive: true,
+      unscoped: true,
+      title: "Unrecognised GitHub GraphQL request",
+    });
+    const tooMany = Array.from(
+      { length: 51 },
+      (_, index) =>
+        `m${index}: createCommitOnBranch(input: {branch: {repositoryNameWithOwner: "acme/r${index}", branchName: "f"}}) { clientMutationId }`,
+    );
+    expect(
+      classifyGitHubGraphqlRequest({ query: `mutation { ${tooMany.join(" ")} }` }).action,
+    ).toMatchObject({ sensitive: true, unscoped: true });
+  });
+
+  test("merges follow the merge policy; deletions and unknown mutations are sensitive", () => {
     expect(
       classifyGitHubGraphqlRequest({
         query:
           'mutation { mergePullRequest(input: {pullRequestId: "PR_kwDOAbCdEf"}) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ tools: ["pull_request_merge"], alwaysAsk: false });
+    ).toMatchObject({ tools: ["pull_request_merge"], sensitive: false });
     expect(
       classifyGitHubGraphqlRequest({
         query: 'mutation { deleteRef(input: {refId: "REF_kwDOAbCdEf"}) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ alwaysAsk: true });
+    ).toMatchObject({ sensitive: true });
     expect(
       classifyGitHubGraphqlRequest({
         query:
           'mutation { updateRepository(input: {repositoryId: "R_kgDOAbCdEf", hasWikiEnabled: false}) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ alwaysAsk: true });
+    ).toMatchObject({ sensitive: true });
     expect(
       classifyGitHubGraphqlRequest({
         query: "mutation($i: UpdateRefsInput!) { updateRefs(input: $i) { clientMutationId } }",
@@ -151,19 +167,19 @@ describe("GitHub gateway GraphQL classification", () => {
           },
         },
       }).action,
-    ).toMatchObject({ alwaysAsk: true });
+    ).toMatchObject({ sensitive: true });
   });
 
   test("an unreadable or ambiguous document asks", () => {
     expect(classifyGitHubGraphqlRequest({ query: "mutation {" }).action).toMatchObject({
-      alwaysAsk: true,
+      sensitive: true,
     });
     expect(
       classifyGitHubGraphqlRequest({
         query:
           'query A { viewer { login } } mutation B { addStar(input: {starrableId: "R_kgDOAbCdEf"}) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ alwaysAsk: true });
+    ).toMatchObject({ sensitive: true });
     // The operation is chosen by name.
     expect(
       classifyGitHubGraphqlRequest({
@@ -171,24 +187,103 @@ describe("GitHub gateway GraphQL classification", () => {
           'query A { viewer { login } } mutation B { addStar(input: {starrableId: "R_kgDOAbCdEf"}) { clientMutationId } }',
         operationName: "B",
       }).action,
-    ).toMatchObject({ kind: "write", alwaysAsk: false });
-    expect(classifyGitHubGraphqlRequest("not json").action).toMatchObject({ alwaysAsk: true });
+    ).toMatchObject({ kind: "write", sensitive: false });
+    expect(classifyGitHubGraphqlRequest("not json").action).toMatchObject({ sensitive: true });
   });
 });
 
 describe("GitHub gateway review fixes", () => {
+  test("a fragment chain too deep to read is unrecognised, not a hidden mutation", () => {
+    const chain = Array.from({ length: 70 }, (_, index) =>
+      index === 69
+        ? `fragment F69 on Mutation { deleteProjectV2(input: {projectId: "PVT_kwDOProject1"}) { clientMutationId } }`
+        : `fragment F${index} on Mutation { ...F${index + 1} }`,
+    ).join("\n");
+    const result = classifyGitHubGraphqlRequest({
+      query: `mutation { addComment(input: {subjectId: "I_kwDOWidgets1", body: "hi"}) { clientMutationId } ...F0 }\n${chain}`,
+    });
+    expect(result.action).toMatchObject({ sensitive: true, unscoped: true });
+    // Scoping reads only ID-typed keys, never free text.
+    const sponsor = classifyGitHubGraphqlRequest({
+      query:
+        'mutation { createSponsorship(input: {sponsorableLogin: "x", clientMutationId: "R_kgDOWidgets", websiteUrl: "https://github.com/acme/widgets"}) { clientMutationId } }',
+    });
+    expect(sponsor.fields).toEqual([
+      expect.objectContaining({ nodeIds: [], namesRepository: false, sensitive: true }),
+    ]);
+  });
+
+  test("indented block strings are dedented, and unreadable IDs leave a mutation unscoped", () => {
+    const transfer = classifyGitHubGraphqlRequest({
+      query:
+        'mutation { transferIssue(input: {\n  issueId: """\n  I_kwDOForbidden1\n  """, repositoryId: "R_kgDOAllowed1" }) { issue { id } } }',
+    });
+    expect(transfer.nodeIds).toEqual(["I_kwDOForbidden1", "R_kgDOAllowed1"]);
+    expect(transfer.fields[0]).toMatchObject({
+      nodeIds: ["I_kwDOForbidden1", "R_kgDOAllowed1"],
+      unreadableId: false,
+    });
+    const padded = classifyGitHubGraphqlRequest({
+      query:
+        'mutation($issue: ID!) { transferIssue(input: {issueId: $issue, repositoryId: "R_kgDOAllowed1"}) { issue { id } } }',
+      variables: { issue: " I_kwDOForbidden1 " },
+    });
+    expect(padded.fields[0]).toMatchObject({ unreadableId: true });
+    const comment = classifyGitHubGraphqlRequest({
+      query:
+        'mutation { addComment(input: {subjectId: "I_kwDOWidgets1", body: """\n    hi there\n    """}) { clientMutationId } }',
+    });
+    expect(comment.fields[0]).toMatchObject({ nodeIds: ["I_kwDOWidgets1"], unreadableId: false });
+    // A repository field the gateway can't read can't be write-checked.
+    const subIssue = classifyGitHubGraphqlRequest({
+      query:
+        'mutation { addSubIssue(input: {issueId: "I_kwDOWidgets1", subIssueUrl: "github.com/other/secret/issues/1"}) { clientMutationId } }',
+    });
+    expect(subIssue.fields[0]).toMatchObject({ unreadableId: true });
+  });
+
+  test("strings GitHub might read differently are unrecognised", () => {
+    const unrecognised = { sensitive: true, unscoped: true };
+    // An escaped quote before the closing quotes: GitHub ends the block string there.
+    const hidden = classifyGitHubGraphqlRequest({
+      query:
+        'mutation($repo: ID!) { a: addComment(input: {subjectId: "I_kwDOWidgets1", body: """A\\"""""}) { clientMutationId } b: updateRepository(input: {repositoryId: $repo, hasWikiEnabled: false}) { clientMutationId } c: addComment(input: {subjectId: "I_kwDOWidgets1", body: """ }) { clientMutationId } # """}) { clientMutationId }\n}',
+      variables: { repo: "R_kgDOSecret1" },
+    });
+    expect(hidden.action).toMatchObject(unrecognised);
+    for (const body of ['"""\f\nx"""', '"""a\r\nb"""', '"""\n\tx\n"""', '"\\q"', '"\\u{63}"']) {
+      expect(
+        classifyGitHubGraphqlRequest({
+          query: `mutation { addComment(input: {subjectId: "I_kwDOWidgets1", body: ${body}}) { clientMutationId } }`,
+        }).action,
+      ).toMatchObject(unrecognised);
+    }
+    // Braced escapes decode as GitHub decodes them, so a zero commit ID is a deletion.
+    const zeros = "\\u{0030}".repeat(40);
+    const updateRefs = classifyGitHubGraphqlRequest({
+      query: `mutation { updateRefs(input: {repositoryId: "R_kgDOWidgets", refUpdates: [{name: "refs/tags/v1", afterOid: "${zeros}", force: false}]}) { clientMutationId } }`,
+    });
+    expect(updateRefs.action).toMatchObject({ title: "Delete branch or tag", sensitive: true });
+    // An afterOid that isn't a full commit ID counts as a deletion too.
+    const short = classifyGitHubGraphqlRequest({
+      query:
+        'mutation { updateRefs(input: {repositoryId: "R_kgDOWidgets", refUpdates: [{name: "refs/heads/f", afterOid: "abc", force: false}]}) { clientMutationId } }',
+    });
+    expect(short.action).toMatchObject({ title: "Delete branch or tag" });
+  });
+
   test("only reruns and cancels are routine on a workflow run", () => {
     expect(
       rest("POST", "/repos/acme/widgets/actions/runs/9/rerun-failed-jobs").action,
     ).toMatchObject({
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(rest("POST", "/repos/acme/widgets/actions/runs/9/cancel").action).toMatchObject({
-      alwaysAsk: false,
+      sensitive: false,
     });
     for (const sub of ["pending_deployments", "approve", "deployment_protection_rule"]) {
       expect(rest("POST", `/repos/acme/widgets/actions/runs/9/${sub}`).action).toMatchObject({
-        alwaysAsk: true,
+        sensitive: true,
       });
     }
   });
@@ -207,9 +302,9 @@ describe("GitHub gateway review fixes", () => {
       }).action;
     expect(classify("0".repeat(40))).toMatchObject({
       title: "Delete branch or tag",
-      alwaysAsk: true,
+      sensitive: true,
     });
-    expect(classify("b".repeat(40))).toMatchObject({ title: "Update branch", alwaysAsk: false });
+    expect(classify("b".repeat(40))).toMatchObject({ title: "Update branch", sensitive: false });
   });
 
   test("repositories named in mutation input are collected", () => {
@@ -272,23 +367,26 @@ describe("GitHub gateway force updates and deletions of refs", () => {
     expect(refRewriteFollowsPolicy("refs/heads/", "main")).toBe(false);
     expect(refRewriteFollowsPolicy("refs/heads/a/../main", "main")).toBe(false);
     expect(refRewriteFollowsPolicy("refs/heads/.hidden", "main")).toBe(false);
+    // A `%` the gateway couldn't decode might name another ref on GitHub.
+    expect(refRewriteFollowsPolicy("refs/heads/%6Dain%", "main")).toBe(false);
+    expect(refRewriteFollowsPolicy("refs/heads/x%00", "main")).toBe(false);
   });
 
   test("REST deletions and force updates name their ref and still ask until confirmed", () => {
     expect(rest("DELETE", "/repos/acme/widgets/git/refs/heads/feature/x").action).toEqual({
       kind: "write",
       tools: ["ref_create"],
-      alwaysAsk: true,
+      sensitive: true,
       title: "Delete branch or tag",
       refRewrites: {
         targets: [{ kind: "name", ref: "refs/heads/feature/x" }],
-        alwaysAskOtherwise: false,
+        sensitiveOtherwise: false,
       },
     });
     expect(
       rest("PATCH", "/repos/acme/widgets/git/refs/heads/feature", { sha: "a", force: true }).action,
     ).toMatchObject({
-      alwaysAsk: true,
+      sensitive: true,
       refRewrites: { targets: [{ kind: "name", ref: "refs/heads/feature" }] },
     });
     // No ref to confirm.
@@ -301,7 +399,89 @@ describe("GitHub gateway force updates and deletions of refs", () => {
     expect(
       rest("PATCH", "/repos/acme/widgets/git/refs/heads/feature", { sha: "a", force: "true" })
         .action,
-    ).toMatchObject({ alwaysAsk: true, title: "Force-update branch" });
+    ).toMatchObject({ sensitive: true, title: "Force-update branch" });
+  });
+
+  test("a ref whose slashes gh encodes still names its branch", () => {
+    // `gh pr merge --delete-branch` and `gh api` send `heads%2Fem%2Fx`.
+    expect(
+      rest("DELETE", "/repos/acme/widgets/git/refs/heads%2Fem%2Fstaging-live-binary-readiness")
+        .action,
+    ).toEqual({
+      kind: "write",
+      tools: ["ref_create"],
+      sensitive: true,
+      title: "Delete branch or tag",
+      refRewrites: {
+        targets: [{ kind: "name", ref: "refs/heads/em/staging-live-binary-readiness" }],
+        sensitiveOtherwise: false,
+      },
+    });
+    expect(
+      rest("PATCH", "/repos/acme/widgets/git/refs/heads%2Ffeature", { sha: "a", force: true })
+        .action,
+    ).toMatchObject({ refRewrites: { targets: [{ kind: "name", ref: "refs/heads/feature" }] } });
+    // Crafted encodings never confirm a tag or the default branch as a branch.
+    for (const ref of [
+      "heads%2F..%2Ftags%2Fv1",
+      "heads%2Fx%2F..%2F..%2Ftags%2Fv1",
+      "heads%2F.hidden",
+      "heads%2F%2Fmain",
+      "heads%2Fmain%00",
+      "heads%252Fmain",
+      "heads%2",
+    ]) {
+      const action = rest("DELETE", `/repos/acme/widgets/git/refs/${ref}`).action;
+      expect(action).toMatchObject({ sensitive: true });
+      const targets =
+        action.kind === "write" && action.refRewrites ? action.refRewrites.targets : [];
+      for (const target of targets) {
+        if (target.kind === "name") expect(refRewriteFollowsPolicy(target.ref, "main")).toBe(false);
+      }
+    }
+    expect(rest("DELETE", "/repos/acme/widgets/git/refs/tags%2Fv1").action).toEqual({
+      kind: "write",
+      tools: ["ref_create"],
+      sensitive: true,
+      title: "Delete branch or tag",
+    });
+  });
+
+  test("account and organization writes are unscoped: the repository allowlist can't cover them", () => {
+    expect(rest("PUT", "/orgs/acme/actions/secrets/TOKEN", { encrypted_value: "x" })).toEqual({
+      action: {
+        kind: "write",
+        tools: [],
+        sensitive: true,
+        unscoped: true,
+        title: "Change GitHub account data",
+      },
+      repository: null,
+    });
+    expect(rest("DELETE", "/user/keys/1").action).toMatchObject({
+      sensitive: true,
+      unscoped: true,
+      title: "Delete on GitHub",
+    });
+    // A repository write is checked against the allowlist instead.
+    expect(
+      rest("PUT", "/repos/acme/widgets/environments/staging/secrets/X", {}).action,
+    ).not.toHaveProperty("unscoped");
+  });
+
+  test("environment secrets and other settings are sensitive, with no policy action of their own", () => {
+    expect(
+      rest(
+        "PUT",
+        "/repos/acme/widgets/environments/staging/secrets/OPENGENI_OBSERVABILITY_CREDITS_PROBE_API_KEY",
+        { encrypted_value: "x", key_id: "1" },
+      ).action,
+    ).toEqual({
+      kind: "write",
+      tools: [],
+      sensitive: true,
+      title: "Change repository environments",
+    });
   });
 
   test("GraphQL variable defaults count, as GitHub applies them", () => {
@@ -311,7 +491,7 @@ describe("GitHub gateway force updates and deletions of refs", () => {
     }).action;
     expect(forcedByDefault).toMatchObject({
       title: "Force-update branch",
-      alwaysAsk: true,
+      sensitive: true,
       refRewrites: { targets: [{ kind: "node", refNodeId: "REF_kwDOAbCdEf" }] },
     });
     expect(
@@ -319,7 +499,7 @@ describe("GitHub gateway force updates and deletions of refs", () => {
         query:
           'mutation($i: UpdateRefInput! = {refId: "REF_kwDOAbCdEf", oid: "abc", force: true}) { updateRef(input: $i) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ title: "Force-update branch", alwaysAsk: true });
+    ).toMatchObject({ title: "Force-update branch", sensitive: true });
     // A variable the request sets wins over its default.
     expect(
       classifyGitHubGraphqlRequest({
@@ -327,12 +507,12 @@ describe("GitHub gateway force updates and deletions of refs", () => {
           'mutation($f: Boolean = true) { updateRef(input: {refId: "REF_kwDOAbCdEf", oid: "abc", force: $f}) { clientMutationId } }',
         variables: { f: false },
       }).action,
-    ).toMatchObject({ title: "Update branch", alwaysAsk: false });
+    ).toMatchObject({ title: "Update branch", sensitive: false });
     // An input the gateway can't read asks, and names no ref.
     const unreadable = classifyGitHubGraphqlRequest({
       query: "mutation($i: UpdateRefInput!) { updateRef(input: $i) { clientMutationId } }",
     }).action;
-    expect(unreadable).toMatchObject({ title: "Force-update branch", alwaysAsk: true });
+    expect(unreadable).toMatchObject({ title: "Force-update branch", sensitive: true });
     expect(unreadable).not.toHaveProperty("refRewrites");
   });
 
@@ -343,7 +523,7 @@ describe("GitHub gateway force updates and deletions of refs", () => {
       }).action,
     ).toMatchObject({
       tools: ["ref_create"],
-      alwaysAsk: true,
+      sensitive: true,
       refRewrites: { targets: [{ kind: "node", refNodeId: "REF_kwDOAbCdEf" }] },
     });
     expect(
@@ -351,39 +531,39 @@ describe("GitHub gateway force updates and deletions of refs", () => {
         query:
           'mutation { updateRef(input: {refId: "REF_kwDOAbCdEf", oid: "abc"}) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ alwaysAsk: false, title: "Update branch" });
+    ).toMatchObject({ sensitive: false, title: "Update branch" });
     const refs = classifyGitHubGraphqlRequest({
       query: "mutation($i: UpdateRefsInput!) { updateRefs(input: $i) { clientMutationId } }",
       variables: {
         i: {
           repositoryId: "R_kgDOAbCdEf",
           refUpdates: [
-            { name: "refs/heads/x", afterOid: "a", force: true },
+            { name: "refs/heads/x", afterOid: "a".repeat(40), force: true },
             { name: "refs/heads/y", afterOid: "0".repeat(40) },
-            { name: "refs/heads/z", afterOid: "b" },
+            { name: "refs/heads/z", afterOid: "b".repeat(40) },
           ],
         },
       },
     }).action;
     expect(refs).toMatchObject({
       title: "Delete branch or tag",
-      alwaysAsk: true,
+      sensitive: true,
       refRewrites: {
         targets: [
           { kind: "name", ref: "refs/heads/x", repositoryNodeId: "R_kgDOAbCdEf" },
           { kind: "name", ref: "refs/heads/y", repositoryNodeId: "R_kgDOAbCdEf" },
         ],
-        alwaysAskOtherwise: false,
+        sensitiveOtherwise: false,
       },
     });
-    // With another mutation that always asks, confirming the refs is not enough.
+    // With another sensitive mutation, confirming the refs is not enough.
     expect(
       classifyGitHubGraphqlRequest({
         query:
           'mutation { deleteRef(input: {refId: "REF_kwDOAbCdEf"}) { clientMutationId } deleteIssue(input: {issueId: "I_kwDOAbCdEf"}) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ alwaysAsk: true, refRewrites: { alwaysAskOtherwise: true } });
-    // A ref it cannot name always asks.
+    ).toMatchObject({ sensitive: true, refRewrites: { sensitiveOtherwise: true } });
+    // A ref it cannot name stays sensitive.
     expect(
       classifyGitHubGraphqlRequest({
         query: "mutation($i: UpdateRefsInput!) { updateRefs(input: $i) { clientMutationId } }",

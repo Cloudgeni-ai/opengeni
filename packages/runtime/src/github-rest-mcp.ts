@@ -144,6 +144,14 @@ export const GITHUB_REST_TOOL_NAMES = Object.freeze([
   ...GITHUB_REST_WRITE_TOOL_NAMES,
 ] as const);
 
+/**
+ * The policy action of personal-GitHub requests that are hard to undo
+ * (settings, secrets, environments, deletions, tag and default-branch
+ * rewrites, unrecognised writes). It is not a tool: the `gh` and Git gateway
+ * applies it next to the matching tool's policy. Without a choice it asks.
+ */
+export const GITHUB_SENSITIVE_REQUEST_POLICY_NAME = "github_sensitive_request";
+
 const WRITE_TOOLS = new Set<string>(GITHUB_REST_WRITE_TOOL_NAMES);
 
 export function githubRestToolIsMutation(toolName: string): boolean {

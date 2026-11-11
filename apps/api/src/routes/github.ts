@@ -49,6 +49,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   eventRouteSecret,
   githubAppActionPolicyActor,
+  githubActionPolicyGroupApplies,
   hasPermission,
   listGitHubActionPolicyActors,
   personalGitHubActionPolicyActor,
@@ -254,6 +255,11 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const payload = await parseRequestJson(c, UpdateGitHubActionPolicyRequest);
     const actor = payload.actor;
+    if (!githubActionPolicyGroupApplies(actor, payload.group)) {
+      throw new HTTPException(400, {
+        message: "Settings and deletions applies only to Your GitHub",
+      });
+    }
     if (actor.kind === "workspace_app") {
       const grant = await requireAccessGrant(c, deps, workspaceId, "github:manage");
       const installations = await listGitHubInstallationAccessForWorkspace(db, grant.workspaceId);

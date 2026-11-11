@@ -329,7 +329,7 @@ no redirects, bounded deadlines, stripped ambient headers, and streaming bodies.
 A receive-pack transport failure is outcome-unknown and is never automatically
 replayed. A push that deletes or force-updates a branch other than the default
 branch follows the person's policy; one that deletes or force-updates the
-default branch or a tag asks the person first (see [Git pushes](#git-pushes)).
+default branch or a tag follows their Settings and deletions policy (Ask unless they chose otherwise; see [Git pushes](#git-pushes)).
 Ordinary pushes are unchanged.
 The standalone consumer remains default-off with personal GitHub OAuth; GitHub
 App and Connected Machine credential paths are unchanged.
@@ -410,8 +410,18 @@ user`, `gh repo list <org>`) and search pass as the person. GraphQL
 `repository(...)` reads are checked like REST ones, also under
 `organization`, `user`, `repositoryOwner` and `viewer`; `node(id:)` reads are
 not. GraphQL mutations are checked against the repositories their input names
-(node IDs, `repositoryNameWithOwner`, github.com URLs); when those can't be
-found, the request asks. The gateway replaces
+(node IDs, `repositoryNameWithOwner`, github.com URLs). When those can't be
+found, or a write names no repository (account and organization writes, or a
+request the gateway can't read), the allowlist can't apply, so the request
+asks whatever the person's policies say (Block still wins). This is decided
+per mutation: one on an allowed repository doesn't vouch for an organization
+or project write sent in the same request, only ID inputs (`subjectId`,
+`repositoryId`, …) and repository fields (`repositoryNameWithOwner`,
+`subIssueUrl`) count as its target, and an unrecognised mutation that also
+touches a node outside any repository, or one GitHub won't show, asks too.
+A request nested too deeply to read is treated as unrecognised, strings GitHub might read differently (escaped quotes, tabs, form feeds or carriage returns in a block string, unknown escapes) make it unrecognised, and a value under an ID input or repository field the gateway can't read as a node ID leaves the mutation unconfirmed. With All my
+repositories at write access and no repository removed from the chat there is
+no allowlist to step around, so the person's policies decide as usual. The gateway replaces
 `Authorization` with the person's token, never forwards the bearer, does not
 follow redirects, forwards only the request headers GitHub needs, buffers
 API bodies up to 32 MiB (larger ones get 413), streams uploads and responses,
@@ -429,21 +439,31 @@ tools use, so one setting covers both:
   group when no single action matches. Reviews and merges follow their own
   groups.
 - Deleting or force-updating a branch other than the repository's default
-  branch (REST `git/refs`, GraphQL `deleteRef`, `updateRef` and `updateRefs`)
-  follows the person's `Create and update work` policy, so agents can rebase
-  their own pull request branches and delete merged ones. The gateway reads
+  branch (REST `git/refs`, also with the ref's slashes encoded as `gh` sends
+  them, e.g. `git/refs/heads%2Fmy%2Fbranch`; GraphQL `deleteRef`, `updateRef`
+  and `updateRefs`) follows the person's `Create and update work` policy, so
+  agents can rebase their own pull request branches and delete merged ones
+  (`gh pr merge --delete-branch`). The gateway reads
   the default branch with the person's token (REST `default_branch`, kept for
   a minute per connection and repository, so a just-changed default branch
   can take that long to apply; or the GraphQL Ref and Repository nodes, which
   must belong to a repository the request was checked against); when it
-  can't confirm every ref is such a branch, the request asks.
-- Destructive or hard-to-undo requests always ask: deleting or force-updating
-  the default branch, deleting or force-moving tags, deleting repositories,
+  can't confirm every ref is such a branch, the request is treated as a
+  settings-and-deletions request (below).
+- Destructive or hard-to-undo requests follow the person's `Settings and
+  deletions` policy (`sensitive` in the API; policy action
+  `github_sensitive_request`), together with the policy of any matching
+  action, and the strictest decision applies: deleting or force-updating the
+  default branch, deleting or force-moving tags, deleting repositories,
   releases, comments or other data; repository settings, collaborators and
-  teams, secrets and variables, webhooks and deploy keys, branch protection,
-  transfer, archive and visibility, approving deployments or fork workflow
-  runs. So do REST writes and GraphQL mutations the gateway doesn't
-  recognise.
+  teams, secrets, variables and environments, webhooks and deploy keys,
+  branch protection, transfer, archive and visibility, approving deployments
+  or fork workflow runs. So do REST writes and GraphQL mutations the gateway
+  doesn't recognise. The policy asks until the person chooses otherwise; a
+  connection-wide Allow for every GitHub tool does not cover it, and a
+  connection-wide Block covers it only while Settings and deletions has no
+  choice of its own. Only Your GitHub has it: the workspace app has no `gh`
+  gateway.
 - Block always wins. Unattended sessions refuse instead of asking.
 
 A request that needs approval is not sent. `gh` prints `Waiting for approval:
@@ -465,7 +485,9 @@ when every such ref is a branch other than the repository's default branch
 (the `default_branch` of the live repository check the broker makes on every
 request), it follows the person's `Create and update work` policy; when one
 is the default branch, a tag or another ref, or the default branch is
-unknown, it asks the person. An approval is bound to the exact ref updates.
+unknown, it also follows their `Settings and deletions` policy (Ask unless
+they chose otherwise), as does a push the gateway can't read. An approval is
+bound to the exact ref updates.
 Git reports a waiting push as a rejected ref with the same message. Pushes
 from shallow clones (how managed sandboxes clone) are read like any other.
 When the gateway can't tell whether an update is a fast-forward, it treats it
