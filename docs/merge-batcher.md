@@ -98,8 +98,9 @@ never share a batch. The numbered directories are listed in `NUMBERED_FILES`
 (`scripts/batcher/model.ts`).
 
 Two PRs that both regenerated one generated file, such as
-`packages/sdk/src/site-browser-runtime.gen.ts` or
-`scripts/public-api/surface.gen.json`, conflict in Git once the first lands,
+`packages/sdk/src/site-browser-runtime.gen.ts`,
+`scripts/public-api/surface.gen.json` or
+`scripts/workflow-execution-graph-manifest.json`, conflict in Git once the first lands,
 although neither did anything wrong. A queued PR that conflicts with `main`
 therefore is not ejected at once. The batcher dispatches the `Regenerate
 generated files` workflow for its head, which merges `main` into it and, if
@@ -155,7 +156,14 @@ and members of the running batch are never regenerated.
    that the new `main` tree is exactly the tree CI tested at that point, and
    stops with a comment on the PR if not.
 5. **Failures.** A failed batch is split in half and each half is tested in
-   turn until the failing PR is found and removed from the queue. A failed
+   turn until the failing PR is found and removed from the queue.
+   Once a PR the bisection tested alone is removed, the groups the bisection
+   still holds are tested together again as one batch (groups with a priority
+   PR first, up to `BATCHER_MAX_BATCH`, the rest next in line), without the
+   bisection's blame, instead of one group per round; a group that fails again
+   is split as any batch is. Two PRs that add the same migration number still
+   go into separate groups. A PR removed from a batch that went ahead of the
+   bisection, or a Version PR, leaves its groups as they were. A failed
    batch with both priority and other PRs is split into its priority PRs, tested
    first, and the rest, so a broken fill delays them one round. When the rest
    has at least two PRs and at least as many as the priority PRs, it is halved

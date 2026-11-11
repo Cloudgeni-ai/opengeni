@@ -88,6 +88,7 @@ export async function admitIndependentSessionTitle(input: {
   route: SessionTitleRoute;
   policy: TurnExecutionPolicyV1;
   prompt: string;
+  titleInstructions?: string | undefined;
   subscriptionConnectionId: string | null;
   subscriptionProvider: string | null;
   expectedTitle: SessionTitleRequest["expectedTitle"];
@@ -111,6 +112,7 @@ export async function admitIndependentSessionTitle(input: {
     prompt: Array.from(input.prompt.trim())
       .slice(0, SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS)
       .join(""),
+    ...(input.titleInstructions ? { titleInstructions: input.titleInstructions } : {}),
     apiConnectionId: input.subscriptionConnectionId
       ? null
       : await sessionTitleApiConnectionId({
@@ -297,6 +299,7 @@ export async function reconcileSessionTitleOperation(
               resolvedModel: route.resolvedModel,
               modelName: route.modelName,
               serviceTier: request.serviceTier,
+              titleInstructions: request.titleInstructions,
               signal: AbortSignal.timeout(PARALLEL_SESSION_TITLE_TIMEOUT_MS),
             }),
           );

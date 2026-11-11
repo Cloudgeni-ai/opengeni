@@ -25,6 +25,8 @@ import {
 
 export const CODEX_PLAN_ENTITLEMENT_CODE = "codex_plan_entitlement";
 export const CODEX_REQUEST_REJECTED_CODE = "codex_request_rejected";
+/** The Codex backend refused the model for the client version Opengeni presents. */
+export const CODEX_CLIENT_VERSION_REJECTED_CODE = "codex_client_version_rejected";
 
 export type CodexPlanEntitlementFailurePayload = {
   error: string;

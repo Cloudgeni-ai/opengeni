@@ -362,6 +362,8 @@ export type TurnStreamAttemptDeps = {
   turnTools: ReturnType<typeof withFirstPartyTools>;
   generateSessionTitleInParallel: boolean;
   sessionTitlePrompt: string;
+  /** The host's `agent.titleInstructions`, if any. */
+  sessionTitleInstructions: string | undefined;
   compactSummarizer: CompactionSummarizer;
   settleDeferredSteerAfterCompaction: () => Promise<RunAgentTurnResult | null>;
   compactionModelHistoryProjector: (
@@ -514,6 +516,7 @@ export async function runTurnStreamAttempt(
     turnTools,
     generateSessionTitleInParallel,
     sessionTitlePrompt,
+    sessionTitleInstructions,
     compactSummarizer,
     settleDeferredSteerAfterCompaction,
     compactionModelHistoryProjector,
@@ -2978,6 +2981,7 @@ export async function runTurnStreamAttempt(
             route: titleRoute,
             policy: turnExecutionPolicy,
             prompt: sessionTitlePrompt,
+            titleInstructions: sessionTitleInstructions,
             subscriptionConnectionId: subscription?.connectionId ?? null,
             subscriptionProvider: providerTurn.codexSubscriptionCore
               ? "codex"
@@ -3012,6 +3016,7 @@ export async function runTurnStreamAttempt(
                 resolvedModel: titleRoute.resolvedModel,
                 modelName: titleRoute.modelName,
                 serviceTier,
+                titleInstructions: sessionTitleInstructions,
                 signal,
               }),
             ),

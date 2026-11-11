@@ -7,14 +7,26 @@ import {
 } from "@opengeni/contracts";
 import { ComputerInteractionController } from "@opengeni/interaction";
 import type { ToolResult } from "@trycua/cua-driver";
-import { ambiguityForRefs, CuaComputerBackend, namedOperation } from "../src/cua/backend";
+import {
+  ambiguityForRefs,
+  CuaComputerBackend,
+  menuBarStep,
+  menuRefusal,
+  namedOperation,
+} from "../src/cua/backend";
 import { ComputerDriver } from "../src/computer-driver";
-import { callDesktop, type CuaDesktopRuntime, WINDOWS_SET_VALUE_REFUSED } from "../src/cua/wire";
+import {
+  callDesktop,
+  CuaFailure,
+  type CuaDesktopRuntime,
+  WINDOWS_SET_VALUE_REFUSED,
+} from "../src/cua/wire";
 import { AgentInput } from "../src/cua/macos-person-input";
 import type { MacConsoleState } from "../src/cua/macos-windows";
-import type {
-  ComputerBackendActionCommand,
-  ComputerBackendObservation,
+import {
+  ComputerHelperStoppedError,
+  type ComputerBackendActionCommand,
+  type ComputerBackendObservation,
 } from "../src/computer-backend";
 
 function result(data: Record<string, unknown>, isError = false): ToolResult {
@@ -706,6 +718,58 @@ describe("CUA desktop boundary", () => {
     } finally {
       await backend.close();
     }
+  });
+
+  test("a macOS menu-bar item is never pressed open; its item is chosen from the menu bar", () => {
+    const args = { pid: 42, window_id: 7, session: "s" };
+    const view = {
+      ref: "e61",
+      role: "AXMenuBarItem",
+      name: "View",
+      actions: ["invoke", "show_menu", "focus"],
+      states: [],
+    } as never;
+    const act = (action: string, value?: string) =>
+      ({
+        type: "semantic",
+        locator: { kind: "ref", ref: "e61" },
+        action,
+        ...(value === undefined ? {} : { value }),
+      }) as never;
+    // Pressing it would leave an app in the background stuck in its menu.
+    for (const action of ["invoke", "show_menu"])
+      expect(() => menuBarStep("macos", args, view, act(action))).toThrow(
+        /"View" menu was not opened: choose its item with set_value on e61/,
+      );
+    expect(menuBarStep("macos", args, view, act("set_value", "Zoom In"))).toEqual({
+      name: "invoke_menu",
+      args: { pid: 42, window_id: 7, path: ["View", "Zoom In"] },
+    });
+    expect(
+      menuBarStep("macos", args, view, act("set_value", " Developer >  JavaScript Console ")),
+    ).toMatchObject({ args: { path: ["View", "Developer", "JavaScript Console"] } });
+    expect(() => menuBarStep("macos", args, view, act("set_value", " > "))).toThrow(
+      /Name the item of the "View" menu/,
+    );
+    // Other elements and platforms act as before.
+    const button = { ref: "e2", role: "button", name: "View", actions: ["invoke"], states: [] };
+    expect(menuBarStep("macos", args, button as never, act("invoke"))).toBeNull();
+    expect(menuBarStep("windows", args, view, act("invoke"))).toBeNull();
+    expect(menuBarStep("macos", args, view, act("focus"))).toBeNull();
+  });
+
+  test("CUA's refusal of a menu item is worded for the menu-bar item it was chosen on", () => {
+    const missing = new CuaFailure(
+      "invalid_action",
+      'invoke_menu: path segment 1 "Zoom" was not found under "View". Items there: "Zoom In", "Zoom Out"',
+      false,
+      undefined,
+    );
+    expect(menuRefusal(missing)?.message).toBe(
+      'The item "Zoom" was not found under "View". Items there: "Zoom In", "Zoom Out"; nothing was chosen',
+    );
+    const other = new CuaFailure("invalid_action", "window gone", false, undefined);
+    expect(menuRefusal(other)).toBeNull();
   });
 
   test("a checkbox named in a batch step is pressed into its state as the step runs", () => {
@@ -1452,6 +1516,35 @@ describe("CUA desktop boundary", () => {
       retryable: false,
       message:
         "The input was sent, but Windows did not keep this window in front afterwards, so its effect is unknown; observe the window before acting again",
+    });
+  });
+
+  test("a call to a CUA worker that is gone says the helper stopped, not that input may have run", async () => {
+    // As CUA's SDK reports them once its private worker exited.
+    const failing = (error: unknown): CuaDesktopRuntime => ({
+      callTool: async () => {
+        throw error;
+      },
+      shutdown: async () => undefined,
+    });
+    const shutdown = Object.assign(new Error("DriverError.Shutdown"), { tag: "Shutdown" });
+    const interrupted = Object.assign(new Error("DriverError.ActionInterrupted"), {
+      tag: "ActionInterrupted",
+      inner: { completion: 0, reason: "private worker exited before the request was written" },
+    });
+    for (const error of [shutdown, interrupted])
+      for (const mutation of [false, true])
+        await expect(callDesktop(failing(error), "click", {}, mutation)).rejects.toBeInstanceOf(
+          ComputerHelperStoppedError,
+        );
+    // A worker that stopped while it ran the call may have acted.
+    const during = Object.assign(new Error("DriverError.ActionInterrupted"), {
+      tag: "ActionInterrupted",
+      inner: { completion: 0, reason: "private worker exited while handling the request" },
+    });
+    await expect(callDesktop(failing(during), "click", {}, true)).rejects.toMatchObject({
+      code: "outcome_unknown",
+      dispatched: true,
     });
   });
 

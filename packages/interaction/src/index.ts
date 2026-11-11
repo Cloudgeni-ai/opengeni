@@ -24,6 +24,7 @@ import {
   type ComputerActionReceipt as ComputerActionReceiptValue,
   type ComputerObservation as ComputerObservationValue,
   type ComputerTarget as ComputerTargetValue,
+  type InteractionFailureReason,
 } from "@opengeni/contracts";
 import {
   InteractionControllerCore,
@@ -46,6 +47,15 @@ export {
   type InteractionControllerErrorCode,
   type InteractionDispatchTrace,
   type InteractionDriverConnectionState,
+};
+
+/** A browser action receipt as the controller returns it: a failed or
+ * outcome-unknown receipt may carry the operator-only `failureReason` its
+ * driver error gave (see InteractionFailureReason). The field is not part of
+ * BrowserActionReceipt and is never journaled; the controller's server returns
+ * it only to a caller that asks for it. */
+export type BrowserControllerActionReceipt = BrowserActionReceiptValue & {
+  failureReason?: InteractionFailureReason;
 };
 
 export type BrowserInteractionDriver = {
@@ -201,6 +211,10 @@ export class BrowserInteractionController {
               : {}),
           });
         },
+        attachFailureReason(receipt, reason) {
+          const decorated: BrowserControllerActionReceipt = { ...receipt, failureReason: reason };
+          return decorated;
+        },
         recoverReceipt(receipt, settledAt) {
           if (
             receipt.browserSessionId !== browserSessionId ||
@@ -222,7 +236,7 @@ export class BrowserInteractionController {
     return this.core.observe(targetId);
   }
 
-  run(command: BrowserActionCommandValue): Promise<BrowserActionReceiptValue> {
+  run(command: BrowserActionCommandValue): Promise<BrowserControllerActionReceipt> {
     return this.core.run(command);
   }
 

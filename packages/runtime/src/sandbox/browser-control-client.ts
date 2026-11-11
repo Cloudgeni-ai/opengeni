@@ -2,14 +2,17 @@ import {
   ComputerNativeCommand,
   ComputerNativeReceipt,
   ComputerOperationReceipt,
+  parseInteractionFailureReason,
   parseInteractionDriverDiagnostic,
   type InteractionDriverDiagnostic,
+  type InteractionFailureReason,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { posix as posixPath } from "node:path";
 import { parseBrowserFrameMetadata, type BrowserFrameMetadata } from "@opengeni/sdk";
 import { olderBrowserControllerMessage } from "./browser-controller-compatibility";
 import {
+  BROWSER_ACTION_RECEIPT_FAILURE_REASON_PARAMETER,
   BROWSER_ACTION_RECEIPT_NOTES_PARAMETER,
   BROWSER_ACTION_RECEIPT_NOTES_VERSION,
   BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER,
@@ -31,6 +34,8 @@ import {
   BrowserDiagnosticBatch,
   BrowserDownload,
   BrowserDownloadExportReceipt,
+  BrowserDownloadUploadRequest,
+  BrowserDownloadUploadStatus,
   BrowserRecordingExportReceipt,
   BrowserRecordingExportRequest,
   BrowserRecordingStartRequest,
@@ -67,6 +72,8 @@ import {
   type BrowserDiagnosticBatch as BrowserDiagnosticBatchValue,
   type BrowserDownload as BrowserDownloadValue,
   type BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
+  type BrowserDownloadUploadRequest as BrowserDownloadUploadRequestValue,
+  type BrowserDownloadUploadStatus as BrowserDownloadUploadStatusValue,
   type BrowserRecordingExportReceipt as BrowserRecordingExportReceiptValue,
   type BrowserRecordingExportRequest as BrowserRecordingExportRequestValue,
   type BrowserRecordingSummary as BrowserRecordingSummaryValue,
@@ -132,7 +139,7 @@ const BROWSER_STATE_TRANSFER_TIMEOUT_MS = 20 * 60_000;
 /** Stopping writes the recording's bundle (up to 200 MB) to local disk. */
 const BROWSER_RECORDING_STOP_TIMEOUT_MS = 2 * 60_000;
 /** Slack for the controller to answer after its bounded upload wait. */
-const BROWSER_RECORDING_UPLOAD_RESPONSE_MARGIN_MS = 15_000;
+const BROWSER_UPLOAD_RESPONSE_MARGIN_MS = 15_000;
 const PRIVATE_READ_CHUNK_BYTES = 512 * 1024;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 
@@ -626,11 +633,22 @@ export class BrowserControlRequestError extends Error {
     /** Operator-only context the controller sent beside a driver failure;
      * logged, never shown to callers. */
     readonly diagnostic: InteractionDriverDiagnostic | null = null,
+    /** Operator-only reason the controller sent beside a typed driver
+     * failure (see InteractionFailureReason); for metrics, never shown to
+     * callers. */
+    readonly failureReason: InteractionFailureReason | null = null,
   ) {
     super(error.message);
     this.retryable = error.retryable;
   }
 }
+
+/** A browser action receipt with the operator-only failure reason the
+ * controller returned beside it, if any. The reason is not part of
+ * BrowserActionReceipt: remove it before passing the receipt on. */
+export type BrowserControlActionReceipt = BrowserActionReceiptValue & {
+  failureReason?: InteractionFailureReason;
+};
 
 export class BrowserControlUnsupportedError extends Error {
   readonly name = "BrowserControlUnsupportedError";
@@ -2059,6 +2077,38 @@ export class BrowserControlSessionClient {
     return receipt;
   }
 
+  /** Starts or joins a download export with a bounded wait. Null means the
+   * controller predates this route, not that an upload is still running. */
+  async uploadDownload(
+    requestInput: BrowserDownloadUploadRequestValue,
+  ): Promise<BrowserDownloadUploadStatusValue | null> {
+    const request = BrowserDownloadUploadRequest.parse(requestInput);
+    let data: unknown;
+    try {
+      data = await this.parent.requestForSession({
+        method: "POST",
+        path: this.path(`downloads/${request.downloadId}/uploads`),
+        token: this.controlToken,
+        body: request,
+        timeoutMs: request.waitMs + BROWSER_UPLOAD_RESPONSE_MARGIN_MS,
+      });
+    } catch (error) {
+      if (isLegacyRouteMiss(error)) return null;
+      throw error;
+    }
+    const status = BrowserDownloadUploadStatus.parse(data);
+    if (
+      status.downloadId !== request.downloadId ||
+      status.operationId !== request.operationId ||
+      (status.receipt &&
+        (status.receipt.downloadId !== request.downloadId ||
+          status.receipt.operationId !== request.operationId))
+    ) {
+      throw new BrowserControlProtocolError("browser controller returned another export receipt");
+    }
+    return status;
+  }
+
   async startRecording(targetId: string): Promise<BrowserRecordingSummaryValue> {
     let data: unknown;
     try {
@@ -2140,7 +2190,7 @@ export class BrowserControlSessionClient {
         path: this.path(`recordings/${request.recordingId}/uploads`),
         token: this.controlToken,
         body: request,
-        timeoutMs: request.waitMs + BROWSER_RECORDING_UPLOAD_RESPONSE_MARGIN_MS,
+        timeoutMs: request.waitMs + BROWSER_UPLOAD_RESPONSE_MARGIN_MS,
       });
     } catch (error) {
       if (isLegacyRouteMiss(error)) return null;
@@ -2389,7 +2439,7 @@ export class BrowserControlSessionClient {
   async action(
     command: BrowserActionCommandValue,
     options: BrowserObservationNoticeRequest = {},
-  ): Promise<BrowserActionReceiptValue> {
+  ): Promise<BrowserControlActionReceipt> {
     const parsed = BrowserActionCommand.parse(command);
     if (
       parsed.browserSessionId !== this.reference.browserSessionId ||
@@ -2405,10 +2455,10 @@ export class BrowserControlSessionClient {
         async (timeoutMs) =>
           await this.parent.requestForSession({
             method: "POST",
-            // Controllers that predate resolved targets, notes or notices
-            // ignore these parameters.
+            // Controllers that predate resolved targets, notes, notices or
+            // failure reasons ignore these parameters.
             path: withObservationNotices(
-              `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1&${BROWSER_ACTION_RECEIPT_NOTES_PARAMETER}=${BROWSER_ACTION_RECEIPT_NOTES_VERSION}`,
+              `${this.path("actions")}?${BROWSER_ACTION_RECEIPT_TARGETS_PARAMETER}=1&${BROWSER_ACTION_RECEIPT_NOTES_PARAMETER}=${BROWSER_ACTION_RECEIPT_NOTES_VERSION}&${BROWSER_ACTION_RECEIPT_FAILURE_REASON_PARAMETER}=1`,
               options,
             ),
             token: this.controlToken,
@@ -2439,7 +2489,15 @@ export class BrowserControlSessionClient {
       }
       throw error;
     }
-    return BrowserActionReceipt.parse(data);
+    // The failure reason travels beside the receipt's own fields.
+    let failureReason: InteractionFailureReason | null = null;
+    if (isRecord(data) && "failureReason" in data) {
+      const { failureReason: sent, ...receipt } = data;
+      failureReason = parseInteractionFailureReason(sent);
+      data = receipt;
+    }
+    const receipt = BrowserActionReceipt.parse(data);
+    return failureReason === null ? receipt : { ...receipt, failureReason };
   }
 
   /** API-broker-only file authority path. Signed read URLs are materialized by
@@ -3207,6 +3265,7 @@ function parseEnvelope(body: string, status: number): unknown {
         parsed.data.code === "driver_failed" || parsed.data.code === "resource_unavailable"
           ? parseInteractionDriverDiagnostic(value.diagnostic)
           : null,
+        parseInteractionFailureReason(value.failureReason),
       );
     }
   }

@@ -3,6 +3,11 @@ import type { OpenGeniClient } from "./client";
 export type TeamsBotStatus = {
   enabled: boolean;
   configured: boolean;
+  /**
+   * The name of this deployment's Teams app, as people see it in Teams.
+   * Absent from servers that predate it.
+   */
+  appName?: string;
   setupAvailable: boolean;
   installation: { tenantId: string; workspaceId: string; active: boolean } | null;
   linked: boolean;

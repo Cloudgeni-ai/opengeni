@@ -756,6 +756,76 @@ describe("connectionHealth", () => {
     ).toEqual({ state: "attention", connection: null });
   });
 
+  describe("a subject binding with several of the caller's own accounts", () => {
+    const gmailRef = {
+      providerDomain: "gmailmcp.googleapis.com",
+      kind: "oauth2" as const,
+      subjectScope: "subject" as const,
+    };
+    const gmail = (id: string, status: ConnectionMetadata["status"]) =>
+      connection({
+        id,
+        subjectId: "current-user",
+        providerDomain: "gmailmcp.googleapis.com",
+        status,
+      });
+    const health = (rows: ConnectionMetadata[]) =>
+      connectionHealth(item({ enabled: true, connectionRef: gmailRef }), rows, true);
+
+    // The connections list is newest first. Removing the newer of two
+    // duplicate logins left a removed row first, and the page said "Sign in
+    // again" beside the remaining Connected account.
+    test("a removed duplicate listed first does not hide the working account", () => {
+      const removed = gmail("removed-duplicate", "revoked");
+      const working = gmail("working", "active");
+      expect(health([removed, working])).toEqual({ state: "connected", connection: working });
+    });
+
+    test("a working account wins over one that needs signing in again", () => {
+      const lapsed = gmail("lapsed", "needs_reauth");
+      const working = gmail("working", "active");
+      expect(health([lapsed, working])).toEqual({ state: "connected", connection: working });
+    });
+
+    test("an account that stopped working is reported over a removed one", () => {
+      const removed = gmail("removed", "revoked");
+      const lapsed = gmail("lapsed", "needs_reauth");
+      expect(health([removed, lapsed])).toEqual({ state: "attention", connection: lapsed });
+    });
+
+    test("only removed accounts left means no account, so the repair is Connect", () => {
+      const binding = item({ enabled: true, connectionRef: gmailRef });
+      const result = health([gmail("removed", "revoked"), gmail("older-removed", "revoked")]);
+      expect(result).toEqual({ state: "attention", connection: null });
+      // Never a reconnect of a removed login the server refuses to revive.
+      expect(capabilityReconnectPlan(binding, result)).toEqual({
+        kind: "oauth",
+        connectionId: null,
+        ownership: "personal",
+      });
+    });
+  });
+
+  test("an all-eligible selector ignores removed accounts", () => {
+    const selectorRef = {
+      providerDomain: "linear.app",
+      kind: "oauth2" as const,
+      accountSelection: "all_eligible" as const,
+    };
+    const removed = connection({ id: "removed", status: "revoked" });
+    const lapsed = connection({ id: "lapsed", status: "needs_reauth" });
+    expect(
+      connectionHealth(
+        item({ enabled: true, connectionRef: selectorRef }),
+        [removed, lapsed],
+        true,
+      ),
+    ).toEqual({ state: "attention", connection: lapsed });
+    expect(
+      connectionHealth(item({ enabled: true, connectionRef: selectorRef }), [removed], true),
+    ).toEqual({ state: "attention", connection: null });
+  });
+
   test("workspace bindings continue to match only their exact UUID", () => {
     const conns = [
       connection({

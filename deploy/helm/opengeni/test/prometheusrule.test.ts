@@ -355,7 +355,11 @@ describe("turn-capacity Prometheus alerts", () => {
       ],
       [
         "OpenGeniInteractionOperationFailureRatio",
-        ["opengeni_interaction_operations_total", 'outcome=~"failed|denied|outcome_unknown"'],
+        [
+          "opengeni_interaction_operations_total",
+          'outcome=~"failed|denied|outcome_unknown"',
+          'reason!~"destination_.+"',
+        ],
       ],
       [
         "OpenGeniHandoffsExpiringUnanswered",
