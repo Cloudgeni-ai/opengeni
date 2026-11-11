@@ -280,6 +280,21 @@ spec:
             headline: 'Session-recovery monitor not reporting'
             user_impact: 'No user-visible impact by itself; we just cannot see stuck sessions until it recovers.'
             next_step: 'Check that the worker-control pods are running and being scraped; restore the monitor before trusting session-recovery alerts.'
+        # Readiness stays up when only a required runtime EXECUTE grant is
+        # missing (an unsafe posture still fails readiness), so this alert is
+        # what makes the broken feature visible.
+        - alert: OpenGeniRuntimeDatabaseGrantMissing
+          expr: max by (component) (opengeni_runtime_database_degraded_findings{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'The runtime database role is missing an EXECUTE grant that this release needs; pods stay ready, but the features behind those routines fail.'
+            headline: 'Runtime database grant missing'
+            value: '{{ "{{ printf `%.0f` $value }}" }} finding(s)'
+            user_impact: 'Features that call the affected database routines fail with a permission error; everything else keeps working.'
+            next_step: 'Read the "Runtime database posture is degraded" warning for the routine names, then apply the migration or grant that provides them.'
+            description: Startup and readiness report a missing required runtime EXECUTE grant as degraded instead of failing. The strict posture check in the migration job and the compatibility workflow still rejects it.
         # Runnable prompts, not prompts held behind a running turn, a Pause,
         # a capacity wait or a required human action. Time queued behind an
         # active turn in the same chat is normal serialization and never pages.

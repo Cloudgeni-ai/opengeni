@@ -1,4 +1,4 @@
-import { compactLegacySessionContent } from "@opengeni/db";
+import { collectSessionContentGarbagePass, compactLegacySessionContent } from "@opengeni/db";
 import type { ControlActivityServices } from "./types";
 
 /** Rows per content kind rewritten by one compaction batch. */
@@ -8,21 +8,24 @@ export const SESSION_STORAGE_PASS_BUDGET_MS = 10 * 60 * 1_000;
 
 export type MaintainSessionStorageResult = {
   contentCompaction: { scanned: number; compacted: number; skipped: number; failed: number };
+  contentCollection: { available: boolean; sessions: number; deleted: number; failed: number };
 };
 
 export type SessionStorageActivityOptions = {
   compactionRowsPerPass?: number;
   compactLegacyContent?: typeof compactLegacySessionContent;
+  collectContentGarbage?: typeof collectSessionContentGarbagePass;
   timeBudgetMs?: number;
   now?: () => number;
 };
 
 /**
- * Deployment-wide session storage maintenance: legacy content compaction. It is
- * lossless (the database proves every rewrite) and therefore always on, and it
- * keeps working through its backlog while it makes progress and the pass has
- * budget left. Streamed text deltas need no pass: the turn writer stores each
- * flush's adjacent fragments as one row.
+ * Deployment-wide session storage maintenance: legacy content compaction, then
+ * deletion of session content blobs nothing refers to any more. Both are
+ * lossless (the database proves every rewrite, and deletes only unreferenced
+ * blobs) and therefore always on, and each keeps working through its backlog
+ * while the pass has budget left. Streamed text deltas need no pass: the turn
+ * writer stores each flush's adjacent fragments as one row.
  */
 export function createSessionStorageActivities(
   services: () => Promise<ControlActivityServices>,
@@ -30,6 +33,7 @@ export function createSessionStorageActivities(
 ) {
   const rowsPerPass = options.compactionRowsPerPass ?? SESSION_CONTENT_COMPACTION_ROWS_PER_PASS;
   const compactLegacyContent = options.compactLegacyContent ?? compactLegacySessionContent;
+  const collectContentGarbage = options.collectContentGarbage ?? collectSessionContentGarbagePass;
   const timeBudgetMs = options.timeBudgetMs ?? SESSION_STORAGE_PASS_BUDGET_MS;
   const now = options.now ?? Date.now;
 
@@ -60,7 +64,21 @@ export function createSessionStorageActivities(
       observability.info("session content compaction pass finished", contentCompaction);
     }
 
-    return { contentCompaction };
+    const contentCollection = await collectContentGarbage(db, {
+      deadline,
+      now,
+      onSessionError: (candidate, error) =>
+        observability.warn("session content collection failed; the session is retried later", {
+          workspaceId: candidate.workspaceId,
+          sessionId: candidate.sessionId,
+          errorName: error instanceof Error ? error.name : "unknown",
+        }),
+    });
+    if (contentCollection.deleted > 0 || contentCollection.failed > 0) {
+      observability.info("session content collection pass finished", contentCollection);
+    }
+
+    return { contentCompaction, contentCollection };
   }
 
   return { maintainSessionStorage };

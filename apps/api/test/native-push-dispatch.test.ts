@@ -12,6 +12,7 @@ import {
   nativeFcmMessage,
   nativePushEndsCall,
   nativePushRingsCall,
+  plainNotificationText,
 } from "../src/native-push-dispatch";
 import {
   nativeAppRedirectAllowed,
@@ -51,6 +52,14 @@ describe("native push presentation", () => {
       undefined,
     );
     expect(nativePushCategory(payload)).toBe(undefined);
+  });
+
+  test("lock-screen text shows bare source links without hosted-search tracking", () => {
+    expect(
+      plainNotificationText(
+        "Permit rules: https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai and [the guide](https://example.com/g?utm_source=openai)",
+      ),
+    ).toBe("Permit rules: https://example.com/rules/4-1 and the guide");
   });
 
   test("an MCP server's question shows as the question and opens the app", () => {

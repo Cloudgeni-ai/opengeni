@@ -559,6 +559,73 @@ describe("idle-session archive lifecycle", () => {
       await wire.end();
     }
   }, 120_000);
+
+  test("a purge given an invalid fromTable starts at the first table and is not recorded complete", async () => {
+    const scope = await archivedSessionWithBulkContent();
+    let calls = 0;
+    const wire = postgres(shared.appUrl, {
+      max: 1,
+      debug: (_connection, query) => {
+        if (query.includes("purge_archived_session_content")) calls += 1;
+      },
+    });
+    const observed = drizzle(wire, { schema }) as unknown as Database;
+    try {
+      for (const fromTable of [
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        -1,
+        1.5,
+        SESSION_ARCHIVE_PURGE_TABLES.length,
+      ]) {
+        calls = 0;
+        const step = await purgeArchivedSessionContent(observed, scope, {
+          batchSize: 1,
+          fromTable,
+        });
+        // A call from the first table visits every table up to the one whose
+        // full batch stopped it.
+        expect({ fromTable, deleted: step.deleted, complete: step.complete, calls }).toEqual({
+          fromTable,
+          deleted: 1,
+          complete: false,
+          calls: step.nextTable + 1,
+        });
+        const [row] = await shared.admin`select content_archive_purged_at from sessions
+          where id = ${scope.sessionId}`;
+        expect(row!.content_archive_purged_at).toBeNull();
+      }
+    } finally {
+      await wire.end();
+    }
+  }, 120_000);
+
+  test("a purge that skipped the first table is not recorded complete even when nothing is left", async () => {
+    const scope = await archivedSessionWithBulkContent();
+    expect(await countRows(SESSION_ARCHIVE_PURGE_TABLES[0], scope)).toBe(0);
+    // Empty every table after the first without ever starting at the first.
+    let step = await purgeArchivedSessionContent(client.db, scope, {
+      batchSize: 100,
+      fromTable: 1,
+    });
+    while (step.deleted > 0)
+      step = await purgeArchivedSessionContent(client.db, scope, { batchSize: 100, fromTable: 1 });
+    expect(step).toEqual({ deleted: 0, complete: false, nextTable: 0 });
+    const [skipped] = await shared.admin`select content_archive_purged_at from sessions
+      where id = ${scope.sessionId}`;
+    expect(skipped!.content_archive_purged_at).toBeNull();
+
+    // Only a pass from the first table records the purge complete.
+    expect(await purgeArchivedSessionContent(client.db, scope, { batchSize: 100 })).toEqual({
+      deleted: 0,
+      complete: true,
+      nextTable: 0,
+    });
+    const [purged] = await shared.admin`select content_archive_purged_at from sessions
+      where id = ${scope.sessionId}`;
+    expect(purged!.content_archive_purged_at).not.toBeNull();
+  }, 120_000);
 });
 
 /**

@@ -13,6 +13,17 @@ render it; legacy bytes are unchanged.
 + When most of the user's requests in a chat are the same kind of work, including the last three or more in a row, call `agent_suggest` once in that chat, preferring an agent that already does the work: it offers them an agent as a card and changes nothing until they accept.
 ```
 
+An agent can change who can see an existing Site through the artifactId and
+visibility path `sandbox_file_publish` already offers for files, instead of
+publishing a copy to share it. Its description names Sites only for a grant
+that may publish them (`artifacts:publish`): +8 bytes, " or Site". No prompt
+module or Skill changes.
+
+```text
+- … To change who can open an existing file, such as a generated image, pass its artifactId and visibility instead of path. …
++ … To change who can open an existing file or Site, such as a generated image, pass its artifactId and visibility instead of path. …   (with artifacts:publish)
+```
+
 Agents can start workers as the person on GitHub, and know when the person
 allowed all their repositories. No prompt module changes; three tool texts
 change. `session_create`'s `resources` description gains one sentence

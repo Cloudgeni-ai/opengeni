@@ -1260,6 +1260,10 @@ export async function grantDeferredRuntimeAccess(
       TO ${grantee};
     GRANT EXECUTE ON FUNCTION opengeni_private.end_agent_call_rings_v1(uuid)
       TO ${grantee};
+    GRANT EXECUTE ON FUNCTION
+      opengeni_private.session_content_garbage_candidates_v1(integer),
+      opengeni_private.collect_session_content_garbage_v1(uuid, uuid, integer)
+      TO ${grantee};
   `);
 }
 

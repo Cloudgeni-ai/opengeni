@@ -305,6 +305,7 @@ import {
   codemodeCallExecutionMachine,
   publishSandboxFileArtifact,
 } from "../sandbox-file-artifacts";
+import { changeSiteAudienceForAgent } from "../site-audience-change";
 import {
   projectWorkspaceArtifactDetailProvenance,
   projectWorkspaceArtifactMutationProvenance,
@@ -2731,8 +2732,9 @@ function registerSandboxFileArtifactTool(
   server.registerTool(
     "sandbox_file_publish",
     {
-      description:
-        "Publish one file from this session's workspace so the person can open it. Use it for every file you hand over: document, spreadsheet, PDF, image, video, archive or data. Link the result as [Descriptive label](artifact:<artifactId>), or ![Descriptive label](artifact:<artifactId>) to preview an image, video, audio or PDF inline; never give a sandbox: link instead. The artifactId is also the file's workspace file ID, which tools such as a browser upload accept. A new file gets this chat's visibility unless you pass visibility. To change who can open an existing file, such as a generated image, pass its artifactId and visibility instead of path. Check access.whoCanOpen in the result before sharing the link with anyone else.",
+      // Sites take the same artifactId path, so they are named only where the
+      // grant may change one.
+      description: `Publish one file from this session's workspace so the person can open it. Use it for every file you hand over: document, spreadsheet, PDF, image, video, archive or data. Link the result as [Descriptive label](artifact:<artifactId>), or ![Descriptive label](artifact:<artifactId>) to preview an image, video, audio or PDF inline; never give a sandbox: link instead. The artifactId is also the file's workspace file ID, which tools such as a browser upload accept. A new file gets this chat's visibility unless you pass visibility. To change who can open an existing file${hasPermission(grant.permissions, "artifacts:publish") ? " or Site" : ""}, such as a generated image, pass its artifactId and visibility instead of path. Check access.whoCanOpen in the result before sharing the link with anyone else.`,
       inputSchema: {
         path: z4.string().min(1).max(4_096).optional(),
         artifactId: z4.string().uuid().optional(),
@@ -2751,7 +2753,11 @@ function registerSandboxFileArtifactTool(
       if (artifactId !== undefined) {
         if (!visibility)
           throw new Error("Pass visibility with artifactId to change who can open that file.");
-        return json(await changeWorkspaceFileVisibility(deps, { grant, artifactId, visibility }));
+        const change = { grant, artifactId, visibility };
+        return json(
+          (await changeWorkspaceFileVisibility(deps, change)) ??
+            (await changeSiteAudienceForAgent(deps, change)),
+        );
       }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
       // A Codemode call names its operation in the worker's trusted call

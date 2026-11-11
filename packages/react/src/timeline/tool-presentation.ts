@@ -1,3 +1,4 @@
+import { withoutProviderTracking } from "@opengeni/contracts/citation-urls";
 import { isConnectedMachineOutcomeUnknownOutput, type GitFileDiff } from "@opengeni/sdk";
 import { stringifyPayload, tryParseJson } from "../lib/format";
 import {
@@ -709,7 +710,12 @@ export function webSearchPresentation(t: OpenGeniText, item: ToolCallItem): Tool
       };
     };
   };
-  const action = raw.providerData?.action ?? {};
+  const rawAction = raw.providerData?.action ?? {};
+  // The page a hosted search opened is shown without the tracking it tagged on.
+  const action =
+    typeof rawAction.url === "string"
+      ? { ...rawAction, url: withoutProviderTracking(rawAction.url) }
+      : rawAction;
   const actionType = action.type ?? "search";
   const queries = (action.queries ?? []).filter(
     (value): value is string => typeof value === "string" && value.trim().length > 0,

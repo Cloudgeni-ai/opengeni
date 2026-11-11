@@ -5621,7 +5621,7 @@ export const sessions = pgTable(
     // NULL is a legacy chat (instructions already in `instructions`): never
     // add the agent layer to it.
     agentPromptRevision: integer("agent_prompt_revision"),
-    // Migration 1359: the agent suggestion made in this chat
+    // Migration 1361: the agent suggestion made in this chat
     // (`agent_suggest`), written once. Display state only, never model context.
     agentSuggestion: jsonb("agent_suggestion").$type<SessionAgentSuggestion>(),
     // Migration 1124: hosted web-search records reach the model as runtime
@@ -9704,6 +9704,17 @@ export const sessionSystemUpdateOutbox = pgTable(
       table.dedupeKey,
     ),
     pending: index("session_system_update_outbox_pending_idx").on(table.status, table.createdAt),
+    // The newest terminal notice a child wrote for its parent, which decides
+    // whether that child's failure is already the parent agent's (migration 1360).
+    childTerminalSource: index("session_system_update_outbox_child_terminal_source_idx")
+      .on(
+        table.workspaceId,
+        table.sourceSessionId,
+        table.targetSessionId,
+        table.createdAt,
+        table.id,
+      )
+      .where(sql`${table.kind} = 'child_terminal_result'`),
   }),
 );
 

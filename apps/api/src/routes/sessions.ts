@@ -462,6 +462,7 @@ import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discov
 import { recordAcceptedApiAdmission } from "../admission-trace";
 import { parseRequestBody, parseRequestJson, parseRequestQuery } from "../http/request-body";
 import { allSettledInOrder } from "../http/settled-in-order";
+import { liveStreamSignal } from "../http/server-drain";
 import { measureSessionCreatePhase } from "../session-create-observability";
 import { errorMessage } from "@opengeni/contracts/values";
 
@@ -4233,7 +4234,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       workspaceId,
       sessionId,
       Number.isFinite(after) ? after : 0,
-      c.req.raw.signal,
+      liveStreamSignal(c),
       {
         ...browserSseDeliveryOptions(c.req.query("transport")),
         observability: deps.observability,
