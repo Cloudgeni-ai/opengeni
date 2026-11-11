@@ -28,9 +28,10 @@ A queued Version PR (the `changeset-release/main` branch that the Open Version
 PR workflow opens) holds the queue so it lands on a stable `main`:
 
 1. Run the **Open Version PR** workflow, then add `queue-ready` to the PR.
-2. The batch already running, if any, still finishes and may land. After
-   that, nothing else builds, including priority and CI-change PRs, so `main`
-   moves at most once after you queue it. The Version PR gets one comment per
+2. The batches already running, if any, still finish and may land: the
+   running batch and a second batch built on it. After that, nothing else
+   builds, including priority and CI-change PRs, so `main` moves only for
+   those batches after you queue it. The Version PR gets one comment per
    head saying it holds `main`.
 3. Once the Version PR's PR CI passes on its head, it is built alone on that
    `main` and lands as a true merge. Normal batching then resumes, priority
@@ -79,10 +80,11 @@ never stops batching. Don't push to an `in-batch` PR, remove its `queue-ready`
 label or close it: any change to one member cancels the whole batch, so every
 other member's CI starts again. The batcher wakes as soon as an `in-batch` PR
 changes, rebuilds the batch without it, and comments on that PR with the
-members it restarted. The one exception is a new head that tests exactly the
-same: merging the same `main` into the branch again, or rebasing it, leaves the
-batch running, and it lands the new head. Pushing to a queued PR that is not
-`in-batch` is fine.
+members it restarted, including those of a second batch built on it (see
+below), which is cancelled with it. The one exception is a new head that
+tests exactly the same: merging the same `main` into the branch again, or
+rebasing it, leaves the batch running, and it lands the new head. Pushing to a
+queued PR that is not `in-batch` is fine.
 
 Database migrations need unique numbers, and two PRs can add the same number
 without a Git conflict. When `main` already uses the number of a migration a
@@ -316,7 +318,9 @@ staging deploys use the newest fully green `main` SHA as before.
 - **Stop landing:** set `MERGE_BATCHER` to anything else. Nothing is lost: the
   queue is the labels, and a leftover `batch/<id>` branch is rebuilt later.
 - **Run one batch at a time:** set `MERGE_BATCHER_CONCURRENT_BATCHES` to `1`.
-  The next pass cancels a second batch already built on the running one.
+  A pass that finds the running batch still testing cancels a second batch
+  already built on it; if the running batch lands in that pass, the second
+  one is judged and may land too.
 - **Hold main for a release:** queue the Version PR (see
   [Releasing](#releasing-a-version-pr-holds-main)); do not change the window,
   the batch size or other PRs' labels.

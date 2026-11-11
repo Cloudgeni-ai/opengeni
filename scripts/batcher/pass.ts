@@ -457,19 +457,31 @@ async function park(ctx: Context, number: number, headSha: string, reason: strin
   );
 }
 
-async function abandon(ctx: Context, batch: Batch, reason: string, changed?: number) {
+async function abandon(
+  ctx: Context,
+  batch: Batch,
+  reason: string,
+  changed?: number,
+  alsoRestarted: number[] = [],
+) {
   ctx.log(`Abandoning ${batch.branch}: ${reason}`);
   for (const ci of batch.runs) if (ci.status !== "completed") await ctx.gh.cancelRun(ci.id);
   await ctx.gh.deleteBranch(batch.branch);
   if (changed !== undefined && !ctx.ejected.has(changed))
-    await tellChanged(ctx, batch.manifest, reason, changed);
+    await tellChanged(ctx, batch.manifest, reason, changed, alsoRestarted);
 }
 
 /** Show whoever changed a member what that cost. Best effort: never fails the pass. */
-async function tellChanged(ctx: Context, manifest: Manifest, reason: string, changed: number) {
-  const others = ownMembers(manifest)
-    .filter((m) => m.number !== changed)
-    .map((m) => `#${m.number}`);
+async function tellChanged(
+  ctx: Context,
+  manifest: Manifest,
+  reason: string,
+  changed: number,
+  alsoRestarted: number[],
+) {
+  const others = [...ownMembers(manifest).map((m) => m.number), ...alsoRestarted]
+    .filter((n) => n !== changed)
+    .map((n) => `#${n}`);
   const restarted = others.length
     ? ` It restarted CI for ${others.join(", ")}, which are tested again without this PR.`
     : "";
@@ -982,7 +994,7 @@ async function build(
 async function act(ctx: Context, action: Action) {
   switch (action.kind) {
     case "abandon":
-      return abandon(ctx, action.batch, action.reason, action.changed);
+      return abandon(ctx, action.batch, action.reason, action.changed, action.alsoRestarted);
     case "retry":
       for (const ci of action.runs) await retry(ctx, ci);
       return;

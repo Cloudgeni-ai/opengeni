@@ -256,6 +256,8 @@ export type Action =
       reason: string;
       /** The member whose new head or departure from the queue ended the batch. */
       changed?: number;
+      /** PRs of the batch built on this one, which were restarted with it. */
+      alsoRestarted?: number[];
     }
   | { kind: "retry"; batch: Batch; runs: BatchRun[] }
   | { kind: "land"; batch: Batch }
@@ -631,11 +633,6 @@ export function runningBatches<T extends { createdAt: number; manifest: Manifest
   };
 }
 
-/** The running batch: the newest one, as `decide` treats any others as extra. */
-export function runningBatch<T extends { createdAt: number }>(batches: T[]): T | undefined {
-  return [...batches].sort((a, b) => b.createdAt - a.createdAt)[0];
-}
-
 /**
  * Label changes that make the `in-batch` label name exactly the running
  * batch's members, given the PRs that carry it now.
@@ -784,6 +781,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         batch,
         reason,
         ...(changed === undefined ? {} : { changed }),
+        ...(changed !== undefined && stacked
+          ? { alsoRestarted: ownMembers(stacked.manifest).map((m) => m.number) }
+          : {}),
       });
       dropStacked(`the batch it was built on, \`${manifest.id}\`, was cancelled`);
     } else {

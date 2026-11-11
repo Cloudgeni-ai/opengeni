@@ -1120,6 +1120,23 @@ describe("a batch built on the running batch", () => {
     expect(moved[1]).toMatchObject({
       reason: "the batch it was built on, `0123456789ab`, was cancelled",
     });
+    // No one member changed, so no one is told whose CI restarted.
+    expect(moved[0]).not.toHaveProperty("alsoRestarted");
+
+    // A front member's new head restarts the batch built on it too; the
+    // comment on that PR names those PRs as well.
+    const under = running([1, 4]);
+    const pushed = decide(
+      observe(
+        [pull(1), pull(2), pull(3), pull(4, { headSha: sha(444) })],
+        [under, on(under, [2, 3])],
+      ),
+    );
+    expect(pushed[0]).toMatchObject({ batch: under, changed: 4, alsoRestarted: [2, 3] });
+    expect(pushed[1]).toMatchObject({
+      kind: "abandon",
+      reason: expect.stringContaining("was cancelled"),
+    });
 
     // Its own PR has a new head: it alone is rebuilt, on the same front batch.
     const front = running([1]);
