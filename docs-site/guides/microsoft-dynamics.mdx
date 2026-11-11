@@ -80,9 +80,14 @@ access to the data, as for any other app.
 ### Finance and Operations
 
 1. In Feature management, turn on **Dynamics 365 ERP Model Context Protocol
-   server**.
+   server** (newer environments have it on already).
 2. Open **System administration** > **Setup** > **Allowed MCP clients**, add
    Opengeni's application ID and set **Allowed** to **Yes**.
+   A newly allowed client can take up to a minute to work.
+
+Environments created in the Power Platform admin center use a regional
+address such as `https://contoso.operations.ch.dynamics.com`; it works the
+same way.
 
 Calls run under each user's own Finance and Operations security roles. See
 [MCP server security](https://learn.microsoft.com/en-us/dynamics365/fin-ops-core/dev-itpro/copilot/mcp/mcp-security).
@@ -96,8 +101,11 @@ Calls run under each user's own Finance and Operations security roles. See
 - Microsoft bills calls to its hosted MCP servers from non-Microsoft clients
   in Copilot Credits (see
   [Dataverse MCP billing](https://learn.microsoft.com/en-us/power-apps/maker/data-platform/data-platform-mcp#billing)).
-  Opengeni uses the Web API for Dataverse; the Finance and Operations
-  connection uses its MCP server, so check Microsoft's current terms for it.
+  Opengeni uses the Web API for Dataverse. The Finance and Operations
+  connection uses its MCP server, which Microsoft bills at 0.1 Copilot Credits
+  per tool call unless the user has Finance Premium or Supply Chain Management
+  Premium (see
+  [ERP MCP server](https://learn.microsoft.com/en-us/dynamics365/fin-ops-core/dev-itpro/copilot/copilot-mcp)).
 - Opengeni's own usage is billed as usual.
 
 ## Troubleshooting

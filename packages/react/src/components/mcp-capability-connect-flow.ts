@@ -720,8 +720,9 @@ export function useMcpCapabilityConnect({
     waiting,
     reconciling,
     busy,
-    /** The approval panel replaces a generic failure message. */
-    error: approval ? null : error,
+    // A refused sign-in with an approval link sets no error (see
+    // performAuthorization), so any error here is newer and stays visible.
+    error,
     notice,
     ownership,
     setOwnership,

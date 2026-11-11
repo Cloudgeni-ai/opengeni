@@ -24,6 +24,9 @@ describe("Microsoft Dynamics MCP endpoints", () => {
     expect(
       microsoftDynamicsProductForMcpUrl("https://usmf-uat.sandbox.operations.dynamics.com/mcp"),
     ).toBe("finance_operations");
+    expect(
+      microsoftDynamicsProductForMcpUrl("https://opengeni-fno-test.operations.ch.dynamics.com/mcp"),
+    ).toBe("finance_operations");
     for (const url of [
       "http://contoso.crm.dynamics.com/api/mcp",
       "https://contoso.crm.dynamics.com/",

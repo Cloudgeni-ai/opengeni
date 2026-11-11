@@ -17,10 +17,11 @@ export const MICROSOFT_DYNAMICS_PRODUCT_LABELS: Readonly<Record<MicrosoftDynamic
 
 // Dataverse (Dynamics 365 Sales, Customer Service, Power Apps): <org>.crm[N].dynamics.com
 const DATAVERSE_HOST = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.crm\d*\.dynamics\.com$/u;
-// Finance and Operations: <env>[.sandbox].operations.dynamics.com, or a cloud-hosted
-// development environment on cloudax.dynamics.com.
+// Finance and Operations: <env>[.sandbox].operations[.<region>].dynamics.com (environments
+// created in the Power Platform admin center use a regional host such as
+// operations.ch.dynamics.com), or a cloud-hosted development environment on cloudax.dynamics.com.
 const FINANCE_OPERATIONS_HOST =
-  /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:operations|cloudax)\.dynamics\.com$/u;
+  /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:operations(?:\.[a-z]{2,4})?|cloudax)\.dynamics\.com$/u;
 
 const MCP_PATHS: Readonly<Record<MicrosoftDynamicsProduct, readonly string[]>> = {
   dataverse: ["/api/mcp", "/api/mcp_preview"],
