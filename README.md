@@ -62,7 +62,7 @@ Prefer to run it yourself? Everything is open source under Apache-2.0. Jump to [
 - **Credentials, handled.** Per-user OAuth connections, short-lived tokens you mint per session, and encrypted secrets that stay out of prompts.
 - **Memory.** Agent Knowledge keeps files, sources, and findings in one searchable library with personal and workspace scope, so agents remember what matters across sessions.
 - **Multi-tenant workspaces.** Each customer gets its own workspace, created on first use by the session proxy or explicitly with `ensureWorkspace`. Sessions, files, knowledge, and connections stay inside it, enforced by the API and Postgres row-level security.
-- **Swap models freely.** OpenAI, Azure OpenAI, Anthropic, OpenRouter, Vercel AI Gateway, any OpenAI-compatible endpoint, or a ChatGPT/Codex, Claude or SuperGrok subscription.
+- **Swap models freely.** OpenAI, Azure OpenAI, Anthropic, OpenRouter, Vercel AI Gateway, or any OpenAI-compatible endpoint, chosen per session. In the Opengeni apps, Pro, Max and Enterprise can also use a ChatGPT/Codex, Claude or SuperGrok subscription.
 - **Background agents and goals.** Start agents on a schedule or from webhooks, and give a session a goal with success criteria so it keeps working until the job is done.
 - **Approvals and questions when you need them.** Require approval for sensitive tools, and let the agent ask the user structured questions mid-task.
 - **Managed or self-hosted.** Use [app.opengeni.ai](https://app.opengeni.ai) with nothing to run, or deploy the same API, web app, workers, Helm chart, and reference Terraform yourself. All of it is Apache-2.0.
