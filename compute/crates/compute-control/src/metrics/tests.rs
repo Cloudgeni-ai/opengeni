@@ -56,6 +56,26 @@ fn value(text: &str, series: &str) -> Option<f64> {
         .map(|value| value.parse().unwrap())
 }
 
+/// The leader reports each host's registration and its agent's restarts
+/// as the store keeps them, which survive a change of leader.
+#[test]
+fn the_leader_reports_each_hosts_registration_and_restarts() {
+    let metrics = Metrics::default();
+    metrics.leads(true);
+    let text = metrics.render(&[host(1, "hosts-a", HostState::Live)]);
+    assert_eq!(
+        value(&text, "compute_fleet_host_epoch{host_name=\"hosts-a\"}"),
+        Some(1.0)
+    );
+    assert_eq!(
+        value(
+            &text,
+            "compute_fleet_host_agent_restarts{host_name=\"hosts-a\"}"
+        ),
+        Some(3.0)
+    );
+}
+
 #[test]
 fn only_the_leader_reports_the_fleet() {
     let metrics = Metrics::default();
@@ -121,17 +141,6 @@ fn only_the_leader_reports_the_fleet() {
             "compute_fleet_host_renewal_age_seconds{host_name=\"hosts-a\"}"
         ),
         Some(1.5)
-    );
-    assert_eq!(
-        value(&text, "compute_fleet_host_epoch{host_name=\"hosts-a\"}"),
-        Some(1.0)
-    );
-    assert_eq!(
-        value(
-            &text,
-            "compute_fleet_host_agent_restarts{host_name=\"hosts-a\"}"
-        ),
-        Some(3.0)
     );
 
     // The count moves after standing still 12 s: one gap of 12 s, and
