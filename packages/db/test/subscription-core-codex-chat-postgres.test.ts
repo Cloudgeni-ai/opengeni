@@ -2078,6 +2078,20 @@ describe.skipIf(!realDb)("durable model catalog observations", () => {
     expect(await place(turn)).toMatchObject({ kind: "run", connectionId: b });
     expect(await evaluate()).toMatchObject({ kind: "run", connectionId: b });
     expect(await observe(b, [])).toBe(true);
+    // No fresh catalog lists the model (a provider can hide it from every
+    // account, for example above the presented client version): the catalog
+    // cannot choose, so placement runs on capacity and the provider decides.
+    expect(await place(turn)).toMatchObject({ kind: "run" });
+    // Once an account lists it, the catalog chooses again: the listing
+    // account is exhausted, so the turn waits instead of using the account
+    // whose catalog omits the model.
+    expect(await observe(a, [upstream])).toBe(true);
+    await shared!.admin`update subscription_connection_quota set quota=${shared!.admin.json({
+      windows: [],
+      modelCooldowns: {},
+      exhaustedUntil: Date.now() + 3600_000,
+      exhaustedKind: "quota",
+    })}::jsonb, observed_refresh_generation=1 where connection_id=${a}::uuid`;
     expect(await place(turn)).toMatchObject({ kind: "wait", reason: "no_eligible_capacity" });
     // The same evaluator used immediately after arming a waiter must not wake
     // the turn on the model-ineligible account it just rejected.
