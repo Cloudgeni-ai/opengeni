@@ -459,7 +459,7 @@ function Home() {
             textAlign: "center",
           }}
         >
-          What should the agent do?
+          What can I help with?
         </Text>
         <View style={{ marginTop: 28 }}>
           <SessionComposer
@@ -468,7 +468,7 @@ function Home() {
             onSend={() => void create()}
             canSend={canCreate}
             sending={creating}
-            placeholder="Describe a task for the agent..."
+            placeholder="Ask anything, or describe what you need..."
             voice={voice}
             call={
               workspaceId

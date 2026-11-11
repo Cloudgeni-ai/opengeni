@@ -5,6 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   slackMrkdwnFromMarkdown,
+  slackMrkdwnKeepingProviderTracking,
   stripProviderCitationMarkers,
 } from "../src/integrations/slack-mrkdwn";
 
@@ -204,6 +205,30 @@ describe("slackMrkdwnFromMarkdown", () => {
 
     expect(slackMrkdwnFromMarkdown(answer)).toBe(
       "The *v2 API* is deprecated and ends in March.\nUse <https://example.com/v3|v3> instead.",
+    );
+  });
+});
+
+describe("source links from a hosted web search", () => {
+  const answer = [
+    "Rule 4-1 applies ([example.com](https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai)).",
+    "Video: https://example.com/watch?v=abc&utm_source=openai",
+    "`https://example.com/code?utm_source=openai`",
+  ].join("\n");
+
+  test("post without the tracking the search tagged on, keeping page parameters and code", () => {
+    expect(slackMrkdwnFromMarkdown(answer)).toBe(
+      [
+        "Rule 4-1 applies (<https://example.com/rules/4-1|example.com>).",
+        "Video: https://example.com/watch?v=abc",
+        "`https://example.com/code?utm_source=openai`",
+      ].join("\n"),
+    );
+  });
+
+  test("keep the earlier rendering reachable for operations bound to it", () => {
+    expect(slackMrkdwnKeepingProviderTracking(answer)).toContain(
+      "<https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai|example.com>",
     );
   });
 });

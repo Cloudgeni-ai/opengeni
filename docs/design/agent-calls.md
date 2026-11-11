@@ -38,7 +38,11 @@ saying why the agent called, and the conversation lands in that chat.
      the ring as a self-managed Telecom call (androidx core-telecom) and shows
      the incoming-call notification (`CallStyle`) with a full-screen ring
      screen over the lock screen; answering opens the app and hands the call
-     to the same `incoming` adapter as on iOS. An older app, or one without
+     to the same `incoming` adapter as on iOS. The message reaches the
+     package's own Firebase messaging service (declared when the app uses
+     expo-notifications) or, with `call.androidMessagingService: "app"`, the
+     app's own service, which hands it to `OpenGeniCallPush.handle` first.
+     An older app, or one without
      system calls, shows the plain notification instead. The setting shows on
      Android only in an app with system calls and push. While the app runs it
      follows the call's state, as on iOS. When the call is answered or

@@ -674,10 +674,13 @@ export async function purgeArchivedSessionContent(
   scope: SessionArchiveScope,
   input: { batchSize: number; fromTable?: number },
 ): Promise<{ deleted: number; complete: boolean; nextTable: number }> {
-  const fromTable = Math.min(
-    Math.max(Math.trunc(input.fromTable ?? 0), 0),
-    SESSION_ARCHIVE_PURGE_TABLES.length,
-  );
+  // Anything but a valid table index starts at the first table, so a bad
+  // value can never skip tables and still record the purge complete.
+  const requested = input.fromTable ?? 0;
+  const fromTable =
+    Number.isInteger(requested) && requested >= 0 && requested < SESSION_ARCHIVE_PURGE_TABLES.length
+      ? requested
+      : 0;
   let deleted = 0;
   for (let index = fromTable; index < SESSION_ARCHIVE_PURGE_TABLES.length; index += 1) {
     const table = SESSION_ARCHIVE_PURGE_TABLES[index]!;
