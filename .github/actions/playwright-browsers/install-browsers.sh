@@ -13,7 +13,9 @@
 #      (PLAYWRIGHT_DEB_DIR), with no network. The cache holds the debs for
 #      every browser, so any job that fills it serves every other job.
 #   3. Only then use the network: download into the cache and install, with
-#      apt retries, backoff and a fallback archive mirror outside ubuntu.com.
+#      apt retries and backoff. Archive mirrors whose host does not resolve
+#      are dropped first, and a fallback mirror outside ubuntu.com takes the
+#      lead, so apt never spends its budget on dead DNS names.
 #   4. If that also fails, continue when every shared library the browsers
 #      link resolves (only fonts or tools are missing), and fail otherwise.
 #
@@ -24,8 +26,9 @@
 # shellcheck disable=SC2086
 set -uo pipefail
 
-# The Ubuntu archive is signed, so apt verifies whatever this mirror serves.
-FALLBACK_MIRROR="https://mirrors.edge.kernel.org/ubuntu/"
+# The Ubuntu archive is signed, so apt verifies whatever these mirrors serve.
+# They live outside ubuntu.com, so they stay reachable when it does not.
+FALLBACK_MIRRORS="${PLAYWRIGHT_FALLBACK_MIRRORS:-https://mirrors.edge.kernel.org/ubuntu/ https://mirrors.mit.edu/ubuntu/}"
 APT_CONF_DIR="${PLAYWRIGHT_APT_CONF_DIR:-/etc/apt/apt.conf.d}"
 APT_MIRRORS="${PLAYWRIGHT_APT_MIRRORS:-/etc/apt/apt-mirrors.txt}"
 DEB_DIR="${PLAYWRIGHT_DEB_DIR:-}"
@@ -51,20 +54,73 @@ set_output() {
 }
 
 configure_apt() {
-  # Retry each download, bound each request, and wait for a dpkg lock a killed
-  # attempt may have left instead of failing at once.
+  # Bound each request, and wait for a dpkg lock a killed attempt may have
+  # left instead of failing at once. Few retries: a dead host costs the full
+  # timeout on every retry of every file.
   printf '%s\n' \
-    'Acquire::Retries "5";' \
-    'Acquire::http::Timeout "30";' \
-    'Acquire::https::Timeout "30";' \
+    'Acquire::Retries "2";' \
+    'Acquire::http::Timeout "20";' \
+    'Acquire::https::Timeout "20";' \
     'DPkg::Lock::Timeout "60";' \
     | sudo tee "${APT_CONF_DIR}/99playwright-browsers-network" >/dev/null
-  # Hosted runners fetch through a mirror list; apt tries the next entry when
-  # one fails. Only amd64 is served from the main archive mirrors.
-  if [ -f "${APT_MIRRORS}" ] && [ "$(dpkg --print-architecture 2>/dev/null)" = "amd64" ] \
-    && ! grep -qF "${FALLBACK_MIRROR}" "${APT_MIRRORS}"; then
-    printf '%s\tpriority:10\n' "${FALLBACK_MIRROR}" | sudo tee -a "${APT_MIRRORS}" >/dev/null
+}
+
+resolves() {
+  timeout 5 getent ahosts "$1" >/dev/null 2>&1
+}
+
+mirror_host() {
+  sed -E 's#^[a-z+]+://([^/:]+).*#\1#' <<<"$1"
+}
+
+# Hosted runners fetch through a mirror list (mirror+file:). Before the first
+# download, drop entries whose host does not resolve and add the fallback
+# mirrors: first when a primary is gone, last otherwise. Only amd64 is served
+# from the main archive mirrors. Runs once.
+mirrors_prepared=false
+prepare_mirrors() {
+  [ "${mirrors_prepared}" = "false" ] || return 0
+  mirrors_prepared=true
+  if [ ! -f "${APT_MIRRORS}" ] || [ "$(dpkg --print-architecture 2>/dev/null)" != "amd64" ]; then
+    return 0
   fi
+  local line uri live=() fallbacks=() dropped=0
+  while IFS= read -r line; do
+    case "${line}" in "" | "#"*) continue ;; esac
+    uri="${line%%[[:space:]]*}"
+    case " ${FALLBACK_MIRRORS} " in *" ${uri} "*) continue ;; esac
+    if resolves "$(mirror_host "${uri}")"; then
+      live+=("${line}")
+    else
+      echo "::warning::apt mirror $(mirror_host "${uri}") does not resolve; skipping it."
+      dropped=$((dropped + 1))
+    fi
+  done <"${APT_MIRRORS}"
+  for uri in ${FALLBACK_MIRRORS}; do
+    if resolves "$(mirror_host "${uri}")"; then
+      fallbacks+=("${uri}")
+    else
+      echo "::warning::Fallback apt mirror $(mirror_host "${uri}") does not resolve; skipping it."
+    fi
+  done
+  if [ "${#live[@]}" -eq 0 ] && [ "${#fallbacks[@]}" -eq 0 ]; then
+    echo "::warning::No apt mirror resolves; keeping the runner's mirror list."
+    return 0
+  fi
+  local priority=10
+  [ "${dropped}" -eq 0 ] || priority=0
+  {
+    for uri in "${fallbacks[@]}"; do
+      [ "${priority}" -ne 0 ] || printf '%s\tpriority:0\n' "${uri}"
+    done
+    for line in "${live[@]}"; do
+      printf '%s\n' "${line}"
+    done
+    for uri in "${fallbacks[@]}"; do
+      [ "${priority}" -eq 0 ] || printf '%s\tpriority:10\n' "${uri}"
+    done
+  } | sudo tee "${APT_MIRRORS}.playwright" >/dev/null
+  sudo mv "${APT_MIRRORS}.playwright" "${APT_MIRRORS}"
 }
 
 # Prints the packages the given browsers still need, one per line. A local
@@ -85,55 +141,61 @@ deb_file() {
 }
 
 # Fills the deb cache with every browser's packages, using the network only
-# for what it lacks. Succeeds when the cache holds them all.
+# for what it lacks. Succeeds when the cache holds them all, at the versions
+# and hashes the package lists name.
 fill_deb_cache() {
-  local deadline=$1 all absent=() package attempt=1 delay=10 remaining status
+  local deadline=$1 all attempt=1 delay=10 remaining status
   all="$(missing_packages ${ALL_DEPS_TARGETS})" || return 1
-  for package in ${all}; do
-    [ -n "$(deb_file "${package}")" ] || absent+=("${package}")
-  done
-  if [ "${#absent[@]}" -eq 0 ]; then
+  mkdir -p "${DEB_DIR}/partial"
+  status=0
+  sudo apt-get install -y --no-install-recommends --download-only --no-download \
+    -o Dir::Cache::archives="${DEB_DIR}" ${all} >/dev/null 2>&1 || status=$?
+  if [ "${status}" -eq 0 ]; then
+    finish_deb_cache
     echo "The deb cache holds all $(wc -w <<<"${all}") browser system packages."
     return 0
   fi
-  echo "The deb cache lacks ${#absent[@]} browser system packages; downloading them."
-  mkdir -p "${DEB_DIR}/partial"
+  echo "The deb cache lacks some of the $(wc -w <<<"${all}") browser system packages; downloading them."
+  prepare_mirrors
   while :; do
     remaining=$((deadline - SECONDS))
-    [ "${remaining}" -ge 1 ] || return 1
+    [ "${remaining}" -ge 1 ] || { finish_deb_cache; return 1; }
     echo "::group::Download browser system packages attempt ${attempt}/${SYSTEM_DEPS_ATTEMPTS}"
-    # The first attempt uses the runner image's package lists, which match
-    # the versions other jobs on the same image resolve; later attempts
-    # refresh them in case a version left the archive.
-    # A partly failed refresh still leaves usable lists, so it never stops
-    # the download.
-    if [ "${attempt}" -gt 1 ]; then
-      timeout --kill-after="${KILL_AFTER_SECONDS}s" "${remaining}s" sudo apt-get update || true
-      remaining=$((deadline - SECONDS))
-    fi
+    # Refresh the lists first: the archive drops superseded versions, so the
+    # runner image's lists soon name debs that 404. A partly failed refresh
+    # still leaves usable lists, so it never stops the download.
+    timeout --kill-after="${KILL_AFTER_SECONDS}s" "${remaining}s" sudo apt-get update || true
+    remaining=$((deadline - SECONDS))
     status=124
     if [ "${remaining}" -ge 1 ]; then
       status=0
       timeout --kill-after="${KILL_AFTER_SECONDS}s" "${remaining}s" \
         sudo apt-get install -y --no-install-recommends --download-only \
-        -o Dir::Cache::archives="${DEB_DIR}" "${absent[@]}" || status=$?
+        -o Dir::Cache::archives="${DEB_DIR}" ${all} || status=$?
     fi
     echo "::endgroup::"
-    sudo rm -rf "${DEB_DIR}/partial" "${DEB_DIR}/lock"
-    sudo chown -R "$(id -u):$(id -g)" "${DEB_DIR}"
     if [ "${status}" -eq 0 ]; then
+      # Drop debs the package lists no longer name (an older image's).
+      sudo apt-get autoclean -o Dir::Cache::archives="${DEB_DIR}" >/dev/null 2>&1 || true
+      finish_deb_cache
       return 0
     fi
     echo "::warning::Download browser system packages attempt ${attempt} failed with exit ${status}."
     remaining=$((deadline - SECONDS))
     if [ "${attempt}" -ge "${SYSTEM_DEPS_ATTEMPTS}" ] || [ "${remaining}" -le $((delay + 30)) ]; then
+      finish_deb_cache
       return 1
     fi
     sleep "${delay}"
     delay=$((delay * 2))
     attempt=$((attempt + 1))
-    mkdir -p "${DEB_DIR}/partial"
   done
+}
+
+# apt's working files stay out of the saved cache, and the runner user owns it.
+finish_deb_cache() {
+  sudo rm -rf "${DEB_DIR}/partial" "${DEB_DIR}/lock"
+  sudo chown -R "$(id -u):$(id -g)" "${DEB_DIR}"
 }
 
 # Installs the given packages from the deb cache with no network.
@@ -147,6 +209,7 @@ install_from_deb_cache() {
     fi
     files+=("${file}")
   done
+  mkdir -p "${DEB_DIR}/partial"
   echo "::group::Install $# browser system packages from the deb cache"
   # apt resolves against the image's package lists and uses the cached debs
   # when their versions match; dpkg installs the cached debs when the lists
@@ -162,12 +225,14 @@ install_from_deb_cache() {
     fi
   fi
   echo "::endgroup::"
+  finish_deb_cache
   return "${status}"
 }
 
 # Playwright's own apt install, with retries and backoff.
 install_from_network() {
   local deadline=$1 attempt=1 delay=10 status remaining
+  prepare_mirrors
   while :; do
     remaining=$((deadline - SECONDS))
     if [ "${remaining}" -lt 1 ]; then
@@ -196,12 +261,26 @@ install_from_network() {
   done
 }
 
+# Installs the given packages from the deb cache, then succeeds when nothing
+# the browsers need is missing any more.
+install_from_cache_and_check() {
+  local remaining
+  install_from_deb_cache "$@" || return 1
+  remaining="$(missing_packages ${deps_browsers})" || return 1
+  still_missing="${remaining}"
+  if [ -n "${remaining}" ]; then
+    return 1
+  fi
+  echo "Installed the browser system packages from the deb cache."
+}
+
 install_system_packages() {
   local deadline=$((SECONDS + SYSTEM_DEPS_BUDGET_SECONDS)) needed
   if ! needed="$(missing_packages ${deps_browsers})"; then
     echo "::warning::Could not check the browser system packages; installing them with apt."
     needed="unknown"
   fi
+  still_missing="${needed}"
   if [ -z "${needed}" ]; then
     echo "Browser system packages are already installed; skipping apt."
     return 0
@@ -209,14 +288,19 @@ install_system_packages() {
   configure_apt
   if [ -n "${DEB_DIR}" ] && [ "${needed}" != "unknown" ]; then
     mkdir -p "${DEB_DIR}"
+    # Offline first: a restored cache (possibly from an older image or newer
+    # package lists) usually covers this job without any network.
+    if install_from_cache_and_check ${needed}; then
+      # Where the cache is saved, make it complete for every browser.
+      if [ "${PLAYWRIGHT_DEBS_SAVE:-false}" = "true" ] && fill_deb_cache "${deadline}"; then
+        set_output "debs-complete=true"
+      fi
+      return 0
+    fi
     if fill_deb_cache "${deadline}"; then
       set_output "debs-complete=true"
     fi
-    if install_from_deb_cache ${needed} && needed="$(missing_packages ${deps_browsers})" \
-      && [ -z "${needed}" ]; then
-      echo "Installed the browser system packages from the deb cache."
-      return 0
-    fi
+    install_from_cache_and_check ${needed} && return 0
   fi
   install_from_network "${deadline}"
 }
@@ -277,7 +361,7 @@ fi
 
 if [ "${system_packages}" = "failed" ]; then
   if unresolved="$(browser_libraries_resolve)"; then
-    echo "::warning::Some browser system packages (fonts or tools) are missing, but every library the browsers link resolves; continuing."
+    echo "::warning::Browser system packages are missing ($(xargs <<<"${still_missing}")), but every library the browsers link resolves; continuing."
     exit 0
   fi
   printf '%s\n' "${unresolved}"

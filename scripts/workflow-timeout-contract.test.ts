@@ -405,6 +405,8 @@ describe("workflow timeout contract", () => {
     // Only a cache that serves every browser is saved.
     expect(save?.if).toContain("steps.install.outputs.debs-complete == 'true'");
     expect(save?.if).toContain("steps.restore-debs.outputs.cache-hit != 'true'");
+    // Saved where every branch, including merge batcher candidates, reads it.
+    expect(save?.if).toContain("github.ref == 'refs/heads/main'");
 
     // Nothing missing: no apt and no cache at all.
     const present = await runPlaywrightInstall({ dryRun: ["-"], install: [0] });
@@ -418,7 +420,7 @@ describe("workflow timeout contract", () => {
 
     // Restored cache: installs offline, never touches the network.
     const hit = await runPlaywrightInstall({
-      dryRun: ["fonts-a libb", "fonts-a libb libc", "-"],
+      dryRun: ["fonts-a libb", "-"],
       debs: ["fonts-a", "libb", "libc"],
       install: [0],
     });
@@ -426,17 +428,30 @@ describe("workflow timeout contract", () => {
     expect(hit.calls).toEqual([
       "sudo python3",
       "bun install-deps --dry-run chromium",
-      "bun install-deps --dry-run chromium chromium-headless-shell firefox webkit",
       "apt no-download fonts-a libb",
       "bun install-deps --dry-run chromium",
       expect.stringMatching(/^timeout \d+s bun install chromium$/u),
     ]);
-    expect(hit.outputs).toContain("debs-complete=true");
     expect(hit.stdout).toContain("from the deb cache");
+
+    // Where the cache is saved, the job also checks it holds every browser's
+    // packages at the listed versions, and marks it complete.
+    const saving = await runPlaywrightInstall({
+      dryRun: ["fonts-a libb", "-", "fonts-a libb libc"],
+      debs: ["fonts-a", "libb", "libc"],
+      install: [0],
+      save: true,
+    });
+    expect(saving.exitCode).toBe(0);
+    expect(saving.calls.slice(4, 6)).toEqual([
+      "bun install-deps --dry-run chromium chromium-headless-shell firefox webkit",
+      "apt check fonts-a libb libc",
+    ]);
+    expect(saving.outputs).toContain("debs-complete=true");
 
     // The image's package lists moved on: dpkg installs the cached debs.
     const moved = await runPlaywrightInstall({
-      dryRun: ["libb", "libb", "-"],
+      dryRun: ["libb", "-"],
       debs: ["libb"],
       apt: [100],
       install: [0],
@@ -451,17 +466,27 @@ describe("workflow timeout contract", () => {
     // Cold cache: downloads every browser's debs once, then installs offline.
     const cold = await runPlaywrightInstall({
       dryRun: ["libb", "libb libc", "-"],
-      apt: [0, 0],
+      apt: [0, 0, 0],
       install: [0],
     });
     expect(cold.exitCode).toBe(0);
-    expect(cold.calls.slice(3, 5)).toEqual(["apt download libb libc", "apt no-download libb"]);
+    expect(cold.calls.slice(3, 8)).toEqual([
+      "apt check libb libc",
+      // The archive drops superseded versions, so the lists come first.
+      "apt update",
+      "apt download libb libc",
+      "apt autoclean",
+      "apt no-download libb",
+    ]);
     expect(cold.debs).toEqual(["libb_1_amd64.deb", "libc_1_amd64.deb"]);
     expect(cold.outputs).toContain("debs-complete=true");
-    expect(cold.aptConf).toContain('Acquire::Retries "5";');
+    expect(cold.aptConf).toContain('Acquire::Retries "2";');
+    // Every archive mirror resolves: the fallbacks go last.
     expect(cold.mirrors).toBe(
       "https://archive.ubuntu.com/ubuntu/\tpriority:1\n" +
-        "https://mirrors.edge.kernel.org/ubuntu/\tpriority:10\n",
+        "http://security.ubuntu.com/ubuntu/\tpriority:3\n" +
+        "https://mirrors.edge.kernel.org/ubuntu/\tpriority:10\n" +
+        "https://mirrors.mit.edu/ubuntu/\tpriority:10\n",
     );
   });
 
@@ -471,13 +496,21 @@ describe("workflow timeout contract", () => {
     // fonts are missing, so the step continues.
     const down = await runPlaywrightInstall({
       dryRun: ["fonts-a", "fonts-a libb"],
-      apt: [100, 100, 100, 100, 100, 100, 100],
+      apt: [100, 100, 100, 100, 100, 100, 100, 100],
       deps: [100, 100, 100, 100],
       install: [0],
+      unresolvable: ["archive.ubuntu.com", "mirrors.mit.edu"],
     });
     expect(down.exitCode).toBe(0);
+    // A primary that does not resolve is dropped and a resolvable fallback
+    // goes first, so apt never waits on a dead DNS name.
+    expect(down.mirrors).toBe(
+      "https://mirrors.edge.kernel.org/ubuntu/\tpriority:0\n" +
+        "http://security.ubuntu.com/ubuntu/\tpriority:3\n",
+    );
+    expect(down.stdout).toContain("apt mirror archive.ubuntu.com does not resolve");
     expect(down.calls.filter((call) => call === "apt download fonts-a libb")).toHaveLength(4);
-    expect(down.calls.filter((call) => call === "apt update")).toHaveLength(3);
+    expect(down.calls.filter((call) => call === "apt update")).toHaveLength(4);
     expect(down.calls.filter((call) => call.includes("bun install-deps chromium"))).toHaveLength(4);
     expect(down.calls.filter((call) => call.startsWith("sleep"))).toEqual([
       "sleep 10",
@@ -488,12 +521,14 @@ describe("workflow timeout contract", () => {
       "sleep 40",
     ]);
     expect(down.outputs).not.toContain("debs-complete=true");
-    expect(down.stdout).toContain("every library the browsers link resolves; continuing");
+    expect(down.stdout).toContain(
+      "are missing (fonts-a), but every library the browsers link resolves",
+    );
 
     // A missing shared library still fails the step.
     const broken = await runPlaywrightInstall({
       dryRun: ["libb", "libb"],
-      apt: [100, 100, 100, 100, 100, 100, 100],
+      apt: [100, 100, 100, 100, 100, 100, 100, 100],
       deps: [100, 100, 100, 100],
       install: [0],
       ldd: "\tlibb.so.1 => not found",
@@ -529,6 +564,26 @@ describe("workflow timeout contract", () => {
     expect(shell.calls).toContain("bun install-deps --dry-run chromium-headless-shell");
     expect(shell.calls.at(-1)).toMatch(/^timeout \d+s bun install --only-shell chromium$/u);
 
+    // Nothing resolves: the runner's mirror list stays as it was.
+    const dark = await runPlaywrightInstall({
+      dryRun: ["libb"],
+      deps: [0],
+      install: [0],
+      noDebCache: true,
+      unresolvable: [
+        "archive.ubuntu.com",
+        "security.ubuntu.com",
+        "mirrors.edge.kernel.org",
+        "mirrors.mit.edu",
+      ],
+    });
+    expect(dark.exitCode).toBe(0);
+    expect(dark.mirrors).toBe(
+      "https://archive.ubuntu.com/ubuntu/\tpriority:1\n" +
+        "http://security.ubuntu.com/ubuntu/\tpriority:3\n",
+    );
+    expect(dark.stdout).toContain("No apt mirror resolves");
+
     // Other runners keep Playwright's own `--with-deps` and never touch apt.
     const mac = await runPlaywrightInstall({ dryRun: [], install: [0], os: "macOS" });
     expect(mac.exitCode).toBe(0);
@@ -552,6 +607,8 @@ async function runPlaywrightInstall(options: {
   apt?: number[];
   debs?: string[];
   ldd?: string;
+  unresolvable?: string[];
+  save?: boolean;
   noDebCache?: boolean;
   onlyShell?: boolean;
   mirrorPresent?: boolean;
@@ -585,8 +642,10 @@ async function runPlaywrightInstall(options: {
     await writeFile(
       mirrors,
       "https://archive.ubuntu.com/ubuntu/\tpriority:1\n" +
+        "http://security.ubuntu.com/ubuntu/\tpriority:3\n" +
         (options.mirrorPresent ? "https://mirrors.edge.kernel.org/ubuntu/\tpriority:10\n" : ""),
     );
+    await writeFile(join(dir, "unresolvable"), `${(options.unresolvable ?? []).join("\n")}\n`);
     for (const [name, values] of [
       ["dry-run", options.dryRun],
       ["deps", options.deps ?? []],
@@ -602,7 +661,7 @@ async function runPlaywrightInstall(options: {
       timeout: [
         'while [[ "$1" == --* ]]; do shift; done',
         'duration="$1"; shift',
-        `case " $* " in *" --dry-run "*|*" apt-get "*) ;; *) printf 'timeout %s ' "$duration" >> ${log} ;; esac`,
+        `case " $* " in *" --dry-run "*|*" apt-get "*|*" getent "*) ;; *) printf 'timeout %s ' "$duration" >> ${log} ;; esac`,
         '"$@"',
       ],
       bun: [
@@ -617,12 +676,17 @@ async function runPlaywrightInstall(options: {
         'exit "${code:-99}"',
       ],
       "apt-get": [
-        'mode=install; archives=""; packages=()',
+        'mode=install; download=""; offline=""; archives=""; packages=()',
         'for arg in "$@"; do case "$arg" in',
-        "  update) mode=update ;; --download-only) mode=download ;; --no-download) mode=no-download ;;",
+        "  update|autoclean) mode=$arg ;; --download-only) download=1 ;; --no-download) offline=1 ;;",
         '  Dir::Cache::archives=*) archives=${arg#*=} ;; -*|install) ;; *) packages+=("$arg") ;;',
         "esac; done",
+        '[ -n "$download" ] && mode=download; [ -n "$offline" ] && mode=no-download',
+        '[ -n "$download" ] && [ -n "$offline" ] && mode=check',
         `echo "apt $mode \${packages[*]}" | sed 's/ *$//' >> ${log}`,
+        '[ "$mode" = autoclean ] && exit 0',
+        // The cache holds every package exactly when each has a deb.
+        'if [ "$mode" = check ]; then for p in "${packages[@]}"; do [ -e "$archives/${p}_1_amd64.deb" ] || exit 100; done; exit 0; fi',
         pop("apt"),
         'if [ "${code:-99}" = 0 ] && [ "$mode" = download ]; then for p in "${packages[@]}"; do : > "$archives/${p}_1_amd64.deb"; done; fi',
         'exit "${code:-99}"',
@@ -635,6 +699,7 @@ async function runPlaywrightInstall(options: {
       ],
       dpkg: ['[ "$1" = --print-architecture ] && echo amd64'],
       ldd: [`cat ${dir}/ldd-output`],
+      getent: [`grep -qxF "$2" ${dir}/unresolvable && exit 2; echo "127.0.0.1 $2"`],
       sleep: [`echo "sleep $*" >> ${log}`],
     };
     for (const [name, body] of Object.entries(scripts)) {
@@ -673,6 +738,7 @@ async function runPlaywrightInstall(options: {
           PLAYWRIGHT_APT_CONF_DIR: confDir,
           PLAYWRIGHT_APT_MIRRORS: mirrors,
           PLAYWRIGHT_BROWSERS_PATH: join(dir, "browsers"),
+          PLAYWRIGHT_DEBS_SAVE: options.save ? "true" : "false",
         },
         stdout: "pipe",
         stderr: "pipe",

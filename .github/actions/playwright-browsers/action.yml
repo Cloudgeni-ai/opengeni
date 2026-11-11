@@ -47,8 +47,9 @@ inputs:
       On Linux, the most the system packages phase may take, out of the first
       attempt's wall clock. The phase skips apt when no package is missing,
       installs from the restored deb cache without the network, and only
-      then downloads, retrying apt with backoff and a fallback archive mirror;
-      whatever it leaves goes to the first browser download.
+      then downloads, retrying apt with backoff after dropping archive mirrors
+      that do not resolve in favour of fallback mirrors; whatever it leaves
+      goes to the first browser download.
     required: false
     default: "300"
 
@@ -138,12 +139,15 @@ runs:
         KILL_AFTER_SECONDS: "15"
         PLAYWRIGHT_RUNNER_OS: ${{ runner.os }}
         PLAYWRIGHT_ACTION_PATH: ${{ github.action_path }}
+        # Where the cache is saved, the job also completes it for every browser.
+        PLAYWRIGHT_DEBS_SAVE: ${{ runner.os == 'Linux' && github.ref == 'refs/heads/main' && steps.restore-debs.outputs.cache-hit != 'true' }}
       run: PLAYWRIGHT_DEB_DIR="${HOME}/.cache/playwright-debs" bash "${PLAYWRIGHT_ACTION_PATH}/install-browsers.sh"
 
-    # Saved only once the cache holds the packages of every browser, so a job
-    # for one browser never stores a set another browser cannot use.
+    # Saved only from main, whose caches every branch can read, and only once
+    # the cache holds the packages of every browser, so a job for one browser
+    # never stores a set another browser cannot use.
     - name: Save browser system packages
-      if: ${{ always() && runner.os == 'Linux' && steps.restore-debs.outputs.cache-hit != 'true' && steps.install.outputs.debs-complete == 'true' }}
+      if: ${{ always() && runner.os == 'Linux' && github.ref == 'refs/heads/main' && steps.restore-debs.outputs.cache-hit != 'true' && steps.install.outputs.debs-complete == 'true' }}
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ~/.cache/playwright-debs
