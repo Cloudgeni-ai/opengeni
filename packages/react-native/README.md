@@ -269,3 +269,29 @@ The ring arrives as a high-priority FCM data message (`android.priority: "HIGH"`
 ```
 
 `createExpoCallAdapter()` reports `incoming` on such a build as on one with Opengeni's own messaging service, so `NativeAgentCallProvider` takes the rings without further setup.
+
+### Full-screen rings on Android 14 and later
+
+From Android 14, Play grants `USE_FULL_SCREEN_INTENT` up front only to apps whose core function is calling or alarms. In any other app an agent's ring shows only as a heads-up notification, easy to miss on a locked phone, until the person allows full-screen notifications for the app in system settings. `useFullScreenRings(callAdapter)` tracks this and re-checks whenever the app returns to the foreground, for example from that setting:
+
+```tsx
+import { useFullScreenRings } from "@opengeni/react-native";
+
+const fullScreen = useFullScreenRings(callAdapter);
+
+<Switch
+  value={callsOn}
+  onValueChange={(on) => {
+    setCallsOn(on);
+    // Explains why in an alert and offers to open the setting; nothing when allowed.
+    if (on) fullScreen.ask();
+  }}
+/>;
+{callsOn && !fullScreen.allowed ? (
+  <Button title={fullScreen.messages.title} onPress={() => void fullScreen.openSettings()} />
+) : null}
+```
+
+- `allowed` is false only on Android 14 and later while the setting is off; it is true on iOS (CallKit always rings full screen), on older Android, and in builds that cannot ring.
+- `ask()` shows the explanation with "Not now" and "Open settings"; `openSettings()` opens the app's full-screen notification setting directly (or its notification settings where a phone has no such screen) and resolves false if nothing opened. `messages` holds the default, translatable text for a settings row or footer; pass `messages` to replace it.
+- The same check is on the call adapter for hosts without React state: `incoming.canRingFullScreen?.()` and `incoming.openFullScreenRingSettings?.()`, both absent where rings always show full screen.
