@@ -273,9 +273,11 @@ the cost with leaner platforms. Before you add or change this text:
 - Keep the cached prefix stable. Per-turn data, times and caller context go in
   the user message, never in instructions or tool definitions (see
   `AGENTS.md`).
-- Measure the change. Record the byte or token delta in
-  `agent-instructions/PROMPT_CHANGELOG.md`, keep the prompt budget and parity
-  tests green, and do not raise a budget without a reason stated in the PR.
+- Measure the change. Record the byte or token delta in a new entry file,
+  `agent-instructions/prompt-changelog/<YYYY-MM-DD>-<slug>.md` (one file per
+  change, named by date and branch topic; see its `README.md`), keep the
+  prompt budget and parity tests green, and do not raise a budget without a
+  reason stated in the PR.
 - Shortening existing behavioural text needs before/after behaviour evidence,
   for example from `scripts/agent-behavior-eval`, because most of it guards a
   known failure. Omitting text for a feature that is switched off does not.
