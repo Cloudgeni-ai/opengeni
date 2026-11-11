@@ -3620,6 +3620,11 @@ New Modal sessions persist `/workspace` with `snapshot_directory`: the restored
 directory Image layers user files onto the currently selected sandbox environment/base
 image instead of replacing the whole machine. Existing serialized sessions keep
 their recorded `snapshot_filesystem` or tar mode and remain recoverable.
+A deployment that sets `OPENGENI_MODAL_WORKSPACE_PERSISTENCE=tar` keeps every
+save in its own object storage: a session whose latest save is a directory
+snapshot is restored from it into a tar destination, so that snapshot is the
+last one it reads and it never writes another. A box that is still live keeps
+the mode it was created in until it is next restored.
 Filesystem snapshot recovery boots the exact selected immutable Image directly,
 attributes that single destination before verification, and rejects a missing
 snapshot without falling back to the base image or an older checkpoint. It does
