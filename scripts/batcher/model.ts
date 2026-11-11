@@ -123,10 +123,18 @@ export interface QueuedPull {
   /** When PR CI passed on this exact head, or null while it has not. */
   greenAt: number | null;
   /**
-   * Why the PR cannot land on main as it is (a Git conflict, a number main
-   * already uses, a Version PR whose PR CI failed), or null.
+   * Why the PR cannot land on main as it is and leaves the queue (a number
+   * main already uses, a Version PR whose PR CI failed), or null.
    */
   conflict: string | null;
+  /**
+   * It conflicts with main in a way only its author can settle. It keeps its
+   * place and label but is not batched until its branch merges main cleanly
+   * and PR CI passes on that head. `noted` once it was told so for this head.
+   * `recheck`: it is skipped only while it is in the running batch, whose
+   * branch must not move; once out of it, it is checked (and regenerated) again.
+   */
+  parked: { reason: string; noted: boolean; recheck?: true } | null;
   /**
    * Added files whose numbers main already uses, which the batcher moves to
    * free numbers on the PR's branch before testing it; empty when none.
@@ -134,7 +142,7 @@ export interface QueuedPull {
   renumber: string[];
   /**
    * It conflicts with main. The batcher merges main into its branch and
-   * regenerates the generated files that conflict, or ejects it when other
+   * regenerates the generated files that conflict, or parks it when other
    * files conflict too; it is not tested meanwhile.
    */
   regenerate: boolean;
@@ -249,6 +257,12 @@ export type Action =
       blame?: string[];
       aheadOfBisection?: true;
     }
+  /**
+   * A PR that conflicts with main keeps its label and is skipped until its
+   * branch merges main cleanly; it is told so once per head. One parked only
+   * while in the running batch is told without that, as it is checked again.
+   */
+  | { kind: "park"; number: number; headSha: string; reason: string; recheck?: true }
   /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
   | {
       kind: "hold";
@@ -380,7 +394,14 @@ export function nextBatch(
         };
 
   const ready = pulls
-    .filter((p) => p.greenAt !== null && p.conflict === null && !p.renumber.length && !p.regenerate)
+    .filter(
+      (p) =>
+        p.greenAt !== null &&
+        p.conflict === null &&
+        p.parked === null &&
+        !p.renumber.length &&
+        !p.regenerate,
+    )
     .sort(fifo);
   if (!ready.length) return null;
   const alone = (p: QueuedPull) => p.controlPlane;
@@ -565,7 +586,16 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         number: pull.number,
         reason: pull.conflict,
       });
-    else if (pull.regenerate) actions.push({ kind: "regenerate", number: pull.number });
+    else if (pull.parked !== null) {
+      if (!pull.parked.noted)
+        actions.push({
+          kind: "park",
+          number: pull.number,
+          headSha: pull.headSha,
+          reason: pull.parked.reason,
+          ...(pull.parked.recheck ? { recheck: true as const } : {}),
+        });
+    } else if (pull.regenerate) actions.push({ kind: "regenerate", number: pull.number });
     else if (pull.renumber.length)
       actions.push({
         kind: "renumber",
@@ -588,9 +618,12 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     pending = [numbers, ...manifest.pending];
     blame = manifest.blame ?? [];
     // A new head that tests to the same tree (main merged in again, a rebase)
-    // changes nothing this batch tests, so it does not restart it.
+    // changes nothing this batch tests, so it does not restart it. A member
+    // that now conflicts with main is rebuilt out of it, though it stays queued.
     const left = manifest.members.find(
-      (m) => byNumber.get(m.number)?.headSha !== (batch.sameTree?.[m.number] ?? m.head),
+      (m) =>
+        byNumber.get(m.number)?.headSha !== (batch.sameTree?.[m.number] ?? m.head) ||
+        byNumber.get(m.number)?.parked,
     );
     // A member whose model request approval is gone (dismissed, or revoked by
     // a later review) must not land with the batch.
@@ -601,9 +634,12 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     if (manifest.base !== mainSha) reason = "main moved since the batch was built";
     else if (left) {
       changed = left.number;
-      reason = byNumber.has(left.number)
-        ? `#${left.number} has a new head`
-        : `#${left.number} left the queue`;
+      const current = byNumber.get(left.number);
+      reason = !current
+        ? `#${left.number} left the queue`
+        : current.parked
+          ? `#${left.number} conflicts with main`
+          : `#${left.number} has a new head`;
     } else if (unapproved) {
       changed = unapproved.number;
       reason = `#${unapproved.number} needs the maintainer's approval of its model request changes on its head`;

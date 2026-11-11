@@ -1,5 +1,14 @@
 # @opengeni/contracts
 
+## 6.16.0
+
+### Patch Changes
+
+- fb19875: Approval cards now read in the host's words and language. A saved review carries codes beside its English text: `reasonCode` for why it asks or is blocked, `approveLabelCode` when the button is the plain "Approve action" or "Allow", `toolName` for the action, and per field the argument it stands for (`key`) and a plain yes or no (`booleanValue`). The card, the approval list, the step in the chat (`toolDisplayName`) and the history line after a decision word these through the host's `messages`: `approvalSurface.approveAction` and `approvalSurface.allow` for the button, `toolActionReview.reason.*` for the reason, `toolActionReview.yes` and `.no` for yes or no values, and new host keys to name a connector's actions and fields the same way as `connectService.<id>.name`: `toolAction.<toolName>.title`, `toolAction.<toolName>.field.<argument>` and, for every tool, `toolField.<argument>`. Without host words nothing changes.
+- 54dc5da: `sandbox_file_publish` publishes any file the agent's own shell can read, such as scratch output in `/tmp`, on managed sandboxes and Connected Machines alike, instead of refusing every path outside the workspace root. A managed box reads the file through its shell and a Connected Machine at its host path; the workspace root is only the base for relative paths, and a workspace file keeps its existing artifact identity. Callers that cannot run the session's shell (no agent attempt of that session and no `terminal:attach`) keep the workspace scope of their file reads.
+
+  A first-party tool that refuses the caller's own arguments (a schema mismatch, a bad field combination, an unknown ID, an API 400/422) now records `outcome="rejected"` in `opengeni_mcp_tool_calls_total` instead of `provider_declared_error`, and `OpenGeniMcpToolFailureRatio` leaves rejected calls out of both its failures and its total. The server marks the result in `_meta`; the worker honors the mark only from the first-party server and removes it, so the result the caller sees is unchanged.
+
 ## 6.15.0
 
 ### Minor Changes
