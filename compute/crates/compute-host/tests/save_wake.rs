@@ -1093,6 +1093,11 @@ async fn checkpointing(
 /// A checkpoint that takes longer than the time between two is followed
 /// at once by the next, whose clone may then be taken before the change
 /// is written: that one does not hold it, and the one after is awaited.
+///
+/// The guest writes its change out itself. A checkpoint copies the disk
+/// and no memory, so it holds what has reached the disk; these hosts set
+/// no restore notice port, so nothing here asks the guest to write its
+/// disks out before the clone, as a deployed host does.
 async fn checkpoint_twice(
     agent: &Agent,
     events: &mut tokio::sync::mpsc::Receiver<compute_host::observe::Event>,
@@ -1103,7 +1108,7 @@ async fn checkpoint_twice(
     let output = exec(
         &agent.client,
         id,
-        &format!("{}\necho kept > /kept", check(pid)),
+        &format!("{}\necho kept > /kept; sync", check(pid)),
     )
     .await;
     assert_eq!(field(&output, "alive"), "yes", "{output}");
