@@ -453,6 +453,7 @@ import { registerSessionArtifactAssociationRoutes } from "./routes/session-artif
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { adminStepUpGuard } from "./auth/admin-step-up";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
@@ -1343,6 +1344,10 @@ export function createAppComposition(
   // Every Opengeni MCP endpoint, registered before any of them: EU-only
   // content never answers an Opengeni workspace that isn't EU-only.
   app.use("/v1/*", callingWorkspaceContentFlowGuard(routeDeps));
+
+  // Owners and admins confirm admin changes with a recent passkey; runs after
+  // personal API keys and agents acting as a person are stamped.
+  app.use("/v1/*", adminStepUpGuard(routeDeps));
 
   // These product-owned auth routes must be registered before Better Auth's
   // wildcard handler or the provider returns its own 404 first.
