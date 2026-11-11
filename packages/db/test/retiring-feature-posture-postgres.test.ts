@@ -8,6 +8,7 @@ import { createDb, type DbClient } from "../src/database";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import {
+  AGENTS_LEGACY_TRIGGER_ROUTINES,
   assertRuntimeDatabasePosture,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
@@ -73,6 +74,11 @@ realTest(
       await database!.admin.unsafe(
         `DROP FUNCTION IF EXISTS "${database!.schema}".${signature} CASCADE`,
       );
+    }
+    // The agents legacy drop removes the legacy tables' trigger functions with
+    // them, so this release must stay ready without them too.
+    for (const signature of AGENTS_LEGACY_TRIGGER_ROUTINES) {
+      await database!.admin.unsafe(`DROP FUNCTION "${database!.schema}".${signature}`);
     }
     const posture = await assertRuntimeDatabasePosture(client!.db, options);
     expect(posture.retiringFeatureTablesPresent).toEqual({

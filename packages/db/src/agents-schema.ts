@@ -114,6 +114,8 @@ export const agentSlackInstalls = pgTable(
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     connectionId: uuid("connection_id").notNull(),
+    /** The Slack installation's own workspace (migration 1373). */
+    installWorkspaceId: uuid("install_workspace_id"),
     slackTeamId: text("slack_team_id").notNull(),
     nameKey: text("name_key").notNull(),
     open: boolean("open").notNull().default(false),

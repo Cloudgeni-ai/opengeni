@@ -9,10 +9,9 @@ GlobalRegistrator.register();
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const kit = await import("../../../../../packages/react/test/agents-test-kit");
-const { AGENT_SLACK_MOVE_RESETS, AgentSlackSection, agentSlackErrorText } =
-  await import("./agent-slack-section");
+const { AgentSlackSection, agentSlackErrorText } = await import("./agent-slack-section");
 
-const { WORKSPACE_ID, makeAgent, appContext, AgentsTestHost } = kit;
+const { makeAgent, appContext, AgentsTestHost } = kit;
 const CONNECTION_ID = "cccccccc-cccc-4ccc-8ccc-000000000001";
 
 afterAll(() => GlobalRegistrator.unregister());
@@ -53,11 +52,7 @@ async function render(
   await act(async () =>
     root.render(
       <AgentsTestHost context={appContext(client)}>
-        <AgentSlackSection
-          agent={agent}
-          onAgentChange={() => undefined}
-          onIntroduce={onIntroduce}
-        />
+        <AgentSlackSection agent={agent} onIntroduce={onIntroduce} />
       </AgentsTestHost>,
     ),
   );
@@ -169,88 +164,27 @@ test("without a connected Slack workspace, admins get one way to connect it", as
   expect(container.textContent).toContain("Connect Slack");
 });
 
-test("while it is in one Slack workspace, the other one says where it is", async () => {
-  const agent = makeAgent({ name: "Data team", slack: [availability()] });
-  const container = await render(agent, {
-    listAgentSlackInstalls: installs([
-      row(),
-      row({
-        connectionId: "cccccccc-cccc-4ccc-8ccc-000000000002",
-        slackTeamId: "T2",
-        slackTeamName: "Acme Support",
-        availability: null,
-        unavailable: "agent_slack_single_install",
-      }),
-    ]),
-  });
-  expect(container.textContent).toContain(
-    "For now an agent works in one Slack workspace, and it's in Acme.",
-  );
-});
-
-test("an admin can move it to the other Slack workspace", async () => {
+test("it is available in every linked Slack workspace at once, with nothing to move", async () => {
   const other = "cccccccc-cccc-4ccc-8ccc-000000000002";
   const agent = makeAgent({
     name: "Data team",
-    slack: [availability()],
+    slack: [availability(), availability({ connectionId: other, slackTeamName: "Acme Support" })],
     viewer: { canEdit: true, canManageSlack: true, canOpenInSlack: false },
-  });
-  let moved = false;
-  const puts: unknown[] = [];
-  const container = await render(agent, {
-    listAgentSlackInstalls: async () => ({
-      routingEnabled: true,
-      installs: [
-        row(moved ? { availability: null, unavailable: "agent_slack_single_install" } : {}),
-        row({
-          connectionId: other,
-          slackTeamId: "T2",
-          slackTeamName: "Acme Support",
-          availability: moved
-            ? availability({ connectionId: other, slackTeamName: "Acme Support" })
-            : null,
-          unavailable: moved ? null : "agent_slack_single_install",
-        }),
-      ],
-    }),
-    putAgentSlackAvailability: async (...args: unknown[]) => {
-      puts.push(args);
-      moved = true;
-      return { agent, availability: availability({ connectionId: other }) };
-    },
-  });
-  const buttons = [...container.querySelectorAll("button")].filter(
-    (button) => button.textContent === "Move here",
-  );
-  expect(buttons).toHaveLength(1);
-  // It says what moving drops before anyone presses it.
-  expect(container.textContent).toContain(AGENT_SLACK_MOVE_RESETS);
-  await act(async () => buttons[0]!.click());
-  for (let index = 0; index < 3; index += 1) {
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
-  }
-  expect(puts).toEqual([[WORKSPACE_ID, agent.id, other, {}]]);
-  expect(container.textContent).toContain(
-    "For now an agent works in one Slack workspace, and it's in Acme Support.",
-  );
-});
-
-test("people who can't manage it see where it is, with no move", async () => {
-  const agent = makeAgent({
-    name: "Data team",
-    slack: [availability()],
-    viewer: { canEdit: false, canManageSlack: false, canOpenInSlack: false },
   });
   const container = await render(agent, {
     listAgentSlackInstalls: installs([
       row(),
       row({
-        connectionId: "cccccccc-cccc-4ccc-8ccc-000000000002",
+        connectionId: other,
+        slackTeamId: "T2",
         slackTeamName: "Acme Support",
-        availability: null,
-        unavailable: "agent_slack_single_install",
+        availability: availability({ connectionId: other, slackTeamName: "Acme Support" }),
       }),
     ]),
   });
+  expect(container.textContent).toContain("Slack · Acme");
+  expect(container.textContent).toContain("Slack · Acme Support");
+  expect(container.querySelectorAll("[data-agent-slack-handle]")).toHaveLength(2);
   expect(container.textContent).not.toContain("Move here");
+  expect(container.textContent).not.toContain("one Slack workspace");
 });

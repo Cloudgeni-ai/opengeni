@@ -98,7 +98,10 @@ export const AGENT_ERROR_CODES = [
   "agent_slack_name_invalid",
   /** Only shared (`workspace`) agents can be available in Slack. */
   "agent_slack_requires_workspace_visibility",
-  /** For now an agent is available in at most one Slack workspace. */
+  /**
+   * @deprecated Never returned: an agent is available in every linked Slack
+   * workspace at once. Kept so the exported type does not narrow within a major.
+   */
   "agent_slack_single_install",
   /**
    * Agents are available in every Slack workspace linked to their workspace;

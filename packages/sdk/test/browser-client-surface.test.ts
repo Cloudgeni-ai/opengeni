@@ -199,9 +199,13 @@ const pendingBillingAlertMethods = ["listBillingCreditNotifications"];
 // by SDK callers. Remove the entry when a browser consumer lands.
 const pendingAgentsMethods = ["listAgentRevisions"];
 
-// A shared agent is in every linked Slack workspace, so the web has no Slack
-// off switch; the method stays for existing callers and answers why.
-const alwaysAvailableAgentSlackMethods = ["deleteAgentSlackAvailability"];
+// A shared agent is in every linked Slack workspace, so the web neither places
+// it in one Slack workspace nor takes it out of one; the methods stay for
+// existing callers (put places it, delete answers why it cannot leave).
+const alwaysAvailableAgentSlackMethods = [
+  "deleteAgentSlackAvailability",
+  "putAgentSlackAvailability",
+];
 
 // The Agents page replaced the Bot templates and Slack agents screens, so the
 // web calls the /agents methods instead. The legacy methods stay on the SDK for

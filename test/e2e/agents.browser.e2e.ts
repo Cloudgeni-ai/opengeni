@@ -77,11 +77,10 @@ describe("agents in the browser", () => {
     await page.getByText("@Opengeni Release manager").waitFor();
     // There is no switch to make it available: it is, wherever it can be.
     expect(await page.getByRole("switch", { name: /^Available in/u }).count()).toBe(0);
-    await page
-      .getByText("For now an agent works in one Slack workspace, and it's in Acme.")
-      .first()
-      .waitFor();
-    await page.getByRole("button", { name: "Introduce" }).waitFor();
+    // It is in every linked Slack workspace at once, each with its own intros.
+    expect(await page.getByText("@Opengeni Release manager").count()).toBe(2);
+    expect(await page.getByText("one Slack workspace").count()).toBe(0);
+    expect(await page.getByRole("button", { name: "Introduce" }).count()).toBe(2);
     await page.close();
   }, 60_000);
 

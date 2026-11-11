@@ -612,8 +612,8 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     return parsed.data;
   }
 
-  // Change open use in one linked Slack workspace. While an agent is in one
-  // Slack workspace at a time, PUT on another linked one moves it there.
+  // Make a shared agent available in one linked Slack workspace now (it is
+  // anyway, on its own), or change open use, which is the agent's own.
   app.put(`${base}/:agentId/slack/:connectionId`, async (c) => {
     const context = await requestContext(c, "workspace:admin");
     const agent = await requireVisibleAgent(c, context);
@@ -665,8 +665,6 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (request.open === true && !agent.organizationAccess) {
       requireOrganizationAccessAdmin(context);
     }
-    // While an agent is in one Slack workspace at a time, choosing another
-    // one moves it there, in one step: if that fails, it stays where it was.
     const outcome = await putAgentSlackInstall(db, home, {
       agentId: agent.id,
       connectionId,
@@ -676,7 +674,6 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         ? { expectedVersion: request.expectedVersion }
         : {}),
       actorSubjectId: context.grant.subjectId,
-      moveFromOther: true,
     });
     if (outcome.kind === "not_found") throw notFound();
     if (outcome.kind === "requires_workspace_visibility") {
@@ -691,14 +688,6 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
         409,
         "agent_slack_name_taken",
         "Another agent in that Slack workspace already has this name. Rename this one first.",
-      );
-    }
-    if (outcome.kind === "single_install") {
-      throw agentError(
-        409,
-        "agent_slack_single_install",
-        "For now an agent is available in one Slack workspace, and this one is already in another.",
-        { connectionId: outcome.connectionId || null },
       );
     }
     if (outcome.kind === "version_conflict") {
@@ -751,6 +740,7 @@ export function registerAgentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const projection = await getSlackAgent(db, {
       accountId: context.home.accountId,
       agentId: agent.id,
+      connectionId,
     });
     if (
       !projection ||
