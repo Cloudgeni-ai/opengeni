@@ -20,8 +20,9 @@ import { MODULAR_PARITY_CASES, PARITY_SETTINGS } from "./modular-parity-cases";
  * Every locked case has goals on, so every case with a sandbox or Connected
  * Machine kept its bytes; a session with compute but without goals gets the
  * goal-free verification rule (compose.test.ts). Every case then gained the
- * one `agent_suggest` sentence (275 bytes, PROMPT_CHANGELOG.md), which these
- * cases render because they leave tool availability unknown.
+ * one `agent_suggest` sentence (275 bytes,
+ * prompt-changelog/2026-11-11-agent-suggest.md), which these cases render
+ * because they leave tool availability unknown.
  */
 const LOCKED: Record<string, string> = {
   "all/none": "31269:50f9d7e3108e8ff828e8b706d6853dec5bd725c443280cb18e022999a891b5e3",
