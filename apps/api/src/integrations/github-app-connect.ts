@@ -4,8 +4,12 @@ import { HTTPException } from "hono/http-exception";
 import type { ConnectAdvance, ConnectAttempt } from "@opengeni/contracts/connect";
 import {
   bindAuthorizedGitHubInstallationRepositories,
+  deleteGitHubInstallationBinding,
   finishConnectOperation,
   getConnectAttempt,
+  listConnectorActionPolicies,
+  listGitHubInstallationAccessForWorkspace,
+  upsertConnectorActionPolicies,
   type ConnectActorScope,
   type ConnectOperationAuthorization,
 } from "@opengeni/db";
@@ -27,6 +31,7 @@ import {
 import { githubConnectFailureHtml } from "../routes/github-browser-pages";
 import { connectOwnerStateFields } from "../connection-ownership";
 import { requestGitHubInstallationRepositorySync } from "../github-installation-sync";
+import { readGitHubInstallationForRepair } from "../github-access";
 
 const stateSchema = z.object({
   kind: z.literal("github_app_connect"),
@@ -85,6 +90,51 @@ export function githubAppConnectNavigation(
           redirectUri: `${integrationBaseUrl(deps.settings.publicBaseUrl, requestUrl)}/v1/github/oauth/callback`,
         });
   return { authorizationUrl: url, expiresAt: new Date(Date.now() + lifetimeMs).toISOString() };
+}
+
+/** The Connect account id of a linked installation, as a completed attempt names it. */
+const repairAccountIdPattern = /^github-installation:([1-9][0-9]{0,15})$/u;
+
+/**
+ * Repair of one linked installation starts at its own fix instead of the
+ * account chooser: one uninstalled on GitHub goes straight to installing the
+ * app again; any other goes straight to its owner's sign-in for that
+ * installation.
+ */
+export async function githubAppRepairNavigation(
+  deps: ApiRouteDeps,
+  scope: GitHubConnectScope,
+  attemptId: string,
+  requestUrl: string,
+  reconnectAccountId: string,
+) {
+  const installationId = Number(repairAccountIdPattern.exec(reconnectAccountId)?.[1]);
+  if (!Number.isSafeInteger(installationId))
+    throw new HTTPException(422, { message: "Repair names a linked GitHub installation" });
+  const repair = await readGitHubInstallationForRepair(deps, scope.workspaceId, installationId);
+  if (!repair)
+    throw new HTTPException(409, {
+      message: "This GitHub installation is no longer linked to the workspace",
+    });
+  // Gone on GitHub: install the app again. Unknown (GitHub didn't answer):
+  // the account chooser covers both a reinstall and an owner sign-in.
+  // Otherwise: that installation's owner sign-in.
+  const navigation =
+    repair.live === null
+      ? githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "install")
+      : repair.live === undefined
+        ? githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "discover")
+        : githubAppConnectNavigation(deps, scope, attemptId, requestUrl, "bind", installationId);
+  return {
+    ...navigation,
+    account: {
+      id: reconnectAccountId,
+      providerId: "github-app",
+      label: repair.stored.accountLogin ?? `GitHub installation ${installationId}`,
+      ownership: "workspace" as const,
+      status: "auth_needed" as const,
+    },
+  };
 }
 
 export function prepareGitHubAppConnectAction(
@@ -336,6 +386,54 @@ export async function completeGitHubAppConnect(
               eventRouteSecret: eventRouteSecret(deps.settings),
             });
             if (!bound) throw new Error("GitHub binding proof already consumed");
+            // A repair that installed the app again replaces the binding it
+            // repaired: GitHub keeps one installation of an App per account.
+            const repaired = Number(repairAccountIdPattern.exec(current.account?.id ?? "")?.[1]);
+            if (Number.isSafeInteger(repaired) && repaired !== installationId) {
+              const previous = (
+                await listGitHubInstallationAccessForWorkspace(tx, state.workspaceId)
+              ).find((binding) => binding.installationId === repaired);
+              if (previous && previous.githubAccountId === proof.installation.accountId) {
+                // The approvals chosen for it carry over to the new
+                // installation, never over a choice already made there.
+                const from = `github-app:${repaired}`;
+                const to = `github-app:${installationId}`;
+                const existing = await listConnectorActionPolicies(tx, {
+                  accountId: state.accountId,
+                  workspaceId: state.workspaceId,
+                  connectionIds: [from, to],
+                });
+                const scope = (policy: (typeof existing)[number]) =>
+                  JSON.stringify([policy.serverId, policy.toolName, policy.actionName]);
+                const chosen = new Set(
+                  existing.filter((policy) => policy.connectionId === to).map(scope),
+                );
+                const policies = existing.filter(
+                  (policy) => policy.connectionId === from && !chosen.has(scope(policy)),
+                );
+                for (let offset = 0; offset < policies.length; offset += 128)
+                  await upsertConnectorActionPolicies(
+                    tx,
+                    policies.slice(offset, offset + 128).map((policy) => ({
+                      accountId: state.accountId,
+                      workspaceId: state.workspaceId,
+                      subjectId: state.subjectId,
+                      connectionId: to,
+                      serverId: policy.serverId,
+                      toolName: policy.toolName,
+                      actionName: policy.actionName,
+                      policy: policy.policy,
+                    })),
+                  );
+                await deleteGitHubInstallationBinding(tx, {
+                  accountId: state.accountId,
+                  workspaceId: state.workspaceId,
+                  installationId: repaired,
+                  eventRouteSecret: eventRouteSecret(deps.settings),
+                  audit: { subjectId: state.subjectId, source: "app", principalKind: null },
+                });
+              }
+            }
             boundInstallationId = installationId;
             return {
               ...current,

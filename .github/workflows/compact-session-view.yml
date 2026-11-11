@@ -23,7 +23,7 @@ concurrency:
 jobs:
   browser:
     name: Compact session view browser regression
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

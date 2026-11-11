@@ -22,6 +22,7 @@ import {
   environmentsEncryptionKeyBytes,
   findIntegrationsOauthClient,
   parseIntegrationsOauthClientsJson,
+  parseSocialOauthClientsJson,
   type Settings,
 } from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
@@ -2478,12 +2479,15 @@ const SOCIAL_PROVIDER_TOOL_NAMES = {
  * operator's own and carry no known brand.
  */
 export function builtInConnectorCatalogItems(input: {
-  settings: Parameters<typeof excelAddin>[0];
+  settings: Parameters<typeof excelAddin>[0] & { socialOauthClientsJson?: string | undefined };
   socialConnections: SocialConnection[];
   workspaceConnections: ConnectionMetadata[];
 }): CapabilityCatalogItem[] {
   return [
-    ...providerIntegrationCatalogItems(input.socialConnections),
+    ...providerIntegrationCatalogItems(
+      input.socialConnections,
+      socialOAuthClientConfigured(input.settings),
+    ),
     fikenCatalogItem(input.workspaceConnections.filter(isFikenConnection)),
     onePasswordCatalogItem(input.workspaceConnections.filter(isOnePasswordConnection)),
     excelAddinCatalogItem(excelAddin(input.settings)),
@@ -2669,12 +2673,31 @@ export function excelAddinCatalogItem(addin: ExcelAddin): CapabilityCatalogItem 
   });
 }
 
+/**
+ * X and Reddit connect through Opengeni's own OAuth client, which the operator
+ * registers in `OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON`. Without it the OAuth
+ * start fails with 503, so the catalog says so instead of offering a Connect.
+ */
+function socialOAuthClientConfigured(settings: {
+  socialOauthClientsJson?: string | undefined;
+}): (provider: SocialProviderIntegrationDefinition["provider"]) => boolean {
+  let configured: ReturnType<typeof parseSocialOauthClientsJson> = {};
+  try {
+    configured = parseSocialOauthClientsJson(settings.socialOauthClientsJson);
+  } catch {
+    // Startup validates this setting; a malformed value can configure nothing.
+  }
+  return (provider) => configured[provider] !== undefined;
+}
+
 function providerIntegrationCatalogItems(
   socialConnections: SocialConnection[],
+  oauthClientConfigured: (provider: SocialProviderIntegrationDefinition["provider"]) => boolean,
 ): CapabilityCatalogItem[] {
   return SOCIAL_PROVIDER_INTEGRATIONS.map((definition) => {
     const counts = socialConnectionCounts(socialConnections, definition.provider);
     const enabled = counts.connected + counts.needsReauth > 0;
+    const clientConfigured = oauthClientConfigured(definition.provider);
     return CapabilityCatalogItem.parse({
       id: `api:${definition.provider}`,
       kind: "api",
@@ -2692,8 +2715,13 @@ function providerIntegrationCatalogItems(
       runtime: {
         available: true,
         mcpServerId: "opengeni",
+        operatorOAuthClient: { configured: clientConfigured },
+        // Existing accounts keep their status note; the setup note is for a
+        // provider nobody here has connected yet.
         notes:
-          "Opengeni's social provider adapter routes every call through an exact visible account Connection.",
+          clientConfigured || counts.total > 0
+            ? "Opengeni's social provider adapter routes every call through an exact visible account Connection."
+            : "New connections are unavailable until this deployment registers an OAuth client with the provider.",
       },
       enabled,
       enabledReason: socialConnectionSummary(counts),
@@ -2847,6 +2875,8 @@ export function nativeConnectionCapabilityRecommendations(
     connectedMachines?: boolean;
     /** Personal GitHub OAuth is enabled: offer the person's own GitHub identity. */
     personalGitHub?: boolean;
+    /** All my repositories is offered: the person may allow all their repositories. */
+    personalGitHubAllRepositories?: boolean;
     browserExtension?: BrowserExtension;
     /** Reviewed API integration definitions this deployment can connect here. */
     integrationDefinitions?: readonly IntegrationDefinition[];
@@ -2899,8 +2929,7 @@ export function nativeConnectionCapabilityRecommendations(
         kind: "api",
         source: "built_in",
         name: "Your GitHub",
-        description:
-          "The person's own GitHub account: commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose. Use for 'connect my GitHub', 'use my account' or 'do it as me'.",
+        description: `The person's own GitHub account: commits, branches, pull requests and reviews appear under their name, only in chats they start, on repositories they choose${options.personalGitHubAllRepositories ? " or all of theirs" : ""}. Use for 'connect my GitHub', 'use my account' or 'do it as me'.`,
         category: "source-control",
         tags: [
           "github",

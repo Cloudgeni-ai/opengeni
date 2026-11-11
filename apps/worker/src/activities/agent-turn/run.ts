@@ -227,11 +227,11 @@ export function sessionTitleXaiRequestContext(
   context: XaiSubscriptionRequestContext,
   nextRequestId: () => string,
   /**
-   * On the shared core: the turn's dispatch fence, the title custody lane and
-   * the title lane's bearer (which never moves the main lane's refusal fence).
+   * On the shared core: the turn's request admission (its reservation is the
+   * dispatch fence), the title custody lane and the title lane's bearer (which never moves the main lane's refusal fence).
    */
   core?: {
-    assertDispatch: () => Promise<void>;
+    admit: (reserve: () => Promise<unknown>) => Promise<void>;
     requests: CoreSubscriptionRequests;
     getToken: XaiSubscriptionRequestContext["getToken"];
     refresh: XaiSubscriptionRequestContext["refresh"];
@@ -253,8 +253,7 @@ export function sessionTitleXaiRequestContext(
     ...(core
       ? {
           beforeProviderDispatch: async (request) => {
-            await core.assertDispatch();
-            await core.requests.reserve(request);
+            await core.admit(() => core.requests.reserve(request));
           },
           onProviderRequestSettled: core.requests.observe,
         }
@@ -2289,6 +2288,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnTools,
               generateSessionTitleInParallel,
               sessionTitlePrompt: sessionTitlePromptFor(session.initialMessage, turn.prompt),
+              sessionTitleInstructions: session.agent?.titleInstructions,
               compactSummarizer,
               settleDeferredSteerAfterCompaction,
               compactionModelHistoryProjector,

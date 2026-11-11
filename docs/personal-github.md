@@ -106,7 +106,13 @@ and `capability_catalog_search` offers `api:github-personal` (**Your GitHub**)
 next to `api:github-app`. Its in-chat card connects the person's account and
 then links to the repository chooser. Requests such as "connect my GitHub" or
 "do it as me" map to the personal identity; "install the GitHub app" or "give
-Opengeni access to the org" map to the App. The repositories prompt lists each
+Opengeni access to the org" map to the App. Its `personal.repositoryCount` is
+the person's chosen list, and
+`personal.allRepositories` (`{ enabled, access }`, null when unknown) reports
+the All my repositories mode, so the agent knows any repository the person can
+reach is usable up to that access without choosing it first. The mode reads as
+off while `OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED` is off. The
+repositories prompt lists each
 mounted GitHub repository's identity (as the person, with their login when
 known, or as the workspace's GitHub app). In a managed sandbox it says that git and `gh`
 act as the person on personal repositories, through the
@@ -274,6 +280,27 @@ and freezes the connection generation, selection generation, per-row
 generation, canonical URI, ref, and access into the accepted turn or task.
 Credential bindings remain selectors, never grants. Missing, stale, mixed-
 account, or widened authority fails closed.
+
+A session or scheduled task that an agent creates from its own turn
+(`session_create`, `scheduled_tasks_create`, `scheduled_tasks_update`) may name
+a personal repository with only `uri`, `ref` and
+`connectionType: "github_personal"`. The server resolves the rest from the
+calling turn's frozen Your GitHub delegation
+(`resolveAgentPersonalGitHubRepositoryResources` in
+`packages/core/src/domain/agent-personal-github-resources.ts`): the same owner,
+connection and credential binding, the repository ID looked up as the person,
+and access capped by `checkPersonalGitHubRepositoryAccess`, so the chosen list
+and All my repositories mode both work. Without `access` it takes the most the
+turn holds (write only when the same check allows write now). A partly
+specified resource is completed the same way; a `credentialBindingId` or
+`repositoryId` it carries must match the turn's binding and the repository, and
+GitHub App fields are dropped. The GitHub lookup in All my repositories is the
+calling attempt's own accepted use of the person's connection, fenced like the
+Git broker; GitHub refusing the token asks the person to reconnect. A repository outside the delegation, more access than the turn
+holds, a repository a person removed from the calling chat, or a turn without
+Your GitHub access is refused with a message naming the cause. The child then
+inherits the connection use through durable propagation; it never receives
+another person's connection or more than the parent turn holds.
 
 Managed sandboxes consume this authority through Opengeni's dedicated personal
 GitHub smart-HTTP broker. The worker mints a five-minute encrypted bearer bound
@@ -454,6 +481,8 @@ and agent-created child sessions keep the already-approved personal identity
 without asking the user to reconnect on every turn. It does not broaden access:
 the child must request an exact subset of the parent's personal GitHub
 repositories and may narrow write access to read, never widen read to write.
+The ref is only the branch to check out, not authority, so a child may check
+out another ref of a repository the parent holds.
 `once` grants stop at their accepted work; `session` grants remain within the
 same session; `always` grants may cross to causally linked child/goal work. The
 frozen connection and selection generations travel with the work, and every

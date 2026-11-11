@@ -254,6 +254,14 @@ describe("Teams actor and transport boundary", () => {
       'The news: "FrontierCode v1.1 replaces DeepSWE v1.1".',
     ]);
   });
+  test("a reply shows source links without hosted-search tracking", () => {
+    const parts = teamsReplyParts(
+      "Rule 4-1 applies ([example.com](https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai)) and [the video](https://example.com/watch?v=abc&utm_source=openai).",
+    );
+    expect(parts.join("")).toContain("(https://example.com/rules/4-1)");
+    expect(parts.join("")).toContain("(https://example.com/watch?v=abc)");
+    expect(parts.join("")).not.toContain("utm_source");
+  });
 });
 
 test.each(["https://login.microsoftonline.com/example/v2.0", "https://api.botframework.com"])(

@@ -1,5 +1,94 @@
 # Modular prompt changelog
 
+The "Repository skills" system-prompt section no longer changes between turns
+of one chat. It used to carry the live index (or an unreachable, degraded or
+deferred notice), so a repository Skill added mid-chat, an offline Connected
+Machine or a deferred turn rewrote the system prompt, which broke prompt caching
+and made Claude reject replayed signed thinking. The section is now one stable
+notice built only from the search folders; the index is a durable "Repository
+skills" developer history item, written only when it changes. Sessions with
+repository skill folders always get the notice: 1,185 characters with the two
+default folders (before: 472 for the deferred notice, about 820 plus the listing when indexed,
+and nothing for a workspace without skills, which now gets a short "No
+repository skills were found" history item instead). The one-shot request for a
+missing session title moves from the first request's system prompt into that
+turn's operational notice.
+
+```text
+- ## Repository skills / Repository skills are instructions already present in the live workspace. Read them with repository_skill_read using the exact repository: id below. … ### Available repository skills … ### How to use repository skills …   (indexed)
+- ## Repository skills / Repository skills are not listed here: the repository may not be ready until a tool first uses the workspace. If the task involves the repository, look for skill folders in {folders} …   (deferred)
+- ## Repository skills / Repository skills could not be indexed because the workspace was unreachable when this run started …   (unreachable; degraded similar)
++ ## Repository skills
++ Repository skills are instructions already present in the live workspace, in skill folders under {folders} (paths from the workspace root). A skill's identifier is repository: followed by its SKILL.md path, such as repository:{first folder}/<folder>/SKILL.md. Read skills with repository_skill_read, which returns current live files; ordinary filesystem tools execute referenced scripts and read binary assets. Configured Skills use their separate skill_read index.
++ Once the workspace has been indexed, its index appears in the conversation as a Repository skills context message; the latest one replaces earlier ones. If there is none, or it may be out of date, and the task involves the repository, look in those folders yourself.
++ (the four "How to use" bullets, unchanged)
++ history item: <opengeni_repository_skills> This is the Repository skills index from the last time the live workspace was indexed, and it replaces earlier ones. Files may have changed since. {listing, or the unreachable/degraded/no-skills notice} </opengeni_repository_skills>
+- repository_skill_read: … Use the exact repository: identifier from the Repository skills index. …   (indexed)
+- repository_skill_read: … Name a skill as repository: followed by its SKILL.md path from the workspace root, for a skill folder in one of the folders the Repository skills section lists. …   (deferred)
++ repository_skill_read: … Name a skill by its exact repository: identifier, which is repository: followed by its SKILL.md path from the workspace root. …   (all modes)
+- system prompt (first request only): … This session still needs a semantic display title. …
++ turn operational notice: … This session still needs a semantic display title. …   (same text)
+```
+
+Integration discovery now reports an enabled connection-backed MCP excluded by
+the chat's tool selection as unavailable, rather than treating the absent turn
+account binding as a reason to connect. The catalog result explains the chat
+selection and does not offer a Connect card. Consequently `tool_search` no longer
+adds "Not connected yet" for that result on native or generic routes. No system
+or developer prompt bytes, tool schemas, historical messages, catalog authority,
+or account bindings change; only new discovery results change. An account truly
+missing from an included connector retains its setup path.
+
+An agent can change who can see an existing Site through the artifactId and
+visibility path `sandbox_file_publish` already offers for files, instead of
+publishing a copy to share it. Its description names Sites only for a grant
+that may publish them (`artifacts:publish`): +8 bytes, " or Site". No prompt
+module or Skill changes.
+
+```text
+- … To change who can open an existing file, such as a generated image, pass its artifactId and visibility instead of path. …
++ … To change who can open an existing file or Site, such as a generated image, pass its artifactId and visibility instead of path. …   (with artifacts:publish)
+```
+
+Agents can start workers as the person on GitHub, and know when the person
+allowed all their repositories. No prompt module changes; three tool texts
+change. `session_create`'s `resources` description gains one sentence
+(136 bytes) only when personal GitHub OAuth is enabled, because the server now
+resolves a personal repository named by `uri`, `ref` and `connectionType` from
+the calling turn's Your GitHub access; other deployments keep their bytes.
+Only where All my repositories is offered
+(`OPENGENI_GITHUB_PERSONAL_ALL_REPOSITORIES_ENABLED`), `github_connect_link`'s
+personal-OAuth description grows 188 bytes to name the new
+`personal.allRepositories` field and what it allows, and its shared identity
+guidance, also used by the `api:github-personal` catalog description, grows
+17 bytes so it no longer implies the person must choose each repository.
+Deployments without that mode keep both texts byte for byte.
+
+```text
+- … An empty array inherits no resources.
++ … An empty array inherits no resources. For a repository as the person, give uri, ref and connectionType "github_personal"; the rest comes from this turn's Your GitHub access.   (personal GitHub OAuth on)
+- The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl …
++ The personal field covers the person's own account: connected, login, repositoryCount (their chosen list) and allRepositories, or connectUrl … When allRepositories.enabled, any repository the person can reach on GitHub is usable as them up to allRepositories.access, without choosing it first.   (All my repositories offered)
+- … only in chats they start, on repositories they choose.
++ … only in chats they start, on repositories they choose or all of theirs.   (All my repositories offered)
+```
+
+Codemode's programmatic directive grows by 261 UTF-8 bytes (2,368 to 2,629),
+only where an attempt-scoped Codemode bearer is available. Its polling advice
+now explicitly applies within the live attempt: background processes retain
+their launching credentials, so delayed checks should wake the session and
+start a fresh command rather than reuse a sleeping script after the turn ends.
+Sessions without Codemode keep their prompt bytes. This is a static directive
+change; it introduces no per-request state, token renewal, history rewrite or
+automatic tool replay. The existing receipt/unknown-outcome guidance remains.
+
+The API's `agent_attempt_caller_stale` refusal now explains that the process's
+turn attempt is no longer active, says to stop retrying that process and start
+a fresh command in the current live turn, and warns to check receipts or actual
+state before resubmitting a possibly executed call. Its 403 status, typed
+reason and non-retryable outcome are unchanged; other authority failures keep
+their existing message. Clients already display the server's error message.
+
 A configured session without a sandbox or Connected Machine no longer gets
 text it cannot act on: editing files in the sandbox, publishing new files,
 workspace file links, sandbox paths, background-command acknowledgement and

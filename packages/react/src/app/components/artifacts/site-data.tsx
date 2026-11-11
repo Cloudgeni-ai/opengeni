@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ChatClient } from "@opengeni/sdk";
 import { DatabaseIcon, DownloadIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 import { toast } from "../../lib/toast";
+import { saveBlob } from "../../lib/save-blob";
 import type {
   SiteDataCollectionResponse,
   SiteDataDescribeResponse,
@@ -384,16 +385,12 @@ function SiteDataCollection({
       const exported = await client.exportSiteData(workspaceId, siteId, collection.name, {
         format,
       });
-      const url = URL.createObjectURL(
+      saveBlob(
         new Blob([exported.content], {
           type: format === "csv" ? "text/csv" : "application/json",
         }),
+        `${collection.name}.${format}`,
       );
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `${collection.name}.${format}`;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 0);
       if (exported.truncated)
         toast.warning("Exported the first 10,000 records", {
           description: "Ask Opengeni to export the rest in parts.",

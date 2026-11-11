@@ -6368,6 +6368,23 @@ describe("runtime event normalization", () => {
     expect(staticInstructions(off.instructions)).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
   });
 
+  test("Codemode guidance keeps delayed polling inside its credential lifetime", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("intermediate data within the live attempt");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Background commands keep the launching attempt's credentials; a new turn does not renew those processes.",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Do not leave a sleeping script or polling loop to make Codemode calls after ending your turn.",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "For a later recheck, let the session wake, then launch a fresh command.",
+    );
+    // It does not advise replaying a possibly committed operation.
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "Observation failure or outcome_unknown does not prove execution failed",
+    );
+  });
+
   test("no token minted for the turn omits the directive", () => {
     const agent = buildOpenGeniAgent(testSettings(codemodeOn), []);
     expect(staticInstructions(agent.instructions)).not.toContain(CODEMODE_PROGRAMMATIC_DIRECTIVE);
@@ -7884,7 +7901,8 @@ describe("runtime event normalization", () => {
       ),
     ).rejects.toThrow("Sandbox could not receive the Git broker credential");
 
-    expect(created).toHaveLength(2);
+    // Three seed attempts (an unknown outcome is retried) plus the gh kit.
+    expect(created).toHaveLength(4);
     expect(deleted.toSorted()).toEqual(created.toSorted());
   });
 

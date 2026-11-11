@@ -1485,6 +1485,7 @@ export const englishMessages = {
   "connectionTypePicker.connectionType": "Connection type",
   "connectionTypePicker.mcpServer": "MCP server",
   "connectPanel.authorizeConnection": "Authorize connection",
+  "connectPanel.backToConnections": "Back to connections",
   "connectPanel.connections": "Connections",
   "connectPanel.continueToServicename": "Continue to {serviceName}",
   "connectPanel.customConnection": "Custom connection",
@@ -1621,7 +1622,11 @@ export const englishMessages = {
     "{workspace} doesn't offer this shortcut's model.",
   "desktopDictation.host.needsCredits": "Voice input needs credits. Your speech is saved.",
   "desktopDictation.host.notAllowed": "Voice input isn't allowed in this workspace.",
+  "desktopDictation.host.notInRegion":
+    "This model isn't available in your workspace's region. Your speech is saved.",
   "desktopDictation.host.notSaved": "The audio couldn't be saved. Try again.",
+  "desktopDictation.host.serviceOutOfCredit":
+    "The speech service is out of credit. Your speech is saved.",
   "desktopDictation.host.stopped": "Dictation stopped. Try again.",
   "desktopDictation.host.tooLong": "Too long to transcribe. Try a shorter one.",
   "desktopDictation.host.transcriptionFailed": "Transcription failed. Your speech is saved.",
@@ -2142,44 +2147,40 @@ export const englishMessages = {
   "lib.format.capacityRecoveryExhausted":
     "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
   "lib.format.composerApiCreditsRequired":
-    "API usage uses credits, not your plan credit. Add credits to continue. Your message and attachments are saved.",
+    "API usage uses credits, not your plan credit. Add credits to continue.",
   "lib.format.composerApiCreditsRequiredAskOwner":
-    "API usage uses credits, not your plan credit. Ask an organization owner to add credits. Your message and attachments are saved.",
-  "lib.format.composerByokPaidCreditRequired":
-    "Add credits to use your own key. Your message and attachments are saved.",
+    "API usage uses credits, not your plan credit. Ask an organization owner to add credits.",
+  "lib.format.composerByokPaidCreditRequired": "Add credits to use your own key.",
   "lib.format.composerByokPaidCreditRequiredAskOwner":
-    "Ask an organization owner to add credits to use your own key. Your message and attachments are saved.",
-  "lib.format.composerByokUpgradeRequired":
-    "Upgrade to Pro to use your own key. Your message and attachments are saved.",
+    "Ask an organization owner to add credits to use your own key.",
+  "lib.format.composerByokUpgradeRequired": "Upgrade to Pro to use your own key.",
   "lib.format.composerByokUpgradeRequiredAskOwner":
-    "Ask an organization owner to upgrade to Pro to use your own key. Your message and attachments are saved.",
-  "lib.format.composerSubscriptionUpgradeRequired":
-    "Upgrade to Pro to use your own subscription. Your message and attachments are saved.",
+    "Ask an organization owner to upgrade to Pro to use your own key.",
+  "lib.format.composerSubscriptionUpgradeRequired": "Upgrade to Pro to use your own subscription.",
   "lib.format.composerSubscriptionUpgradeRequiredAskOwner":
-    "Ask an organization owner to upgrade to Pro to use your own subscription. Your message and attachments are saved.",
+    "Ask an organization owner to upgrade to Pro to use your own subscription.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
   "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "lib.format.minutes": "{count}m",
   "lib.format.accountUnavailable":
-    "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.",
+    "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your message.",
   "lib.format.modelUnavailable":
-    "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
-  "lib.format.newChatModelUnavailable":
-    "This model isn't available to you. Choose another model. Your message is saved.",
+    "This chat's model is no longer available. Choose another model to continue.",
+  "lib.format.newChatModelUnavailable": "This model isn't available to you. Choose another model.",
   "lib.format.modelPolicyCredits":
-    "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key. Your message is saved.",
+    "This model uses credits, which are off in this workspace. Choose a model paid by a subscription or API key.",
   "lib.format.modelPolicyRefused":
-    "This workspace's model policy doesn't allow this model. Choose another model. Your message is saved.",
+    "This workspace's model policy doesn't allow this model. Choose another model.",
   "lib.format.repositoryUnavailable":
-    "{repository} is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry. Your message is saved.",
+    "{repository} is no longer available to this workspace. Remove the repository from this chat, or restore its GitHub access, then retry.",
   "lib.format.repositoriesUnavailable":
-    "These repositories are no longer available to this workspace: {repositories}. Remove them from this chat, or restore their GitHub access, then retry. Your message is saved.",
+    "These repositories are no longer available to this workspace: {repositories}. Remove them from this chat, or restore their GitHub access, then retry.",
   "lib.format.someRepositoryUnavailable":
-    "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry. Your message is saved.",
+    "A repository in this chat is no longer available to this workspace. Remove it from this chat, or restore its GitHub access, then retry.",
   "lib.format.now": "now",
   "lib.format.speedUnavailable":
-    "This model can't run at the selected speed. Choose another speed. Your message is saved.",
+    "This model can't run at the selected speed. Choose another speed.",
   "lib.format.outOfCreditsThisWorkspace":
     "There aren't enough credits for this model. Add credits, or choose another model. The conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
@@ -2187,8 +2188,7 @@ export const englishMessages = {
   "lib.format.reconcileBeforeRetry":
     "This client cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
   "lib.format.seconds": "{count}s",
-  "lib.format.sessionUsageLimitReached":
-    "This task's usage limit is reached. Your message is saved.",
+  "lib.format.sessionUsageLimitReached": "This task's usage limit is reached.",
   "lib.format.subscriptionUpgradeRequired":
     "Upgrade to Pro to use your own subscription. The conversation is preserved.",
   "lib.format.subscriptionUpgradeRequiredAskOwner":
@@ -2201,20 +2201,16 @@ export const englishMessages = {
   "lib.format.theServiceEncounteredADatabase": "The service encountered a database error.",
   "lib.format.thisClientCannotResumeThe":
     "This client cannot resume the workspace. Ask your administrator for a control-capable client.",
-  "lib.format.thisSiteSAssistantCan":
-    "This Site's assistant can't do that for you. Your message is saved.",
-  "lib.format.thisSiteSAssistantHas":
-    "This Site's assistant has reached its usage limit for now. Your message is saved.",
-  "lib.format.thisSiteSAssistantIs":
-    "This Site's assistant is busy. Try again in a moment. Your message is saved.",
-  "lib.format.thisSiteSAssistantIs2":
-    "This Site's assistant is paused for visitors right now. Your message is saved.",
+  "lib.format.thisSiteSAssistantCan": "This Site's assistant can't do that for you.",
+  "lib.format.thisSiteSAssistantHas": "This Site's assistant has reached its usage limit for now.",
+  "lib.format.thisSiteSAssistantIs": "This Site's assistant is busy. Try again in a moment.",
+  "lib.format.thisSiteSAssistantIs2": "This Site's assistant is paused for visitors right now.",
   "lib.format.usageLimitReachedAWorkspace":
     "Usage limit reached. A workspace admin can raise this limit. Your draft is preserved.",
   "lib.format.workspaceUsageLimitReachedAn":
     "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.",
   "lib.format.yourOrganizationDoesnTHave":
-    "There aren't enough credits for this model. Add credits, or choose another model. Your message and attachments are saved.",
+    "There aren't enough credits for this model. Add credits, or choose another model.",
   "lib.providerRecovery.anImageFromEarlierIn":
     "An image from earlier in this conversation can't be read from storage",
   "lib.providerRecovery.opengeniToolServiceUnavailable":
@@ -3401,6 +3397,7 @@ export const englishMessages = {
   "messageTimeline.workerPaused": "Worker paused",
   "messageTimeline.workerReportedBack": "Worker reported back",
   "messageTimeline.workResumed": "work resumed",
+  "messageTimeline.attemptFailedRetried": "Attempt failed · retried",
   "messageTimeline.youAnswered": "You answered",
   "messageTimeline.youLetTheAgentDecide": "You let the agent decide",
   "modelPicker.codexOnlySession": "Codex-only session",
@@ -3726,6 +3723,12 @@ export const englishMessages = {
   "native.realtime.callView.reconnecting": "Reconnecting…",
   "native.realtime.callView.speaker": "Speaker",
   "native.realtime.callView.unmute": "Unmute",
+  /** Android 14+: asking the person to let agents' calls ring over the lock screen. */
+  "native.realtime.fullScreenRings.message":
+    "Android shows agents' calls only as a notification until you allow full-screen notifications for this app. Allow them so a call rings over the lock screen like a phone call.",
+  "native.realtime.fullScreenRings.notNow": "Not now",
+  "native.realtime.fullScreenRings.openSettings": "Open settings",
+  "native.realtime.fullScreenRings.title": "Let calls ring full screen",
   "native.realtime.nativeCall.couldNotStartTheCall": "Could not start the call.",
   "native.realtime.nativeCall.noInputAudio":
     "Your microphone isn't picking up any sound. Check that no other app is using it.",
@@ -3986,6 +3989,7 @@ export const englishMessages = {
   "native.timeline.sessionScreen.removeName": "Remove {name}",
   "native.timeline.sessionScreen.retryName": "Retry {name}",
   "native.timeline.sessionScreen.tapToRetrySuffix": " · tap to retry",
+  "native.timeline.sessionScreen.uploadingNamePercent": "{name}, uploading, {percent}%",
   "native.timeline.sessionSignals.doneWhen": "DONE WHEN",
   "native.timeline.sessionSignals.evidence": "EVIDENCE",
   "native.timeline.sessionSignals.noCommandsAreRunning": "No commands are running.",
@@ -4148,7 +4152,7 @@ export const englishMessages = {
   "providerRecoveryNotice.theTurnContinuesAutomaticallyOnceItsBack":
     "The turn continues automatically as soon as it's back.",
   "providerRecoveryNotice.yourMessageIsSavedOpengeni":
-    "Your message is saved. {product} keeps retrying automatically for a few minutes.",
+    "{product} keeps retrying automatically for a few minutes.",
   "queueItemContent.contentUnavailable": "Content unavailable",
   "queuePresentationModel.contentOmittedAtSafeBoundary":
     "Content omitted at safe boundary · ref {reference}",
@@ -5294,7 +5298,7 @@ export const englishMessages = {
   "timeline.activityRail.preference": "Preference",
   "timeline.activityRail.procedure": "Procedure",
   "timeline.activityRail.savedToMemory": "Saved to memory",
-  "timeline.activityRail.unableToStartYetYour": "Unable to start yet. Your messages are saved.",
+  "timeline.activityRail.unableToStartYetYour": "Unable to start yet.",
   "timeline.activityRail.updatedInPlace": "Updated in place.",
   "timeline.activityRail.updatedMemory": "Updated memory",
   "timeline.activityRail.viewInMemory": "View in memory",
@@ -5823,8 +5827,7 @@ export const englishMessages = {
     "Start confirmation is unavailable.",
   "timeline.startupDispatchDetails.theStartRequestWasAccepted":
     "The start request was accepted; a worker has not started the turn yet.",
-  "timeline.startupDispatchDetails.yourMessagesAreSavedNo":
-    "Your messages are saved. No agent turn is running yet.",
+  "timeline.startupDispatchDetails.yourMessagesAreSavedNo": "No agent turn is running yet.",
   "timeline.startupTimings.conversationHistory": "Conversation history",
   "timeline.startupTimings.duration": "Duration",
   "timeline.startupTimings.eachTurnHasItsOwn":
@@ -6310,6 +6313,7 @@ export const englishMessages = {
   "timeline.turnSummary.contextCompactedExpandForDetails": "Context compacted; expand for details",
   "timeline.turnSummary.copyTurn": "Copy turn",
   "timeline.turnSummary.interrupted": "· interrupted",
+  "timeline.turnSummary.failed": "Failed",
   "timeline.turnSummary.paused": "Paused",
   "timeline.turnSummary.preparation": "Preparation",
   "timeline.turnSummary.steps": "Steps",

@@ -9,6 +9,7 @@ import { ComputerInteractionController } from "@opengeni/interaction";
 import {
   ComputerDriver,
   ComputerBackendError,
+  ComputerHelperStoppedError,
   type ComputerBackendCaptureOptions,
   type ComputerBackend,
   type ComputerBackendActionCommand,
@@ -90,6 +91,55 @@ describe("ComputerDriver", () => {
     expect(await outcome).toMatchObject({ code: "controller_lost" });
     expect(transport.closed).toBe(true);
     expect(replacements).toBe(0);
+  });
+
+  test("replaces a helper that stopped, for reads, checks and actions alike", async () => {
+    const stopped = new FixtureNativeTransport();
+    stopped.targetsError = new ComputerHelperStoppedError("the worker stopped before list");
+    stopped.validateError = new ComputerHelperStoppedError("the worker stopped before check");
+    stopped.dispatchError = new ComputerHelperStoppedError("the worker stopped before click");
+    const replacements: FixtureNativeTransport[] = [];
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: stopped,
+      clientFactory: async () => {
+        const replacement = new FixtureNativeTransport();
+        replacements.push(replacement);
+        return replacement;
+      },
+    });
+
+    // A read is answered by a fresh helper.
+    expect(await driver.listTargets()).toHaveLength(1);
+    expect(stopped.closed).toBe(true);
+    expect(replacements).toHaveLength(1);
+
+    // So is a check before an action.
+    replacements[0]!.validateError = new ComputerHelperStoppedError("the worker stopped");
+    await driver.validate(command());
+    expect(replacements).toHaveLength(2);
+    expect(replacements[1]!.validated).not.toBeNull();
+
+    // An action that never reached the stopped helper did nothing: it fails
+    // plainly and retryably, and the next call uses a fresh helper.
+    replacements[1]!.dispatchError = new ComputerHelperStoppedError("the worker stopped");
+    const failure = await driver.dispatch(command()).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({
+      code: "resource_unavailable",
+      retryable: true,
+      message:
+        "The computer helper had stopped, so nothing was done. It has been restarted: observe the screen again, then retry.",
+    });
+    expect(failure).not.toBeInstanceOf(ComputerHelperStoppedError);
+    expect(replacements).toHaveLength(3);
+    expect(replacements[1]!.closed).toBe(true);
+    expect(await driver.dispatch(command())).not.toBeNull();
+    expect(replacements[2]!.dispatched).not.toBeNull();
+    await driver.close();
   });
 
   test("rejects continuation before native delivery unless the active helper advertised support", async () => {

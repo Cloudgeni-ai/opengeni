@@ -274,6 +274,41 @@ test("composer chips show restored images as pictures from the server, with no l
   expect(removed).toEqual([0]);
 });
 
+test("composer chips show a video's upload progress, then its length", async () => {
+  const source = fileSource();
+  const video: NativeAttachment = {
+    id: "clip-1",
+    name: "IMG_0042.MOV",
+    contentType: "video/quicktime",
+    sizeBytes: 734_003_200,
+    kind: "video",
+    durationSeconds: 75.4,
+    status: "uploading",
+    progress: 0.42,
+  };
+  mounted = await renderComponent(
+    <AttachmentChips attachments={attachmentsResult(source, [video])} fileSource={source} />,
+  );
+  const tile = mounted.container.querySelector('[aria-label="IMG_0042.MOV, uploading, 42%"]');
+  expect(tile).not.toBeNull();
+  expect(tile!.textContent).toContain("42%");
+  // A video has no picture of its own to load.
+  expect(mounted.container.querySelectorAll("img")).toHaveLength(0);
+  await mounted.unmount();
+
+  mounted = await renderComponent(
+    <AttachmentChips
+      attachments={attachmentsResult(source, [
+        { ...video, status: "ready", progress: undefined, file: FILES.get(PHOTO_ID) },
+      ])}
+      fileSource={source}
+    />,
+  );
+  const ready = mounted.container.querySelector('[aria-label="IMG_0042.MOV"]');
+  expect(ready?.textContent).toContain("1:15");
+  expect(ready?.textContent).not.toContain("%");
+});
+
 test("the queue dock shows a queued message's image", async () => {
   const source = fileSource();
   const turn = {

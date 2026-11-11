@@ -18,13 +18,12 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import {
-  COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
-  COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE,
   ComposerReconciliationRequiredError,
   ComposerStateError,
   ComposerWorkspaceControlUnavailableError,
   composerSubmissionCanRetry,
   composerSubmissionErrorMessage,
+  isComposerSelectionRefusalMessage,
 } from "../lib/format";
 import { normalizeError, useErrorMessage } from "../lib/error-message";
 import { notifyObserver as notifyComposerObserver } from "../lib/notify-observer";
@@ -236,6 +235,32 @@ function pendingComposerStorage(): Storage | null {
   }
 }
 
+/**
+ * Forget every in-flight composer operation in this tab, in memory and in
+ * session storage. Called when nobody is signed in any more, so the next person
+ * in the tab never sees another person's unsent message.
+ */
+export function forgetAllComposerOperations(): void {
+  pendingComposerOperations.clear();
+  optimisticSendOperations.clear();
+  const storage = pendingComposerStorage();
+  if (!storage) return;
+  try {
+    const keys: string[] = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (
+        key?.startsWith(PENDING_COMPOSER_STORAGE_PREFIX) ||
+        key?.startsWith(OPTIMISTIC_SEND_STORAGE_PREFIX)
+      )
+        keys.push(key);
+    }
+    for (const key of keys) storage.removeItem(key);
+  } catch {
+    // A blocked store holds nothing to forget.
+  }
+}
+
 function pendingComposerStorageKey(key: string): string {
   return `${PENDING_COMPOSER_STORAGE_PREFIX}${encodeURIComponent(key)}`;
 }
@@ -335,9 +360,8 @@ function restoredErrorReference(
   const correlationId = restoredCorrelationId(reference);
   return message &&
     correlationId &&
-    message !== COMPOSER_MODEL_UNAVAILABLE_MESSAGE &&
+    !isComposerSelectionRefusalMessage(message) &&
     message !== t("lib.format.modelUnavailable") &&
-    message !== COMPOSER_ACCOUNT_UNAVAILABLE_MESSAGE &&
     message !== t("lib.format.accountUnavailable")
     ? t("hooks.useComposer.messageReferenceCorrelationid", { message, correlationId })
     : message;

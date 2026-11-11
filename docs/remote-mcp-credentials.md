@@ -225,6 +225,18 @@ event trigger, vault, Knowledge sync, Site tool allowance or API Integration
 depends on, is left for its owner to remove. Accepted turns and their audit
 records keep the login they ran with.
 
+The OAuth client is not part of an account's identity: the authorization
+server's issuer and the verified identity are. A deployment that replaces its
+registered client (for example its Google client) therefore still recognises a
+login made with the earlier client as the same account: connecting again
+reuses it, and reconnecting it is not an account mismatch. Migration
+`1362_merge_duplicate_personal_logins_across_oauth_clients.sql` applies 1226's
+rules without the client, merging the Slack, Gmail, Google Calendar, Google
+Drive and Atlassian duplicates saved under different clients before this rule
+(the services whose verified identity 1226 reads). Of two working logins it
+keeps the one that refreshed most recently, since that proves its client still
+works; a login a Slack agent depends on is also left in place.
+
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
 `accountSelection: "all_eligible"` mode cannot be combined with a connection ID,
