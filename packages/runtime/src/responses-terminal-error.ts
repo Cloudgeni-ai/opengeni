@@ -35,6 +35,12 @@ const REQUEST_CODES = new Set([
   "invalid_prompt",
   "context_length_exceeded",
   "invalid_argument",
+  // Configuration errors that can never succeed on retry, even if a provider
+  // labels them with a broad server_error type.
+  "deploymentnotfound",
+  "model_not_found",
+  "invalid_value",
+  "unsupported_parameter",
 ]);
 const RATE_CODES = new Set([
   "slow_down",
@@ -77,6 +83,8 @@ const UNAVAILABLE_CODES = new Set([
  * unrecognized code defers to the status its type names, exactly as a real 5xx
  * or 429 HTTP status is authoritative before the stream opens. Recognized
  * safety and request codes still veto, and quota codes stay terminal upstream.
+ * Quota detection needs rate evidence (a rate code or the too_many_requests
+ * type), so an unrecognized code under server_error is never read as quota.
  */
 const STATUS_TYPES = new Map<string, "rate_limit" | "unavailable">([
   ["server_error", "unavailable"],
@@ -168,9 +176,12 @@ export function responsesStreamingTerminalError(
   ) {
     return undefined;
   }
+  const nested = value.error ?? record(value.response)?.error;
+  // A flat `error` event carries its fields beside the event's own `type`,
+  // which names the event, not a provider error type.
   return new ResponsesStreamingTerminalError(
     value.type,
-    value.error ?? record(value.response)?.error ?? value,
+    nested ?? { ...value, type: undefined },
     headers,
   );
 }

@@ -104,6 +104,16 @@ describe("Responses terminal failure settlement", () => {
       }),
     );
     expect(capacity).toMatchObject({ code: "provider_rate_limited", retryable: true });
+    // Quota exhaustion under the rate status type still stops the turn.
+    expect(
+      agentRunFailurePayload(
+        new ResponsesStreamingTerminalError("response.error", {
+          type: "too_many_requests",
+          code: "insufficient_quota",
+          message: "You exceeded your current quota, please check your plan and billing details.",
+        }),
+      ),
+    ).toMatchObject({ code: "provider_quota_exhausted", retryable: false });
   });
 
   test("rejected stream terminals record the bounded provider code and type, not wording", () => {
@@ -134,6 +144,14 @@ describe("Responses terminal failure settlement", () => {
         }),
       ),
     ).toMatchObject({ code: "provider_request_rejected", retryable: false });
+    // A code-less flat event records neither field (the runtime drops the
+    // event's own `type`, which names the event, not a provider type).
+    const flat = agentRunFailurePayload(
+      new ResponsesStreamingTerminalError("error", { code: null, message: "Service Unavailable" }),
+    );
+    expect(flat).toMatchObject({ code: "provider_request_rejected", retryable: false });
+    expect(flat).not.toHaveProperty("providerErrorType");
+    expect(flat).not.toHaveProperty("providerErrorCode");
   });
 
   test("server terminals keep all five connectivity delays then exhaust without losing detail", () => {

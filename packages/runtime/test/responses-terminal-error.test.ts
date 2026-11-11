@@ -347,6 +347,53 @@ describe("ordinary Responses streamed provider terminals", () => {
     }
   });
 
+  test("a flat code-less error event stays terminal and never reports the event type", async () => {
+    const event = {
+      type: "error",
+      code: null,
+      message: "503 Service Unavailable",
+      param: null,
+      sequence_number: 1,
+    };
+    const client = new OpenAI({
+      apiKey: "fixture",
+      maxRetries: 2,
+      fetch: async () =>
+        new Response(`event: error\ndata: ${JSON.stringify(event)}\n\n`, {
+          headers: { "content-type": "text/event-stream" },
+        }),
+    });
+    const model = new OpenGeniResponsesModel(client, "fixture", {
+      id: "azure",
+      label: "Azure OpenAI",
+      kind: "api-key",
+      api: "responses",
+      builtin: true,
+    });
+    let observed: unknown;
+    try {
+      for await (const _event of model.getStreamedResponse({
+        input: "hello",
+        modelSettings: {},
+        tools: [],
+        handoffs: [],
+        outputType: "text",
+        tracing: false,
+      })) {
+      }
+    } catch (failure) {
+      observed = failure;
+    }
+    expect(observed).toBeInstanceOf(ResponsesStreamingTerminalError);
+    expect(observed).toMatchObject({
+      eventType: "error",
+      category: "unknown",
+      detail: "503 Service Unavailable",
+    });
+    expect((observed as ResponsesStreamingTerminalError).type).toBeUndefined();
+    expect((observed as ResponsesStreamingTerminalError).code).toBeUndefined();
+  });
+
   test("diagnostics are exact through 4 KiB and UTF-8 bounded beyond it", () => {
     const exact = " 🧬\n".repeat(500);
     expect(new ResponsesStreamingTerminalError("response.failed", { message: exact }).detail).toBe(
@@ -413,6 +460,8 @@ describe("ordinary Responses streamed provider terminals", () => {
     for (const [code, category] of [
       ["content_filter", "safety"],
       ["context_length_exceeded", "request"],
+      ["DeploymentNotFound", "request"],
+      ["model_not_found", "request"],
     ] as const) {
       for (const type of ["server_error", "too_many_requests"]) {
         expect(new ResponsesStreamingTerminalError("error", { code, type }).category).toBe(
@@ -420,6 +469,11 @@ describe("ordinary Responses streamed provider terminals", () => {
         );
       }
     }
+    // A recognized request type vetoes even a 5xx-looking code.
+    expect(
+      new ResponsesStreamingTerminalError("error", { code: "503", type: "invalid_request_error" })
+        .category,
+    ).toBe("request");
   });
 
   test("a failed terminal cannot execute a tool call assembled in the same response", async () => {
