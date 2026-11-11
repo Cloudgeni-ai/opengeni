@@ -302,6 +302,15 @@ import {
 } from "./github-identity-status";
 import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import {
+  canonicalMcpEndpointUrl,
+  MICROSOFT_DYNAMICS_CAPABILITY_ID,
+  MICROSOFT_DYNAMICS_CONNECTION_NAME,
+  microsoftDynamicsMcpEndpoint,
+} from "@opengeni/contracts/microsoft-dynamics";
+
+/** What the agent needs before it can show a Microsoft Dynamics Connect card. */
+const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. Ask the person for the web address they open Dynamics at (for example https://contoso.crm4.dynamics.com; any page of it works), then call custom_mcp_setup_request with name "${MICROSOFT_DYNAMICS_CONNECTION_NAME}" and that address as endpointUrl. Its card signs them in with their Microsoft work account.`;
+import {
   changeWorkspaceFileVisibility,
   codemodeCallExecutionMachine,
   publishSandboxFileArtifact,
@@ -7630,6 +7639,14 @@ function registerCapabilityDiscoveryTools(
       personalGitHubAllRepositories: deps.settings.githubPersonalAllRepositoriesEnabled,
       browserExtension: browserExtension(deps.settings),
       integrationDefinitions: connectableIntegrationDefinitions(deps.settings, grant.workspaceId),
+      ...(deps.settings.microsoftDynamicsClientId?.trim() &&
+      deps.settings.microsoftDynamicsClientSecret?.trim()
+        ? {
+            microsoftDynamics: {
+              financeOperations: deps.settings.microsoftDynamicsFinanceOperationsEnabled === true,
+            },
+          }
+        : {}),
     });
   // Indexed marketplace plugins: a person installs one from its card.
   const plugins = () => marketplacePluginCapabilityItems(deps.db, grant.workspaceId);
@@ -7891,6 +7908,15 @@ function registerCapabilityDiscoveryTools(
         reconnectInventory([item]),
       ]);
       if (!setup) throw new Error("Capability setup projection is unavailable.");
+      // Each Dynamics connection is one customer environment: its card needs
+      // the environment's address, which only the person knows.
+      if (item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID) {
+        return json({
+          capabilityId: item.id,
+          status: "input_required",
+          message: MICROSOFT_DYNAMICS_SETUP_DETAIL,
+        });
+      }
       // An account of this entry that stopped working is reconnected in place:
       // a first-time Connect cannot replace it. The agent names the one the
       // task needs; without a name, the only one here is used while no
@@ -8030,6 +8056,7 @@ function registerCapabilityDiscoveryTools(
           .url()
           .max(2048)
           .refine((url) => {
+            if (microsoftDynamicsMcpEndpoint(url)) return true;
             const parsed = new URL(url);
             return (
               parsed.protocol === "https:" &&
@@ -8081,8 +8108,12 @@ function registerCapabilityDiscoveryTools(
           .optional(),
       },
     },
-    async ({ name, endpointUrl, rationale, ownership, mcpSetup }) => {
+    async ({ name, endpointUrl: suppliedEndpointUrl, rationale, ownership, mcpSetup }) => {
       await authorize();
+      // A Dynamics environment address becomes its connection endpoint.
+      const endpointUrl = mcpSetup
+        ? suppliedEndpointUrl
+        : canonicalMcpEndpointUrl(suppliedEndpointUrl);
       const payload = ToolAuthNeededPayload.parse({
         serverId: "opengeni",
         toolName: "custom_mcp_setup_request",
@@ -8184,6 +8215,13 @@ async function capabilitySetupProjection(
       detail:
         item.runtime.notes ??
         "New connections to this integration are not available on this deployment.",
+    };
+  }
+  if (item.id === MICROSOFT_DYNAMICS_CAPABILITY_ID) {
+    return {
+      status: "authorization_required",
+      action: "connect",
+      detail: MICROSOFT_DYNAMICS_SETUP_DETAIL,
     };
   }
   if (item.surfaceType === "first_party_onepassword") {

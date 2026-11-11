@@ -761,6 +761,84 @@ describe("agent capability discovery MCP (real PostgreSQL)", () => {
       "Not installed. The person can review what the sentry plugin adds and install it for the workspace from its card.",
     );
   }, 60_000);
+  test("'connect Microsoft Dynamics' asks for the environment and turns its address into the card's endpoint", async () => {
+    if (!shared) return;
+    const settings = testSettings({
+      microsoftDynamicsClientId: "dynamics-client",
+      microsoftDynamicsClientSecret: "dynamics-secret",
+    });
+    const attempt = await seedAttempt(false, [
+      "capability_catalog_search",
+      "capability_authorization_request",
+      "custom_mcp_setup_request",
+    ]);
+    const server = buildOpenGeniMcpServer(
+      { settings, db: client.db, bus: new MemoryEventBus() } as ApiRouteDeps,
+      {
+        accountId: workspace.accountId,
+        workspaceId: workspace.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["workspace:read"],
+        principalKind: "agent_attempt",
+        metadata: {
+          ...attempt,
+          firstPartyMcpTools: [
+            "capability_catalog_search",
+            "capability_authorization_request",
+            "custom_mcp_setup_request",
+          ],
+        },
+      },
+    );
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "dynamics-discovery", version: "1" });
+    await server.connect(st);
+    await mcp.connect(ct);
+    try {
+      const searched = mcpJson(
+        await mcp.callTool({
+          name: "capability_catalog_search",
+          arguments: { query: "connect Microsoft Dynamics" },
+        }),
+      ) as {
+        matches: Array<{
+          capabilityId: string;
+          setup: { status: string; detail: string; nextAction: unknown };
+        }>;
+      };
+      expect(searched.matches[0]).toMatchObject({
+        capabilityId: "api:microsoft-dynamics",
+        setup: { status: "authorization_required" },
+      });
+      expect(searched.matches[0]!.setup.detail).toContain("custom_mcp_setup_request");
+      const requested = await mcp.callTool({
+        name: "capability_authorization_request",
+        arguments: { capabilityId: "api:microsoft-dynamics", rationale: "Answer CRM questions." },
+      });
+      expect(mcpJson(requested)).toMatchObject({ status: "input_required" });
+      const proposed = await mcp.callTool({
+        name: "custom_mcp_setup_request",
+        arguments: {
+          name: "Microsoft Dynamics",
+          endpointUrl: "https://contoso.crm4.dynamics.com/main.aspx?appid=1&pagetype=entitylist",
+          rationale: "Answer CRM questions.",
+        },
+      });
+      expect(proposed.isError, JSON.stringify(proposed)).not.toBe(true);
+      const notices = (
+        await listSessionEvents(client.db, workspace.workspaceId, attempt.sessionId)
+      ).filter((event) => event.type === "tool.auth_needed");
+      // Only the setup request posts a card; asking for the environment does not.
+      expect(notices).toHaveLength(1);
+      expect(notices[0]!.payload).toMatchObject({
+        providerDomain: "contoso.crm4.dynamics.com",
+        setupRequest: { endpointUrl: "https://contoso.crm4.dynamics.com/api/mcp" },
+      });
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  });
+
   test("finds Outlook for a Hotmail request and posts its Connect card; respects availability gates", async () => {
     if (!shared) return;
     const microsoftSettings = (overrides: Parameters<typeof testSettings>[0] = {}) =>

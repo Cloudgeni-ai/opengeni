@@ -8,13 +8,17 @@ import { Input } from "../../../ui/input";
 import { Label } from "../../../ui/label";
 import { SessionCapabilityFrame } from "../../../components/session-capability-frame";
 import { PreparedMcpSetupCard } from "./prepared-mcp-setup-card";
+import {
+  MICROSOFT_DYNAMICS_CONNECTION_NAME,
+  microsoftDynamicsProductForMcpUrl,
+} from "@opengeni/contracts/microsoft-dynamics";
 
 type Props = {
   item: AuthNeededItem;
   workspaceId: string;
   sessionId: string;
   onConfigured?: (() => Promise<void>) | undefined;
-  onRegistered: (id: string, restoreFocus: boolean) => void;
+  onRegistered: (id: string, restoreFocus: boolean, openSetup?: boolean) => void;
 };
 
 /** A proposed URL is untrusted display data until the human submits this form.
@@ -35,7 +39,103 @@ export function SessionCustomMcpCard(props: Props) {
         )}
       />
     );
+  if (microsoftDynamicsProductForMcpUrl(props.item.setupRequest!.endpointUrl))
+    return <MicrosoftDynamicsCard {...props} />;
   return <LegacyCustomMcpCard {...props} />;
+}
+
+/**
+ * A Microsoft Dynamics environment the person named: it is Microsoft's own
+ * service with a reviewed sign-in, so there is no server to review. Connect
+ * adds the environment and opens its sign-in at once.
+ */
+function MicrosoftDynamicsCard({ item, workspaceId, onRegistered }: Props) {
+  const context = useAppContext();
+  const proposal = item.setupRequest!;
+  const endpointUrl = proposal.endpointUrl;
+  const host = new URL(endpointUrl).hostname;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const canManage = canAddWorkspaceIntegrations(
+    context.accessContext,
+    workspaceId,
+    context.workspaceMemberIntegrationSetup,
+  );
+  const existing = async () =>
+    (await context.client.listCapabilities(workspaceId)).items.find(
+      (entry) => entry.kind === "mcp" && entry.endpointUrl === endpointUrl && !entry.stale,
+    );
+  useEffect(() => {
+    let active = true;
+    // Once added, this card is the environment's ordinary connection card.
+    void context.client
+      .listCapabilities(workspaceId)
+      .then((catalog) => {
+        const found = catalog.items.find(
+          (entry) => entry.kind === "mcp" && entry.endpointUrl === endpointUrl && !entry.stale,
+        );
+        if (active && found) onRegistered(found.id, false);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [context.client, workspaceId, endpointUrl, onRegistered]);
+
+  async function connect() {
+    if (busy || !canManage) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const found = await existing();
+      const id =
+        found?.id ??
+        (
+          await context.client.createCapability(workspaceId, {
+            kind: "mcp",
+            source: "manual",
+            name: MICROSOFT_DYNAMICS_CONNECTION_NAME,
+            endpointUrl,
+          })
+        ).id;
+      onRegistered(id, true, true);
+    } catch (failure) {
+      // A lost response may still have added it: look again before retrying.
+      const found = await existing().catch(() => undefined);
+      if (found) {
+        onRegistered(found.id, true, true);
+        return;
+      }
+      setError(`Couldn't connect. ${userErrorText(failure)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SessionCapabilityFrame
+      name={MICROSOFT_DYNAMICS_CONNECTION_NAME}
+      subtitle={host}
+      logo={null}
+      typeLabel=""
+      description={error ?? proposal.rationale}
+      clampDescription={!error}
+      skill={false}
+      expanded={false}
+      complete={false}
+      actionLabel="Connect"
+      opensDialog={false}
+      note="You'll sign in with your Microsoft work account."
+      onOpen={() => void connect()}
+      onClose={() => undefined}
+      busy={busy}
+      actionUnavailable={
+        canManage
+          ? undefined
+          : "Someone who can add connections to this workspace needs to connect it first."
+      }
+    />
+  );
 }
 
 function LegacyCustomMcpCard({ item, workspaceId, onRegistered }: Props) {

@@ -185,6 +185,35 @@ describe("agent capability catalog search", () => {
       ).toMatchObject({ name: "Your GitHub", kind: "api", source: "built_in" });
     });
 
+    test("'connect Microsoft Dynamics' finds the Dynamics entry when this deployment has its app", () => {
+      expect(
+        nativeConnectionCapabilityRecommendations().some(
+          (entry) => entry.id === "api:microsoft-dynamics",
+        ),
+      ).toBe(false);
+      const withDynamics = [
+        ...catalog,
+        ...nativeConnectionCapabilityRecommendations({
+          microsoftDynamics: { financeOperations: false },
+        }).filter((entry) => entry.id === "api:microsoft-dynamics"),
+      ];
+      for (const query of [
+        "connect Microsoft Dynamics",
+        "Dynamics 365",
+        "Dynamics 365 Sales",
+        "dataverse",
+        "my CRM",
+      ]) {
+        expect({
+          query,
+          first: searchCapabilityCatalogItems(withDynamics, query)[0]?.item.id,
+        }).toEqual({
+          query,
+          first: "api:microsoft-dynamics",
+        });
+      }
+    });
+
     test("entries are agent recommendations for the Connect card", () => {
       const outlook = catalog.find(
         (entry) => entry.id === "api:integration:microsoft-outlook-mail",

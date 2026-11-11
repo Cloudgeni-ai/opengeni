@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  canonicalMcpEndpointUrl,
   dataverseWebApiBase,
   microsoftDynamicsDefaultScope,
   microsoftDynamicsMcpEndpoint,
@@ -69,6 +70,18 @@ describe("Microsoft Dynamics MCP endpoints", () => {
       "https://usmf.operations.dynamics.com/.default",
     );
     expect(microsoftDynamicsDefaultScope("https://example.com/mcp")).toBeNull();
+  });
+
+  test("a pasted environment address is stored as its endpoint; other servers are unchanged", () => {
+    expect(
+      canonicalMcpEndpointUrl("https://contoso.crm4.dynamics.com/main.aspx?appid=1&pagetype=x"),
+    ).toBe("https://contoso.crm4.dynamics.com/api/mcp");
+    expect(canonicalMcpEndpointUrl("https://contoso.crm4.dynamics.com/api/mcp")).toBe(
+      "https://contoso.crm4.dynamics.com/api/mcp",
+    );
+    expect(canonicalMcpEndpointUrl("https://mcp.example.com/sse?x=1")).toBe(
+      "https://mcp.example.com/sse?x=1",
+    );
   });
 
   test("the Web API root belongs to Dataverse endpoints only", () => {

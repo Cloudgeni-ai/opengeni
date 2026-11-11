@@ -74,9 +74,13 @@ type SessionCapabilityCardProps = {
 export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   const page = usePage();
   const context = useAppContext();
-  const [registered, setRegistered] = useState<{ id: string; restoreFocus: boolean } | null>(null);
+  const [registered, setRegistered] = useState<{
+    id: string;
+    restoreFocus: boolean;
+    open: boolean;
+  } | null>(null);
   const onRegistered = useCallback(
-    (id: string, restoreFocus: boolean) => setRegistered({ id, restoreFocus }),
+    (id: string, restoreFocus: boolean, open = false) => setRegistered({ id, restoreFocus, open }),
     [],
   );
   if (props.item.setupRequest && !registered) {
@@ -225,6 +229,7 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       {...props}
       item={item}
       restoreFocus={registered?.restoreFocus ?? false}
+      openSetup={registered?.open ?? false}
     />
   );
 }
@@ -235,10 +240,15 @@ function ScopedSessionCapabilityCard({
   sessionId,
   onConfigured,
   restoreFocus = false,
-}: SessionCapabilityCardProps & { restoreFocus?: boolean | undefined }) {
+  openSetup = false,
+}: SessionCapabilityCardProps & {
+  restoreFocus?: boolean | undefined;
+  /** Open setup at once: the person already chose to connect on the card before. */
+  openSetup?: boolean | undefined;
+}) {
   const context = useAppContext();
   const recommendation = item.capability!;
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(openSetup);
   const [complete, setComplete] = useState(false);
   const [busy, setBusy] = useState(false);
   const [resolvedItem, setResolvedItem] = useState<CapabilityCatalogItem | null>(null);

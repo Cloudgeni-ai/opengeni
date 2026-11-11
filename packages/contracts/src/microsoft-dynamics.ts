@@ -100,3 +100,18 @@ export function dataverseWebApiBase(mcpUrl: string): string | null {
 }
 
 export const DATAVERSE_WEB_API_PATH = "/api/data/v9.2/";
+
+/** The agent-facing catalog entry that leads to a Microsoft Dynamics Connect card. */
+export const MICROSOFT_DYNAMICS_CAPABILITY_ID = "api:microsoft-dynamics";
+
+/** The name a Microsoft Dynamics connection is given when a person connects one. */
+export const MICROSOFT_DYNAMICS_CONNECTION_NAME = "Microsoft Dynamics";
+
+/**
+ * The endpoint to store for a remote MCP address a person or agent supplied:
+ * a Dynamics environment address (any page of it) becomes the environment's
+ * MCP endpoint; anything else is returned unchanged.
+ */
+export function canonicalMcpEndpointUrl(endpointUrl: string): string {
+  return microsoftDynamicsMcpEndpoint(endpointUrl)?.mcpUrl ?? endpointUrl;
+}

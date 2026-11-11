@@ -102,6 +102,11 @@ import { HTTPException } from "hono/http-exception";
 import { isPersonalIntegrationSetupCandidate } from "@opengeni/contracts/personal-integration-setup";
 import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import {
+  canonicalMcpEndpointUrl,
+  MICROSOFT_DYNAMICS_CAPABILITY_ID,
+  MICROSOFT_DYNAMICS_CONNECTION_NAME,
+} from "@opengeni/contracts/microsoft-dynamics";
+import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
 } from "@opengeni/db/organization-integration-policy";
@@ -501,6 +506,13 @@ export async function createCatalogItem(input: {
    */
   memberCreate?: { settings: Settings } | undefined;
 }): Promise<CapabilityCatalogItem> {
+  // A Dynamics environment address is stored as its MCP endpoint, so a pasted
+  // browser address reaches the reviewed Microsoft Dynamics sign-in.
+  if (input.payload.endpointUrl) {
+    const endpointUrl = canonicalMcpEndpointUrl(input.payload.endpointUrl);
+    if (endpointUrl !== input.payload.endpointUrl)
+      input = { ...input, payload: { ...input.payload, endpointUrl } };
+  }
   const id = input.payload.id?.trim() || generatedCapabilityId(input.payload);
 
   if (id.startsWith("skill:")) {
@@ -2880,6 +2892,8 @@ export function nativeConnectionCapabilityRecommendations(
     browserExtension?: BrowserExtension;
     /** Reviewed API integration definitions this deployment can connect here. */
     integrationDefinitions?: readonly IntegrationDefinition[];
+    /** This deployment has its Microsoft Dynamics sign-in app configured. */
+    microsoftDynamics?: { financeOperations: boolean };
   } = {},
 ): CapabilityCatalogItem[] {
   const extensionUrl = options.browserExtension?.installUrl ?? OPENGENI_BROWSER_EXTENSION_URL;
@@ -3022,6 +3036,53 @@ export function nativeConnectionCapabilityRecommendations(
           browserExtensionUrl: extensionUrl,
           recommendationOnly: true,
         },
+      }),
+    );
+  }
+  if (options.microsoftDynamics) {
+    const products = options.microsoftDynamics.financeOperations
+      ? "Dynamics 365 Sales, Customer Service and other Dataverse apps, or Finance and Operations"
+      : "Dynamics 365 Sales, Customer Service and other Dataverse apps";
+    items.push(
+      CapabilityCatalogItem.parse({
+        id: MICROSOFT_DYNAMICS_CAPABILITY_ID,
+        kind: "api",
+        source: "built_in",
+        name: MICROSOFT_DYNAMICS_CONNECTION_NAME,
+        description: `Read and update the person's ${products} data (accounts, contacts, leads, opportunities, activities and any other table) as them, with their Microsoft work account.`,
+        category: "crm",
+        tags: [
+          "dynamics",
+          "dynamics 365",
+          "microsoft dynamics",
+          "d365",
+          "crm",
+          "sales",
+          "dataverse",
+          "power apps",
+          "customer service",
+          "erp",
+          "microsoft",
+        ],
+        homepageUrl: "https://dynamics.microsoft.com",
+        providerDomain: "dynamics.com",
+        authModel: "oauth2_authorization_code",
+        authKind: "oauth2",
+        surfaceType: "microsoft_dynamics",
+        tools: [],
+        runtime: {
+          available: true,
+          notes:
+            "Each connection is one Dynamics environment, identified by the web address the person opens Dynamics at.",
+        },
+        lifecycle: {
+          status: "available",
+          readiness: "setup_required",
+          detail: "Connect an environment from the chat card.",
+          managedBy: "platform",
+        },
+        actions: ["connect", "inspect"],
+        metadata: { recommendationOnly: true },
       }),
     );
   }
