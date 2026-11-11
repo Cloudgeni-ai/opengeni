@@ -31,8 +31,12 @@ export type TeamsRoute = TeamsInstallation & {
   bot_id: string;
   session_id: string;
   /** Where a 1:1 route's session lives when not in the installation's workspace:
-   * the linked person's own Personal workspace. Null keeps the installation's. */
+   * the linked person's own Personal workspace, or (with workspace routing) a
+   * workspace of the organization they can start work in. Null keeps the
+   * installation's. */
   session_workspace_id: string | null;
+  /** The agent a 1:1 route's chat runs as, or null for the plain assistant. */
+  agent_id?: string | null;
   session_bound: boolean;
   delivered_sequence: number;
   /** The latest reply, request for input or failure event in the route's session. */
@@ -655,11 +659,20 @@ export async function enqueueTeamsMessage(
     payload: unknown;
     /** A 1:1 route's session in the sender's own Personal workspace. */
     sessionWorkspaceId?: string | null;
+    /**
+     * A 1:1 route's session in another workspace of the organization (or an
+     * agent's): checked in the enqueue transaction by the caller's live
+     * authority check, which replaces the Personal-workspace-only rule.
+     */
+    authorizeSessionWorkspace?: (tx: Database, workspaceId: string) => Promise<boolean>;
+    /** The agent a 1:1 route's chat runs as. */
+    agentId?: string | null;
   },
 ) {
   if (input.groupAudience && input.groupRevision === undefined)
     throw new Error("teams_group_revision_missing");
   const sessionWorkspaceId = input.sessionWorkspaceId ?? null;
+  const agentId = input.agentId ?? null;
   if (
     sessionWorkspaceId &&
     (!input.personal ||
@@ -668,15 +681,20 @@ export async function enqueueTeamsMessage(
       sessionWorkspaceId === i.workspace_id)
   )
     throw new Error("teams_route_unavailable");
+  if (agentId && (!input.personal || input.groupAudience || input.channelId))
+    throw new Error("teams_route_unavailable");
   return teamsScoped(db, i, async (tx) => {
     // Only the linked person's own Personal workspace, named by their active
-    // organization membership, can hold their 1:1 chat.
+    // organization membership, can hold their 1:1 chat, unless workspace
+    // routing checks their live access to the workspace here.
     if (
       sessionWorkspaceId &&
-      (await namedSubjectPersonalWorkspaceId(tx, {
-        accountId: i.account_id,
-        subjectId: input.subjectId,
-      })) !== sessionWorkspaceId
+      !(input.authorizeSessionWorkspace
+        ? await input.authorizeSessionWorkspace(tx, sessionWorkspaceId)
+        : (await namedSubjectPersonalWorkspaceId(tx, {
+            accountId: i.account_id,
+            subjectId: input.subjectId,
+          })) === sessionWorkspaceId)
     )
       throw new Error("teams_route_unavailable");
     const active = await rawRows(
@@ -706,7 +724,12 @@ export async function enqueueTeamsMessage(
         input = { ...input, routeId: `teams-group:${randomUUID()}` };
       }
     }
-    await tx.execute(sql`insert into teams_bot_routes(account_id,workspace_id,tenant_id,route_id,generation,actor_id,subject_id,personal,channel_id,conversation_id,thread_id,service_url,bot_id,group_audience,group_active,session_workspace_id)
+    // A route that names no agent keeps the shape a previous release writes.
+    if (agentId)
+      await tx.execute(sql`insert into teams_bot_routes(account_id,workspace_id,tenant_id,route_id,generation,actor_id,subject_id,personal,channel_id,conversation_id,thread_id,service_url,bot_id,group_audience,group_active,session_workspace_id,agent_id)
+   values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.routeId},${i.generation}::uuid,${input.actorId}::uuid,${input.subjectId},${input.personal},${input.channelId ?? null},${input.conversationId},${input.threadId},${input.serviceUrl},${input.botId},null::jsonb,false,${sessionWorkspaceId}::uuid,${agentId}::uuid) on conflict(route_id) do nothing`);
+    else
+      await tx.execute(sql`insert into teams_bot_routes(account_id,workspace_id,tenant_id,route_id,generation,actor_id,subject_id,personal,channel_id,conversation_id,thread_id,service_url,bot_id,group_audience,group_active,session_workspace_id)
    values(${i.account_id}::uuid,${i.workspace_id}::uuid,${i.tenant_id}::uuid,${input.routeId},${i.generation}::uuid,${input.actorId}::uuid,${input.subjectId},${input.personal},${input.channelId ?? null},${input.conversationId},${input.threadId},${input.serviceUrl},${input.botId},${input.groupAudience ? JSON.stringify(input.groupAudience) : null}::jsonb,${Boolean(input.groupAudience)},${sessionWorkspaceId}::uuid) on conflict(route_id) do nothing`);
     const [route] = await rawRows<TeamsRoute>(
       tx,
@@ -716,7 +739,8 @@ export async function enqueueTeamsMessage(
       !route ||
       route.generation !== i.generation ||
       (route.personal && route.actor_id !== input.actorId) ||
-      (route.session_workspace_id ?? null) !== sessionWorkspaceId
+      (route.session_workspace_id ?? null) !== sessionWorkspaceId ||
+      (route.agent_id ?? null) !== agentId
     )
       throw new Error("teams_route_unavailable");
     const inserted = await rawRows(
