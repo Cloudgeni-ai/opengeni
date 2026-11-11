@@ -94,6 +94,13 @@ describe("approvals of secret writes", () => {
     const retry = await put(ENV_SECRET, sealed({}, "3380204578043523366"));
     expect(first.title).toBe("Change repository environments on acme/ops");
     expect(retry.digest).toBe(first.digest);
+    // The approval ledger also fingerprints what the card shows: it must not
+    // carry the ciphertext either, or the retry conflicts with its approval.
+    expect(retry.reviewArguments).toEqual(first.reviewArguments);
+    expect(first.reviewArguments).toEqual({
+      request: `PUT ${ENV_SECRET}`,
+      body: { encrypted_value: "[sealed]" },
+    });
   });
 
   test("repository, organization, Dependabot, Codespaces and legacy paths match their retries", async () => {
@@ -111,6 +118,7 @@ describe("approvals of secret writes", () => {
       const first = await put(path, sealed(extra));
       const retry = await put(path, sealed(extra, "other-key"));
       expect(retry.digest).toBe(first.digest);
+      expect(retry.reviewArguments).toEqual(first.reviewArguments);
     }
   });
 
@@ -122,9 +130,16 @@ describe("approvals of secret writes", () => {
       "/repos/acme/ops/environments/production/secrets/SLACK_WEBHOOK_URL",
       "/repos/acme/ops/environments/staging/secrets/OTHER_SECRET",
       "/repos/acme/ops/actions/secrets/SLACK_WEBHOOK_URL",
+      `${ENV_SECRET}?unexpected=1`,
     ]) {
       expect((await put(path, sealed())).digest).not.toBe(approved);
     }
+    const actions = (await put("/repos/acme/ops/actions/secrets/TOKEN", sealed())).digest;
+    const dependabot = (await put("/repos/acme/ops/dependabot/secrets/TOKEN", sealed())).digest;
+    expect(dependabot).not.toBe(actions);
+    const mine = (await put("/user/codespaces/secrets/TOKEN", sealed())).digest;
+    const org = (await put("/orgs/acme/codespaces/secrets/TOKEN", sealed())).digest;
+    expect(org).not.toBe(mine);
   });
 
   test("who can read an organization secret stays part of the approval", async () => {
@@ -154,5 +169,10 @@ describe("approvals of secret writes", () => {
     const c = await put(plain, { value: "one" });
     const d = await put(plain, { value: "two" });
     expect(d.digest).not.toBe(c.digest);
+    // A file that happens to live under a `secrets` directory is not a secret.
+    const file = "/repos/acme/ops/contents/secrets/notes.txt";
+    const e = await put(file, { message: "m", content: "YQ==", encrypted_value: "x" });
+    const f = await put(file, { message: "m", content: "YQ==", encrypted_value: "y" });
+    expect(f.digest).not.toBe(e.digest);
   });
 });

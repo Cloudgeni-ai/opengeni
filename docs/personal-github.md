@@ -456,7 +456,8 @@ approval, running the same command again sends it once. A secret write
 `encrypted_value` and `key_id`: `gh` seals the value with fresh randomness on
 every run, so the retry differs only in ciphertext. The repository,
 environment, secret name and any other fields (such as an organization
-secret's visibility) still have to match. A declined request
+secret's visibility) still have to match, and the approval card shows the
+value as `[sealed]`. A declined request
 answers `Declined by the person`. Outcomes are recorded in the same connector
 action ledger as tool calls: a 5xx or transport failure is outcome-unknown and
 is not replayed.
