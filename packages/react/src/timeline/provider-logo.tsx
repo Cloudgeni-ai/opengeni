@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
 import type { ToolDisplayMetadata } from "@opengeni/sdk";
+import { displayImageSrc } from "../lib/content-hosting";
 
 /*
  * Connector logos in tool rows. The host resolves a provider domain to a logo
@@ -40,7 +41,7 @@ export function ConnectorLogoIcon({
   if (!src || failed) return <>{fallback}</>;
   return (
     <img
-      src={src}
+      src={displayImageSrc(src)}
       alt=""
       aria-hidden="true"
       loading="lazy"

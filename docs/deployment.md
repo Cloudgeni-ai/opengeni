@@ -2091,9 +2091,70 @@ from the previous builds' assets listed in `OPENGENI_WEB_PREVIOUS_ASSET_ROOTS`
 [Web assets across rollouts](#web-assets-across-rollouts). Every shell response carries
 `X-Content-Type-Options: nosniff` and `Referrer-Policy:
 strict-origin-when-cross-origin` (the setup-account page keeps its stricter
-`no-referrer`). The server deliberately sets no `X-Frame-Options`,
-`frame-ancestors`, or other CSP, because the console supports embedding. The
-API compresses JSON responses and leaves SSE and other streaming transports
+`no-referrer`).
+
+### Console Content-Security-Policy
+
+Every HTML page the web server serves carries an enforced
+`Content-Security-Policy` built in `apps/web/src/csp.ts`. Its fixed part is
+`default-src 'self'`; `script-src 'self' 'wasm-unsafe-eval'` plus the sha256
+hash of each inline script in the exact bytes served (hashed when the page is
+rendered, so they never drift from the build); `object-src 'none'`;
+`base-uri 'self'`; `form-action 'self'`; `frame-ancestors 'self'` (Office's
+hosts for the Excel add-in pages under `/office/`, which also get
+`https://appsforoffice.microsoft.com` and Office's other script hosts);
+`img-src`/`media-src 'self' data: blob:`; `font-src 'self' data:`;
+`connect-src 'self' blob:` (pdf.js reads downloaded bytes from a blob: URL);
+`worker-src`/`child-src 'self' blob:`; and `style-src`/`style-src-elem 'self'`
+plus a fresh nonce on every response, with `style-src-attr 'unsafe-inline'`.
+Libraries such as the toast, scroll-lock, terminal and diff components create
+`<style>` elements at runtime, so a hashed bootstrap script that runs first
+reads the response's nonce from a `csp-nonce` meta element and stamps it on
+every `<style>` element the page creates. Style attributes (React `style`
+props and the attributes the diff and terminal components write into markup)
+cannot carry a nonce or hash, so only `style-src-attr` allows them inline;
+they cannot load resources or run script. Pages are therefore rendered per
+response (the cached page holds a placeholder nonce). No directive ever contains `*` or a bare scheme such as
+`https:`. Other responses keep `frame-ancestors 'self'` and
+`X-Frame-Options: SAMEORIGIN` (none on `/office/`).
+
+The deployment-specific hosts come from the API's public
+`GET /v1/config/content-security`, derived from existing API settings:
+the object storage origin of signed URLs, the API origin when it differs from
+the console's, the relay and Modal tunnel sockets, Turnstile when the sign-up
+challenge is on, PostHog/Reo/GA4 when analytics is configured, Google and
+GitHub avatar hosts when those sign-ins are configured, catalog model logo
+hosts, `https://github.com` in `form-action` outside platform-managed mode
+(the GitHub App manifest form), and the HTML frame host
+`https://og.<sites domain>`. The web server reads it from
+`OPENGENI_WEB_CONTENT_SECURITY_API_URL` (the Helm chart sets it to the
+in-cluster API service when the chart deploys the API), else
+`OPENGENI_PUBLIC_BASE_URL`. It waits up to five seconds for the first answer
+before serving pages, then refreshes every five minutes; after a failure it
+logs one warning, keeps the last policy (or the base policy, which fails
+closed) and retries after 1, 2, 4 and then every 10 seconds. No new Helm value
+is needed.
+
+Agent-authored HTML (chat visualizations, HTML artifacts and Sites in the
+console) does not run under the console policy: it renders in an
+opaque-origin sandboxed frame of the HTML frame host page
+(`/_og/html-frame`), which the Sites gateway serves on `og.<sites domain>`
+(deploy the gateway with or before a web release that uses it) and the web
+server serves on the console origin only when there is no Sites domain (its
+policy cannot restrict the agent's HTML, so a deployment with a Sites domain
+keeps every console page under the strict policy). Both frame hosts may be framed by the console and by Office's
+hosts. Images from hosts the policy does not list load through the API's
+signed-in image proxy `GET /v1/image-proxy?url=`: public HTTPS images only,
+SSRF-checked on every redirect, magic-byte sniffed (SVG is served with
+`default-src 'none'; style-src 'unsafe-inline'; sandbox`), size and time
+capped, and rate limited. When the API has its own origin the console uses the
+absolute proxy URL the API publishes. The Excel add-in signs in with a bearer
+token, which an `<img>` cannot send, so it fetches a short-lived signed ticket
+from `GET /v1/image-proxy/ticket` and appends it to proxy URLs; tickets are
+signed with a key derived from the Better Auth secret (or the delegation or
+integration state secret), and without one the ticket route answers 404.
+
+The API compresses JSON responses and leaves SSE and other streaming transports
 uncompressed.
 
 Set `OPENGENI_WEB_NOINDEX=true` on a deployment search engines should not

@@ -40222,8 +40222,11 @@
       "BrowserEditableArtifactWorkbenchProps": "type",
       "ChatInteractiveBlock": "value",
       "ChatInteractiveBlockProps": "type",
+      "configureContentHosting": "value",
+      "ContentHostingConfig": "type",
       "DEFAULT_ARTIFACT_LABELS": "value",
       "DeferredChatMedia": "value",
+      "displayImageSrc": "value",
       "DocumentArtifactSurface": "value",
       "DocumentArtifactSurfaceProps": "type",
       "DocumentCommit": "type",
@@ -40327,6 +40330,7 @@
       "SpreadsheetSelection": "type",
       "SpreadsheetViewport": "type",
       "useArtifactLabels": "value",
+      "useDisplayImageSrc": "value",
       "useRetainedImageObjectUrl": "value"
     },
     "@opengeni/react/artifacts/document": {

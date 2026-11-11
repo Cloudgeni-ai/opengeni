@@ -30,6 +30,10 @@
       "types": "./src/browser-response-headers.ts",
       "default": "./src/browser-response-headers.ts"
     },
+    "./html-frame-host": {
+      "types": "./src/html-frame-host.ts",
+      "default": "./src/html-frame-host.ts"
+    },
     "./billing-credit-notifications": {
       "types": "./src/billing-credit-notifications.ts",
       "default": "./src/billing-credit-notifications.ts"
