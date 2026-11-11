@@ -671,7 +671,10 @@ describe("ci.yml records the batch result", () => {
     for (const name of Object.keys(ci.jobs).filter((job) => job.endsWith("-image"))) {
       const build = ci.jobs[name].steps.find((s: any) => s.with?.push !== undefined);
       expect(build.with.push, name).toBe(
-        "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
+        // The batch API image never runs on main, so it never pushes.
+        name === "batch-api-image"
+          ? false
+          : "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}",
       );
     }
   });

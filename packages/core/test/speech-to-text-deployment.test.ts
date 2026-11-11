@@ -3,6 +3,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   asRecordingTranscriptionError,
   asTranscriptionServiceError,
+  coreTranscriptionResult,
   createSpeechToTextDeployment,
   createTranscriptionService,
   dictationChoiceOf,
@@ -767,7 +768,7 @@ describe("a provider out of credit", () => {
       const meeting = asRecordingTranscriptionError(voice) as RecordingTranscriptionError;
       expect([meeting.code, meeting.retryable]).toEqual([code, code === "rate_limited"]);
     }
-    // A subscription keeps it too, though nothing falls back from it.
+    // A subscription keeps it too, though only out of credit falls back from it.
     const pinned = withoutFallback(responseError(402, { error: { code: "insufficient_quota" } }));
     expect(pinned.fallbackSafe).toBe(false);
     expect((asRecordingTranscriptionError(pinned) as RecordingTranscriptionError).code).toBe(
@@ -805,6 +806,82 @@ describe("a provider out of credit", () => {
     const service = createTranscriptionService({ settings, db: {} as never, deployment });
     const result = await service.transcribe({ ...request, preferredProvider: "first" });
     expect(result).toMatchObject({ text: "Hello", providerId: "second" });
+  });
+
+  test("SUB-FAIL-10: a subscription out of credit may fall back; any other refusal stays final", async () => {
+    const refusal = (status: number, body: unknown) =>
+      coreTranscriptionResult(Response.json(body, { status })).then(
+        () => null,
+        (error: TranscriptionServiceError) => error,
+      );
+    const spent = await refusal(402, { error: { code: "insufficient_quota" } });
+    expect([spent?.fallbackSafe, spent?.providerCode]).toEqual([true, "quota_exceeded"]);
+    const broken = await refusal(500, { error: { message: "boom" } });
+    expect(broken?.fallbackSafe).toBe(false);
+    const refused = await refusal(401, { error: { code: "invalid_api_key" } });
+    expect(refused?.fallbackSafe).toBe(false);
+  });
+
+  test("SUB-FAIL-10: a provider out of credit is tried last for a while, and still tried when alone", async () => {
+    const settings = testSettings({ voiceInputProviderOrder: "openai" });
+    let clock = Date.parse("2026-11-10T08:00:00Z");
+    const calls: string[] = [];
+    let firstHasCredit = false;
+    const heard = (id: string) => async () => {
+      calls.push(id);
+      if (id === "first" && !firstHasCredit) {
+        throw new RecordingTranscriptionError("no credit", "quota_exceeded", false);
+      }
+      return {
+        languages: [],
+        audioMilliseconds: null,
+        diarized: false,
+        words: [
+          { text: id, startMilliseconds: 0, endMilliseconds: 1, speaker: null, spaceBefore: false },
+        ],
+      };
+    };
+    const serviceWith = (ids: string[]) =>
+      createTranscriptionService({
+        settings,
+        db: {} as never,
+        now: () => new Date(clock),
+        deployment: createSpeechToTextDeployment(
+          { settings },
+          {
+            isEuOnly: async () => false,
+            providers: ids.map((id) => fakeTextProvider(id, "workspace_subscription", heard(id))),
+          },
+        ),
+      });
+    const service = serviceWith(["first", "second"]);
+    const dictate = () => service.transcribe({ ...request, preferredProvider: "first" });
+    expect(await dictate()).toMatchObject({ providerId: "second" });
+    // The next dictation doesn't wait on the refusal first.
+    expect(await dictate()).toMatchObject({ providerId: "second" });
+    expect(calls).toEqual(["first", "second", "second"]);
+    // Another workspace still asks it first.
+    calls.length = 0;
+    await service.transcribe({ ...request, workspaceId: "other", preferredProvider: "first" });
+    expect(calls).toEqual(["first", "second"]);
+    // After a while it's asked first again, and once it hears, it stays first.
+    clock += 16 * 60_000;
+    firstHasCredit = true;
+    calls.length = 0;
+    expect(await dictate()).toMatchObject({ providerId: "first" });
+    expect(calls).toEqual(["first"]);
+
+    // When it's the only choice, it's still asked, so the person learns why.
+    firstHasCredit = false;
+    const alone = serviceWith(["first"]);
+    calls.length = 0;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const error = await alone
+        .transcribe({ ...request, preferredProvider: "first" })
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(TranscriptionServiceError);
+    }
+    expect(calls).toEqual(["first", "first"]);
   });
 });
 

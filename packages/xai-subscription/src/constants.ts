@@ -23,7 +23,7 @@ export const XAI_TOKEN_AUTH_HEADER_VALUE = "xai-grok-cli";
 // The Grok CLI release Opengeni presents. xAI refuses clients below its
 // minimum; scripts/xai-client-version-pin.ts keeps this on the current stable
 // release, and client-version.ts adopts a higher minimum named by a refusal.
-export const XAI_CLIENT_VERSION = "1.0.70";
+export const XAI_CLIENT_VERSION = "1.0.77";
 export const XAI_CLIENT_MODE = "opengeni";
 
 export const XAI_SUBSCRIPTION_PROVIDER_ID = "supergrok-subscription";

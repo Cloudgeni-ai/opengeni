@@ -35,6 +35,7 @@ export function clearTeamsFragment(kind: "teams_setup" | "teams_link") {
 }
 
 const PENDING_SETUP_KEY = "opengeni.teams-setup";
+const PENDING_LINK_KEY = "opengeni.teams-link";
 const PENDING_SETUP_MAX_AGE_MS = 15 * 60_000;
 const MICROSOFT_RETURN_PARAMS = [
   "code",
@@ -46,9 +47,10 @@ const MICROSOFT_RETURN_PARAMS = [
 ];
 
 export type TeamsPendingSetup = { setupToken: string; workspaceId: string; replaceOwnLink?: true };
+export type TeamsPendingLink = { linkToken: string; workspaceId: string };
 export type TeamsMicrosoftReturn =
   | { kind: "signed_in"; code: string; state: string }
-  | { kind: "failed"; error: string; description: string };
+  | { kind: "failed"; error: string; description: string; state?: string };
 
 /**
  * The setup proof and chosen workspace survive the Microsoft sign-in in this
@@ -98,6 +100,72 @@ export function readPendingTeamsSetup(
   }
 }
 
+/**
+ * An account link survives its Microsoft sign-in the same way: the link proof
+ * and workspace stay in this tab's session storage, never in the URL Microsoft
+ * sees. Microsoft returns to the setup page, which finishes the link.
+ */
+export function savePendingTeamsLink(
+  pending: TeamsPendingLink,
+  storage: Pick<Storage, "setItem"> = window.sessionStorage,
+  now = Date.now(),
+): void {
+  storage.setItem(PENDING_LINK_KEY, JSON.stringify({ ...pending, savedAt: now }));
+}
+
+export function clearPendingTeamsLink(
+  storage: Pick<Storage, "removeItem"> = window.sessionStorage,
+): void {
+  storage.removeItem(PENDING_LINK_KEY);
+}
+
+/** Reads the pending account link; stale or malformed entries read as none. */
+export function readPendingTeamsLink(
+  storage: Pick<Storage, "getItem"> = window.sessionStorage,
+  now = Date.now(),
+): TeamsPendingLink | null {
+  const raw = storage.getItem(PENDING_LINK_KEY);
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as Partial<TeamsPendingLink & { savedAt: number }>;
+    if (
+      typeof value.linkToken !== "string" ||
+      !value.linkToken ||
+      value.linkToken.length > 16_384 ||
+      typeof value.workspaceId !== "string" ||
+      !value.workspaceId ||
+      typeof value.savedAt !== "number" ||
+      now - value.savedAt > PENDING_SETUP_MAX_AGE_MS ||
+      value.savedAt > now
+    )
+      return null;
+    return { linkToken: value.linkToken, workspaceId: value.workspaceId };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a Microsoft sign-in was started for setup or for an account link,
+ * from the purpose in its OAuth state. Only picks which pending action this
+ * tab finishes; the API verifies the signed state itself. Null when unknown.
+ */
+export function teamsMicrosoftSignInPurpose(state: string | undefined): "setup" | "link" | null {
+  const payload = state?.split(".")[0];
+  if (!payload) return null;
+  try {
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const { purpose } = JSON.parse(atob(base64)) as { purpose?: unknown };
+    return purpose === "teams-account-link"
+      ? "link"
+      : purpose === "teams-admin-setup" || purpose === "teams-installer-setup"
+        ? "setup"
+        : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Microsoft's answer on the setup page: a code and state, or an error. */
 export function teamsMicrosoftReturn(search: string): TeamsMicrosoftReturn | null {
   const params = new URLSearchParams(search);
@@ -106,9 +174,15 @@ export function teamsMicrosoftReturn(search: string): TeamsMicrosoftReturn | nul
     return values.length === 1 && values[0] && values[0].length <= 8192 ? values[0] : null;
   };
   const error = single("error");
-  if (error) return { kind: "failed", error, description: single("error_description") ?? "" };
-  const code = single("code");
   const state = single("state");
+  if (error)
+    return {
+      kind: "failed",
+      error,
+      description: single("error_description") ?? "",
+      ...(state ? { state } : {}),
+    };
+  const code = single("code");
   return code && state ? { kind: "signed_in", code, state } : null;
 }
 
@@ -119,12 +193,17 @@ export function clearTeamsMicrosoftReturn() {
 }
 
 /** A person-facing reason for a Microsoft sign-in that returned without a code. */
-export function teamsMicrosoftFailureText(failure: { error: string; description: string }) {
+export function teamsMicrosoftFailureText(
+  failure: { error: string; description: string },
+  purpose: "setup" | "link" = "setup",
+) {
   if (
     failure.error === "consent_required" ||
     /AADSTS(65001|90093|90094|90095)\b/.test(failure.description)
   )
-    return "Your organization needs a Global Administrator to approve Opengeni before you can sign in. Ask a Global Administrator to connect Opengeni, then try again.";
+    return purpose === "link"
+      ? "Your organization needs a Global Administrator to approve Opengeni before you can sign in. Ask a Global Administrator to approve it, then try again."
+      : "Your organization needs a Global Administrator to approve Opengeni before you can sign in. Ask a Global Administrator to connect Opengeni, then try again.";
   return "Microsoft sign-in didn't finish. Try again.";
 }
 /**
@@ -164,4 +243,20 @@ export function teamsOwnAccountLinkedElsewhere(error: unknown): boolean {
   if (apiErrorDetailCode(error) !== TEAMS_CONNECTION_REFUSED_CODE) return false;
   const details = (error as { details?: { reason?: unknown } }).details;
   return details?.reason === "opengeni_account_linked";
+}
+
+/**
+ * True when an account link was refused for its Microsoft sign-in, so the same
+ * link can still succeed with another sign-in. Other refusals (a used or
+ * expired link, a changed connection) need a new link from Teams.
+ */
+export function teamsLinkSignInRefused(error: unknown): boolean {
+  if (apiErrorDetailCode(error) !== TEAMS_CONNECTION_REFUSED_CODE) return false;
+  const details = (error as { details?: { reason?: unknown } }).details;
+  return (
+    details?.reason === "link_identity_mismatch" ||
+    details?.reason === "link_sign_in_required" ||
+    details?.reason === "link_sign_in_expired" ||
+    details?.reason === "link_sign_in_failed"
+  );
 }

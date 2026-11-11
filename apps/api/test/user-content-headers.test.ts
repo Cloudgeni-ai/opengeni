@@ -35,6 +35,11 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
   "editable-artifacts.ts": { count: 1, userContent: true, why: "materialized export download" },
   "feedback.ts": { count: 1, userContent: true, why: "the author's own feedback screenshot bytes" },
   "files.ts": { count: 1, userContent: true, why: "retained file and screenshot content" },
+  "image-proxy.ts": {
+    count: 1,
+    userContent: false,
+    why: "public third-party raster or SVG image bytes, magic-byte checked and sent with their own inert headers (nosniff, a sandbox CSP, an inline disposition) and cross-origin CORP so a console on another origin can show them",
+  },
   "install.ts": { count: 2, userContent: false, why: "operator-built install script and assets" },
   "managed-auth-session-sets.ts": {
     count: 1,
@@ -78,6 +83,9 @@ const RAW_BODY_RESPONSES: Record<string, { count: number; userContent: boolean; 
  * machine or point at a type that is never active markup.
  */
 const SIGNED_GET_URLS: Record<string, { calls: number; withUserContentOptions: number }> = {
+  // Signs a URL for an unused key only to learn the storage origin for the
+  // console's Content-Security-Policy; the URL never reaches a browser.
+  "http/console-content-security.ts": { calls: 1, withUserContentOptions: 0 },
   "mcp/files.ts": { calls: 1, withUserContentOptions: 1 },
   // Browser-controller upload/download authorities, encrypted profile archives
   // and the sandbox import of a saved browser recording.
