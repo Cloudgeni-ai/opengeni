@@ -1291,6 +1291,7 @@ import {
 } from "./child-lifecycle-notices";
 import {
   CAPACITY_WAIT_NOTICE_KEY,
+  CAPACITY_WAIT_PARENT_NOTICE_KEY,
   capacityWaitAttention,
   capacityWaitNoticeMarker,
   capacityWaitNoticeNeedsRestating,
@@ -27563,15 +27564,22 @@ export async function armSubscriptionCoreCapacityWait(
                 }),
               )
             : null;
-        const waitingMetadata = personNotice
-          ? {
-              ...recoveryMetadata,
-              [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
-                personNotice.key,
-                attention!.resetsAt,
-              ),
-            }
-          : recoveryMetadata;
+        // A worker's turn remembers the reset its parent is told below (set
+        // once the waiter exists), so a later check can restate it; a short
+        // wait tells the parent nothing.
+        const { [CAPACITY_WAIT_PARENT_NOTICE_KEY]: _toldParent, ...unannouncedMetadata } =
+          recoveryMetadata as Record<string, unknown>;
+        const waitingMetadata = {
+          ...unannouncedMetadata,
+          ...(personNotice
+            ? {
+                [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
+                  personNotice.key,
+                  attention!.resetsAt,
+                ),
+              }
+            : {}),
+        };
         const waitingPrompt = stopped
           ? await runnableQueuedTurnExists(tx, {
               accountId: input.accountId,
@@ -27765,7 +27773,19 @@ export async function armSubscriptionCoreCapacityWait(
           .set({
             status: stopped ? "failed" : "waiting_capacity",
             activeAttemptId: null,
-            metadata: waitingMetadata,
+            metadata:
+              attention && session.parentSessionId && waiter
+                ? {
+                    ...waitingMetadata,
+                    [CAPACITY_WAIT_PARENT_NOTICE_KEY]: capacityWaitNoticeMarker(
+                      childWaitingCapacityDedupeKey({
+                        childSessionId: input.sessionId,
+                        waiterId: waiter.waiterId,
+                      }),
+                      attention.resetsAt,
+                    ),
+                  }
+                : waitingMetadata,
             version: turn.version + 1,
             finishedAt: stopped ? now : null,
             updatedAt: now,
@@ -27946,14 +27966,32 @@ export async function reconcileSubscriptionCoreCapacityWait(
           return { action: "stale", events: [] } as const;
         }
         const vocabulary = subscriptionCoreWaitVocabulary(waiterRead.provider);
+        // A worker's parent is locked with it, as for every child lifecycle
+        // notice: the wait below may restate its reset to the parent.
+        const [preview] = await tx
+          .select({ parentSessionId: schema.sessions.parentSessionId })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
         const locks = await lockSessionEventWriteRows(tx, {
           workspaceId: input.workspaceId,
           controlLock: "already_locked",
           workspaceLock: "already_locked",
-          sessionIds: [input.sessionId],
+          sessionIds: [
+            input.sessionId,
+            ...(preview?.parentSessionId ? [preview.parentSessionId] : []),
+          ],
           turnIds: [waiterRead.blockedTurnId],
         });
-        const session = locks.sessions[0];
+        const session = locks.sessions.find((row) => row.id === input.sessionId);
+        if (session && session.parentSessionId !== (preview?.parentSessionId ?? null)) {
+          throw new Error(`Session parent changed while locking: ${input.sessionId}`);
+        }
         const blockedTurn = locks.turns[0];
         const effectiveControl = session
           ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
@@ -28105,14 +28143,16 @@ export async function reconcileSubscriptionCoreCapacityWait(
             waiter.waitReason !== waitEvaluation.waitReason
               ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
               : null;
-          // A top-level chat's person is told again, in place, once the reset
-          // their notification named no longer holds (it passed without
-          // capacity, or a longer limit binds), and told for the first time
-          // when a short wait has become a long one. Only an evaluation that
-          // found no capacity says when it returns; a held false-resumption
-          // delay or legacy evaluation leaves the notice as it is.
+          // Whoever was told when the wait ends (a top-level chat's person,
+          // or a worker's parent) is told again once the reset they heard no
+          // longer holds (it passed without capacity, or a longer limit
+          // binds), and told for the first time when a short wait has become
+          // a long one; the session's timeline gets a waiting event naming
+          // the reset that now holds. Only an evaluation that found no
+          // capacity says when it returns; a held false-resumption delay or
+          // legacy evaluation restates nothing.
           const attention =
-            session.parentSessionId || evaluation.kind !== "wait"
+            evaluation.kind !== "wait"
               ? null
               : capacityWaitAttention({
                   waitReason: waitEvaluation.waitReason,
@@ -28120,29 +28160,56 @@ export async function reconcileSubscriptionCoreCapacityWait(
                   healthRetryAt: waitEvaluation.healthRetryAt,
                   now,
                 });
-          const openNotice = readCapacityWaitNotice(blockedTurn.metadata);
+          const toldKey = session.parentSessionId
+            ? CAPACITY_WAIT_PARENT_NOTICE_KEY
+            : CAPACITY_WAIT_NOTICE_KEY;
+          const told = readCapacityWaitNotice(blockedTurn.metadata, toldKey);
+          const restate =
+            attention !== null &&
+            (!told || capacityWaitNoticeNeedsRestating(told, attention.resetsAt));
+          // What agents see (a worker's parent woken by a notice, the
+          // session's own timeline) is restated only for a real change: the
+          // first long wait, a told time that passed without capacity, a
+          // limit's reset that now binds later, or a reset that became
+          // unknown. A health-retry time that moves later at each check while
+          // the told time still lies ahead would otherwise wake the parent at
+          // every check; the person's silent in-place notification still
+          // follows it.
+          const toldTimePassed =
+            typeof told?.resetsAt === "string" && Date.parse(told.resetsAt) <= now.getTime();
+          const restateToAgents =
+            restate &&
+            (!told ||
+              toldTimePassed ||
+              waitEvaluation.earliestResetAt !== null ||
+              attention!.resetsAt === null);
+          const openNotice = session.parentSessionId ? null : told;
           const personNotice =
-            attention &&
-            (!openNotice || capacityWaitNoticeNeedsRestating(openNotice, attention.resetsAt))
+            restate && !session.parentSessionId
               ? SessionNotificationPostedPayload.parse({
                   ...capacityWaitNotificationPayload({
                     turnId: blockedTurn.id,
                     provider: waiter.provider,
-                    resetsAt: attention.resetsAt,
+                    resetsAt: attention!.resetsAt,
                   }),
                   // Same key: the open notification is updated in place, silently.
                   replaced: openNotice !== null,
                 })
               : null;
+          const waitingText =
+            changedReasonText ??
+            (restateToAgents
+              ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
+              : null);
           const restated = [
-            ...(changedReasonText
+            ...(waitingText
               ? [
                   {
                     type: vocabulary.waitingEventType,
                     payload: {
                       ...vocabulary.waitingPayload,
                       code: "subscription_capacity_unavailable",
-                      error: changedReasonText,
+                      error: waitingText,
                       waitReason: waitEvaluation.waitReason,
                       actionRequired: subscriptionCapacityWaitNeedsAction(
                         waitEvaluation.waitReason,
@@ -28194,18 +28261,37 @@ export async function reconcileSubscriptionCoreCapacityWait(
               );
             restatedEvents = insertedEvents.map(mapEvent);
           }
-          if (personNotice) {
-            // The turn remembers what the notification now says, and its key
-            // for the withdrawal when the wait ends.
+          // A worker's parent hears the restated reset in a new notice (the
+          // system-update outbox delivers it), keyed by that reset so it never
+          // collides with the arm's notice or an earlier restatement.
+          const parentNoticeKey =
+            restateToAgents && session.parentSessionId
+              ? childWaitingCapacityDedupeKey({
+                  childSessionId: session.id,
+                  waiterId: waiter.waiterId,
+                  restatedResetsAt: attention!.resetsAt?.toISOString() ?? null,
+                })
+              : null;
+          if (parentNoticeKey) {
+            await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
+              turnId: blockedTurn.id,
+              waiterId: waiter.waiterId,
+              provider: waiter.provider,
+              nextCheckAt,
+              resetsAt: attention!.resetsAt,
+              restated: true,
+            });
+          }
+          const noticeKey = personNotice?.key ?? parentNoticeKey;
+          if (noticeKey) {
+            // The turn remembers what it said and to whom; the person's
+            // notification key also serves its withdrawal when the wait ends.
             const [noticedTurn] = await tx
               .update(schema.sessionTurns)
               .set({
                 metadata: {
                   ...blockedTurn.metadata,
-                  [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
-                    personNotice.key,
-                    attention!.resetsAt,
-                  ),
+                  [toldKey]: capacityWaitNoticeMarker(noticeKey, attention!.resetsAt),
                 },
                 version: blockedTurn.version + 1,
                 updatedAt: now,
@@ -91133,6 +91219,8 @@ async function enqueueChildWaitingCapacityOutboxTx(
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
     resetsAt: Date | null;
+    /** A later notice restating the reset of a wait the parent already heard of. */
+    restated?: boolean;
   },
 ): Promise<boolean> {
   if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
@@ -91148,6 +91236,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     dedupeKey: childWaitingCapacityDedupeKey({
       childSessionId: session.id,
       waiterId: input.waiterId,
+      ...(input.restated ? { restatedResetsAt: payload.resetsAt } : {}),
     }),
     kind: "child_waiting_capacity",
     classification: "info",

@@ -181,6 +181,7 @@ describe("Teams self-serve setup", () => {
       microsoft: microsoftResult,
     });
     expect(status).toMatchObject({
+      appName: "Opengeni",
       installation: { tenantId, workspaceId: admin.grant.workspaceId, active: true },
       linked: true,
     });

@@ -19,7 +19,7 @@ const REFUSALS = {
   ],
   consumer_tenant: [
     403,
-    "Only a work or school Microsoft 365 organization can connect Opengeni for Teams.",
+    "Only a work or school Microsoft 365 organization can connect Microsoft Teams to Opengeni.",
   ],
   token_exchange_failed: [
     400,

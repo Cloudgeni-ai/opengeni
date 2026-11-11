@@ -708,6 +708,7 @@ async function startMcpOAuthWithinDeadline(
       expiresAt,
     }),
   );
+  const extraAuthorizeParams = authorizeParamsFor(profile, existing?.metadata);
   const authorizationUrl = buildAuthorizationUrl({
     endpoint: discovery.as.authorizationEndpoint,
     settings,
@@ -718,10 +719,10 @@ async function startMcpOAuthWithinDeadline(
     verifier,
     scopes: authorizeScopes,
     resourceParameterSupported,
-    ...(profile.extraAuthorizeParams || oidcNonce
+    ...(extraAuthorizeParams || oidcNonce
       ? {
           extraParams: {
-            ...profile.extraAuthorizeParams,
+            ...extraAuthorizeParams,
             ...(oidcNonce ? { nonce: oidcNonce } : {}),
           },
         }
@@ -732,6 +733,24 @@ async function startMcpOAuthWithinDeadline(
     authorizationUrl,
     expiresAt: expiresAt.toISOString(),
   });
+}
+
+/**
+ * The profile's authorize parameters. Reconnecting an account whose verified
+ * email the profile names signs in exactly that account: `login_hint` with
+ * the profile's reconnect prompt, so the provider does not pick another
+ * account the browser is signed in to. Exported for tests.
+ */
+export function authorizeParamsFor(
+  profile: Pick<OAuthProviderProfile, "extraAuthorizeParams" | "reconnectLoginHint">,
+  reconnecting: Readonly<Record<string, unknown>> | undefined,
+): Readonly<Record<string, string>> | undefined {
+  const hint = profile.reconnectLoginHint;
+  const email = hint && reconnecting ? reconnecting[hint.metadataKey] : undefined;
+  if (!hint || typeof email !== "string" || !/^[^\s@]+@[^\s@]+$/u.test(email)) {
+    return profile.extraAuthorizeParams;
+  }
+  return { ...profile.extraAuthorizeParams, prompt: hint.prompt, login_hint: email };
 }
 
 function assertGoogleMcpSetupEnabled(settings: Settings, profile: OAuthProviderProfile): void {

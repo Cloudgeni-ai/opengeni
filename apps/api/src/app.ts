@@ -58,7 +58,10 @@ import {
   readRejectionEnvelope,
   type HttpRejectionFacts,
 } from "./http/rejection-telemetry";
-import { observeInteractionRouteOutcome } from "./interaction-metrics";
+import {
+  interactionFailureReasonFromError,
+  observeInteractionRouteOutcome,
+} from "./interaction-metrics";
 import {
   isOAuthCallbackRoute,
   observeConnectAttemptTransition,
@@ -1114,6 +1117,7 @@ export function createAppComposition(
             status,
             durationMs: durationSeconds * 1000,
             rejectionReason: rejection?.reason,
+            failureReason: status >= 400 ? interactionFailureReasonFromError(c.error) : null,
           });
           if (isOAuthCallbackRoute(route)) {
             observeOAuthCallback(observability, {
@@ -1159,6 +1163,7 @@ export function createAppComposition(
             status,
             durationMs: durationSeconds * 1000,
             rejectionReason: rejection.reason,
+            failureReason: interactionFailureReasonFromError(error),
           });
           observability.recordHttpRejection({
             method: c.req.method,

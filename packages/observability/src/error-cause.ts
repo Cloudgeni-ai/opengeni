@@ -68,6 +68,14 @@ export const PUBLIC_ERROR_CAUSE_NAMES: ReadonlySet<string> = new Set([
   "InteractionResourceStateError",
   "SelfhostedControlError",
   "SandboxProviderError",
+  // Sandbox Channel-A and internal command outcomes, so an "unexpected"
+  // file operation (an artifact publish, for example) says which step failed.
+  "SynchronousCommandOutcomeUnknownError",
+  "RoutingMutationOutcomeUnknownError",
+  "ChannelAUnavailableError",
+  "ChannelAUnsupportedError",
+  "ChannelAPartialMutationError",
+  "ChannelAFileSystemRouteChangedError",
 ]);
 
 /** The interaction controller's closed error codes (contracts InteractionError). */

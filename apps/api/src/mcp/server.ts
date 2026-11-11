@@ -23,6 +23,7 @@ import {
   integrationDefinitionCardPostedMessage,
   integrationDefinitionSetupContext,
   integrationDefinitionSetup,
+  chatToolSelectionIncludes,
 } from "./integration-definition-capabilities";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import { sessionChatUrl, withUserSetupCard, type UserSetupCardPost } from "./user-setup-card";
@@ -2754,10 +2755,13 @@ function registerSandboxFileArtifactTool(
         if (!visibility)
           throw new Error("Pass visibility with artifactId to change who can open that file.");
         const change = { grant, artifactId, visibility };
-        return json(
-          (await changeWorkspaceFileVisibility(deps, change)) ??
-            (await changeSiteAudienceForAgent(deps, change)),
-        );
+        const fileAccess = await changeWorkspaceFileVisibility(deps, change);
+        if (fileAccess)
+          return json({
+            ...fileAccess,
+            artifactReference: `[Open file](artifact:${artifactId})`,
+          });
+        return json(await changeSiteAudienceForAgent(deps, change));
       }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
       // A Codemode call names its operation in the worker's trusted call
@@ -2774,15 +2778,17 @@ function registerSandboxFileArtifactTool(
             ? operationId
             : null,
       });
-      return json(
-        await publishSandboxFileArtifact(deps, {
-          grant,
-          session,
-          path: path!,
-          visibility,
-          executionMachine,
-        }),
-      );
+      const receipt = await publishSandboxFileArtifact(deps, {
+        grant,
+        session,
+        path: path!,
+        visibility,
+        executionMachine,
+      });
+      return json({
+        ...receipt,
+        artifactReference: `[Open file](artifact:${receipt.artifact.artifactId})`,
+      });
     },
   );
 }
@@ -3842,7 +3848,7 @@ function registerGoalTools(
           goal.metadata.reportDeliveriesV1 ?? [],
         ).map((delivery) => ({
           ...delivery,
-          artifactReference: `[Open report](/workspaces/${grant.workspaceId}/artifacts/editable/${delivery.artifactId})`,
+          artifactReference: `[Open report](artifact:${delivery.artifactId})`,
         })),
         handoff: reply?.trim()
           ? "Your reply is this turn's final answer and ends the turn after this tool batch; if this turn still continues, give that answer as your final reply."
@@ -4002,8 +4008,10 @@ function registerWorkspaceArtifactTools(
         if (error instanceof SessionAuthorizationDeniedError) return false;
         throw error;
       });
-  const mutation = async (response: WorkspaceArtifactMutationResponse) =>
-    await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
+  const mutation = async (response: WorkspaceArtifactMutationResponse) => ({
+    ...(await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession)),
+    artifactReference: `[Open Site](artifact:${response.artifact.id})`,
+  });
   // A published Site follows its Site here exactly as through the API routes:
   // the same hook resyncs the edge and scans a version that became current.
   const siteMutation = async (response: WorkspaceArtifactMutationResponse, scan: boolean) =>
@@ -4099,6 +4107,7 @@ function registerWorkspaceArtifactTools(
         detail,
         version: projectedVersion,
         downloads,
+        artifactReference: `[Open Site](artifact:${artifactId})`,
       });
     },
   );
@@ -7656,6 +7665,7 @@ function registerCapabilityDiscoveryTools(
     const availableFirstPartyTools = new Set<string>();
     const acceptedServerIds = new Set<string>();
     let accountSelectionKnown = false;
+    let chatIncludes = (_serverId: string) => true;
     if (
       items.some(
         (item) =>
@@ -7664,6 +7674,9 @@ function registerCapabilityDiscoveryTools(
       )
     ) {
       const claims = exactAgentCommandContext(grant, sessionId);
+      chatIncludes = chatToolSelectionIncludes(
+        await getSession(deps.db, grant.workspaceId, sessionId),
+      );
       const attemptCatalog = await getAttemptToolCatalog(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -7715,6 +7728,7 @@ function registerCapabilityDiscoveryTools(
                     accountSelectionKnown,
                     availableFirstPartyTools,
                     new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+                    chatIncludes,
                   ),
       ),
     );
@@ -8159,6 +8173,7 @@ async function capabilitySetupProjection(
   accountSelectionKnown: boolean,
   availableFirstPartyTools: ReadonlySet<string>,
   selectedFirstPartyTools: ReadonlySet<string>,
+  chatIncludes: (serverId: string) => boolean = () => true,
 ): Promise<CapabilitySetupProjection> {
   // The rule the Capabilities page uses to hide such entries: no card could
   // finish a connection this deployment cannot start.
@@ -8292,6 +8307,14 @@ async function capabilitySetupProjection(
         status: "ready",
         action: null,
         detail: "This capability has tools available in this turn.",
+      };
+    }
+    if (item.runtime.mcpServerId && !chatIncludes(item.runtime.mcpServerId)) {
+      return {
+        status: "unavailable",
+        action: null,
+        detail:
+          "This integration is enabled, but this chat's tool selection leaves it out. Include it in the chat's tools, then send a new message. This does not mean the account is disconnected; do not request reconnection based on missing tools alone.",
       };
     }
     if (
