@@ -10,6 +10,8 @@ import {
   PR_LANE_DEFINITIONS,
   PR_UNIT_FILE_CAP,
   browserLaneMatrix,
+  deferredAuthoredWarning,
+  isWorkspaceTestSupport,
   repositoryHelperImports,
   selectPrBrowserE2e,
   selectPrFastPlan,
@@ -383,6 +385,36 @@ test("helper imports follow relative repository files outside workspaces", () =>
   expect(
     repositoryHelperImports("test/e2e/x.browser.e2e.ts", graph, (path) => files[path] ?? null),
   ).toEqual(["test/e2e/fixtures/a.ts", "test/e2e/fixtures/b.ts"]);
+  // Workspace test-support files count as helpers but are not followed.
+  const workspaceFiles: Record<string, string> = {
+    "test/e2e/y.browser.e2e.ts": `import "../../packages/react/test/sandbox-fixtures"; import "../../apps/web/src/main";`,
+    "packages/react/test/sandbox-fixtures.ts": `import "./more-fixtures"; import "../src/index";`,
+    "packages/react/test/more-fixtures.ts": `export const c = 3;`,
+    "packages/react/src/index.ts": `export const d = 4;`,
+    "apps/web/src/main.ts": `export const e = 5;`,
+  };
+  expect(
+    repositoryHelperImports(
+      "test/e2e/y.browser.e2e.ts",
+      graph,
+      (path) => workspaceFiles[path] ?? null,
+    ),
+  ).toEqual(["packages/react/test/sandbox-fixtures.ts"]);
+  expect(isWorkspaceTestSupport("apps/web/test/session-fixture.ts")).toBe(true);
+  expect(isWorkspaceTestSupport("packages/db/src/fixtures.ts")).toBe(true);
+  expect(isWorkspaceTestSupport("apps/web/src/main.ts")).toBe(false);
+  expect(isWorkspaceTestSupport("packages/sdk/src/attestation.ts")).toBe(false);
+});
+
+test("authored tests over the PR budget become one warning annotation", () => {
+  expect(deferredAuthoredWarning([])).toBeNull();
+  expect(deferredAuthoredWarning(["test/e2e/a.e2e.ts", "test/e2e/b.e2e.ts"])).toBe(
+    "::warning title=Authored E2E tests deferred to Batch::2 changed or fixture-affected E2E test(s) exceed the PR budget and run only in Batch:%0Atest/e2e/a.e2e.ts%0Atest/e2e/b.e2e.ts",
+  );
+});
+
+test("helper imports resolve for every curated browser acceptance test", () => {
+  const graph = createWorkspaceGraph();
   // Every curated browser acceptance test resolves in the real repository.
   for (const testPath of Object.values(BROWSER_ACCEPTANCE_TESTS).flat()) {
     expect(existsSync(testPath)).toBe(true);

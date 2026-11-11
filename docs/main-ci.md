@@ -15,8 +15,10 @@ the PR instead of failing a batch of PRs:
 - The jobs are Batch's own: `ci-e2e-shards.yml` and `ci-browser-acceptance.yml`
   are reusable workflows that `ci.yml` and `pr-ci.yml` both call.
 - `scripts/ci/pr-fast-plan.ts` picks from the impact plan. Authored tests (a
-  changed test, or one that imports a changed helper or fixture) run in E2E
-  and in their browser acceptance lanes. E2E tests that depend directly on a
+  changed test, or one that imports a changed shared helper or fixture, or a
+  fixture under a package's `test/` directory) run in E2E and in their
+  browser acceptance lanes. Authored E2E tests that do not fit the budget get
+  a warning annotation on the PR. E2E tests that depend directly on a
   touched workspace add a cheapest-first sample of about one shard. A CI or
   toolchain fence does not hide either.
 - E2E has a budget of estimated profile seconds and at most four shards.

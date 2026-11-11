@@ -127,9 +127,17 @@ export function shardMatrix(total: number) {
 
 const SOURCE_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".mjs", "/index.ts", "/index.tsx"];
 
+/** Test-support files inside a workspace: its `test/` tree or a fixture. */
+export function isWorkspaceTestSupport(path: string) {
+  return /(^|\/)(test|tests|__tests__|fixtures?)\//.test(path) || /fixtures?\.[jt]sx?$/.test(path);
+}
+
 /**
  * Repository files outside every workspace (shared E2E helpers and fixtures)
- * that a test reaches through relative imports, followed transitively.
+ * that a test reaches through relative imports, followed transitively, plus
+ * the workspace test-support files (fixtures under a package's `test/`) those
+ * imports reach directly. Workspace files are not followed further: product
+ * code is covered by workspace impact, not by authorship.
  */
 export function repositoryHelperImports(
   test: string,
@@ -161,7 +169,11 @@ export function repositoryHelperImports(
       const resolved = SOURCE_EXTENSIONS.map((ext) => `${base}${ext}`).find(
         (candidate) => read(candidate) !== null,
       );
-      if (!resolved || seen.has(resolved) || workspaceForPath(graph, resolved)) continue;
+      if (!resolved || seen.has(resolved)) continue;
+      if (workspaceForPath(graph, resolved)) {
+        if (isWorkspaceTestSupport(resolved)) seen.add(resolved);
+        continue;
+      }
       seen.add(resolved);
       pending.push(resolved);
     }
@@ -192,6 +204,9 @@ export const PR_LANE_DEFINITIONS = {
     ".github/workflows/pr-ci.yml",
     ".github/actions/playwright-browsers/",
     "scripts/ci/run-test-shard.ts",
+    "scripts/ci/profile-command.ts",
+    "scripts/ci/workspace.ts",
+    "scripts/ci/e2e-shard-profile.json",
     "scripts/run-browser-e2e.ts",
   ],
   browser: [
@@ -286,6 +301,19 @@ export function selectPrBrowserE2e(plan: LanePlan, context: PrBrowserE2eContext)
       browserJobCount: browserLaneMatrix(browserAcceptanceLanes).length,
     },
   };
+}
+
+/**
+ * A GitHub warning annotation naming authored E2E tests that did not fit the
+ * PR budget, so the author sees which of their own tests only Batch will run.
+ */
+export function deferredAuthoredWarning(deferred: readonly string[]) {
+  if (deferred.length === 0) return null;
+  const escape = (text: string) =>
+    text.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+  return `::warning title=Authored E2E tests deferred to Batch::${escape(
+    `${deferred.length} changed or fixture-affected E2E test(s) exceed the PR budget and run only in Batch:\n${deferred.join("\n")}`,
+  )}`;
 }
 
 /** Admission sampling only; the original full Batch plan is never changed. */
@@ -412,4 +440,6 @@ if (import.meta.main) {
   );
   console.log(JSON.stringify(selected.prAdmissionUnits));
   console.log(JSON.stringify(lanes.summary));
+  const warning = deferredAuthoredWarning(lanes.summary.e2eDeferredAuthored);
+  if (warning) console.log(warning);
 }

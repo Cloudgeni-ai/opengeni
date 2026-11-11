@@ -7,8 +7,11 @@ choice in the plan's `prBrowserE2e` summary:
 
 - authored tests first: a changed E2E or browser acceptance test, or one that
   imports (transitively, through relative imports outside workspaces) a
-  changed helper or fixture. They select their browser acceptance lanes, and
-  E2E files use up to `PR_E2E_BUDGET_SECONDS`;
+  changed helper or fixture. A workspace test-support file those imports
+  reach (under a package's `test/`, or named `*fixture(s)`) also counts, but
+  is not followed further. They select their browser acceptance lanes, and
+  E2E files use up to `PR_E2E_BUDGET_SECONDS`; authored E2E files over the
+  budget are named in a warning annotation;
 - then E2E tests whose own or declared workspaces a changed file belongs to,
   cheapest first, within `PR_E2E_DIRECT_BUDGET_SECONDS` (about one shard);
 - shard count is the estimate over `PR_E2E_SHARD_TARGET_SECONDS`, at most
@@ -38,6 +41,9 @@ content, dependency lock, Bun pin and browser runner; each file's weight is its
 lower-median observed interval, and `fileSources` names the job that observed
 it. These are planning observations, not performance guarantees or
 cross-source efficacy claims.
+Since the shard job moved to the reusable `ci-e2e-shards.yml`, Batch names it
+`Impacted E2E / Impacted E2E shard N/M`; PR CI's
+`PR impacted E2E / Impacted E2E shard N/M` runs a subset and is not a source.
 
 The profile is used only when its schema, tier, units and platform/architecture
 match; a missing or malformed profile falls back to deterministic source-byte
