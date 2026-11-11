@@ -286,7 +286,7 @@ the check, citing a baseline pin (`2a02889ffe`) that production never ran:
 production still ran `6327db2c`, which predates 1240 and rejects the grant.
 1283 withholds it again and the caller check is back; 1283 takes the free
 ordinal after 1282 so a database that has not applied 1282 runs the two back
-to back. 1359 grants it again and removes the check, now that a release containing
+to back. 1361 grants it again and removes the check, now that a release containing
 1283 is the pinned previous production binary. Pin only the binary production really runs
 (its healthz `deploymentRevision`), never one that merely reached staging.
 

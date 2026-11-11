@@ -24,7 +24,7 @@ test("1283 withholds the compact-audio inventory 1282 granted from every configu
     return row;
   };
   try {
-    // The whole chain ends with 1359, which grants it again.
+    // The whole chain ends with 1361, which grants it again.
     await migrate(owned.ownerUrl);
     expect(await execute("opengeni_app")).toEqual({ granted: true, public_execute: false });
     for (let index = 0; index < 2; index++) {

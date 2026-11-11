@@ -4252,7 +4252,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1359 grant what 0937, 0946, 1103, 1060, 1107, 0988, 1218, 1224 and 1240/1283 withheld; 0978's, 0984's, 1002's, 1091's, 1172's and 1211's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1361 grant what 0937, 0946, 1103, 1060, 1107, 0988, 1218, 1224 and 1240/1283 withheld; 0978's, 0984's, 1002's, 1091's, 1172's and 1211's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,

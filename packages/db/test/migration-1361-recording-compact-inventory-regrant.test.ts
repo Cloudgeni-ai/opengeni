@@ -5,7 +5,7 @@ import { migrate } from "../src/migrate";
 
 const signature = "list_uncompacted_recording_tracks_v1(integer, text)";
 
-test("1359 grants the compact-audio inventory 1283 withheld to every configured role", async () => {
+test("1361 grants the compact-audio inventory 1283 withheld to every configured role", async () => {
   const owned = await acquireOwnerMigratedTestDatabase("recording-compact-regrant");
   if (!owned) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") throw new Error("PostgreSQL is required");
@@ -24,17 +24,17 @@ test("1359 grants the compact-audio inventory 1283 withheld to every configured 
     return row;
   };
   try {
-    // The whole chain runs 1282, 1283 and then 1359, so the runtime ends with it.
+    // The whole chain runs 1282, 1283 and then 1361, so the runtime ends with it.
     await migrate(owned.ownerUrl);
     expect(await execute("opengeni_app")).toEqual({ granted: true, public_execute: false });
     for (let index = 0; index < 2; index++) {
-      const role = `migration_1349_${crypto.randomUUID().replaceAll("-", "")}`;
+      const role = `migration_1361_${crypto.randomUUID().replaceAll("-", "")}`;
       await owned.admin.unsafe(`CREATE ROLE "${role}" NOSUPERUSER NOBYPASSRLS`);
       roles.push(role);
       await recordTestRoleOwner(owned.admin, role);
     }
     const source = await Bun.file(
-      new URL("../drizzle/1359_recording_compact_inventory_regrant.sql", import.meta.url),
+      new URL("../drizzle/1361_recording_compact_inventory_regrant.sql", import.meta.url),
     ).text();
     expect(source).toStartWith("-- deployment-mode: rolling");
     expect(source).not.toMatch(/\b(DROP|REVOKE)\b/i);
