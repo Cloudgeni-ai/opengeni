@@ -3,11 +3,13 @@ import { isAnthropicWebSearchItem } from "./anthropic-web-search";
 import { chatReasoning, chatReasoningDetails, chatReasoningDetailsText } from "./chat-reasoning";
 import { claudeSignedThinkingBlock, claudeThinkingSecret } from "./opaque-reasoning-replay";
 import {
+  isHostedSearchEvidenceRecord,
   projectHostedSearchEvidence,
   withSearchRecordForm,
   withSearchRecordsAfterOpenCalls,
   type SearchRecordForm,
 } from "./hosted-search-evidence";
+import { withItemsAfterOpenCalls } from "./items-after-open-calls";
 
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
@@ -620,7 +622,21 @@ function projectWireHistory(
       changed ||= next !== item;
       return next;
     });
-    return changed ? projected : items;
+    // Claude accepts other assistant content inside its reply, after its tool
+    // calls, and a system notice right before the results, but nothing
+    // between two results of one step. Such an item that falls there (another
+    // provider's records become readable facts) moves back to just before the
+    // step's first result; after the results it would open the next reply,
+    // ahead of its thinking. The Claude adapter places system notices.
+    return withItemsAfterOpenCalls(
+      changed ? projected : items,
+      (item) => isClaudeAssistantContent(item) || isSystemMessage(item),
+      {
+        resultTypeByCallType: FUNCTION_RESULT_TYPE_BY_CALL_TYPE,
+        placement: "before-results",
+        endsStep: isPersonMessage,
+      },
+    );
   }
   const incompatibleCallIds = new Set<string>();
   for (const item of items) {
@@ -634,12 +650,22 @@ function projectWireHistory(
   }
 
   let changed = false;
+  // Request-local tool disclosures that Chat receives as user messages.
+  const machineOrigin = new Set<Record<string, unknown>>();
+  const isRuntimeNotice = (item: Record<string, unknown>) =>
+    isSystemMessage(item) || machineOrigin.has(item) || isHostedSearchEvidenceRecord(item);
   const projected = items.map((item) => {
     if (disclosedTools(item)) {
       changed = true;
-      return options.hoistsSystemMessages
-        ? { type: "message", role: "user", content: `${MACHINE_ORIGIN_PREFIX}\n${item.content}` }
-        : { type: "message", role: "system", content: item.content };
+      if (!options.hoistsSystemMessages)
+        return { type: "message", role: "system", content: item.content };
+      const notice = {
+        type: "message",
+        role: "user",
+        content: `${MACHINE_ORIGIN_PREFIX}\n${item.content}`,
+      };
+      machineOrigin.add(notice);
+      return notice;
     }
     const reasoning = foreignReasoningFact(item, providerApi);
     if (reasoning) {
@@ -665,5 +691,43 @@ function projectWireHistory(
     }
     return item;
   });
-  return changed ? projected : items;
+  // Chat Completions ends an assistant tool_calls message at any other
+  // message, and a tool result must answer the message right before it.
+  // Historical facts, any other assistant message and runtime notices inside
+  // an unfinished step wait for its last result. Only a person's message ends
+  // a step early.
+  return withItemsAfterOpenCalls(
+    changed ? projected : items,
+    (item) => isAssistantMessage(item) || isRuntimeNotice(item),
+    {
+      resultTypeByCallType: FUNCTION_RESULT_TYPE_BY_CALL_TYPE,
+      endsStep: (item) => isPersonMessage(item) && !machineOrigin.has(item),
+    },
+  );
+}
+
+/** After wire projection, only function calls are executable on Chat and Claude. */
+const FUNCTION_RESULT_TYPE_BY_CALL_TYPE = { function_call: "function_call_result" } as const;
+
+function isMessage(item: Record<string, unknown>): boolean {
+  return item.type === undefined || item.type === "message";
+}
+
+function isAssistantMessage(item: Record<string, unknown>): boolean {
+  return isMessage(item) && item.role === "assistant";
+}
+
+function isSystemMessage(item: Record<string, unknown>): boolean {
+  return isMessage(item) && (item.role === "system" || item.role === "developer");
+}
+
+/** A user-role message other than a runtime search record. */
+function isPersonMessage(item: Record<string, unknown>): boolean {
+  return isMessage(item) && item.role === "user" && !isHostedSearchEvidenceRecord(item);
+}
+
+/** An item `anthropicMessages` sends as Claude's own content, other than a tool call. */
+function isClaudeAssistantContent(item: Record<string, unknown>): boolean {
+  if (isMessage(item)) return item.role === "assistant";
+  return item.type !== "function_call" && item.type !== "function_call_result";
 }
