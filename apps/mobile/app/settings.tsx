@@ -214,12 +214,15 @@ function Settings() {
               each.workspaceId !== workspace?.id
                 ? workspaces.find((candidate) => candidate.id === each.workspaceId)?.name
                 : undefined;
-            const chat = each.chatTitle || "Untitled chat";
+            // The chat's title only when it says more than the name does.
+            const chat =
+              each.chatTitle && each.chatTitle !== each.name ? each.chatTitle : undefined;
+            const subtitle = [chat, elsewhere].filter(Boolean).join(" · ");
             return {
               kind: "navigate" as const,
               id: `voice-command-${each.id}`,
               title: each.name,
-              subtitle: elsewhere ? `${chat} · ${elsewhere}` : chat,
+              ...(subtitle ? { subtitle } : {}),
               ...(each.missing ? { detail: "Chat deleted", detailTone: "danger" as const } : {}),
               onPress: () =>
                 router.push({ pathname: "/voice-command", params: { command: each.id } }),

@@ -166,6 +166,15 @@ function VoiceCommandSheet() {
     );
   };
 
+  // The "Hey" guide uses the saved name, so a valid rename is kept first. The
+  // guide replaces this sheet, so it opens as a page with its own back button.
+  const setUpWakePhrase = () => {
+    if (!command) return;
+    if (renamed && !problem) renameVoiceCommand(command.id, name);
+    router.replace(`/wake-phrase?command=${encodeURIComponent(command.id)}`);
+  };
+  const wakeName = renamed && !problem ? name : (command?.name ?? "");
+
   const label = { ...fontStyle(theme), fontSize: 17, lineHeight: 22 };
   const strong = { ...fontStyle(theme, 600) };
   const body = { ...fontStyle(theme), fontSize: 15, lineHeight: 20, color: c.fg };
@@ -339,11 +348,9 @@ function VoiceCommandSheet() {
             {ios && wakePhraseSetupAvailable() ? (
               <ActionRow
                 icon="mic"
-                title={`Set up “Hey ${command.name}”`}
+                title={`Set up “Hey ${wakeName}”`}
                 subtitle="Skip “Siri” and just say the name."
-                onPress={() =>
-                  router.push(`/wake-phrase?command=${encodeURIComponent(command.id)}`)
-                }
+                onPress={setUpWakePhrase}
                 testID="voice-command-wake-phrase"
               />
             ) : null}
