@@ -3,6 +3,7 @@ import {
   type GitHubAppRepositoryBranchPage,
   type GitHubBindingStatus,
   type GitHubInstallationBinding,
+  type GitHubInstallationIssue,
   type GitHubRepository,
   type RepositoryResourceRef,
 } from "@opengeni/contracts";
@@ -136,6 +137,12 @@ export async function listWorkspaceGitHubInstallationBindings(
       installation.installationId,
       lifecycleVerified,
     ),
+    issue: githubInstallationBindingIssue(
+      installation,
+      liveById,
+      installation.installationId,
+      lifecycleVerified,
+    ),
     repositoryScope: installation.repositoryScope,
     repositoryCount: installation.repositoryIds.length,
     configureUrl: null,
@@ -201,6 +208,38 @@ async function readWorkspaceGitHubInstallations(
   return { installations, liveById, lifecycleVerified };
 }
 
+/**
+ * One linked installation, for its repair: the stored binding and GitHub's
+ * live view of it. `live` is null when GitHub no longer has the installation
+ * and undefined when GitHub could not be asked. Null when it is not linked.
+ */
+export async function readGitHubInstallationForRepair(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  installationId: number,
+): Promise<{
+  stored: GitHubInstallationAccess;
+  live: LiveGitHubInstallation | null | undefined;
+} | null> {
+  const stored = (await listGitHubInstallationAccessForWorkspace(deps.db, workspaceId)).find(
+    (installation) => installation.installationId === installationId,
+  );
+  if (!stored) {
+    return null;
+  }
+  let live: LiveGitHubInstallation | null | undefined;
+  try {
+    live = deps.githubAppApi?.getInstallation
+      ? await deps.githubAppApi.getInstallation({ installationId })
+      : deps.githubAppApi
+        ? undefined
+        : await getGitHubAppInstallationSummary(deps.settings, installationId);
+  } catch {
+    live = undefined;
+  }
+  return { stored, live };
+}
+
 export function githubBindingStatus(
   configured: boolean,
   installations: GitHubInstallationBinding[],
@@ -233,6 +272,55 @@ export function githubInstallationBindingLifecycle(
     liveById,
     lifecycleVerified,
   );
+}
+
+/**
+ * Why a binding is not active, named by its fix, so the integration page can
+ * say what is wrong instead of a generic "Needs attention". Null exactly when
+ * the lifecycle is active. GitHub's own view wins: an installation removed,
+ * suspended or moved on GitHub reports that, even when its owner proof or
+ * repositories are also missing (an uninstall clears both).
+ */
+export function githubInstallationBindingIssue(
+  stored: Awaited<ReturnType<typeof listGitHubInstallationAccessForWorkspace>>[number],
+  liveById: Map<number, LiveGitHubInstallation | null>,
+  installationId: number,
+  lifecycleVerified: boolean,
+): GitHubInstallationIssue | null {
+  if (
+    githubInstallationBindingLifecycle(stored, liveById, installationId, lifecycleVerified) ===
+    "active"
+  ) {
+    return null;
+  }
+  // What GitHub says comes first: an app removed or suspended there needs that
+  // fixed whatever the stored owner proof holds.
+  if (lifecycleVerified) {
+    const live = liveById.get(installationId);
+    if (!live) {
+      return "uninstalled";
+    }
+    if (live.suspended) {
+      return "suspended";
+    }
+    // A binding stored without an account id (no owner proof yet) is
+    // unconfirmed, not moved.
+    if (
+      live.installationId !== installationId ||
+      (stored.githubAccountId !== null && stored.githubAccountId !== live.accountId)
+    ) {
+      return "account_changed";
+    }
+  }
+  if (!hasGitHubInstallationOwnerAuthority(stored)) {
+    return "owner_unconfirmed";
+  }
+  if (!lifecycleVerified) {
+    return "github_unreachable";
+  }
+  // Owner proof and GitHub agree; the only gap left is the auditable
+  // repository allowlist (hasAuditableGitHubInstallationAuthority).
+  return stored.repositoryIds.length === 0 ? "no_repositories" : "owner_unconfirmed";
 }
 
 /**

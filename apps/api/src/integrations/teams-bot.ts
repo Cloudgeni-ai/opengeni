@@ -1444,6 +1444,7 @@ async function status(deps: ApiRouteDeps, workspaceId: string, subjectId: string
   return {
     enabled,
     configured,
+    appName: deps.settings.teamsAppName,
     setupAvailable:
       configured &&
       enabled &&

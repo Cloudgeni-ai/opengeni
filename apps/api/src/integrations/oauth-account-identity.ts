@@ -85,10 +85,14 @@ export function decideOAuthAccountConnection(input: {
       sameResource(connection, input.mcpUrl),
   );
   const identity = verifiedIdentity(input.metadata, input.identityKeys);
+  // One account is the same provider account wherever it was signed in from:
+  // the issuer names the account namespace, not the OAuth client. A deployment
+  // that replaces its registered client (Google, for example) must still see a
+  // login made with the earlier client as this account, or connecting again
+  // saves a duplicate and reconnecting it reads as a different account.
   const sameIssuer = (connection: ConnectionMetadata) =>
     connection.providerDomain === input.providerDomain &&
-    connection.metadata.authorizationServerIssuer === input.metadata.authorizationServerIssuer &&
-    connection.metadata.clientId === input.metadata.clientId;
+    connection.metadata.authorizationServerIssuer === input.metadata.authorizationServerIssuer;
   if (input.requestedConnectionId) {
     const requested = matching.find((connection) => connection.id === input.requestedConnectionId);
     if (!requested) return { kind: "reject", reason: "account_mismatch" };

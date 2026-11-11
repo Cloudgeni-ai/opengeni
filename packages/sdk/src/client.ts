@@ -18,6 +18,7 @@ import type {
   ComputerNativeCallRequest,
   ComputerNativeReceipt,
   McpElicitationContent,
+  BrowserDownloadSaveProgress,
 } from "@opengeni/contracts";
 import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
 import {
@@ -1004,8 +1005,11 @@ export type SessionListPageOptions = {
   search?: string;
   /** Restrict rows to one workspace project; null selects unfiled rows. */
   channelId?: string | null;
-  /** Restrict rows to the exact frozen session creator identity. */
-  createdBy?: { kind: "subject" | "service"; subjectId: string };
+  /**
+   * Restrict rows to the exact frozen session creator identity. Omit `kind` to
+   * include every session the subject created, whichever kind it was frozen as.
+   */
+  createdBy?: { kind?: "subject" | "service"; subjectId: string };
   /** Inclusive ISO-8601 activity lower bound. */
   updatedFrom?: string;
   /** Exclusive ISO-8601 activity upper bound. */
@@ -2288,7 +2292,7 @@ export class OpenGeniClient {
       if (search) query.search = search;
       if (options.channelId !== undefined) query.channelId = options.channelId ?? "null";
       if (options.createdBy) {
-        query.createdByKind = options.createdBy.kind;
+        if (options.createdBy.kind) query.createdByKind = options.createdBy.kind;
         query.createdBySubjectId = options.createdBy.subjectId;
       }
       for (const key of SESSION_PAGE_STRING_QUERY_KEYS) {
@@ -5089,6 +5093,9 @@ export class OpenGeniClient {
     );
   }
 
+  /** Save exact download bytes to the source workspace. Slow exports are
+   * polled with the same operationId; only the final materialized receipt is
+   * returned. Aborting stops waiting, not the controller's running upload. */
   async saveBrowserDownload(
     workspaceId: string,
     browserSessionId: string,
@@ -5096,13 +5103,22 @@ export class OpenGeniClient {
     request: BrowserDownloadSaveRequest,
     options: OpenGeniRequestOptions = {},
   ): Promise<BrowserDownloadSaveResponse> {
-    return await this.requestJson<BrowserDownloadSaveResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/downloads/${encodeURIComponent(downloadId)}/save`,
-      request,
-      {},
-      options,
-    );
+    for (;;) {
+      const response = await this.requestJson<
+        BrowserDownloadSaveResponse | BrowserDownloadSaveProgress
+      >(
+        "POST",
+        `/v1/workspaces/${workspaceId}/browser-sessions/${encodeURIComponent(browserSessionId)}/downloads/${encodeURIComponent(downloadId)}/save`,
+        request,
+        { respondAsync: "true" },
+        options,
+      );
+      if (!("state" in response)) return response;
+      if (response.operationId !== request.operationId || response.downloadId !== downloadId) {
+        throw new Error("Browser download save returned another operation binding");
+      }
+      await abortableReadRetryDelay(response.retryAfterMs, options.signal);
+    }
   }
 
   /** Starts recording one tab of a browser session as a video. The recording

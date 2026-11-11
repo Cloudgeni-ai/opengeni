@@ -7901,7 +7901,8 @@ describe("runtime event normalization", () => {
       ),
     ).rejects.toThrow("Sandbox could not receive the Git broker credential");
 
-    expect(created).toHaveLength(2);
+    // Three seed attempts (an unknown outcome is retried) plus the gh kit.
+    expect(created).toHaveLength(4);
     expect(deleted.toSorted()).toEqual(created.toSorted());
   });
 

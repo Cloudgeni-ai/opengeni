@@ -3,8 +3,13 @@ import { describe, expect, test } from "bun:test";
 import {
   creatorAnnouncement,
   creatorHue,
+  creatorIdentityKey,
   creatorInitials,
   creatorLabel,
+  creatorPageIdentity,
+  creatorType,
+  machineCreatorDisplay,
+  machineCreatorLabel,
   railRowCreator,
 } from "./creator-initials";
 import {
@@ -445,6 +450,64 @@ describe("creatorLabel", () => {
     );
     expect(creatorLabel({ kind: "subject", subjectId: "user:x", label: "   " })).toBe("user:x");
     expect(creatorLabel({ kind: "subject", subjectId: "user:x" })).toBe("user:x");
+  });
+
+  test("names an API key by its name with a kind hint, whichever kind it was frozen as", () => {
+    const subjectId = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
+    for (const kind of ["service", "subject"] as const) {
+      const key = { kind, subjectId, label: "Codex operator 2026-09-11" };
+      expect(creatorType(key)).toBe("api_key");
+      expect(machineCreatorDisplay(key)).toEqual({
+        name: "Codex operator 2026-09-11",
+        hint: "API key",
+      });
+      expect(creatorLabel(key)).toBe("Codex operator 2026-09-11 · API key");
+      // An API key is not a person: no initials chip, even on older subject-frozen rows.
+      expect(creatorInitials(key)).toBeNull();
+      expect(creatorAnnouncement(key)).toBeNull();
+    }
+  });
+
+  test("a key or service without a friendly name is just its kind, never a raw id", () => {
+    const subjectId = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
+    for (const kind of ["service", "subject"] as const) {
+      expect(creatorLabel({ kind, subjectId })).toBe("API key");
+      expect(creatorLabel({ kind, subjectId, label: "   " })).toBe("API key");
+    }
+    expect(machineCreatorLabel({ kind: "service", subjectId })).toBe("API key");
+    expect(creatorLabel({ kind: "service", subjectId: "service:billing-worker-v2" })).toBe(
+      "Service",
+    );
+    expect(
+      creatorLabel({ kind: "service", subjectId: "service:5b0f9a7e-3c1d-4e2f-9a8b-7c6d5e4f3a2b" }),
+    ).toBe("Service");
+    expect(creatorLabel({ kind: "service", subjectId: "scheduler", label: "Nightly" })).toBe(
+      "Nightly · Service",
+    );
+    expect(machineCreatorDisplay({ kind: "subject", subjectId: "user:x" })).toBeNull();
+  });
+
+  test("only API keys page and group across frozen kinds", () => {
+    const key = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
+    expect(creatorIdentityKey({ kind: "subject", subjectId: key })).toBe(key);
+    expect(creatorIdentityKey({ kind: "service", subjectId: key })).toBe(key);
+    expect(creatorPageIdentity({ kind: "service", subjectId: key })).toEqual({ subjectId: key });
+    expect(creatorIdentityKey({ kind: "subject", subjectId: "user:ada" })).toBe("subject:user:ada");
+    expect(creatorIdentityKey({ kind: "service", subjectId: "user:ada" })).toBe("service:user:ada");
+    expect(creatorPageIdentity({ kind: "subject", subjectId: "user:ada" })).toEqual({
+      kind: "subject",
+      subjectId: "user:ada",
+    });
+  });
+
+  test("a creator without a subject id never breaks grouping or labels", () => {
+    // Malformed or older payloads can omit the subject id; the rail must still render.
+    const malformed = { type: "user", id: "fixture" } as unknown as Session["createdBy"];
+    expect(creatorType(malformed)).toBe("person");
+    expect(creatorIdentityKey(malformed)).toBe("undefined:undefined");
+    expect(creatorPageIdentity(malformed).subjectId).toBeUndefined();
+    expect(machineCreatorLabel(malformed)).toBeNull();
+    expect(creatorInitials(malformed)).toBeNull();
   });
 });
 

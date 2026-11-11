@@ -71,9 +71,11 @@ export function useTeamsBotIntegration({
     linkRequest?.scope === scope ||
     error?.scope === scope,
   );
+  // The Teams app's own name, so this card matches the app people see in Teams.
+  const appName = status?.appName ?? "Opengeni";
   const model: IntegrationViewModel = {
     id: "teams-bot",
-    name: "Opengeni for Teams",
+    name: appName,
     description: "Start work with a channel mention or a private chat in Teams.",
     mark: { logoSrc: MICROSOFT_TEAMS_LOGO_URL, monogram: "MT" },
     chip:
@@ -109,7 +111,7 @@ export function useTeamsBotIntegration({
             label: "Your Teams account",
             description: status?.linked
               ? "Your Teams messages use your Opengeni access."
-              : "Message Opengeni in Teams to link your account.",
+              : `Message ${appName} in Teams to link your account.`,
             action: status?.linked
               ? { label: "Unlink account", onClick: () => setUnlink(true) }
               : {
@@ -135,8 +137,8 @@ export function useTeamsBotIntegration({
             message: installed
               ? "A workspace administrator manages this bot."
               : canManage && status?.setupAvailable
-                ? "Install the Opengeni app in Teams, then follow its setup link to connect this workspace."
-                : "Ask your administrator to set up Opengeni in Teams.",
+                ? `Install the ${appName} app in Teams, then follow its setup link to connect this workspace.`
+                : `Ask your administrator to set up ${appName} in Teams.`,
           },
     ...(deliveryNeedsAttention
       ? {

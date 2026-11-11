@@ -1414,6 +1414,37 @@ describe("searches that name an integration the person can connect", () => {
   });
 
   for (const transport of ["generic_dispatch", "openai_native", "codex_native"] as const) {
+    test(`${transport}: a connector omitted from this chat is not reported as disconnected`, async () => {
+      const lookup = catalogConnectableIntegrationLookup({
+        callTool: async () => [
+          {
+            type: "text",
+            text: JSON.stringify({
+              matches: [
+                {
+                  capabilityId: "mcp:slack",
+                  name: "Slack",
+                  setup: {
+                    status: "unavailable",
+                    action: null,
+                    nextAction: null,
+                    detail:
+                      "This integration is enabled, but this chat's tool selection leaves it out.",
+                  },
+                },
+              ],
+            }),
+          },
+        ],
+      });
+      const result = await runtimeWith(transport, lookup).prepareSearch({
+        query: "Search Slack discussions",
+      });
+      expect(JSON.parse(result.output).notConnected).toBeUndefined();
+      expect(result.notice ?? "").not.toContain("Not connected");
+      expect(loaded(result)).not.toContain(CARD);
+    });
+
     test(`${transport}: a search naming an unconnected integration loads the card tool and names it`, async () => {
       const { queries, lookup } = fakeLookup();
       const result = await runtimeWith(transport, lookup).prepareSearch({

@@ -168,6 +168,36 @@ describe("session group pagination", () => {
     ).toBe(true);
   });
 
+  test("pages one creator across both frozen kinds when the group names no kind", () => {
+    const subjectId = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
+    const group: SessionPaginationGroup = {
+      key: `creator:${subjectId}`,
+      label: "Codex operator",
+      kind: "creator",
+      creator: { subjectId },
+    };
+    expect(sessionPaginationGroupQuery(group, BROWSE_ALL, NOW)).toEqual({
+      createdBy: { subjectId },
+    });
+    for (const kind of ["subject", "service"] as const) {
+      expect(
+        sessionMatchesPaginationGroup(row({ createdBy: { kind, subjectId } }), group, NOW),
+      ).toBe(true);
+    }
+    expect(
+      sessionMatchesPaginationGroup(
+        row({ createdBy: { kind: "service", subjectId } }),
+        {
+          key: "creator-discovery",
+          label: "More creators",
+          kind: "creatorDiscovery",
+          knownCreators: [{ subjectId }],
+        },
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
   test("uses the browser-local calendar date in the continuation identity", () => {
     expect(sessionPaginationLocalDateKey(NOW)).toBe("2026-9-4");
   });

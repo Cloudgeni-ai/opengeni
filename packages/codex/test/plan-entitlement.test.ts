@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   CODEX_TRANSPORT_ERROR_HEADER,
+  classifyCodexClientVersionRejection,
   classifyCodexEncryptedArtifactRejection,
   classifyCodexEntitlementRejection,
   classifyCodexUsageLimitError,
@@ -23,6 +24,46 @@ function codexApiError(status: number, body?: Record<string, unknown>, message?:
 }
 
 describe("Codex plan entitlement rejection classification", () => {
+  // The Codex backend's answer when a model is gated above the client version
+  // the transport presents (observed with a GPT-6.1 model and an older client).
+  const versionText =
+    "The 'gpt-6.1-sol' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.";
+
+  test("a client-version refusal is never plan-entitlement evidence, whatever code it carries", () => {
+    for (const body of [
+      { type: "invalid_request_error", message: versionText },
+      { type: "invalid_request_error", code: "upgrade_required", message: versionText },
+      { detail: versionText },
+    ] as Record<string, string>[]) {
+      const error = codexApiError(400, body, `400 ${versionText}`);
+      expect(classifyCodexClientVersionRejection(error)).toEqual({
+        status: 400,
+        message: versionText,
+      });
+      expect(classifyCodexEntitlementRejection(error)).toBeNull();
+    }
+    // Beneath a wrapper (the compaction request) too.
+    const wrapped = Object.assign(new Error("Compaction provider request was rejected"), {
+      status: 400,
+      cause: codexApiError(400, { code: "upgrade_required", message: versionText }),
+    });
+    expect(classifyCodexClientVersionRejection(wrapped)?.message).toBe(versionText);
+    expect(classifyCodexEntitlementRejection(wrapped)).toBeNull();
+  });
+
+  test("only the Codex transport's own version refusal qualifies", () => {
+    const foreign = Object.assign(new Error(`400 ${versionText}`), {
+      status: 400,
+      error: { message: versionText },
+    });
+    expect(classifyCodexClientVersionRejection(foreign)).toBeNull();
+    expect(
+      classifyCodexClientVersionRejection(
+        codexApiError(400, { code: "upgrade_required", message: "Upgrade to Pro to use this." }),
+      ),
+    ).toBeNull();
+  });
+
   test("classifies the production empty-body 400 as ambiguous evidence", () => {
     expect(classifyCodexEntitlementRejection(codexApiError(400))).toEqual({
       status: 400,

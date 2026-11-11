@@ -11,6 +11,7 @@ import {
   type CadenceValue,
 } from "@opengeni/react/ui/cadence-picker";
 import { t } from "@opengeni/react/app/lib/console-text";
+import { creatorType } from "@opengeni/react/app/lib/creator-initials";
 import {
   AUTOMATION_FREQUENCIES,
   AUTOMATION_NAME_MAX_LENGTH,
@@ -212,6 +213,8 @@ export function ownerName(task: ScheduledTask): string {
     return created.label.trim();
   }
   const subject = task.ownerSubjectId ?? "";
+  // An unnamed API key is just "API key", never its raw id.
+  if (creatorType({ kind: "subject", subjectId: subject }) === "api_key") return "API key";
   const bare = subject.includes(":") ? subject.slice(subject.indexOf(":") + 1) : subject;
   return bare.trim() || "Someone else";
 }

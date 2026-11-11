@@ -782,14 +782,18 @@ spec:
             next_step: 'Check the API logs for this route: rejectionReason permission:stream:view means the viewer''s grant lacks stream:view; other reasons point at Connected Machine consent or a stale session. Fix the grant before users retry.'
             description: 'More than 25% of POST .../attachments requests on the browser or computer session route failed with a 4xx over 30 minutes, with at least 3 failures.'
         - alert: OpenGeniInteractionOperationFailureRatio
+          # A website that does not answer or cannot be reached
+          # (reason="destination_*") is the website's failure, not ours: it is
+          # left out of both sides of the ratio, so an agent retrying a site
+          # that is down neither pages nor dilutes our own failures.
           expr: |
             (
-              sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown"}[15m]))
+              sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown",reason!~"destination_.+"}[15m]))
               /
-              clamp_min(sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[15m])), 1)
+              clamp_min(sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},reason!~"destination_.+"}[15m])), 1)
             ) > 0.25
             and on (resource, operation)
-            sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown"}[15m])) >= 5
+            sum by (resource, operation) (increase(opengeni_interaction_operations_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},outcome=~"failed|denied|outcome_unknown",reason!~"destination_.+"}[15m])) >= 5
           for: 10m
           labels:
             severity: warning
@@ -799,8 +803,8 @@ spec:
             headline: '{{ "{{ $labels.resource }}" }} {{ "{{ $labels.operation }}" }} operations failing'
             value: '{{ "{{ $value | humanizePercentage }}" }} failed or refused (15 min)'
             user_impact: 'The agent (or a person) cannot drive the browser or computer: pages do not open, observations fail, or actions are refused, so tasks that need a browser stall.'
-            next_step: 'Split opengeni_interaction_operations_total by reason in Grafana: permission_denied/access_denied is an authorization bug, control_* is a Connected Machine problem, stale is usually benign churn.'
-            description: 'Counts every Browser/Computer control route (including observe, tab, and attach routes) plus receipt outcomes; denied means a 401/403 refusal.'
+            next_step: 'Split opengeni_interaction_operations_total by reason in Grafana: permission_denied/access_denied is an authorization bug, control_* is a Connected Machine problem, timeout/controller_lost/driver_failed/tab_* point at the browser or its controller, stale is usually benign churn.'
+            description: 'Counts every Browser/Computer control route (including observe, tab, and attach routes) plus receipt outcomes; denied means a 401/403 refusal. Websites that did not answer or could not be reached (reason destination_*) are excluded; if every site fails that way at once, check the browser''s network.'
         - alert: OpenGeniHandoffsExpiringUnanswered
           expr: |
             (

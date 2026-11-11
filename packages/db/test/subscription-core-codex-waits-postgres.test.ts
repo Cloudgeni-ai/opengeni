@@ -641,14 +641,22 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
         },
       });
 
-    // The check finds the weekly limit binding days later: the same
-    // notification now names that reset, silently (replaced).
+    // The check finds the weekly limit binding days later: the timeline gets
+    // a waiting event naming it, and the same notification now names it,
+    // silently (replaced).
     const weeklyReset = new Date(Date.now() + 5 * 86_400_000);
     const restated = await reconcile(weeklyReset);
     expect(restated.action).toBe("waiting");
-    expect(restated.events.map((event) => event.type)).toEqual(["session.notification.posted"]);
-    const weeklyText = `${weeklyReset.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+    expect(restated.events.map((event) => event.type)).toEqual([
+      "codex.capacity.waiting",
+      "session.notification.posted",
+    ]);
     expect(restated.events[0]!.payload).toMatchObject({
+      earliestResetAt: weeklyReset.toISOString(),
+      waiterId: armed.waiter.waiterId,
+    });
+    const weeklyText = `${weeklyReset.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+    expect(restated.events[1]!.payload).toMatchObject({
       key: `capacity-wait:${turn.identity.turnId}`,
       replaced: true,
       body: expect.stringContaining(weeklyText),
@@ -666,14 +674,18 @@ describe.skipIf(!realDb)("Codex chat waits, wakes and health on the shared core"
       set metadata = jsonb_set(metadata, '{capacityWaitNoticeV1,resetsAt}', to_jsonb(${passed}::text))
       where id = ${turn.identity.turnId}::uuid`;
     const afterPass = await reconcile(weeklyReset);
-    expect(afterPass.events.map((event) => event.type)).toEqual(["session.notification.posted"]);
-    expect(afterPass.events[0]!.payload).toMatchObject({
+    expect(afterPass.events.map((event) => event.type)).toEqual([
+      "codex.capacity.waiting",
+      "session.notification.posted",
+    ]);
+    expect(afterPass.events[1]!.payload).toMatchObject({
       replaced: true,
       body: expect.stringContaining(weeklyText),
     });
     // An unknown reset is said as unknown.
     const unknown = await reconcile(null);
-    expect(unknown.events[0]!.payload).toMatchObject({
+    expect(unknown.events[0]!.payload).toMatchObject({ earliestResetAt: null });
+    expect(unknown.events[1]!.payload).toMatchObject({
       body: expect.stringContaining("no reset time is known"),
     });
     expect(await marker()).toMatchObject({ resetsAt: null });

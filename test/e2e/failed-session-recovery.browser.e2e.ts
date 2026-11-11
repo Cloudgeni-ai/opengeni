@@ -125,9 +125,15 @@ for (const unsupported of [true, false]) {
       const picker = page.getByRole("button", { name: "Model and effort", exact: true });
       await picker.waitFor();
       const details = banner.locator("details");
-      expect(await details.count()).toBe(unsupported ? 0 : 1);
-      if (!unsupported) {
-        expect(await details.evaluate((node) => (node as HTMLDetailsElement).open)).toBe(false);
+      // The banner is the one place this failure is told; text its headline
+      // replaced stays reachable, closed, behind Details.
+      expect(await details.count()).toBe(1);
+      expect(await details.evaluate((node) => (node as HTMLDetailsElement).open)).toBe(false);
+      if (unsupported) {
+        expect(await details.locator("p").textContent()).toBe(
+          "The model `example` is not supported with this account.",
+        );
+      } else {
         expect(await details.locator("p").textContent()).toBe("Connection interrupted.");
         expect(await banner.locator("span").first().textContent()).toBe(
           "The session stopped unexpectedly.",
@@ -136,7 +142,7 @@ for (const unsupported of [true, false]) {
       expect(await banner.getByRole("button", { name: /Choose/ }).count()).toBe(0);
       if (unsupported) {
         expect(await banner.textContent()).toBe(
-          "This model isn’t available. Choose another below.",
+          "This model isn’t available. Choose another below.DetailsThe model `example` is not supported with this account.",
         );
         expect(await banner.getByRole("button").count()).toBe(0);
       } else {
@@ -378,8 +384,13 @@ for (const [size, viewport] of [
       const main = page.locator("main");
       // The person reads plain outcomes; the operator text is nowhere visible.
       expect(await banner.locator("span").first().textContent()).toBe("The sandbox didn’t start.");
-      const chip = main.locator(`[title=${JSON.stringify(SANDBOX_START_DIAGNOSTIC)}]`);
-      expect(await chip.textContent()).toBe(" · Sandbox didn’t start");
+      // The banner tells the failure; the turn's row keeps a quiet status.
+      expect(
+        await main.locator(`[title=${JSON.stringify(SANDBOX_START_DIAGNOSTIC)}]`).count(),
+      ).toBe(0);
+      const workHeader = main.locator('[data-og-work-header="outer"]').first();
+      expect(await workHeader.innerText()).toMatch(/^Worked for \S+ · Failed$/);
+      expect((await main.innerText()).split("The sandbox didn’t start.").length - 1).toBe(1);
       expect(await main.innerText()).not.toContain("capabilities.op_release");
       await banner.getByRole("button", { name: "Retry", exact: true }).waitFor();
       expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
@@ -418,7 +429,12 @@ test("permission-disabled model picker never receives recovery guidance", async 
     const picker = page.getByRole("button", { name: "Model and effort", exact: true });
     await picker.waitFor();
     expect(await picker.isDisabled()).toBe(true);
-    expect(await banner.textContent()).toBe("This model isn’t available.");
+    expect(await banner.textContent()).toBe(
+      "This model isn’t available.DetailsThe model `example` is not supported with this account.",
+    );
+    expect(
+      await banner.locator("details").evaluate((node) => (node as HTMLDetailsElement).open),
+    ).toBe(false);
     expect(await banner.getByRole("alert").count()).toBe(0);
     expect(await banner.getByRole("button").count()).toBe(0);
     if (evidenceDir)
@@ -825,7 +841,13 @@ async function installApi(
     if (path.endsWith("/editable-artifacts") || path.endsWith("/published-artifacts"))
       return json({ artifacts: [], nextCursor: null });
     if (path.endsWith("/github/app"))
-      return json({ configured: false, missing: [], installUrl: null });
+      return json({
+        configured: false,
+        status: "disabled",
+        missing: [],
+        installUrl: null,
+        installations: [],
+      });
     if (path.endsWith("/connections/github")) return json({ enabled: false, connection: null });
     if (path.endsWith("/feedback") || path.endsWith("/feedback/mine"))
       return json({ feedback: [], turns: [] });

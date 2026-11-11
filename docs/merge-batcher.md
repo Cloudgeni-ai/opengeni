@@ -98,8 +98,9 @@ never share a batch. The numbered directories are listed in `NUMBERED_FILES`
 (`scripts/batcher/model.ts`).
 
 Two PRs that both regenerated one generated file, such as
-`packages/sdk/src/site-browser-runtime.gen.ts` or
-`scripts/public-api/surface.gen.json`, conflict in Git once the first lands,
+`packages/sdk/src/site-browser-runtime.gen.ts`,
+`scripts/public-api/surface.gen.json` or
+`scripts/workflow-execution-graph-manifest.json`, conflict in Git once the first lands,
 although neither did anything wrong. A queued PR that conflicts with `main`
 therefore is not ejected at once. The batcher dispatches the `Regenerate
 generated files` workflow for its head, which merges `main` into it and, if

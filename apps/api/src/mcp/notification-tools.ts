@@ -22,7 +22,7 @@ import {
   SessionNotificationWithdrawnPayload,
   type AccessGrant,
 } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { hasPermission, type ApiRouteDeps } from "@opengeni/core";
 import {
   countWebhookDeliveriesForEvent,
   dismissInboxNotification,
@@ -114,6 +114,36 @@ export async function resolveMember(
   }
   const byName = members.filter((member) => member.subjectLabel?.trim().toLowerCase() === lowered);
   return byName.length === 1 ? toMember(byName[0]!) : null;
+}
+
+/**
+ * A failed lookup gives the agent exact recipients it can retry with, when its
+ * grant may already read the workspace's members (`workspace:read`, like the
+ * member-list API). A narrower grant keeps the plain refusal.
+ */
+export async function requireMember(
+  deps: ApiRouteDeps,
+  grant: Pick<AccessGrant, "workspaceId" | "permissions">,
+  recipient: string,
+): Promise<Member> {
+  const member = await resolveMember(deps, grant.workspaceId, recipient);
+  if (member) return member;
+  const unresolved = `${recipient} is not a member of this workspace (or the name matches more than one member).`;
+  if (!hasPermission(grant.permissions, "workspace:read")) {
+    throw new ToolArgumentError(`${unresolved} Use their email.`);
+  }
+  const members = await listWorkspaceMembers(deps.db, grant.workspaceId);
+  const choices = members.map(
+    (each) =>
+      `- ${JSON.stringify(each.subjectLabel?.trim() || each.subjectId)}: recipient=${JSON.stringify(each.subjectId)}`,
+  );
+  throw new ToolArgumentError(
+    `${unresolved} ` +
+      "Retry with the exact recipient ID of the intended member below.\n" +
+      (choices.length > 0
+        ? `Workspace members:\n${choices.join("\n")}`
+        : "No workspace members are available."),
+  );
 }
 
 /** How a person is named to other members: their member name, else their profile. */
@@ -223,12 +253,7 @@ export function registerNotificationTools(input: RegisterNotificationToolsInput)
             "This session works for no person, so it cannot notify other members of the workspace.",
           );
         }
-        member = await resolveMember(deps, grant.workspaceId, recipient);
-        if (!member) {
-          throw new ToolArgumentError(
-            `${recipient} is not a member of this workspace (or the name matches more than one member). Use their email.`,
-          );
-        }
+        member = await requireMember(deps, grant, recipient);
         if (member.subjectId === owner.subjectId) {
           member = null;
         } else if (
