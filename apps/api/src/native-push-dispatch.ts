@@ -1,6 +1,7 @@
 import { createSign, randomUUID } from "node:crypto";
 import { connect, type ClientHttp2Session } from "node:http2";
 import type { Settings } from "@opengeni/config";
+import { withoutProviderTrackingInText } from "@opengeni/contracts/citation-urls";
 import {
   claimNativePushDeliveries,
   listSessionHumanInputRequests,
@@ -93,10 +94,11 @@ export type NativePushDispatchDeps = {
 
 /**
  * A notification message as plain text for the lock screen: links keep their
- * text, emphasis and code marks go, and "- " bullets become "•".
+ * text, emphasis and code marks go, "- " bullets become "•", and bare source
+ * links lose the tracking a hosted web search tagged onto them.
  */
 export function plainNotificationText(markdown: string): string {
-  return markdown
+  return withoutProviderTrackingInText(markdown)
     .replace(/\[([^\]]+)\]\((?:[^)]+)\)/gu, "$1")
     .replace(/(\*\*|__)(.+?)\1/gu, "$2")
     .replace(/`([^`]+)`/gu, "$1")

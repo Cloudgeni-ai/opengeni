@@ -10,6 +10,7 @@ import {
 export * from "./workspace-control-event";
 export * from "./billing-auto-top-up";
 export * from "./secret-value";
+export * from "./citation-urls";
 export * from "./claude-cite-tags";
 export * from "./machine-access";
 export * from "./no-reply";
