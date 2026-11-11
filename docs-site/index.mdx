@@ -49,7 +49,7 @@ See [Embed with your coding agent](/embed-with-a-coding-agent) and the [plugin g
 ## What you get
 
 - **A complete conversation UI.** `OpenGeniChat` gives each user their chats and a conversation with streaming replies, tool calls, approvals, questions, attachments, queueing, and steering. Brand it with CSS tokens.
-- **Your tools, your users.** The agent calls your product through an MCP server or an OpenAPI description, as the signed-in user, with short-lived tokens you mint.
+- **Your tools, your users.** The agent calls your product through an MCP server, as the signed-in user with short-lived tokens you mint, or through an OpenAPI description.
 - **Durable sessions.** Every event lands in a Postgres log. Reloads, new clients, and audits replay the same history, and work survives worker restarts.
 - **Agents that finish.** Give a session a goal with success criteria and it keeps working until it completes the goal with evidence or pauses with a reason.
 - **Humans in control.** Tool approvals and structured questions pause the exact turn until someone answers.
@@ -59,6 +59,16 @@ See [Embed with your coding agent](/embed-with-a-coding-agent) and the [plugin g
 ## Where to go next
 
 <CardGroup cols={2}>
+  <Card title="Why Opengeni" icon="lightbulb" href="/why-opengeni">
+    What you get, who it is for, and when another tool fits better.
+  </Card>
+  <Card
+    title="Compare with agent frameworks"
+    icon="scale-balanced"
+    href="/compare-agent-frameworks"
+  >
+    How Opengeni relates to LangGraph, Mastra, the Vercel AI SDK, and others.
+  </Card>
   <Card title="How it fits together" icon="diagram-project" href="/integrate/how-it-fits-together">
     The browser, your backend, and Opengeni, and how tenants map to workspaces.
   </Card>

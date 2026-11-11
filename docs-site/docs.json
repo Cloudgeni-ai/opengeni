@@ -33,7 +33,14 @@
     "groups": [
       {
         "group": "Get started",
-        "pages": ["index", "embed-with-a-coding-agent", "embed-manually", "quickstart"]
+        "pages": [
+          "index",
+          "why-opengeni",
+          "embed-with-a-coding-agent",
+          "embed-manually",
+          "quickstart",
+          "compare-agent-frameworks"
+        ]
       },
       {
         "group": "Build",
