@@ -4507,7 +4507,7 @@ export const englishMessages = {
   "sessionAdmission.allowing": "Allowing…",
   "sessionAdmission.aMember": "another member",
   "sessionAdmission.approvedElsewhereBody":
-    "You sent it for “{approved}”, but this chat now runs on “{machine}”. A saved message only runs on the machine it was sent for.",
+    "You sent it for “{approved}”, but this chat now runs on “{machine}”. It only runs on the machine it was sent for.",
   "sessionAdmission.approvedElsewhereNext":
     "Run it on “{approved}”, or remove it from the queue and send it again to use “{machine}”.",
   "sessionAdmission.approvedElsewhereOfflineNext":
@@ -4526,36 +4526,39 @@ export const englishMessages = {
     "Send a message in this chat first. The agent can then continue with them under your access.",
   "sessionAdmission.continuingWaitingWork": "Continuing…",
   "sessionAdmission.copyRequestTo": "Copy request to {owner}",
-  "sessionAdmission.genericBody":
-    "{product} couldn’t start your next message. Your message is saved.",
+  "sessionAdmission.genericBody": "{product} couldn’t start your next message.",
   "sessionAdmission.genericNext":
     "Try again. If it still doesn’t start, ask a workspace admin to look into it.",
   "sessionAdmission.genericTitle": "Couldn't start",
   "sessionAdmission.grantBody":
-    "Your next message needs a machine or other personal resource that isn’t allowed for this chat. Your message is saved.",
+    "Your next message needs a machine or other personal resource that isn’t allowed for this chat.",
   "sessionAdmission.grantNext":
-    "The person it belongs to can allow it for this chat. It starts by itself once they do.",
+    "The resource’s owner can allow it for this chat. The message starts by itself once they do.",
   "sessionAdmission.grantTitle": "Not allowed for this chat",
-  "sessionAdmission.machineAccessBody":
-    "This chat isn’t allowed to use “{machine}” right now. Your message is saved.",
+  "sessionAdmission.machineAccessBody": "This chat isn’t allowed to use “{machine}”.",
   "sessionAdmission.machineAccessOthersBody":
-    "This chat isn’t allowed to use {owner}’s machine “{machine}” right now. The message is saved.",
+    "This chat isn’t allowed to use {owner}’s machine “{machine}”.",
   "sessionAdmission.machineAccessOthersNext":
-    "Only {owner} can allow it. It starts by itself once they do.",
+    "Only {owner} can allow it. The message starts by itself once they do.",
   "sessionAdmission.machineAccessOwnerNext":
     "Allow it for this chat and your message starts right away.",
+  "sessionAdmission.machineAccessOwnerPausedNext":
+    "Allow it for this chat. Your message starts when the chat is resumed.",
   "sessionAdmission.machineAccessOwnerSettingsNext":
-    "You can allow it in the machine’s settings. Your message starts by itself once you do.",
+    "Allow it in the machine’s settings. Your message starts by itself once you do.",
+  "sessionAdmission.machineAccessOwnerSettingsPausedNext":
+    "Allow it in the machine’s settings. Your message starts when the chat is resumed.",
+  "sessionAdmission.machineAccessSharedNote":
+    "People in this workspace will see what the agent does on the machine.",
   "sessionAdmission.machineAccessTitle": "Machine access needed",
   "sessionAdmission.machineChangeFailed":
     "The machine change could not be confirmed. Refresh and try again.",
-  "sessionAdmission.machineChangedBody": "Your message is saved.",
-  "sessionAdmission.machineChangedNext": "It starts by itself on the new machine.",
+  "sessionAdmission.machineChangedNext": "The message starts by itself.",
   "sessionAdmission.machineChangedTitle": "Starting on the new machine",
   "sessionAdmission.membershipBody":
-    "The person who sent this message no longer has access to this workspace. Their message is saved.",
+    "The person who sent this message no longer has access to this workspace.",
   "sessionAdmission.membershipNext":
-    "A workspace admin can restore their access. It starts by itself once they do.",
+    "A workspace admin can restore their access. The message starts by itself once they do.",
   "sessionAdmission.membershipTitle": "Workspace access needed",
   "sessionAdmission.messagesWaitingExplanation":
     "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start work there, so messages from other people wait for {owner}.",
@@ -4582,7 +4585,7 @@ export const englishMessages = {
   "sessionAdmission.otherMachineExplanation":
     "This chat runs on {owner}’s personal machine “{machine}”. Only {owner} can start new work there.",
   "sessionAdmission.otherMachineQueuedNext":
-    "The message is saved. Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. It starts by itself once the chat is on a machine you can use.",
+    "Choose a workspace or cloud machine, or ask {owner} about sharing this machine with the workspace. The message starts by itself once the chat is on a machine its sender can use.",
   "sessionAdmission.otherMachineWorkNote":
     "Updates from agents you start here also wait for {owner}.",
   "sessionAdmission.othersApprovedElsewhereBody":
@@ -4608,16 +4611,15 @@ export const englishMessages = {
   "sessionAdmission.ownMachineExplanation":
     "This chat runs on your personal machine “{machine}”. Messages from other people cannot start work on it.",
   "sessionAdmission.ownMachineQueuedNext":
-    "The message is saved. Choose a workspace or cloud machine, or ask a workspace admin to share this machine. It starts by itself once the chat is on a machine its sender can use.",
+    "Choose a workspace or cloud machine, or ask a workspace admin to share this machine. The message starts by itself once the chat is on a machine its sender can use.",
   "sessionAdmission.ownMachineSharedHeadsUp":
     "This chat runs on your personal machine “{machine}”. People in this workspace see what the agent does on it.",
   "sessionAdmission.ownerRequest":
     "This chat runs on your personal machine “{machine}”, so my message can't start there. Could you make the machine available to the workspace, or help me choose a shared machine?",
-  "sessionAdmission.pausedNote": "This chat is also paused. Your message starts when it’s resumed.",
-  "sessionAdmission.permissionBody":
-    "A permission check stopped your next message. Your message is saved.",
+  "sessionAdmission.pausedNote": "This chat is also paused. The message starts when it’s resumed.",
+  "sessionAdmission.permissionBody": "A permission check stopped your next message.",
   "sessionAdmission.permissionNext":
-    "It starts by itself once access to this chat’s machine or resources is fixed. Their owner or a workspace admin can fix it.",
+    "The owner of this chat’s machine or resources, or a workspace admin, can fix this. The message starts by itself once they do.",
   "sessionAdmission.permissionTitle": "Permission needed",
   "sessionAdmission.preSendTitle": "Choose a machine before sending",
   "sessionAdmission.refreshFailed": "Session status could not be refreshed. Try refreshing again.",
@@ -4629,8 +4631,7 @@ export const englishMessages = {
   "sessionAdmission.retryFailed":
     "That couldn’t be confirmed. Check the chat’s status before trying again.",
   "sessionAdmission.runOnApprovedMachine": "Run it on {approved}",
-  "sessionAdmission.savedMessageMachineNote":
-    "Use a workspace or cloud machine for the saved message. It starts by itself once the chat moves.",
+  "sessionAdmission.savedMessageMachineNote": "Use a workspace or cloud machine for this message.",
   "sessionAdmission.starting": "Starting…",
   "sessionAdmission.theMachineOwner": "the machine owner",
   "sessionAdmission.tryAgain": "Try again",
