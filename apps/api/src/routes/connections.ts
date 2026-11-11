@@ -7,6 +7,7 @@ import {
   WORKSPACE_SETTINGS_REFUSAL,
   workspaceSettingsAuthorized,
 } from "@opengeni/core";
+import { storedConnectionIntegrationKey } from "../integrations/stored-connection-integration-key";
 import { withDesktopAppReturnPath } from "../desktop-app-return";
 import {
   assertClaudeWorkspaceCredential,
@@ -484,7 +485,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           })
         : persist(database);
     // Only the canonical workspace model-key lane is outside integration policy.
-    // Generic credentials have no validated protocol/curated target in this contract.
+    // Other credentials count as the integration their own data names (an MCP
+    // server's OAuth credential), else as unclassified, which a restricted
+    // policy refuses.
     const modelKey = workspaceProviderApiKeyConnectionKind({
       subjectId: createConnectionSubjectId(payload, grant.subjectId),
       providerDomain: canonicalProviderDomain(payload.providerDomain),
@@ -496,7 +499,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       : withOrganizationIntegrationAcquisition(
           db,
           { accountId: grant.accountId, workspaceId },
-          [null],
+          [storedConnectionIntegrationKey({ kind: payload.kind, metadata: payload.metadata })],
           commit,
         );
   });
@@ -1194,7 +1197,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                   Date.parse(payload.expiresAt) > Date.parse(existing.expiresAt))) ||
               (payload.status === "active" && existing.status !== "active"))
           ) {
-            assertOrganizationIntegrationAllowed(policy, null);
+            // Judged by what the connection is after this update.
+            assertOrganizationIntegrationAllowed(
+              policy,
+              storedConnectionIntegrationKey({
+                kind: payload.kind ?? existing.kind,
+                metadata: payload.metadata ?? existing.metadata,
+              }),
+            );
           }
           if (changesCredentialDestination && existing.subjectId === null) {
             // A shared credential stays bound to the destination it was issued

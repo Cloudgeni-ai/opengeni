@@ -564,7 +564,8 @@ describe("a batcher pass", () => {
       { number: 5, body: expect.stringContaining("holding main for this Version PR") },
     ]);
     expect(gh.comments[0]!.body).toContain("remove the queue-ready label");
-    expect(new Set(gh.commentLookups)).toEqual(new Set([NOW - 600_000]));
+    // A day early, as a commit's date may run ahead of GitHub's clock.
+    expect(new Set(gh.commentLookups)).toEqual(new Set([NOW - 600_000 - 24 * 60 * 60_000]));
 
     gh.pulls.get(5)!.green = true;
     await run(gh, options());
@@ -1154,7 +1155,7 @@ describe("a batcher pass", () => {
     }
   });
 
-  test("a Git conflict still ejects a PR whose migration number main already uses", async () => {
+  test("a Git conflict parks a PR whose migration number main already uses instead of moving it", async () => {
     const gh = new FakeGitHub();
     gh.addPull(1, { files: ["packages/db/drizzle/0007_a.sql"], labels: [] });
     const landed = gh.store([gh.pulls.get(1)!.head], [await gh.mainSha()], "Change 1 (#1)");
@@ -1174,8 +1175,10 @@ describe("a batcher pass", () => {
     await run(gh, options());
     await run(gh, options());
     expect(gh.branchUpdates).toEqual([]);
-    expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
+    expect(gh.comments).toHaveLength(1);
     expect(gh.comments[0]!.body).toContain("it conflicts with main in `packages/db/src/schema.ts`");
+    expect(gh.dispatches).toHaveLength(1);
   });
 
   test("stops when a landed tree differs from the tested tree", async () => {
@@ -1230,7 +1233,7 @@ describe("a batcher pass", () => {
     expect(gh.commits.get(await gh.mainSha())!.tree).toBe(built.manifest.members[1]!.tree);
   });
 
-  test("a new head that now conflicts is ejected, never landed", async () => {
+  test("a new head that now conflicts is parked out of its batch, never landed", async () => {
     const gh = new FakeGitHub();
     gh.addPull(1);
     gh.addPull(2);
@@ -1244,9 +1247,24 @@ describe("a batcher pass", () => {
     gh.finishCi(built.sha, "success");
     await run(gh, options());
     expect(gh.pulls.get(2)!.merged).toBeUndefined();
-    expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(2)!.labels).not.toContain(IN_BATCH_LABEL);
+    expect(gh.comments.map((c) => c.number)).toEqual([2]);
+    expect(gh.comments[0]!.body).toContain(
+      "took this PR out of the running batch because it conflicts with main",
+    );
+    expect(gh.comments[0]!.body).not.toContain("merge-batcher:conflict");
     expect(gh.pulls.get(1)!.merged).toBeUndefined();
     expect(gh.refs.get(built.name)).toBeUndefined();
+    // The rest is rebuilt without it.
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+    expect(gh.dispatches).toEqual([]);
+
+    // Out of the batch, the same head is checked again: its conflict may be
+    // only in generated files, which the batcher regenerates.
+    await run(gh, options());
+    expect(gh.dispatches.map((d) => [d.pull, d.head])).toEqual([[2, fresh]]);
+    expect(gh.comments).toHaveLength(1);
   });
 
   test("a Version PR's new head restarts its batch", async () => {
@@ -1372,9 +1390,10 @@ describe("regenerating generated files a PR conflicts with main in", () => {
     expect([...gh.refs.keys()].some((name) => name.startsWith("batch-build/"))).toBe(false);
   });
 
-  test("a conflict in a file that is not generated ejects the PR, naming every conflicting file", async () => {
+  test("a conflict in a file that is not generated parks the PR, naming every conflicting file, once per head", async () => {
     const gh = new FakeGitHub();
     conflicting(gh, 1);
+    gh.addPull(2);
     gh.regenerateWith = (input) => ({
       conclusion: "success",
       result: {
@@ -1387,14 +1406,47 @@ describe("regenerating generated files a PR conflicts with main in", () => {
     await run(gh, options());
     expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
     await run(gh, options());
-    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
-    expect(gh.comments[0]!.body).toContain(
-      `it conflicts with main in \`apps/api/src/app.ts\`, \`${GENERATED}\`. Merge main into the branch`,
-    );
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+    const head = gh.pulls.get(1)!.head;
+    expect(gh.comments).toEqual([
+      {
+        number: 1,
+        body: expect.stringContaining(
+          `<!-- merge-batcher:conflict ${head} -->\nThe merge queue is skipping this PR for now because it conflicts with main in \`apps/api/src/app.ts\`, \`${GENERATED}\`. It keeps its \`${QUEUE_LABEL}\` label`,
+        ),
+      },
+    ]);
     expect(gh.branchUpdates).toEqual([]);
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+
+    // Later passes neither regenerate it again nor say it again.
+    await run(gh, options());
+    expect(gh.dispatches).toHaveLength(1);
+    expect(gh.comments).toHaveLength(1);
+
+    // A new head that still conflicts is regenerated and told about again.
+    gh.pulls.get(1)!.head = hash("head:1 still conflicting");
+    gh.headCommit(1);
+    await run(gh, options());
+    await run(gh, options());
+    expect(gh.dispatches).toHaveLength(2);
+    expect(gh.comments).toHaveLength(2);
+    expect(gh.comments[1]!.body).toContain(
+      `<!-- merge-batcher:conflict ${hash("head:1 still conflicting")} -->`,
+    );
+
+    // Once its branch merges main cleanly and PR CI passes, it is batched
+    // without being queued again.
+    gh.finishCi(gh.batch().sha, "success");
+    await run(gh, options());
+    gh.pulls.get(1)!.head = hash("head:1 merged main");
+    gh.pulls.get(1)!.conflicting = false;
+    await run(gh, options());
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+    expect(gh.comments).toHaveLength(2);
   });
 
-  test("waits while the run is going, and ejects when it fails or leaves no valid result", async () => {
+  test("waits while the run is going, and parks the PR when it fails or leaves no valid result", async () => {
     for (const ending of ["failure", "invalid", "missing"] as const) {
       const gh = new FakeGitHub();
       conflicting(gh, 1);
@@ -1419,7 +1471,7 @@ describe("regenerating generated files a PR conflicts with main in", () => {
           files: [{ path: ".github/workflows/ci.yml", mode: "100644", content: base64("x") }],
         });
       await run(gh, options());
-      expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+      expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
       expect(gh.comments[0]!.body).toContain(
         ending === "failure"
           ? `could not regenerate its generated files: ${running!.url} did not succeed`
@@ -1436,7 +1488,7 @@ describe("regenerating generated files a PR conflicts with main in", () => {
     await run(gh, options());
     await run(gh, options());
     expect(gh.branchUpdates).toEqual([]);
-    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
     expect(gh.comments[0]!.body).toContain("GitHub's merge of main differs from the one");
   });
 
@@ -1453,11 +1505,11 @@ describe("regenerating generated files a PR conflicts with main in", () => {
     await run(gh, options());
     await run(gh, options());
     expect(gh.branchUpdates).toEqual([]);
-    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
     expect(gh.comments[0]!.body).toContain(`merged ${side.slice(0, 10)}, which is not on main`);
   });
 
-  test("a clean merge on an older main asks again on the current one; on the same main it ejects", async () => {
+  test("a clean merge on an older main asks again on the current one; on the same main it parks", async () => {
     const gh = new FakeGitHub();
     conflicting(gh, 1);
     gh.regenerateWith = (input) => ({
@@ -1471,11 +1523,13 @@ describe("regenerating generated files a PR conflicts with main in", () => {
     expect(gh.dispatches.map((d) => d.main)).toEqual([gh.root, moved]);
     expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
     await run(gh, options());
-    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
-    expect(gh.comments[0]!.body).toContain("it conflicts with main. Merge main into the branch");
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+    expect(gh.comments[0]!.body).toContain(
+      "skipping this PR for now because it conflicts with main.",
+    );
   });
 
-  test("GitHub failing postpones it; a production branch is ejected as before", async () => {
+  test("GitHub failing postpones it; a production branch is parked without regenerating", async () => {
     const gh = new FakeGitHub();
     conflicting(gh, 1);
     conflicting(gh, 2, { headRef: "production" });
@@ -1485,9 +1539,9 @@ describe("regenerating generated files a PR conflicts with main in", () => {
     };
     await run(gh, options());
     expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
-    expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
     expect(gh.comments).toEqual([
-      { number: 2, body: expect.stringContaining("it conflicts with main. Merge main") },
+      { number: 2, body: expect.stringContaining("because it conflicts with main.") },
     ]);
     gh.regenerations = regenerations;
     await run(gh, options());
@@ -1580,7 +1634,7 @@ describe("the in-batch label", () => {
     expect(gh.marked()).toEqual([]);
   });
 
-  test("a member the batcher ejects itself gets no comment blaming it", async () => {
+  test("a member the batcher parks itself gets no comment blaming it", async () => {
     const gh = new FakeGitHub();
     gh.addPull(1);
     gh.addPull(2);
@@ -1588,7 +1642,8 @@ describe("the in-batch label", () => {
     gh.pulls.get(2)!.conflicting = true;
     await run(gh, options());
     expect(gh.comments.map((c) => c.number)).toEqual([2]);
-    expect(gh.comments[0]!.body).toContain("Removed from the merge queue because it conflicts");
+    expect(gh.comments[0]!.body).toContain("took this PR out of the running batch");
+    expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
     expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
     expect(gh.marked()).toEqual([1]);
   });

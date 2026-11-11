@@ -137,6 +137,7 @@ describe("Teams self-serve Microsoft sign-in return", () => {
       `${Buffer.from(JSON.stringify(value)).toString("base64url")}.signature`;
     expect(teamsMicrosoftSignInPurpose(state({ purpose: "teams-account-link" }))).toBe("link");
     expect(teamsMicrosoftSignInPurpose(state({ purpose: "teams-admin-setup" }))).toBe("setup");
+    expect(teamsMicrosoftSignInPurpose(state({ purpose: "teams-installer-setup" }))).toBe("setup");
     for (const unknown of [undefined, "", "signed-state", state({ purpose: "other" }), "%%%.x"])
       expect(teamsMicrosoftSignInPurpose(unknown)).toBeNull();
   });

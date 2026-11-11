@@ -173,9 +173,12 @@ Privileged Identity Management activates it first. Microsoft personal accounts
 (tenant `9188040d-6c67-4c5b-b112-36a304b66dad`) can never self-serve.
 
 An operator-approved installer (`OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS`) gets the
-setup link without the Microsoft sign-in only in reply to their own 1:1
-message, never on an install event, whose sender needn't be the person whose
-chat it is.
+setup link only in reply to their own 1:1 message, never on an install event,
+whose sender needn't be the person whose chat it is. Because setup links the
+installer's Teams account, they too sign in to Microsoft on the setup page.
+Their sign-in must be the Teams user the setup link names (`tid` and `oid`),
+but needs no administrator role. A setup link forwarded to someone else is
+refused with `user_mismatch` and connects nothing.
 
 What self-serve cannot do: bind a tenant the person doesn't administer (the
 Microsoft sign-in must be the same Teams user and hold an administrator role in
@@ -275,9 +278,9 @@ replies. Its redelivery then gets the short reminder. An install's welcome is al
 
 Self-serve sign-in and the account-link sign-in use the bot's own Entra
 application (`OPENGENI_TEAMS_BOT_CLIENT_ID`) and its existing client secret. Do
-not reuse the Microsoft 365 tools connector app. Account linking needs the
-redirect URI and API permissions below on every deployment, including one that
-connects organizations only through operator-approved installers. On that app
+not reuse the Microsoft 365 tools connector app. Setup by an operator-approved
+installer and account linking need the redirect URI and API permissions below
+on every deployment, including one without self-serve setup. On that app
 registration:
 
 - **Supported account types**: accounts in any organizational directory
