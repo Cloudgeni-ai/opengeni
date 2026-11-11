@@ -15,6 +15,7 @@ import {
   formatRelativeTime,
   humanizeFailureReason,
   isDiagnosticFailureCode,
+  newConversationErrorMessage,
   presentFailure,
   isCreditExhaustion,
   stringifyPayload,
@@ -588,6 +589,70 @@ describe("composerSubmissionErrorMessage", () => {
     const bare = new OpenGeniApiError(400, "");
     expect(composerSubmissionErrorMessage(englishText, bare)).toBe(
       "The request could not be accepted. Check your input and try again.",
+    );
+  });
+
+  test("a refused new chat says the refusal's own reason; typed and uncertain failures keep theirs", () => {
+    const host = (status: number, error: string, options: { outcomeUnknown?: boolean } = {}) =>
+      new OpenGeniApiError(
+        status,
+        JSON.stringify({ error, code: "BAD_REQUEST", details: { field: "latencyMode" } }),
+        { outcomeUnknown: false, ...options },
+      );
+    // A host endpoint's `{ error: "sentence" }` refusal, at any explained 4xx.
+    for (const status of [400, 403, 404, 409, 422]) {
+      expect(
+        newConversationErrorMessage(
+          englishText,
+          host(status, "the chosen speed is not available for this model"),
+        ),
+      ).toBe("The chosen speed is not available for this model.");
+    }
+    // Opengeni's own create refusal body.
+    expect(
+      newConversationErrorMessage(
+        englishText,
+        new OpenGeniApiError(
+          409,
+          JSON.stringify({
+            code: "SESSION_CREATE_REJECTED",
+            message: "The chosen connection is no longer selectable",
+          }),
+          { outcomeUnknown: false },
+        ),
+      ),
+    ).toBe("The chosen connection is no longer selectable.");
+    // Typed refusals keep their worded copy.
+    expect(
+      newConversationErrorMessage(
+        englishText,
+        new OpenGeniApiError(
+          422,
+          JSON.stringify({
+            code: "SESSION_CREATE_REJECTED",
+            message: "latency mode ultrafast is not supported",
+            details: { code: "UNSUPPORTED_LATENCY_MODE" },
+          }),
+          { outcomeUnknown: false },
+        ),
+      ),
+    ).toBe("This model can't run at the selected speed. Choose another speed.");
+    // A bare marker is not a reason; the status copy stays.
+    expect(newConversationErrorMessage(englishText, host(400, "invalid_request"))).toBe(
+      "The request could not be accepted. Check your input and try again.",
+    );
+    expect(newConversationErrorMessage(englishText, host(401, "Your sign-in expired"))).toBe(
+      "Sign in to continue.",
+    );
+    // Uncertain outcomes keep the neutral copy that goes with Retry.
+    expect(
+      newConversationErrorMessage(
+        englishText,
+        host(400, "the chosen speed is not available", { outcomeUnknown: true }),
+      ),
+    ).toBe("The request could not be confirmed. Check its status before retrying.");
+    expect(newConversationErrorMessage(englishText, new TypeError("Failed to fetch"))).toBe(
+      "The request could not be completed.",
     );
   });
 
