@@ -202,7 +202,6 @@ describe("agent capability catalog search", () => {
         "Dynamics 365",
         "Dynamics 365 Sales",
         "dataverse",
-        "my CRM",
       ]) {
         expect({
           query,
@@ -211,6 +210,13 @@ describe("agent capability catalog search", () => {
           query,
           first: "api:microsoft-dynamics",
         });
+      }
+      // A CRM question that names no system must not single out Dynamics.
+      for (const query of ["my CRM", "update the deal in my CRM"]) {
+        expect({
+          query,
+          first: searchCapabilityCatalogItems(withDynamics, query)[0]?.item.id,
+        }).not.toEqual({ query, first: "api:microsoft-dynamics" });
       }
     });
 
@@ -550,6 +556,42 @@ describe("agent capability catalog search", () => {
         expect(named(query, true)).toEqual([...expected]);
       });
     }
+
+    test("a CRM question that names no system does not name Dynamics", () => {
+      const dynamics = nativeConnectionCapabilityRecommendations({
+        microsoftDynamics: { financeOperations: true },
+      }).filter((entry) => entry.id === "api:microsoft-dynamics");
+      const withDynamics = [...catalog, ...dynamics];
+      const namedWith = (query: string, distinctive = false) =>
+        connectableIntegrationsNamedIn(
+          query,
+          searchCapabilityCatalogItems(withDynamics, query, 5).map(({ item: entry }) => ({
+            capabilityId: entry.id,
+            name: entry.name,
+            providerDomain: capabilityCatalogSearchProviderDomain(entry) ?? undefined,
+          })),
+          distinctive,
+        ).map((integration) => integration.name);
+      for (const query of [
+        "Which of my opportunities close this month?",
+        "update the deal in my CRM",
+        "show my sales pipeline",
+      ]) {
+        expect(namedWith(query)).not.toContain("Microsoft Dynamics");
+        expect(namedWith(query, true)).not.toContain("Microsoft Dynamics");
+      }
+      // Naming the system finds it.
+      expect(
+        searchCapabilityCatalogItems(
+          withDynamics,
+          "Which of my Dynamics opportunities close this month?",
+          5,
+        ).map((result) => result.item.id),
+      ).toContain("api:microsoft-dynamics");
+      expect(namedWith("Which of my Microsoft Dynamics opportunities close this month?")).toContain(
+        "Microsoft Dynamics",
+      );
+    });
 
     test("entries whose names agree with a named one share its boost", () => {
       const github = [

@@ -17,7 +17,9 @@ import type { EvalCase, IntegrationId } from "./types";
  *
  * Kinds: not_connected (run in a workspace with no connections; expects the
  * connect card), read, write (expects an approval; the harness approves and
- * verifies), identity, routing. `core` rows form the model × effort grid.
+ * verifies), identity, routing, clarify (a request naming no system; run with
+ * nothing connected, expects the agent to ask which system or offer several).
+ * `core` rows form the model × effort grid.
  */
 
 const i = (pattern: string) => new RegExp(pattern, "i");
@@ -706,6 +708,16 @@ export const CASES: readonly EvalCase[] = [
     decision: "reject",
     prompt: 'Create an account in Dynamics 365 named "Halcyon eval {RUN} denied".',
     verify: "receipts_only",
+  },
+  {
+    id: "microsoft_dynamics.clarify.unnamed-crm",
+    integration: "microsoft_dynamics",
+    kind: "clarify",
+    prompt: "Which of my opportunities close this month?",
+    expectAnswer: [
+      i("which (crm|system|tool|app|platform)|what (crm|system|tool)|hubspot|salesforce|pipedrive"),
+    ],
+    note: "No system is named: the agent must not pick Dynamics (or any one CRM) by itself.",
   },
 
   // ── Choosing between integrations ─────────────────────────────────────────

@@ -274,7 +274,7 @@ const CARDS: Record<string, { label: string; item: AuthNeededItem; ask: [string,
       },
     } as Partial<AuthNeededItem>),
     ask: [
-      "Which of my opportunities close this month?",
+      "Which of my Dynamics opportunities close this month?",
       "Connect your Dynamics environment below and I'll look them up.",
     ],
   },
