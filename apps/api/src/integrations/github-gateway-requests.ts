@@ -565,6 +565,11 @@ function tokenize(source: string): Token[] {
     const char = source[index]!;
     if (char === "#") {
       while (index < source.length && source[index] !== "\n" && source[index] !== "\r") index += 1;
+      // Some GitHub parser versions end a comment only at \n, so a bare \r
+      // could hide code from one reader or the other: unrecognised.
+      if (source[index] === "\r" && source[index + 1] !== "\n") {
+        throw new Error("Unsupported comment");
+      }
       continue;
     }
     if (/[\s,\uFEFF]/u.test(char)) {
@@ -640,12 +645,14 @@ function tokenize(source: string): Token[] {
     }
     const name = /^[_A-Za-z][_0-9A-Za-z]*/u.exec(source.slice(index, index + 256));
     if (name) {
+      if (name[0].length === 256) throw new Error("Name too long");
       tokens.push({ kind: "name", value: name[0] });
       index += name[0].length;
       continue;
     }
     const number = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/u.exec(source.slice(index, index + 64));
     if (number) {
+      if (number[0].length === 64) throw new Error("Number too long");
       tokens.push({ kind: "number", value: number[0] });
       index += number[0].length;
       continue;
@@ -982,6 +989,11 @@ function collectScopeTargets(
   depth = 0,
 ): void {
   if (depth > GRAPHQL_MAX_DEPTH || into.nodeIds.size > GRAPHQL_NODE_IDS_MAX) return;
+  // GitHub's ID type also takes numbers: one the gateway can't resolve.
+  if ((typeof value === "number" || typeof value === "boolean") && isNodeIdKey(key)) {
+    into.unreadableId = true;
+    return;
+  }
   if (typeof value === "string") {
     if (isNodeIdKey(key) && value !== "") {
       // A value GitHub might read as an ID that the gateway can't: unscoped.
@@ -1077,10 +1089,15 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   if (typeof query !== "string" || Buffer.byteLength(query, "utf8") > GRAPHQL_QUERY_MAX_BYTES) {
     return unknown("Unrecognised GitHub GraphQL request");
   }
-  const requestVariables =
-    record.variables && typeof record.variables === "object" && !Array.isArray(record.variables)
-      ? (record.variables as Record<string, unknown>)
-      : {};
+  // Variables GitHub might read that the gateway can't (a JSON string): unrecognised.
+  if (
+    record.variables !== undefined &&
+    record.variables !== null &&
+    (typeof record.variables !== "object" || Array.isArray(record.variables))
+  ) {
+    return unknown("Unrecognised GitHub GraphQL request");
+  }
+  const requestVariables = (record.variables ?? {}) as Record<string, unknown>;
   let document: GraphqlDocument;
   try {
     document = new GraphqlParser(tokenize(query)).parseDocument();
@@ -1088,6 +1105,11 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     return unknown("Unrecognised GitHub GraphQL request");
   }
   const operationName = typeof record.operationName === "string" ? record.operationName : null;
+  // Two operations with one name: GitHub may run another than the one read here.
+  const names = document.operations.map((candidate) => candidate.name);
+  if (names.some((name, index) => name !== null && names.indexOf(name) !== index)) {
+    return unknown("Unrecognised GitHub GraphQL request");
+  }
   const operation = operationName
     ? document.operations.find((candidate) => candidate.name === operationName)
     : document.operations.length === 1

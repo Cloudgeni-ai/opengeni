@@ -242,6 +242,55 @@ describe("GitHub gateway review fixes", () => {
     expect(subIssue.fields[0]).toMatchObject({ unreadableId: true });
   });
 
+  test("documents GitHub might read differently are unrecognised", () => {
+    const unrecognised = { sensitive: true, unscoped: true };
+    const archive =
+      'mutation A { archiveRepository(input: {repositoryId: "R_kgDOWidgets"}) { clientMutationId } }';
+    // A comment ended by a bare \r, which some GitHub parsers read as still a comment.
+    expect(
+      classifyGitHubGraphqlRequest({
+        query: `#\rquery A { viewer { login } }\n${archive}`,
+        operationName: "A",
+      }).action,
+    ).toMatchObject(unrecognised);
+    // Two operations with the same name.
+    expect(
+      classifyGitHubGraphqlRequest({
+        query: `query A { viewer { login } }\n${archive}`,
+        operationName: "A",
+      }).action,
+    ).toMatchObject(unrecognised);
+    // Variables sent as a JSON string.
+    expect(
+      classifyGitHubGraphqlRequest({
+        query:
+          'mutation($r: ID!) { transferIssue(input: {issueId: "I_kwDOWidgets1", repositoryId: $r}) { clientMutationId } }',
+        variables: JSON.stringify({ r: "R_kgDOSecret1" }),
+      }).action,
+    ).toMatchObject(unrecognised);
+    // A number under an ID input.
+    expect(
+      classifyGitHubGraphqlRequest({
+        query:
+          'mutation($s: ID!) { addComment(input: {subjectId: $s, body: "x"}) { clientMutationId } }',
+        variables: { s: 12345 },
+      }).fields[0],
+    ).toMatchObject({ unreadableId: true });
+    // A name too long to read in one token.
+    expect(
+      classifyGitHubGraphqlRequest({
+        query: `mutation { ${"a".repeat(300)}: addStar(input: {starrableId: "R_kgDOWidgets"}) { clientMutationId } }`,
+      }).action,
+    ).toMatchObject(unrecognised);
+    // CRLF documents with comments still read normally.
+    expect(
+      classifyGitHubGraphqlRequest({
+        query:
+          '# star it\r\nmutation {\r\n  addStar(input: {starrableId: "R_kgDOWidgets"}) { clientMutationId }\r\n}',
+      }).action,
+    ).not.toHaveProperty("unscoped");
+  });
+
   test("strings GitHub might read differently are unrecognised", () => {
     const unrecognised = { sensitive: true, unscoped: true };
     // An escaped quote before the closing quotes: GitHub ends the block string there.
