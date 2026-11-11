@@ -485,6 +485,30 @@ its audit creator remains the scheduler. Other private scheduled work uses the
 existing private chat or a Personal workspace. Private file attachments require
 verified owner access and a personal destination.
 
+### When an agent's save is refused
+
+Every SQLSTATE 42501 refusal a Knowledge, workspace instruction or Skill write
+can raise is classified by its exact message in one registry,
+`LEARNING_REFUSAL_MESSAGES` in `packages/db/src/learning-refusals.ts`:
+
+- A correction is a fixable choice the agent made: evidence or a source file
+  readers of the destination couldn't open (for example a private file cited as
+  the source of a workspace entry), a reference that is unavailable, or a scope
+  the change must keep. The agent's tool result says what to change; the person
+  sees no notice.
+- A fence is a stale, interrupted or re-scoped attempt or host context. The
+  change was not judged and is retried under current authority; no one sees a
+  notice.
+- A refusal is a genuine decision: Agent learning Off, or not permitted. The
+  agent is asked to tell the person, and the timeline shows "Not saved"
+  through the content-free `_meta` fact the model never sees.
+
+A message missing from the registry is shown as not permitted, so no refusal is
+lost silently. `packages/db/test/learning-refusal-audit-postgres.test.ts` walks
+every routine and trigger reachable from the write routines in the migrated
+schema and fails on an unclassified 42501 message, so a new one is classified
+in the same change that adds it.
+
 ## Review and corrections
 
 Automatic publishes an authorized write immediately. Review first stores an

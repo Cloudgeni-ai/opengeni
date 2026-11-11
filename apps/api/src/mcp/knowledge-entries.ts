@@ -73,14 +73,22 @@ function refusalAgentMessage(
   }
   const tell = surface === "instruction" ? TELL_PERSON : TELL_PERSON_IF_ASKED;
   const what = surface === "instruction" ? "workspace instructions" : "Knowledge";
-  switch (refusalMessage ? learningSaveCorrection(refusalMessage) : null) {
+  const fix = refusalMessage ? learningSaveCorrection(refusalMessage) : null;
+  switch (fix) {
     case "evidence_not_shared":
       return "Nothing was saved: cited evidence or a source is personal or not yet published, so readers of this destination couldn't see it. Retry without it, or cite a published entry they can read, with a new operation ID.";
+    case "source_not_shared":
+      return "Nothing was saved: the source file or document is private to its owner, belongs to another workspace or isn't ready, so readers of this destination couldn't open it. A private file can back only its owner's personal Knowledge: in their private chat, save without scope. Otherwise use a file or document everyone in the destination can open, or save the finding without the file, with a new operation ID.";
     case "reference_unavailable":
       return "Nothing was saved: a referenced entry, revision or source is unavailable. Check the referenced IDs and current versions, then retry with a new operation ID.";
-    case "skill_scope_kept":
+    case "scope_kept":
+      return "Nothing was saved: a new entry goes where this chat learns, and an existing entry keeps its own scope. Retry without scope, or save a new entry instead of changing one outside this chat's scope, with a new operation ID.";
     case null:
       break;
+    default: {
+      const unhandled: never = fix;
+      throw new Error(`unhandled learning save correction ${unhandled}`);
+    }
   }
   if (!refusal)
     return "Nothing was saved: this attempt is no longer current. Your other work can continue; retry with the same operation ID if the change still applies.";

@@ -160,7 +160,7 @@ async function liveAgent(
   const client = new Client({ name: "learning-refusal", version: "1" });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
-  return Object.assign(client, { sharedFact });
+  return Object.assign(client, { sharedFact, accountId, workspaceId, subjectId });
 }
 
 const correctSharedFact = (client: Awaited<ReturnType<typeof liveAgent>>) => ({
@@ -352,6 +352,65 @@ describe("learning refusal facts", () => {
       expect(text).toContain("Retry without it");
       expect(text).not.toContain("isn't allowed");
       expect(result._meta?.[LEARNING_REFUSAL_META_KEY]).toBeUndefined();
+    } finally {
+      await client.close();
+    }
+  }, 120_000);
+
+  test("a private file cited as the source of a shared entry is a correction, not a notice", async () => {
+    if (!app || !shared) return;
+    const client = await liveAgent(
+      app.db,
+      "personal",
+      {},
+      { personal: "automatic", workspace: "automatic" },
+    );
+    // A ready artifact only the person can open.
+    const fileId = crypto.randomUUID();
+    await shared.admin`
+      INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,
+        size_bytes,bucket,object_key,private_owner_subject_ids)
+      VALUES(${fileId},${client.accountId},${client.workspaceId},'ready','Notes.md','Notes.md',
+        'text/markdown',5,'test',${fileId},${[client.subjectId]})`;
+    const source = (scope: "workspace" | null) => ({
+      name: "knowledge_save",
+      arguments: {
+        operationId: crypto.randomUUID(),
+        expectedVersion: 0,
+        ...(scope ? { scope } : {}),
+        entry: {
+          kind: "source",
+          title: "Notes.md",
+          content: "Meeting notes.",
+          source: { kind: "file", fileId },
+          groupIds: [],
+          evidence: [],
+          relationships: [],
+        },
+      },
+    });
+    try {
+      const refused = await client.callTool(source("workspace"));
+      expect(refused.isError).toBe(true);
+      const text = (refused.content as Array<{ text?: string }>)[0]?.text ?? "";
+      const { code, message } = (JSON.parse(text) as { error: { code: string; message: string } })
+        .error;
+      expect(code).toBe("42501");
+      // The agent learns what to change: personal scope, a source readers
+      // can open, or the finding without the file.
+      expect(message).toContain("Nothing was saved");
+      expect(message).toContain("private to its owner");
+      expect(message).toContain("save without scope");
+      expect(message).toContain("without the file");
+      expect(message).not.toContain("isn't allowed");
+      expect(message).not.toContain("Tell the person");
+      // No refusal notice for the person: nothing they need to act on.
+      expect(refused._meta?.[LEARNING_REFUSAL_META_KEY]).toBeUndefined();
+      // The corrected save, in the person's own Knowledge, succeeds.
+      const saved = await client.callTool(source(null));
+      expect(saved.isError, JSON.stringify(saved.content)).toBeFalsy();
+      expect(JSON.stringify(saved)).toMatch(/outcome[^a-z]*published/);
+      expect(saved._meta?.[LEARNING_REFUSAL_META_KEY]).toBeUndefined();
     } finally {
       await client.close();
     }
