@@ -9316,17 +9316,48 @@ export type FileDownloadUrlResponse = {
   expiresAt: string;
 };
 
+/** Where a {@link FileUploadSource} sends its bytes: the signed object-storage PUT. */
+export type FileUploadTarget = {
+  /** Pre-signed URL; it carries its own authority, so send no API credentials or cookies. */
+  url: string;
+  /** Headers the PUT must carry exactly (the signature covers them, content type included). */
+  headers: Record<string, string>;
+  /** Exact number of bytes the PUT must send. */
+  sizeBytes: number;
+  /** Aborted when the upload's deadline passes; stop the transfer then. */
+  signal: AbortSignal;
+};
+
+/**
+ * File bytes the caller sends itself, for example a native upload streamed
+ * from disk with progress, so a long video never has to be held in memory.
+ * The SDK still opens and completes the upload; `send` performs only the
+ * signed PUT and reports its HTTP status.
+ */
+export type FileUploadSource = {
+  /** Exact size of the bytes `send` will PUT. */
+  sizeBytes: number;
+  send(target: FileUploadTarget): Promise<{ status: number }>;
+};
+
 /** Bytes accepted by the `uploadFile` helper. */
-export type FileUploadData = Blob | ArrayBuffer | Uint8Array | string;
+export type FileUploadData = Blob | ArrayBuffer | Uint8Array | string | FileUploadSource;
 
 export type UploadFileInput = {
   scope?: "workspace" | "personal";
   filename: string;
   contentType: string;
   data: FileUploadData;
+  /**
+   * Hex SHA-256 of the bytes. Computed from `data` when omitted, except for a
+   * {@link FileUploadSource}, whose bytes the SDK never reads: without one the
+   * server records the digest itself for files small enough to show the model inline.
+   */
   sha256?: string | undefined;
   /** Optional deadline for the signed object-storage PUT. */
   timeoutMs?: number | undefined;
+  /** Cancels the upload: the step in flight is aborted and the call rejects. */
+  signal?: AbortSignal | undefined;
   /** The upload is an app-shot (images only): the window it shows and what it said. */
   appShot?: AppShotCapture | undefined;
 };

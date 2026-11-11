@@ -1325,6 +1325,8 @@ export type {
   FileResourceRef,
   FileStatus,
   FileUploadData,
+  FileUploadSource,
+  FileUploadTarget,
   FirstPartyMcpToolName,
   AtlassianBrowseItem,
   AtlassianBrowseResponse,

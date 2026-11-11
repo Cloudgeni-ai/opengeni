@@ -286,12 +286,12 @@ export function useNewSessionOptions(workspaceId: string | null): NewSessionOpti
 }
 
 /**
- * The composer's + as a native menu (web's mobile + panel): camera, photos and files,
+ * The composer's + as a native menu (web's mobile + panel): camera, photos and videos, files,
  * then the new chat's repositories, where it runs and who can see it. Options
  * this app does not edit natively open on the web.
  */
 export function ComposerPlusMenu(props: {
-  /** Take a photo with the camera; the item shows only when this is given. */
+  /** Take a photo or video with the camera; the item shows only when this is given. */
   onTakePhoto?: (() => void) | undefined;
   onPickImages: () => void;
   onPickFiles: () => void;
@@ -307,9 +307,9 @@ export function ComposerPlusMenu(props: {
       displayInline: true,
       subactions: [
         ...(props.onTakePhoto
-          ? [{ id: "camera", title: "Take Photo", image: "camera" } satisfies MenuAction]
+          ? [{ id: "camera", title: "Camera", image: "camera" } satisfies MenuAction]
           : []),
-        { id: "photos", title: "Photo Library", image: "photo.on.rectangle" },
+        { id: "photos", title: "Photos & Videos", image: "photo.on.rectangle" },
         { id: "files", title: "Files", image: "folder" },
       ],
     },
@@ -439,7 +439,7 @@ export function ComposerPlusMenu(props: {
       <View
         accessible
         accessibilityRole="button"
-        accessibilityLabel="Add photos, files and options"
+        accessibilityLabel="Add photos, videos, files and options"
         style={{
           width: 36,
           height: 36,
