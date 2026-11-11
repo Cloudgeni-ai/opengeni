@@ -38965,6 +38965,7 @@
       "teamsApi": "value",
       "TeamsBotStatus": "type",
       "TeamsInstallOptions": "type",
+      "TeamsLinkSignInStart": "type",
       "TeamsMicrosoftSignInResult": "type",
       "TeamsMicrosoftSignInStart": "type"
     },
