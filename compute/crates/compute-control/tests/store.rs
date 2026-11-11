@@ -1075,13 +1075,13 @@ async fn images<S: Store>(store: S) {
     let first = image_id();
     assert_eq!(
         store.record_built(&old, &name, first, 1).await.unwrap(),
-        first
+        Some(first)
     );
     // Another host's build of the same OCI image is not the image recorded.
     let again = image_id();
     assert_eq!(
         store.record_built(&old, &name, again, 2).await.unwrap(),
-        first
+        Some(first)
     );
     assert_eq!(store.image_built(&old).await.unwrap(), Some(first));
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(first));
@@ -1091,7 +1091,7 @@ async fn images<S: Store>(store: S) {
     let next = image_id();
     assert_eq!(
         store.record_built(&new, &name, next, 3).await.unwrap(),
-        next
+        Some(next)
     );
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
     assert_eq!(store.image_built(&old).await.unwrap(), Some(first));
@@ -1105,7 +1105,7 @@ async fn images<S: Store>(store: S) {
             .record_built(&old, &alias, image_id(), 4)
             .await
             .unwrap(),
-        first
+        Some(first)
     );
     assert_eq!(store.latest_built(&alias).await.unwrap(), Some(first));
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
@@ -1116,7 +1116,7 @@ async fn images<S: Store>(store: S) {
             .record_built(&old, &name, image_id(), 5)
             .await
             .unwrap(),
-        first
+        Some(first)
     );
     assert_eq!(store.latest_built(&name).await.unwrap(), Some(first));
 }
@@ -1192,7 +1192,10 @@ async fn a_delayed_use_does_not_undo_a_later_one() {
     // Meanwhile the name moves to a new source and rolls back to the old
     // one: the rollback is recorded by the transaction holding the row.
     let next = image_id();
-    assert_eq!(store.record_built(new, name, next, 3).await.unwrap(), next);
+    assert_eq!(
+        store.record_built(new, name, next, 3).await.unwrap(),
+        Some(next)
+    );
     holder
         .execute(
             &format!(
@@ -1205,7 +1208,7 @@ async fn a_delayed_use_does_not_undo_a_later_one() {
         .await
         .unwrap();
     holder.commit().await.unwrap();
-    assert_eq!(delayed.await.unwrap().unwrap(), first);
+    assert_eq!(delayed.await.unwrap().unwrap(), Some(first));
     assert_eq!(store.latest_built(name).await.unwrap(), Some(first));
 
     drop(store);
@@ -1582,7 +1585,7 @@ async fn replicas_starting_together_migrate_a_new_database_once() {
         .await
         .unwrap()
         .get(0);
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     drop(again);
     client
         .batch_execute(&format!("drop schema {schema} cascade"))
@@ -1693,6 +1696,65 @@ async fn migrating_gives_up_on_a_sandbox_naming_a_host_the_store_lacks() {
         refused.code(),
         Some(&tokio_postgres::error::SqlState::FOREIGN_KEY_VIOLATION),
         "{refused}"
+    );
+    drop(store);
+    client
+        .batch_execute(&format!("drop schema {schema} cascade"))
+        .await
+        .unwrap();
+}
+
+/// A database from before built images were forgotten gets a record for
+/// every image it stores: each one built, and each one a pointer still
+/// names, though no build of it was recorded. The collector then forgets
+/// the ones nothing uses.
+#[tokio::test]
+async fn migrating_records_every_stored_image_for_the_collector() {
+    let Ok(url) = std::env::var("COMPUTE_TEST_POSTGRES") else {
+        return;
+    };
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let schema = format!("compute_built_{:x}", random());
+    client
+        .batch_execute(&format!("create schema {schema}"))
+        .await
+        .unwrap();
+    let scoped = format!("{url} options='-c search_path={schema}'");
+    drop(PostgresStore::connect(&scoped, None, 2).await.unwrap());
+    // As the database was before this version: builds and pointers with
+    // no record beside the captured images.
+    let (latest, older, unrecorded, emptied) = (image_id(), image_id(), image_id(), image_id());
+    let sandbox_id = "00000000-0000-4000-8000-000000000001";
+    client
+        .batch_execute(&format!(
+            "set search_path = {schema}; \
+             insert into compute_images (source, image, built_ms) values \
+             ('registry.example/sandbox@sha256:01', '{older}', 1), \
+             ('registry.example/sandbox@sha256:02', '{latest}', 2); \
+             insert into compute_image_names (name, source, used) values \
+             ('sandbox', 'registry.example/sandbox@sha256:01', nextval('compute_image_uses')), \
+             ('sandbox', 'registry.example/sandbox@sha256:02', nextval('compute_image_uses')); \
+             insert into compute_pointers (name, owner_epoch, owner_save, pointer, version) values \
+             ('rootfs-{unrecorded}', 0, 0, '\\x01', 1), \
+             ('rootfs-{emptied}', 0, 0, '', 2), \
+             ('{sandbox_id}', 0, 0, '\\x01', 3); \
+             update compute_schema set version = 9"
+        ))
+        .await
+        .unwrap();
+
+    let store = PostgresStore::connect(&scoped, None, 2).await.unwrap();
+    let mine = [latest, older, unrecorded, emptied];
+    assert_eq!(unused(&store, 10, 10, &mine).await, Vec::new());
+    let mut forgotten = vec![older, unrecorded];
+    forgotten.sort();
+    assert_eq!(
+        unused(&store, 20, 11, &mine).await,
+        forgotten,
+        "all but the name's latest build, and the image no longer stored"
     );
     drop(store);
     client
@@ -2037,9 +2099,106 @@ async fn uses_after_a_claim<S: Store>(store: &S) {
     assert!(store.collecting(image, &claimed.id).await.unwrap());
 }
 
-/// Captured images are collected only once nothing has used them for a
-/// while, by one collector at a time, which holds an image until its
-/// claim lapses, and no use of an image is recorded once one claims it.
+/// A built image is kept while it is the latest build some name uses, or
+/// a sandbox names it. Any other is forgotten with the record of its
+/// build, and nothing is recorded of it meanwhile, so its OCI image is
+/// built again, as a new image, when a name next uses it.
+async fn builds<S: Store>(store: &S) {
+    let name = format!("image-{:016x}", random());
+    let old = format!("registry.example/sandbox@sha256:{:064x}", random());
+    let new = format!("registry.example/sandbox@sha256:{:064x}", random());
+    let (first, spare, next) = (image_id(), image_id(), image_id());
+    let mine = [first, spare, next];
+    let sorted = |mut images: Vec<ImageId>| {
+        images.sort();
+        images
+    };
+    let at = now_ms();
+    assert_eq!(
+        store.record_built(&old, &name, first, at).await.unwrap(),
+        Some(first)
+    );
+    // Another host's build of the same OCI image is stored too, and
+    // nothing uses it from the start.
+    assert_eq!(
+        store.record_built(&old, &name, spare, at).await.unwrap(),
+        Some(first)
+    );
+    assert_eq!(unused(store, at, at, &mine).await, Vec::new());
+    assert_eq!(unused(store, at + 10, at + 1, &mine).await, vec![spare]);
+
+    // The name moves to a newer OCI image: the older build is no longer
+    // its latest, and a sandbox started from it keeps it until it is gone.
+    let (host, _) = registered(store, &register(&name, random(), Vec::new())).await;
+    let mut started = sandbox(host);
+    started.spec.config.image = Some(first);
+    assert_eq!(store.insert(&started).await.unwrap(), Write::Done);
+    assert_eq!(
+        store
+            .record_built(&new, &name, next, at + 11)
+            .await
+            .unwrap(),
+        Some(next)
+    );
+    assert_eq!(unused(store, at + 20, at + 20, &mine).await, vec![spare]);
+    assert!(store.delete(started.id, started.version).await.unwrap());
+    assert_eq!(unused(store, at + 30, at + 30, &mine).await, vec![spare]);
+    assert_eq!(
+        unused(store, at + 40, at + 31, &mine).await,
+        sorted(vec![first, spare])
+    );
+
+    let claimed = collector(at + 40, 0);
+    assert!(
+        !store.collect_image(next, u64::MAX, &claimed).await.unwrap(),
+        "the latest build a name uses is kept"
+    );
+    assert!(store.collect_image(first, at + 31, &claimed).await.unwrap());
+    // Claimed, it is no source's image, and no use of it is recorded: the
+    // name stays on its latest.
+    assert_eq!(store.image_built(&old).await.unwrap(), None);
+    assert_eq!(
+        store
+            .record_built(&old, &name, image_id(), at + 41)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
+    assert!(store.collecting(first, &claimed.id).await.unwrap());
+
+    // Forgotten with the record of its build, a rollback to its OCI image
+    // records the image built then, which is the name's latest again.
+    store.collected(first, &claimed.id).await.unwrap();
+    assert_eq!(store.image_built(&old).await.unwrap(), None);
+    assert_eq!(store.latest_built(&name).await.unwrap(), Some(next));
+    let rebuilt = image_id();
+    assert_eq!(
+        store
+            .record_built(&old, &name, rebuilt, at + 50)
+            .await
+            .unwrap(),
+        Some(rebuilt)
+    );
+    assert_eq!(store.image_built(&old).await.unwrap(), Some(rebuilt));
+    assert_eq!(store.latest_built(&name).await.unwrap(), Some(rebuilt));
+    assert!(
+        !store
+            .collect_image(rebuilt, u64::MAX, &claimed)
+            .await
+            .unwrap()
+    );
+
+    // The spare build has no record of a build to delete.
+    assert!(store.collect_image(spare, at + 1, &claimed).await.unwrap());
+    store.collected(spare, &claimed.id).await.unwrap();
+    assert_eq!(store.image_built(&old).await.unwrap(), Some(rebuilt));
+}
+
+/// Captured and built images are collected only once nothing has used
+/// them for a while, by one collector at a time, which holds an image
+/// until its claim lapses, and no use of an image is recorded once one
+/// claims it.
 /// One check, its parts in turn: each look for unused images notes the
 /// time on every captured image in the store, so two at once would move
 /// each other's.
@@ -2047,6 +2206,7 @@ async fn collection<S: Store>(store: S) {
     collecting(&store).await;
     claims(&store).await;
     uses_after_a_claim(&store).await;
+    builds(&store).await;
 }
 
 #[tokio::test]

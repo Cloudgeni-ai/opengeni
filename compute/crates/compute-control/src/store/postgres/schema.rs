@@ -18,6 +18,7 @@ const MIGRATIONS: &[&str] = &[
     MIGRATION_7,
     MIGRATION_8,
     MIGRATION_9,
+    MIGRATION_10,
 ];
 
 /// Version 1: the tables, made if missing.
@@ -204,6 +205,20 @@ create table if not exists compute_pointers_imported (
 const MIGRATION_9: &str = "
 alter table compute_sandboxes add column if not exists lost jsonb;
 alter table compute_pointers add column if not exists saved_ms bigint;
+";
+
+/// Version 10: every stored image gets the record the collector reads
+/// (`Store::record_built`): each image built from an OCI image, and each
+/// image a pointer the service keeps still names, which covers the ones
+/// whose build was never recorded. The ones nothing uses are then
+/// forgotten like any captured image.
+const MIGRATION_10: &str = "
+insert into compute_captured_images (image)
+    select image from compute_images
+    union
+    select substr(name, 8) from compute_pointers
+        where name ~ '^rootfs-[0-9a-f]{64}$' and octet_length(pointer) > 0
+    on conflict (image) do nothing;
 ";
 
 /// The transaction-scoped advisory lock replicas starting together take

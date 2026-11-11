@@ -533,7 +533,9 @@ pub trait Store: Send + Sync + 'static {
 
     /// The stored image recorded as built from `source`, if one was: an
     /// OCI image (a reference pinned by digest), with the guest programs
-    /// it names if it names any ([`crate::images::built_key`]).
+    /// it names if it names any ([`crate::images::built_key`]). None while
+    /// that image is being forgotten ([`Store::collect_image`]): it is
+    /// built again once it is.
     fn image_built(&self, source: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
 
     /// Records `image` as built from `source` at `at_ms`, unless an image
@@ -543,19 +545,27 @@ pub trait Store: Send + Sync + 'static {
     /// first recorded wins. Every name that uses a source is recorded, so
     /// two names sharing one each keep it as their latest.
     ///
+    /// A built image is kept while it is the latest some name uses, or a
+    /// template or a sandbox's config names it. Any other is a copy of
+    /// what its OCI image builds again, and is forgotten like a captured
+    /// image nothing uses ([`Store::collect_image`]), with the record of
+    /// its build. So this records the image beside the captured ones, and
+    /// `image` too when another was recorded first, which nothing uses.
+    /// Answers `None`, recording nothing, while the image recorded for
+    /// `source` is being forgotten: ask again once it is. Ordered with
+    /// [`Store::collect_image`] by the image's record.
+    ///
     /// A build is a captured image's bytes only once it is recorded: each
     /// build is a new file system with a random UUID (compute-image's
     /// `ext4::make`), so no disk can be captured with its bytes before a
-    /// sandbox starts from it, which it does only once recorded. A
-    /// recorded build is a use, which keeps a captured image of the same
-    /// bytes (see [`Store::collect_image`]).
+    /// sandbox starts from it, which it does only once recorded.
     fn record_built(
         &self,
         source: &str,
         name: &str,
         image: ImageId,
         at_ms: u64,
-    ) -> impl Future<Output = Result<ImageId>> + Send;
+    ) -> impl Future<Output = Result<Option<ImageId>>> + Send;
 
     /// The image of the source the name `name` was last recorded as using.
     fn latest_built(&self, name: &str) -> impl Future<Output = Result<Option<ImageId>>> + Send;
@@ -580,23 +590,23 @@ pub trait Store: Send + Sync + 'static {
     /// stays until it has been unused for a while.
     fn delete_template(&self, team: &str, id: &str) -> impl Future<Output = Result<bool>> + Send;
 
-    /// Notes at `now_ms` which captured images are unused (no template,
-    /// sandbox or built image names them) and which are used again, and
-    /// answers those to collect: being collected, or unused since before
-    /// `before_ms`.
+    /// Notes at `now_ms` which captured and built images are unused (no
+    /// template or sandbox names them, and no name uses them as its
+    /// latest build) and which are used again, and answers those to
+    /// collect: being collected, or unused since before `before_ms`.
     fn unused_images(
         &self,
         now_ms: u64,
         before_ms: u64,
     ) -> impl Future<Output = Result<Vec<ImageId>>> + Send;
 
-    /// Claims captured image `image` for `collector` to forget, if it is
-    /// still unused and has been since before `before_ms`, or another
-    /// collector's claim on it lapsed; whether `collector` holds the claim
-    /// now (as it does when it claimed it before). Ordered by the image's
-    /// record with every use recorded of it (a template, a sandbox created
-    /// from one, an image built), so none is recorded from then on, and a
-    /// claim sees every use recorded before it.
+    /// Claims captured or built image `image` for `collector` to forget,
+    /// if it is still unused and has been since before `before_ms`, or
+    /// another collector's claim on it lapsed; whether `collector` holds
+    /// the claim now (as it does when it claimed it before). Ordered by
+    /// the image's record with every use recorded of it (a template, a
+    /// sandbox created from one, a name's build), so none is recorded from
+    /// then on, and a claim sees every use recorded before it.
     fn collect_image(
         &self,
         image: ImageId,
@@ -605,16 +615,17 @@ pub trait Store: Send + Sync + 'static {
     ) -> impl Future<Output = Result<bool>> + Send;
 
     /// Whether the collector `collector` (its id) still holds its claim
-    /// on captured image `image`.
+    /// on image `image`.
     fn collecting(
         &self,
         image: ImageId,
         collector: &str,
     ) -> impl Future<Output = Result<bool>> + Send;
 
-    /// Deletes the record of captured image `image` once object storage
-    /// has forgotten it, if the collector `collector` (its id) still holds
-    /// its claim on it.
+    /// Deletes the record of image `image` once object storage has
+    /// forgotten it, and the record of every build that made it, if the
+    /// collector `collector` (its id) still holds its claim on it. Its OCI
+    /// images are built again when a name next uses them.
     fn collected(&self, image: ImageId, collector: &str)
     -> impl Future<Output = Result<()>> + Send;
 
