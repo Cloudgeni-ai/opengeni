@@ -804,6 +804,26 @@ export async function requireAccessContext(c: Context, deps: AccessDeps): Promis
 }
 
 /**
+ * The `user:` person this request's own managed sign-in (the Better Auth
+ * browser session, or an approved native app credential) belongs to, or null.
+ * Bearer keys, delegated tokens, services and local access name no one here.
+ * Never throws: no, expired or unusable credentials mean nobody is signed in.
+ */
+export async function managedHumanSubjectForRequest(
+  c: Context,
+  deps: AccessDeps,
+): Promise<string | null> {
+  try {
+    const context = await requireAccessContext(c, deps);
+    return canonicalManagedCookieContexts.has(context) && context.subjectId.startsWith("user:")
+      ? context.subjectId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Why a request resolved to no one: it sent no credential at all, a sign-in
  * cookie or app credential that is no longer valid, or another credential
  * that was not accepted. Reads only what the request sent.

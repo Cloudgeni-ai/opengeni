@@ -1,3 +1,7 @@
+import {
+  oauthBrowserBindingForStart,
+  oauthCallbackBrowser,
+} from "../integrations/oauth-browser-binding";
 import { createHash, createHmac } from "node:crypto";
 import {
   authorizationHoldsOrganizationAdministration,
@@ -1377,6 +1381,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         subjectId: grant.subjectId,
         personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
+        browserBinding: oauthBrowserBindingForStart(c, settings, access, {
+          externalContinuation: externalActorContinuationForAuthorization(access),
+        }),
         requestUrl: c.req.url,
         payload,
       },
@@ -1404,6 +1411,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           subjectId: grant.subjectId,
           personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
+          browserBinding: oauthBrowserBindingForStart(c, settings, access, {
+            externalContinuation: externalActorContinuationForAuthorization(access),
+          }),
           requestUrl: c.req.url,
           payload: withDesktopAppReturnPath(c, parsed),
         }),
@@ -1430,6 +1440,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("error_description")
         ? { errorDescription: c.req.query("error_description") }
         : {}),
+      browser: await oauthCallbackBrowser(c, deps),
       requestUrl: c.req.url,
     };
     const result = isApiIntegrationProviderOAuthState(input.state, deps.settings)
@@ -1464,6 +1475,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("error_description")
         ? { errorDescription: c.req.query("error_description") }
         : {}),
+      browser: await oauthCallbackBrowser(c, deps),
       requestUrl: c.req.url,
     });
     if (result.exactReturn)
