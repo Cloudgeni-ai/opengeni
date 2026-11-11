@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use compute_core::Level;
+use compute_core::{Input, Level};
 use compute_engine::Engine;
 
 use super::{Command, Handle, HostAgent, HostError};
@@ -139,8 +139,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         })();
         // The copy shares the disk's blocks, so the disk holds less alone
         // and may grow by more, yet its file is unchanged: readings of it
-        // so far no longer stand for it, copied or not.
+        // so far no longer stand for it, copied or not, and it books its
+        // whole bound until it is measured again.
         self.disks.changed(id.0);
+        if let Some(record) = self.records.get(id) {
+            let whole = self.record_size(&record).disk;
+            self.input(Input::DiskGrowth {
+                sandbox: id.0,
+                bytes: whole,
+            });
+        }
         copied.map_err(|error| {
             let _ = remove_if_there(into);
             HostError::Io(format!("copying sandbox {id}'s disk: {error}"))

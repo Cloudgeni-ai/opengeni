@@ -591,6 +591,80 @@ async fn a_local_wake_measures_its_stopped_disk_before_admission() {
     }
 }
 
+/// A capture shares every block of a saved disk, so the disk may grow by
+/// all of it again while its file stays as it was: a wake after it never
+/// books the reading taken before (#6976).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wake_after_a_capture_never_books_the_reading_from_before() {
+    let Some(dir) = super::checkpoint::shared_extents() else {
+        return;
+    };
+    let gauge = DiskGauge::default();
+    let reading = gauge.clone();
+    let root = Lab::root_in(&dir);
+    let shelf = root.join("shelf");
+    let lab = Lab::start_stored_configured(
+        root,
+        Arc::default(),
+        Directory::new(&shelf),
+        move |config| {
+            std::fs::File::create(&config.base_image)
+                .unwrap()
+                .set_len(WRITTEN)
+                .unwrap();
+            config.policy.disk = Some(DiskPolicy {
+                reserve: 0,
+                reserve_inodes: 0,
+            });
+            config.disk_reading = Some(reading);
+        },
+    )
+    .await;
+    let sandbox = id(1);
+    read_free(&gauge, &lab, None).await;
+    lab.create(sandbox, NEVER).await;
+    lab.run(sandbox, &["set awake"]).await;
+    let disk = lab.sandbox_dir(sandbox).join("root/disk.ext4");
+    write_again(&disk);
+    lab.sleep_to(sandbox, LevelName::Saved).await;
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    // The disk holds all its blocks alone: a reading of it at rest finds
+    // it may grow by little.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        read_free(&gauge, &lab, None).await;
+        let booked = lab.status().await.disk.unwrap().booked;
+        if booked < WRITTEN / 4 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no reading at rest: {booked}");
+        sleep(Duration::from_millis(20)).await;
+    }
+    super::capture::captured(&lab, sandbox, "k1").await;
+    // Room for half the disk: the wake fits only if it books the reading
+    // from before the capture.
+    gauge.give(DiskSpace {
+        bytes: WRITTEN / 2,
+        inodes: PLENTY,
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !gauge.taken() {
+        assert!(Instant::now() < deadline, "no reading");
+        sleep(Duration::from_millis(5)).await;
+    }
+    let refused = lab.wake(sandbox).await;
+    assert!(
+        matches!(
+            refused,
+            compute_host::protocol::Reply::Error {
+                code: compute_host::protocol::ErrorCode::HostFull,
+                ..
+            }
+        ),
+        "{refused:?}"
+    );
+}
+
 /// A disk that cannot be read as the disk reading is taken, or whose VM's
 /// writes do not return in time, books all it may take for that reading:
 /// what its guest freed may be taken again, and nothing tells how much

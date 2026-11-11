@@ -198,9 +198,9 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
 
     /// At rest, a disk needs no running-VMM race allowance. Measure before
     /// admission, so a wake arriving before the next sample uses the file,
-    /// not its whole bound. A disk just added, or whose step just ended,
-    /// books its whole bound until it is measured again (see
-    /// [`super::disk_meter`]).
+    /// not its whole bound. A disk just added, or left stopped by a step
+    /// that just ended, books its whole bound until it is measured again
+    /// (see [`super::disk_meter`]).
     pub(super) fn disk_inputs(&mut self, inputs: impl IntoIterator<Item = Input>) -> Vec<Input> {
         let mut batch = Vec::new();
         for input in inputs {
@@ -223,12 +223,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 }
                 Input::Finished {
                     sandbox,
-                    outcome: Outcome::Done,
+                    outcome,
                     ..
-                } if self
-                    .core
-                    .sandbox(*sandbox)
-                    .is_some_and(|view| view.step == Some(Step::Pause)) =>
+                } if self.core.sandbox(*sandbox).is_some_and(|view| {
+                    // A pause done, or a step of a stopped disk that leaves
+                    // no VM; a disk a step leaves running is read with the
+                    // running disks.
+                    (*outcome == Outcome::Done && view.step == Some(Step::Pause))
+                        || (matches!(view.state.level, Level::Saved | Level::Archived)
+                            && !matches!(view.step, Some(Step::Restore | Step::Boot)))
+                }) =>
                 {
                     (Some(*sandbox), false)
                 }

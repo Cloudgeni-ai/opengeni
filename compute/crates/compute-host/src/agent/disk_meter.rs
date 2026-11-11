@@ -25,11 +25,12 @@
 //!   wake's admission, a thread of its own checks the file and uses the
 //!   latest reading if that is of the file as it is now, of the sandbox's
 //!   present generation, and younger than [`VALID_FOR`], or else reads the
-//!   disk. The loop waits [`READ_NOW_WITHIN`] at most, and no more than
-//!   [`READ_NOW_BUDGET`] in all over any second or so: a disk not read in
-//!   time, or that cannot be read, books its whole bound, and no such read
-//!   starts while one that came late still runs. A late reading is kept
-//!   once it comes.
+//!   disk. The loop waits [`READ_NOW_WITHIN`] at most for one read, and
+//!   in all no more than a budget of [`READ_NOW_BUDGET`] that refills at
+//!   a tenth of the time that passes: a disk not read in time, or that
+//!   cannot be read, books its whole bound, as does one met with less than
+//!   [`READ_NOW_FLOOR`] of budget left, and no such read starts while one
+//!   that came late still runs. A late reading is kept once it comes.
 //! - **Running disks** are read on a thread of their own each sample,
 //!   after the disk reading and before their writes are settled, as
 //!   [`HostAgent::disk_growth_readings`] needs. A sample waits for that
@@ -68,6 +69,10 @@ const READ_NOW_WITHIN: Duration = Duration::from_millis(100);
 /// How long the loop may wait for such reads in all: the budget refills
 /// at a tenth of the time that passes, up to this.
 const READ_NOW_BUDGET: Duration = Duration::from_millis(200);
+
+/// The least budget a read the loop waits for starts with: with less, the
+/// disk books its whole bound unread rather than surely miss.
+const READ_NOW_FLOOR: Duration = Duration::from_millis(10);
 
 /// Which file a reading was of: a disk at rest that changes, or is
 /// replaced, is another stamp.
@@ -125,8 +130,12 @@ pub(super) struct DiskMeter {
     /// Each sandbox's generation: it moves on whenever a step of the
     /// sandbox ends and as it is added, so a reading taken before cannot
     /// stand for its disk after, whatever the step did to it or to files
-    /// sharing its blocks.
+    /// sharing its blocks. Generations are drawn from one count for the
+    /// whole host, so a sandbox that leaves and comes back never meets a
+    /// generation of its earlier stay.
     generations: HashMap<SandboxId, u64>,
+    /// The latest generation drawn.
+    drawn: u64,
     /// Since when a measurement of disks at rest is under way.
     measuring: Option<Instant>,
     /// Whether that one was warned of as slow.
@@ -141,13 +150,22 @@ pub(super) struct DiskMeter {
     now: Option<Arc<AtomicBool>>,
     /// What the loop may still wait for such reads, as of when.
     budget: Option<(Duration, Instant)>,
+    /// Whether the budget's running out was warned of, until it refills.
+    budget_warned: bool,
 }
 
 impl DiskMeter {
     /// Sandbox `id`'s disk may have changed: readings taken so far no
     /// longer stand for it.
     pub(super) fn changed(&mut self, id: SandboxId) {
-        *self.generations.entry(id).or_default() += 1;
+        self.drawn += 1;
+        self.generations.insert(id, self.drawn);
+        self.resting.remove(&id);
+    }
+
+    /// Forgets sandbox `id`, gone from the host.
+    pub(super) fn forget(&mut self, id: SandboxId) {
+        self.generations.remove(&id);
         self.resting.remove(&id);
     }
 
@@ -155,12 +173,12 @@ impl DiskMeter {
         self.generations.get(&id).copied().unwrap_or_default()
     }
 
-    /// What the loop may wait for a read now, the budget refilled to now.
-    fn budget(&mut self) -> Duration {
-        let now = Instant::now();
+    /// What the loop may wait for a read at `now`, the budget refilled to
+    /// then.
+    fn budget(&mut self, now: Instant) -> Duration {
         let (left, at) = self.budget.unwrap_or((READ_NOW_BUDGET, now));
         let left = left
-            .saturating_add(now.duration_since(at) / 10)
+            .saturating_add(now.saturating_duration_since(at) / 10)
             .min(READ_NOW_BUDGET);
         self.budget = Some((left, now));
         left
@@ -176,7 +194,7 @@ impl DiskMeter {
     /// Keeps `reading` of sandbox `id`'s disk if it is of the disk's
     /// present generation; says whether it did.
     fn keep(&mut self, id: SandboxId, reading: Reading) -> bool {
-        if reading.generation != self.generation(id) {
+        if reading.generation == 0 || reading.generation != self.generation(id) {
             return false;
         }
         self.resting.insert(id, reading);
@@ -225,6 +243,16 @@ impl<V> Sending<V> {
     }
 }
 
+/// Marks a read the loop stopped waiting for as ended once dropped, also
+/// if it ends part way.
+struct Ended(Arc<AtomicBool>);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 impl<E: Engine, S: Store> HostAgent<E, S> {
     /// Whether nothing can change sandbox `id`'s disk now: no step, no
     /// teardown and no running guest.
@@ -256,10 +284,16 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             self.disks.now = None;
             tracing::info!("stopped disks are read in time again");
         }
-        let within = READ_NOW_WITHIN.min(self.disks.budget());
-        if within.is_zero() {
+        let within = READ_NOW_WITHIN.min(self.disks.budget(Instant::now()));
+        if within < READ_NOW_FLOOR {
+            if !std::mem::replace(&mut self.disks.budget_warned, true) {
+                tracing::warn!(
+                    "the loop has waited its budget for stopped disks: until it refills, each books all it may take unread"
+                );
+            }
             return whole;
         }
+        self.disks.budget_warned = false;
         let generation = self.disks.generation(id);
         let known = self
             .disks
@@ -269,10 +303,13 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
             .filter(|known| known.generation == generation && known.at.elapsed() < VALID_FOR);
         let (unit, shares) = (self.allocation_unit, self.save_copies == 1);
         let events = self.events_tx.clone();
-        let (sent, answer) = std::sync::mpsc::sync_channel(1);
+        // With no buffer, a reading sent after the loop stopped waiting is
+        // refused, and so sent as an event instead of lost.
+        let (sent, answer) = std::sync::mpsc::sync_channel(0);
         let ended = Arc::new(AtomicBool::new(false));
-        let done = Arc::clone(&ended);
+        let done = Ended(Arc::clone(&ended));
         tokio::task::spawn_blocking(move || {
+            let _done = done;
             let stamp = FileStamp::of(&path);
             let reading = match known {
                 Some(known) if known.stamp == stamp => known,
@@ -292,7 +329,6 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 };
                 let _ = events.send(Event::DisksMeasured(Box::new(late)));
             }
-            done.store(true, Ordering::Release);
         });
         let started = Instant::now();
         let answered = answer.recv_timeout(within);
@@ -496,6 +532,11 @@ mod tests {
     fn a_reading_from_an_earlier_generation_is_not_kept() {
         let mut meter = DiskMeter::default();
         let id = SandboxId(7);
+        assert!(
+            !meter.keep(id, reading(meter.generation(id))),
+            "a sandbox never added has no generation to read in"
+        );
+        meter.changed(id);
         let before = reading(meter.generation(id));
         assert!(meter.keep(id, before));
         meter.changed(id);
@@ -504,19 +545,41 @@ mod tests {
         assert!(meter.keep(id, reading(meter.generation(id))));
     }
 
+    /// A sandbox that leaves the host and comes back starts a generation
+    /// its earlier stay never had, so a read still under way from then
+    /// never stands for its disk.
+    #[test]
+    fn a_sandbox_back_on_the_host_meets_no_earlier_generation() {
+        let mut meter = DiskMeter::default();
+        let (id, other) = (SandboxId(7), SandboxId(8));
+        meter.changed(id);
+        let earlier = reading(meter.generation(id));
+        meter.forget(id);
+        meter.changed(other);
+        meter.changed(id);
+        assert!(!meter.keep(id, earlier));
+        meter.forget(id);
+        meter.changed(id);
+        assert!(!meter.keep(id, earlier));
+    }
+
     /// The loop waits for reads it needs at once no more than the budget,
     /// which refills with time.
     #[test]
     fn reads_the_loop_waits_for_are_budgeted() {
         let mut meter = DiskMeter::default();
-        assert_eq!(meter.budget(), READ_NOW_BUDGET);
+        let start = Instant::now();
+        assert_eq!(meter.budget(start), READ_NOW_BUDGET);
         meter.spend(READ_NOW_BUDGET);
-        assert!(meter.budget() < Duration::from_millis(5));
-        std::thread::sleep(Duration::from_millis(100));
-        let refilled = meter.budget();
-        assert!(
-            (Duration::from_millis(9)..=Duration::from_millis(30)).contains(&refilled),
-            "{refilled:?}"
+        assert_eq!(meter.budget(start), Duration::ZERO);
+        let later = start + Duration::from_millis(100);
+        assert_eq!(meter.budget(later), Duration::from_millis(10));
+        meter.spend(Duration::from_millis(4));
+        assert_eq!(meter.budget(later), Duration::from_millis(6));
+        assert_eq!(
+            meter.budget(later + Duration::from_secs(10)),
+            READ_NOW_BUDGET,
+            "it refills no further than the budget"
         );
     }
 }
