@@ -301,6 +301,70 @@ describe("migration previous-release guard", () => {
     }
   });
 
+  test("declared private routines may be dropped but never revoked; owner-internal ones are not the runtime's", () => {
+    const source = [
+      "const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([",
+      "  // a trigger's: the owner's (it's not the runtime's)",
+      '  "owner_trigger_v1()",',
+      "  ...WIDGET_WORKER_CAPABILITY_ROUTINES,",
+      "]);",
+      "const WIDGET_WORKER_CAPABILITY_ROUTINES = [",
+      '  "claim_widget(text[], integer)", // the owner\'s worker',
+      "] as const;",
+      "const WIDGET_CAPABILITY_ROUTINES = [",
+      '  "count_widgets(uuid)",',
+      "] as const;",
+    ].join("\n");
+    const release = previousReleaseContract(
+      "the previous release",
+      posture,
+      { private: ["legacy_routine_v1(uuid)", "owner_trigger_v1()"], target: [] },
+      source,
+    );
+    expect(release.revokeRequiredRoutines.has("legacy_routine_v1(uuid)")).toBe(true);
+    expect(release.revokeRequiredRoutines.has("owner_trigger_v1()")).toBe(false);
+    expect(release.requiredRoutines.has("count_widgets(uuid)")).toBe(true);
+    expect(release.requiredRoutines.has("claim_widget(text[], integer)")).toBe(false);
+    const check = (body: string) => kinds(rolling(body), [release]);
+    expect(
+      check(
+        "REVOKE EXECUTE ON FUNCTION opengeni_private.legacy_routine_v1(uuid) FROM opengeni_app;",
+      ),
+    ).toEqual(["previous-release-dependency"]);
+    // Readiness checks only routines that exist, so a drop is the annotation rule's.
+    expect(check("DROP FUNCTION opengeni_private.legacy_routine_v1(uuid);")).toEqual([
+      "unannotated-removal",
+    ]);
+    expect(check("REVOKE EXECUTE ON FUNCTION count_widgets(uuid) FROM opengeni_app;")).toEqual([
+      "previous-release-dependency",
+    ]);
+    expect(
+      check("REVOKE EXECUTE ON FUNCTION opengeni_private.owner_trigger_v1() FROM opengeni_app;"),
+    ).toEqual(["unannotated-removal"]);
+    // Without a readable owner-internal list, legacy routines stay annotation-only.
+    expect(
+      previousReleaseContract("x", posture, { private: ["legacy_routine_v1(uuid)"] }, "")
+        .revokeRequiredRoutines.size,
+    ).toBe(0);
+  });
+
+  test("grants back count only for the role that lost the privilege", () => {
+    const fn = `opengeni_private.${COMPACT_INVENTORY}`;
+    const dynamic = (revokeArgs: string, grantArgs: string) =>
+      `DO $$ BEGIN EXECUTE format('REVOKE EXECUTE ON FUNCTION ${fn} FROM %I', ${revokeArgs}); EXECUTE format('GRANT EXECUTE ON FUNCTION ${fn} TO %I', ${grantArgs}); END $$;`;
+    expect(kinds(rolling(dynamic("runtime_role", "runtime_role")))).toEqual([]);
+    expect(kinds(rolling(dynamic("runtime_role", "reporting_role")))).toEqual([
+      "previous-release-dependency",
+    ]);
+    // A recreated object is kept only by grants to PUBLIC or the runtime role.
+    const recreate = (grantee: string) =>
+      `DROP TABLE agent_call_host_phones;\nCREATE TABLE agent_call_host_phones (id uuid);\nGRANT ALL ON agent_call_host_phones TO ${grantee};`;
+    expect(kinds(rolling(recreate("opengeni_reporting")))).toEqual(["previous-release-dependency"]);
+    expect(kinds(rolling(recreate("opengeni_app")))).toEqual([]);
+    // A session temporary routine is always new.
+    expect(kinds(rolling(`DROP FUNCTION pg_temp.${COMPACT_INVENTORY};`))).toEqual([]);
+  });
+
   test("a retiring feature's routines may go with the last of its tables", () => {
     const source = [
       "const WIDGET_ROUTINES = [",

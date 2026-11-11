@@ -53,12 +53,19 @@ export const REMOVAL_GOVERNED_FROM_ORDINAL = 1359;
 /** The application data schema. Migrations run with it first on the search path. */
 const TARGET_SCHEMA = "public";
 const PRIVATE_SCHEMA = "opengeni_private";
+/** The runtime role's default name (`inspectRuntimePosture`'s `expectedRole`). */
+const DEFAULT_RUNTIME_ROLE = "opengeni_app";
 
 export type PreviousReleaseContract = {
   /** Where the declarations come from, for messages. */
   label: string;
   /** Routines whose runtime EXECUTE readiness requires: `name(arg types)` → schema. */
   requiredRoutines: ReadonlyMap<string, string>;
+  /**
+   * Routines whose runtime EXECUTE readiness requires while they exist, but
+   * which may be dropped (`DECLARED_PRIVATE_ROUTINES`): only a revoke breaks it.
+   */
+  revokeRequiredRoutines: ReadonlyMap<string, string>;
   /** Routines readiness requires PUBLIC to be able to execute. */
   publicRoutines: ReadonlySet<string>;
   /** Every routine signature the release's posture knows, under any contract. */
@@ -299,6 +306,37 @@ export function previousReleaseContract(
         );
     }
   }
+  // Lists of the same convention the module does not export, from its source.
+  // Some are owner-internal (triggers and workers the owner runs), which
+  // readiness requires the runtime not to hold.
+  const ownerInternal = new Set(
+    (postureSource
+      ? (sourceList(postureSource, posture, "OWNER_INTERNAL_PRIVATE_ROUTINES")?.items ?? [])
+      : []
+    ).map(normalizeRoutineSignature),
+  );
+  for (const name of postureSource
+    ? sourceListNames(postureSource, RUNTIME_ROUTINE_EXPORT).filter(
+        (candidate) => !(candidate in posture),
+      )
+    : [])
+    for (const routine of sourceList(postureSource!, posture, name)?.items ?? []) {
+      if (!ROUTINE_SIGNATURE.test(routine)) continue;
+      const signature = normalizeRoutineSignature(routine);
+      if (
+        !requiredRoutines.has(signature) &&
+        !deferred.has(signature) &&
+        !ownerInternal.has(signature)
+      )
+        requiredRoutines.set(
+          signature,
+          name.endsWith("_RUNTIME_ROUTINES") ? PRIVATE_SCHEMA : TARGET_SCHEMA,
+        );
+    }
+  const revokeRequiredRoutines = postureSource
+    ? declaredPrivateRoutines(posture, postureSource, legacyRoutines?.private, deferred)
+    : new Map<string, string>();
+  for (const signature of requiredRoutines.keys()) revokeRequiredRoutines.delete(signature);
   const publicRoutines = new Set(
     signatureList(posture, "RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES", label).map(
       normalizeRoutineSignature,
@@ -337,6 +375,7 @@ export function previousReleaseContract(
   return {
     label,
     requiredRoutines,
+    revokeRequiredRoutines,
     publicRoutines,
     knownRoutines,
     tablePrivileges,
@@ -348,27 +387,80 @@ export function previousReleaseContract(
   };
 }
 
-/** String literals of an array literal body, expanding `...NAME` spreads. */
-function arrayItems(
-  body: string,
+/** The source text from an opening `[` to its matching `]`, outside strings and comments. */
+function bracketBody(source: string, open: number): string | null {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let index = open; index < source.length; index += 1) {
+    const char = source[index]!;
+    if (quote) {
+      if (char === "\\") index += 1;
+      else if (char === quote) quote = null;
+    } else if (char === "/" && source[index + 1] === "/") {
+      const end = source.indexOf("\n", index);
+      index = end === -1 ? source.length : end;
+    } else if (char === "/" && source[index + 1] === "*") {
+      const end = source.indexOf("*/", index + 2);
+      index = end === -1 ? source.length : end + 1;
+    } else if (char === '"' || char === "'" || char === "`") quote = char;
+    else if (char === "[") depth += 1;
+    else if (char === "]" && --depth === 0) return source.slice(open + 1, index);
+  }
+  return null;
+}
+
+type SourceList = { items: string[]; complete: boolean };
+
+/**
+ * The string items of a list declared in a release's posture source, as
+ * `const NAME = [...]` or `const NAME = new Set([...])`, expanding `...OTHER`
+ * spreads of other lists. Exports are taken from the module itself.
+ * `complete` is false when an item could not be read.
+ */
+export function sourceList(
   source: string,
   posture: Record<string, unknown>,
+  name: string,
   depth = 0,
-): string[] {
-  return splitTopLevel(body).flatMap((item): string[] => {
+): SourceList | null {
+  const exported = posture[name];
+  if (Array.isArray(exported) || exported instanceof Set) {
+    const values = [...exported];
+    const items = values.filter((value): value is string => typeof value === "string");
+    return { items, complete: items.length === values.length };
+  }
+  const declaration = new RegExp(
+    String.raw`\bconst ${name}\b[^=;]*=\s*(?:new\s+Set\s*(?:<[^>()]*>)?\s*\(\s*)?\[`,
+  ).exec(source);
+  if (!declaration || depth > 4) return null;
+  const body = bracketBody(source, declaration.index + declaration[0].length - 1);
+  if (body === null) return null;
+  const result: SourceList = { items: [], complete: true };
+  const uncommented = body.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  for (const item of splitTopLevel(uncommented)) {
     const text = item.trim();
+    if (text === "") continue;
     const literal = /^"([^"\\]*)"$/.exec(text);
-    if (literal) return [literal[1]!];
     const spread = /^\.\.\.([A-Za-z_][A-Za-z0-9_]*)$/.exec(text);
-    if (!spread || depth > 3) return [];
-    const exported = posture[spread[1]!];
-    if (Array.isArray(exported))
-      return exported.filter((value): value is string => typeof value === "string");
-    const declared = new RegExp(String.raw`\bconst ${spread[1]}\b[^=]*=\s*\[([\s\S]*?)\]`).exec(
-      source,
-    );
-    return declared ? arrayItems(declared[1]!, source, posture, depth + 1) : [];
-  });
+    const nested = spread ? sourceList(source, posture, spread[1]!, depth + 1) : null;
+    if (literal) result.items.push(literal[1]!);
+    else if (nested) {
+      result.items.push(...nested.items);
+      result.complete &&= nested.complete;
+    } else result.complete = false;
+  }
+  return result;
+}
+
+/** Names of the lists a release's source declares whose name matches. */
+function sourceListNames(source: string, pattern: RegExp): string[] {
+  return [
+    ...new Set(
+      [...source.matchAll(/\bconst ([A-Z][A-Z0-9_]*)\b/g)]
+        .map((match) => match[1]!)
+        .filter((name) => pattern.test(name)),
+    ),
+  ];
 }
 
 /**
@@ -384,19 +476,53 @@ export function retiringRoutinesFromSource(
   featureTables: ReadonlyMap<string, readonly string[]>,
 ): Map<string, readonly string[]> {
   const routines = new Map<string, readonly string[]>();
-  const sets = source.matchAll(
-    /\bconst (RETIRING_([A-Z0-9_]+)_ROUTINES)\b[^=]*=\s*new Set\(\s*\[([\s\S]*?)\]\s*\)/g,
-  );
-  for (const [, , subject, body] of sets) {
+  for (const name of sourceListNames(source, /^RETIRING_[A-Z0-9_]+_ROUTINES$/)) {
+    const subject = name.slice("RETIRING_".length, -"_ROUTINES".length);
     const features = [...featureTables].filter(([feature]) => {
       const token = feature.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
-      return subject!.startsWith(token) || token.startsWith(subject!);
+      return subject.startsWith(token) || token.startsWith(subject);
     });
-    if (features.length !== 1 || features[0]![1].length === 0) continue;
-    for (const routine of arrayItems(body!, source, posture))
+    const list = sourceList(source, posture, name);
+    if (features.length !== 1 || features[0]![1].length === 0 || !list) continue;
+    for (const routine of list.items)
       if (ROUTINE_SIGNATURE.test(routine))
         routines.set(normalizeRoutineSignature(routine), features[0]![1]);
   }
+  return routines;
+}
+
+/**
+ * Private routines readiness requires the runtime to EXECUTE whenever they
+ * exist (`DECLARED_PRIVATE_ROUTINES`): the frozen legacy inventory, less the
+ * owner-internal, retired and deferred routines. Without a readable
+ * owner-internal list they are left to the annotation rule.
+ */
+function declaredPrivateRoutines(
+  posture: Record<string, unknown>,
+  source: string,
+  legacyPrivate: unknown,
+  deferred: ReadonlySet<string>,
+): Map<string, string> {
+  const routines = new Map<string, string>();
+  const ownerInternal = sourceList(source, posture, "OWNER_INTERNAL_PRIVATE_ROUTINES");
+  if (!Array.isArray(legacyPrivate) || !ownerInternal?.complete) return routines;
+  const excluded = new Set([...ownerInternal.items, ...deferred].map(normalizeRoutineSignature));
+  for (const [name, field] of [
+    ["SUBSCRIPTION_RETIRED_ROUTINES", "signature"],
+    ["SUBSCRIPTION_RENAMED_ROUTINES", "from"],
+  ] as const) {
+    const entries = posture[name];
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      const value = (entry as Record<string, unknown> | null)?.[field];
+      if (typeof value === "string" && ROUTINE_SIGNATURE.test(value))
+        excluded.add(normalizeRoutineSignature(value));
+    }
+  }
+  for (const routine of legacyPrivate)
+    if (typeof routine === "string" && ROUTINE_SIGNATURE.test(routine)) {
+      const signature = normalizeRoutineSignature(routine);
+      if (!excluded.has(signature)) routines.set(signature, PRIVATE_SCHEMA);
+    }
   return routines;
 }
 
@@ -437,7 +563,12 @@ export type Operation =
   | { op: "rename"; target: ObjectRef; sql: string }
   | { op: "create"; target: ObjectRef; replace: boolean; topLevel: boolean };
 
-type Fragment = { text: string; topLevel: boolean };
+type Fragment = {
+  text: string;
+  topLevel: boolean;
+  /** The text after a dynamic SQL string: its `format()` arguments, if any. */
+  args?: string;
+};
 
 const ROUTINE_HEAD =
   /^CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\s+((?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"(?:[^"]|"")+"|[A-Za-z_][A-Za-z0-9_$]*))?)/i;
@@ -464,12 +595,16 @@ export function executableFragments(statement: string, keepBodies = false): Frag
 }
 
 function routineRefs(list: string): ObjectRef[] {
-  return splitTopLevel(list).map((text) => {
+  return splitTopLevel(list).flatMap((text): ObjectRef[] => {
     const open = text.indexOf("(");
     const name = open === -1 ? text : text.slice(0, open);
     if (name.trim() === "" || PLACEHOLDER.test(splitTopLevel(name, ".").pop() ?? name))
-      return { kind: "dynamic", name: text };
-    return { kind: "routine", name: normalizeRoutineSignature(text), schema: routineSchema(text) };
+      return [{ kind: "dynamic", name: text }];
+    // Session-local temporary routines are new to this migration.
+    if (/^\s*pg_temp\s*\./i.test(name)) return [];
+    return [
+      { kind: "routine", name: normalizeRoutineSignature(text), schema: routineSchema(text) },
+    ];
   });
 }
 
@@ -527,7 +662,11 @@ function privilegeSet(text: string): Set<string> {
   return privileges;
 }
 
-function granteeList(text: string): string[] {
+/**
+ * Grantee names, lowercased unless quoted. A placeholder (`%I`) is only the
+ * same role as another placeholder with the same `format()` arguments.
+ */
+function granteeList(text: string, args = ""): string[] {
   return splitTopLevel(text.replace(/\s+(?:CASCADE|RESTRICT)\s*$/i, ""))
     .map((grantee) =>
       grantee
@@ -536,7 +675,9 @@ function granteeList(text: string): string[] {
         .trim(),
     )
     .map((grantee) =>
-      PLACEHOLDER.test(grantee) ? grantee.toLowerCase() : unquoteIdentifier(grantee),
+      PLACEHOLDER.test(grantee)
+        ? `${grantee.toLowerCase()}@${args.toLowerCase()}`
+        : unquoteIdentifier(grantee),
     )
     .filter((grantee) => grantee !== "");
 }
@@ -610,7 +751,7 @@ function fragmentOperations(fragment: Fragment): Operation[] {
     }
     const privileges = privilegeSet(revoke[2]!);
     if (privileges.size === 0) return operations;
-    const grantees = granteeList(revoke[4]!);
+    const grantees = granteeList(revoke[4]!, fragment.args);
     for (const target of privilegeTargets(revoke[3]!.trim()))
       operations.push({ op: "revoke", target, privileges, grantees, sql: text });
     return operations;
@@ -618,7 +759,7 @@ function fragmentOperations(fragment: Fragment): Operation[] {
   const grant = /^GRANT\s+(.+?)\s+ON\s+(.+?)\s+TO\s+(.+)$/i.exec(text);
   if (grant) {
     const privileges = privilegeSet(grant[1]!);
-    const grantees = granteeList(grant[3]!);
+    const grantees = granteeList(grant[3]!, fragment.args);
     for (const target of privilegeTargets(grant[2]!.trim()))
       operations.push({ op: "grant", target, privileges, grantees });
     return operations;
@@ -687,8 +828,11 @@ export function migrationOperations(sql: string): Operation[] {
   const helpers = calledHelperBodies(statements);
   const operations: Operation[] = [];
   for (const [index, statement] of statements.entries()) {
-    for (const fragment of executableFragments(statement, helpers.has(index)))
-      operations.push(...fragmentOperations(fragment));
+    const fragments = executableFragments(statement, helpers.has(index));
+    for (const [position, fragment] of fragments.entries())
+      operations.push(
+        ...fragmentOperations({ ...fragment, args: fragments[position + 1]?.text ?? "" }),
+      );
   }
   return operations;
 }
@@ -806,6 +950,11 @@ function judgeRemoval(
           need(
             `${verb} routine ${routine}${recreated ? " without granting EXECUTE back" : ""}, whose runtime EXECUTE ${RELEASE} requires`,
           );
+      if (operation.op === "revoke" && fromRuntime && loses("EXECUTE"))
+        for (const routine of routineMatches(contract.revokeRequiredRoutines, target.name))
+          need(
+            `revokes privileges on routine ${routine}, whose runtime EXECUTE ${RELEASE} requires while it exists (DECLARED_PRIVATE_ROUTINES)`,
+          );
       if (fromPublic && loses("EXECUTE", restoredToPublic))
         for (const routine of routineMatches(contract.publicRoutines, target.name))
           need(
@@ -826,7 +975,7 @@ function judgeRemoval(
       const required =
         target.allOf === "routines"
           ? loses("EXECUTE")
-            ? [...contract.requiredRoutines]
+            ? [...contract.requiredRoutines, ...contract.revokeRequiredRoutines]
                 .filter(([, schema]) => schema === target.name)
                 .map(([routine]) => routine)
             : []
@@ -958,14 +1107,17 @@ export function migrationRemovals(
     );
     const recreated = operation.op === "drop" && recreatedAt !== -1;
     // A grant restores a revoke only for the grantees it revoked (PUBLIC
-    // reaches everyone). After a drop and create, every grant counts: the
-    // object is new and only granted privileges exist.
+    // reaches everyone). After a drop and create, only grants to PUBLIC or
+    // to the runtime role (by its default name or a placeholder) count.
     const restoring = (grantees: readonly string[]) =>
-      operation.op !== "revoke" ||
       grantees.includes("public") ||
-      operation.grantees
-        .filter((grantee) => grantee !== "public")
-        .every((grantee) => grantees.includes(grantee));
+      (operation.op === "revoke"
+        ? operation.grantees
+            .filter((grantee) => grantee !== "public")
+            .every((grantee) => grantees.includes(grantee))
+        : grantees.some(
+            (grantee) => grantee === DEFAULT_RUNTIME_ROLE || PLACEHOLDER.test(grantee),
+          ));
     const grantsAfter = (
       recreated ? later.slice(recreatedAt) : operation.op === "revoke" ? later : []
     )

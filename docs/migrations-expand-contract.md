@@ -480,9 +480,15 @@ commits, any of those releases would lose:
 
 - the runtime's EXECUTE on a routine its readiness requires:
   `RUNTIME_DEFINER_ROUTINES` not in `DEFERRED_RUNTIME_PRIVATE_ROUTINES`,
-  `RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES`, and the other exported
-  `*_RUNTIME_ROUTINES` and `*_CAPABILITY_ROUTINES` lists (revoked, dropped,
-  renamed or moved, including `ALL FUNCTIONS IN SCHEMA` for that schema);
+  `RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES`, and the other
+  `*_RUNTIME_ROUTINES` and `*_CAPABILITY_ROUTINES` lists, exported or read
+  from the release's source, less its `OWNER_INTERNAL_PRIVATE_ROUTINES`
+  (revoked, dropped, renamed or moved, including `ALL FUNCTIONS IN SCHEMA` for
+  that schema);
+- the runtime's EXECUTE on a routine in its frozen legacy private inventory
+  (`DECLARED_PRIVATE_ROUTINES`, less owner-internal, retired and deferred
+  routines). Readiness checks these only while they exist, so revoking fails
+  and dropping is left to the annotation rule below;
 - PUBLIC's EXECUTE on a `RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES`
   routine;
 - a table-level privilege its `RUNTIME_TABLE_PRIVILEGES` requires, or the table
@@ -494,12 +500,14 @@ SQL in DO blocks, `EXECUTE` strings (including `'...' || '...'` and
 `format('%I.name ...')`) and helper routines the migration creates and calls
 counts. A removal the guard cannot parse counts as dynamic (below). A revoke
 the same file undoes counts as undone only when it grants the privilege back to
-the same role or to PUBLIC; a dropped and recreated object counts as kept only
-with every required privilege granted after the create. Revoking only from
+the same role or to PUBLIC (a `%I` role only with the same `format()`
+arguments); a dropped and recreated object counts as kept only with every
+required privilege granted after the create to PUBLIC or the runtime role
+(`opengeni_app` or a placeholder). Revoking only from
 PUBLIC is allowed except for the shared-policy predicates and schema USAGE (the
 runtime holds explicit grants on everything else). An object the file itself
 creates with an unconditional top-level `CREATE` (not `CREATE OR REPLACE`), and
-`pg_temp` objects, are new. A routine in one of the release's
+`pg_temp` relations and routines, are new. A routine in one of the release's
 `RETIRING_*_ROUTINES` sets may be dropped (not revoked) when every table of its
 `RETIRING_FEATURE_TABLES` feature is gone once the migration commits, counting
 tables that earlier migrations of the same change drop: readiness skips it then.
@@ -535,9 +543,12 @@ and renames stay with the deployment-mode guard's contract-step rule.
 
 What the guard does not model: column-level privileges, grants the previous
 release rejects (its readiness also fails on excess runtime privileges and
-unknown callable definers), CONNECT on the database, and grants inside a branch
-that never runs or inside a string that is not executed, which it still counts
-as grants back. The runtime posture compatibility workflow, which runs the
+unknown callable definers), CONNECT on the database, `DROP OWNED BY`, routines
+readiness checks only through an inline list or a single constant (for example
+the Site cancellation predicate PUBLIC must execute), and grants inside a
+branch that never runs or inside a string that is not executed, which it still
+counts as grants back. Words inside string literals (a `COMMENT` or `RAISE`
+mentioning a revoke) can trigger the annotation rule. The runtime posture compatibility workflow, which runs the
 pinned release's own inspector against a migrated database, remains the
 end-to-end check; review is still required.
 
