@@ -361,7 +361,9 @@ async fn a_host_registering_afresh_and_refusing_as_full_is_counted() {
         }),
         _ => Act::Ordinary,
     });
-    let (status, body) = fleet.post("/v1/sandboxes", json!({})).await;
+    let (status, body) = fleet
+        .post("/v1/sandboxes", json!({ "vcpus": 1, "memory_mib": 256 }))
+        .await;
     assert_eq!(status, 503, "{body}");
     let text = fleet.scrape().await;
     assert_eq!(value(&text, refused_places), Some(1.0), "{text}");
