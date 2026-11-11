@@ -93,7 +93,7 @@ export function unscopedWrite(action: GitHubGatewayAction): GitHubGatewayAction 
 /**
  * Force-updating or deleting `ref` follows the person's policy when it is a
  * branch other than the repository's default branch. Tags, other refs, the
- * default branch, and an unknown default branch always ask.
+ * default branch, and an unknown default branch are sensitive (Settings and deletions).
  */
 export function refRewriteFollowsPolicy(ref: string, defaultBranch: string | null): boolean {
   if (!defaultBranch || !ref.startsWith("refs/heads/")) return false;
@@ -163,7 +163,7 @@ function repositoryScope(segments: string[]): {
   return null;
 }
 
-/** Repository paths that change settings, access or secrets: always ask. */
+/** Repository paths that change settings, access or secrets: sensitive (Settings and deletions). */
 const SENSITIVE_REPOSITORY_AREAS = new Set([
   "collaborators",
   "invitations",
@@ -409,7 +409,7 @@ export function classifyGitHubRestRequest(
 // GraphQL
 // ---------------------------------------------------------------------------
 
-/** GraphQL mutations mapped to policy actions. Anything not listed always asks. */
+/** GraphQL mutations mapped to policy actions. Anything not listed is sensitive (Settings and deletions). */
 const GRAPHQL_MUTATIONS: Record<
   string,
   { tools: readonly string[]; title: string; sensitive?: true }
@@ -935,8 +935,27 @@ export type GitHubGraphqlClassification = {
   accountLevel: boolean;
   /** Node IDs a mutation acts on; resolved to repositories before it runs. */
   nodeIds: string[];
+  /**
+   * Each top-level mutation with the targets its own input names. A write is
+   * scoped only when every mutation that isn't account-level names a
+   * repository of its own, so bundling a mutation on an allowed repository
+   * can't vouch for another one (an organization or project write).
+   */
+  fields: GitHubGraphqlMutationField[];
   /** Top-level mutation fields, for the approval card. */
   mutations: string[];
+};
+
+export type GitHubGraphqlMutationField = {
+  name: string;
+  /** Node IDs in this mutation's input. */
+  nodeIds: string[];
+  /** Its input names a repository directly (`repositoryNameWithOwner`, a URL). */
+  namesRepository: boolean;
+  /** It acts on the person's account only (stars, notifications). */
+  accountLevel: boolean;
+  /** Unrecognised, or mapped as sensitive: any node outside a repository leaves it unscoped. */
+  sensitive: boolean;
 };
 
 /**
@@ -950,6 +969,7 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     mutationRepositories: [],
     accountLevel: false,
     nodeIds: [],
+    fields: [],
     mutations: [],
   });
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -1041,6 +1061,7 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
       mutationRepositories: [],
       accountLevel: false,
       nodeIds: [],
+      fields: [],
       mutations: [],
     };
   }
@@ -1067,6 +1088,7 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   const titles: string[] = [];
   const nodeIds = new Set<string>();
   const named = new Map<string, { owner: string; name: string }>();
+  const fields: GitHubGraphqlMutationField[] = [];
   // Force updates and deletions: they ask unless the gateway confirms every
   // ref is a branch other than the default branch.
   const rewriteTargets: GitHubGatewayRefTarget[] = [];
@@ -1076,8 +1098,18 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     const args = Object.fromEntries(
       Object.entries(field.args).map(([key, value]) => [key, resolveValue(value, variables)]),
     );
-    collectNodeIds(args, nodeIds);
-    collectNamedRepositories(args, named);
+    const fieldNodeIds = new Set<string>();
+    const fieldNamed = new Map<string, { owner: string; name: string }>();
+    collectNodeIds(args, fieldNodeIds);
+    collectNamedRepositories(args, fieldNamed);
+    for (const id of fieldNodeIds) nodeIds.add(id);
+    for (const [key, repository] of fieldNamed) named.set(key, repository);
+    const fieldTargets = {
+      name: field.name,
+      nodeIds: [...fieldNodeIds],
+      namesRepository: fieldNamed.size > 0,
+      accountLevel: ACCOUNT_LEVEL_MUTATIONS.has(field.name),
+    };
     let mapped = GRAPHQL_MUTATIONS[field.name];
     const input =
       args.input !== null && typeof args.input === "object" && !Array.isArray(args.input)
@@ -1131,8 +1163,10 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     if (!mapped) {
       anySensitive = true;
       titles.push(`GitHub ${field.name}`);
+      fields.push({ ...fieldTargets, sensitive: true });
       continue;
     }
+    fields.push({ ...fieldTargets, sensitive: mapped.sensitive === true });
     for (const tool of mapped.tools) tools.add(tool);
     if (mapped.sensitive) anySensitive = true;
     titles.push(mapped.title);
@@ -1153,6 +1187,7 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     mutationRepositories: [...named.values()],
     accountLevel: mutations.every((name) => ACCOUNT_LEVEL_MUTATIONS.has(name)),
     nodeIds: [...nodeIds],
+    fields,
     mutations,
   };
 }

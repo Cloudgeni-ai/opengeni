@@ -230,4 +230,40 @@ describe("personal GitHub gateway decisions in PostgreSQL", () => {
       await decide(identity, request({ ...deletion, sensitive: false }, first.digest)),
     ).toMatchObject({ kind: "run" });
   });
+
+  test("an approval recorded under Create and update runs when sent again as sensitive", async () => {
+    if (!shared) return;
+    const identity = await claimedTurn();
+    const decide = databaseGatewayDecider(client.db);
+    await setPolicies(identity, { ref_create: "ask" });
+    const deletion: GatewayDecisionInput["action"] = {
+      kind: "write",
+      tools: ["ref_create"],
+      sensitive: false,
+      title: "Delete branch or tag",
+    };
+    const first = request(deletion);
+    expect(await decide(identity, first)).toMatchObject({ kind: "refuse", waiting: true });
+    expect(await recordedTool(identity, first.digest)).toBe("ref_create");
+    await approve(identity, first.digest);
+    // Sent again: the default branch couldn't be read this time, so it's sensitive.
+    expect(
+      await decide(identity, request({ ...deletion, sensitive: true }, first.digest)),
+    ).toMatchObject({ kind: "run" });
+  });
+
+  test("Block chosen after an approval refuses the request when it's sent again", async () => {
+    if (!shared) return;
+    const identity = await claimedTurn();
+    const decide = databaseGatewayDecider(client.db);
+    await setPolicies(identity, {});
+    const first = request(environmentSecret);
+    expect(await decide(identity, first)).toMatchObject({ kind: "refuse", waiting: true });
+    await approve(identity, first.digest);
+    await setPolicies(identity, { [GITHUB_SENSITIVE_REQUEST_POLICY_NAME]: "block" });
+    expect(await decide(identity, request(environmentSecret, first.digest))).toMatchObject({
+      kind: "refuse",
+      waiting: false,
+    });
+  });
 });

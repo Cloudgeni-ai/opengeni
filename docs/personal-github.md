@@ -329,7 +329,7 @@ no redirects, bounded deadlines, stripped ambient headers, and streaming bodies.
 A receive-pack transport failure is outcome-unknown and is never automatically
 replayed. A push that deletes or force-updates a branch other than the default
 branch follows the person's policy; one that deletes or force-updates the
-default branch or a tag asks the person first (see [Git pushes](#git-pushes)).
+default branch or a tag follows their Settings and deletions policy (Ask unless they chose otherwise; see [Git pushes](#git-pushes)).
 Ordinary pushes are unchanged.
 The standalone consumer remains default-off with personal GitHub OAuth; GitHub
 App and Connected Machine credential paths are unchanged.
@@ -413,7 +413,10 @@ not. GraphQL mutations are checked against the repositories their input names
 (node IDs, `repositoryNameWithOwner`, github.com URLs). When those can't be
 found, or a write names no repository (account and organization writes, or a
 request the gateway can't read), the allowlist can't apply, so the request
-asks whatever the person's policies say (Block still wins). With All my
+asks whatever the person's policies say (Block still wins). This is decided
+per mutation: one on an allowed repository doesn't vouch for an organization
+or project write sent in the same request, and an unrecognised mutation that
+also touches a node outside any repository asks too. With All my
 repositories at write access and no repository removed from the chat there is
 no allowlist to step around, so the person's policies decide as usual. The gateway replaces
 `Authorization` with the person's token, never forwards the bearer, does not

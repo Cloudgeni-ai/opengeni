@@ -472,15 +472,18 @@ const NODE_REPOSITORIES_QUERY = `query OpengeniGatewayNodes($ids: [ID!]!) {
 }`;
 
 /**
- * The repositories a GraphQL mutation's node IDs belong to, or null when they
- * cannot all be resolved (then the request asks the person).
+ * What each of a GraphQL mutation's node IDs is: the repository it belongs to,
+ * `"other"` for a node outside any repository (an organization, a project),
+ * or `"unseen"` for one GitHub can't show the person. Null when they cannot
+ * all be resolved (then the request asks the person).
  */
 async function resolveNodeRepositories(
   services: PersonalGitHubGatewayServices,
   authority: PersonalGitHubGatewayAuthority,
   nodeIds: string[],
-): Promise<GitHubGatewayRepositoryRef[] | null> {
-  if (nodeIds.length === 0) return [];
+): Promise<Map<string, GitHubGatewayRepositoryRef | "other" | "unseen"> | null> {
+  const resolved = new Map<string, GitHubGatewayRepositoryRef | "other" | "unseen">();
+  if (nodeIds.length === 0) return resolved;
   if (nodeIds.length > GRAPHQL_NODE_IDS_MAX) return null;
   const url = new URL("/graphql", PERSONAL_GITHUB_API_ORIGIN);
   let response: Response;
@@ -518,10 +521,13 @@ async function resolveNodeRepositories(
   }
   const nodes = payload.data?.nodes;
   if (!Array.isArray(nodes) || nodes.length !== nodeIds.length) return null;
-  const repositories: GitHubGatewayRepositoryRef[] = [];
-  for (const node of nodes) {
+  for (const [index, node] of nodes.entries()) {
+    const id = nodeIds[index]!;
     // An ID GitHub cannot see: the mutation fails there too.
-    if (node === null) continue;
+    if (node === null) {
+      resolved.set(id, "unseen");
+      continue;
+    }
     if (!node || typeof node !== "object") return null;
     const record = node as Record<string, unknown>;
     const nameWithOwner =
@@ -532,15 +538,16 @@ async function resolveNodeRepositories(
           : undefined;
     if (typeof nameWithOwner === "string" && nameWithOwner.includes("/")) {
       const [owner, name] = nameWithOwner.split("/", 2) as [string, string];
-      repositories.push({ kind: "name", owner, name });
+      resolved.set(id, { kind: "name", owner, name });
       continue;
     }
     if (typeof record.__typename === "string" && NON_REPOSITORY_NODE_TYPES.has(record.__typename)) {
+      resolved.set(id, "other");
       continue;
     }
     return null;
   }
-  return repositories;
+  return resolved;
 }
 
 /**
@@ -784,7 +791,6 @@ export async function handlePersonalGitHubGatewayRequest(
     }
     if (action.kind === "write") {
       reviewExtra = { mutations: graphql.mutations };
-      let writeTargets = graphql.mutationRepositories.length;
       for (const repository of graphql.mutationRepositories) {
         checks.push({ repository: { kind: "name", ...repository }, access: "write" });
       }
@@ -792,12 +798,21 @@ export async function handlePersonalGitHubGatewayRequest(
       if (nodeRepositories === null) {
         action = unscopedWrite(action);
       } else {
-        writeTargets += nodeRepositories.length;
-        for (const repository of nodeRepositories) checks.push({ repository, access: "write" });
+        for (const resolved of nodeRepositories.values()) {
+          if (typeof resolved === "object") checks.push({ repository: resolved, access: "write" });
+        }
+        // Each mutation needs a repository of its own: one on an allowed
+        // repository can't vouch for an organization or project write
+        // bundled with it. An unrecognised or sensitive mutation that also
+        // touches a node outside any repository can't be confirmed either.
+        const scoped = graphql.fields.every((field) => {
+          if (field.accountLevel) return true;
+          const targets = field.nodeIds.map((id) => nodeRepositories.get(id));
+          if (field.sensitive && targets.includes("other")) return false;
+          return field.namesRepository || targets.some((target) => typeof target === "object");
+        });
+        if (!scoped) action = unscopedWrite(action);
       }
-      // A repository mutation whose repository the gateway could not find
-      // (an input shape it does not know) asks.
-      if (writeTargets === 0 && !graphql.accountLevel) action = unscopedWrite(action);
     }
   } else {
     const rest = classifyGitHubRestRequest(method, pathname, parsedBody ?? null);

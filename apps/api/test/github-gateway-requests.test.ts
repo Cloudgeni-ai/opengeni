@@ -67,7 +67,7 @@ describe("GitHub gateway REST classification", () => {
     });
   });
 
-  test("destructive and settings changes always ask", () => {
+  test("destructive and settings changes are sensitive", () => {
     for (const [method, path, body] of [
       ["DELETE", "/repos/acme/widgets", null],
       ["PATCH", "/repos/acme/widgets", { private: false }],
@@ -139,7 +139,7 @@ describe("GitHub gateway GraphQL classification", () => {
     ).toMatchObject({ sensitive: true, unscoped: true });
   });
 
-  test("merges follow the merge policy; deletions and unknown mutations always ask", () => {
+  test("merges follow the merge policy; deletions and unknown mutations are sensitive", () => {
     expect(
       classifyGitHubGraphqlRequest({
         query:
@@ -477,14 +477,14 @@ describe("GitHub gateway force updates and deletions of refs", () => {
         sensitiveOtherwise: false,
       },
     });
-    // With another mutation that always asks, confirming the refs is not enough.
+    // With another sensitive mutation, confirming the refs is not enough.
     expect(
       classifyGitHubGraphqlRequest({
         query:
           'mutation { deleteRef(input: {refId: "REF_kwDOAbCdEf"}) { clientMutationId } deleteIssue(input: {issueId: "I_kwDOAbCdEf"}) { clientMutationId } }',
       }).action,
     ).toMatchObject({ sensitive: true, refRewrites: { sensitiveOtherwise: true } });
-    // A ref it cannot name always asks.
+    // A ref it cannot name stays sensitive.
     expect(
       classifyGitHubGraphqlRequest({
         query: "mutation($i: UpdateRefsInput!) { updateRefs(input: $i) { clientMutationId } }",

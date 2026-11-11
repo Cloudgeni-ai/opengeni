@@ -366,6 +366,49 @@ describe("personal GitHub gateway", () => {
     const allowEverything: GatewayPolicyLookup = async () => "allow";
     expect((await strictestGatewayPolicy(action, allowEverything)).decision).toBe("ask");
   });
+
+  test("a mutation on an allowed repository can't vouch for an organization write bundled with it", async () => {
+    const nodes: Record<string, unknown> = {
+      PVT_kwDOProject1: { __typename: "ProjectV2" },
+      I_kwDOWidgets1: { __typename: "Issue", repository: { nameWithOwner: "acme/widgets" } },
+    };
+    const respond = (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(bodyText(init)) as { query: string; variables?: { ids?: string[] } };
+      return body.query.includes("OpengeniGatewayNodes")
+        ? Response.json({ data: { nodes: (body.variables?.ids ?? []).map((id) => nodes[id]) } })
+        : Response.json({ data: {} });
+    };
+    const comment =
+      'addComment(input: {subjectId: "I_kwDOWidgets1", body: "hi"}) { clientMutationId }';
+    const send = async (query: string, options: Parameters<typeof harness>[0] = {}) => {
+      const gateway = harness({ respond, ...options });
+      await gateway.send("/graphql", { method: "POST", body: JSON.stringify({ query }) });
+      return gateway.decisions[0]!.action;
+    };
+    // A comment alone is scoped to its repository.
+    expect(await send(`mutation { ${comment} }`)).not.toHaveProperty("unscoped");
+    // A project deletion bundled with it still can't be confirmed.
+    const bundled = `mutation { deleteProjectV2(input: {projectId: "PVT_kwDOProject1"}) { clientMutationId } ${comment} }`;
+    const action = await send(bundled);
+    expect(action).toMatchObject({ sensitive: true, unscoped: true });
+    const allowEverything: GatewayPolicyLookup = async () => "allow";
+    expect((await strictestGatewayPolicy(action, allowEverything)).decision).toBe("ask");
+    // Nor can an unrecognised mutation that names a repository node next to a project.
+    expect(
+      await send(
+        'mutation { moveProjectV2Item(input: {projectId: "PVT_kwDOProject1", contentId: "I_kwDOWidgets1"}) { clientMutationId } }',
+      ),
+    ).toMatchObject({ sensitive: true, unscoped: true });
+    // With every repository allowed for writing, the person's policy decides.
+    const allWrite = authority({
+      selection: {
+        ...authority().selection,
+        repositories: [],
+        allRepositoriesAccess: "write",
+      } as unknown as PersonalGitHubGatewayAuthority["selection"],
+    });
+    expect(await send(bundled, { authority: allWrite })).not.toHaveProperty("unscoped");
+  });
 });
 
 describe("personal GitHub gateway review fixes", () => {
@@ -750,7 +793,7 @@ describe("force updates and deletions of refs", () => {
     expect(decisions.at(-1)?.action).toEqual(expect.objectContaining({ sensitive: true }));
   });
 
-  test("of the default branch, a tag or an unconfirmed ref always ask", async () => {
+  test("of the default branch, a tag or an unconfirmed ref are sensitive", async () => {
     const { respond } = github();
     const { send, decisions } = harness({ respond });
     await send("/repos/acme/widgets/git/refs/heads/main", { method: "DELETE" });
@@ -784,7 +827,7 @@ describe("force updates and deletions of refs", () => {
       "/graphql",
       graphql('mutation { deleteRef(input: {refId: "REF_kwDOElsewhr"}) { clientMutationId } }'),
     );
-    // Another mutation that always asks keeps the request asking.
+    // Another sensitive mutation keeps the request sensitive.
     await send(
       "/graphql",
       graphql(
