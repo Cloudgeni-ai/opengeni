@@ -23,7 +23,7 @@ import {
   startTeamsLinkSignIn,
 } from "../src/integrations/teams-bot";
 import { mintTeamsProof } from "../src/integrations/teams-protocol";
-import { TEAMS_ADMIN_ROLE_IDS } from "../src/integrations/teams-admin-proof";
+import { TEAMS_ADMIN_ROLE_IDS, mintTeamsAdminState } from "../src/integrations/teams-admin-proof";
 import { ApiHttpError } from "../src/http/api-error";
 import { teamsLinkConflict } from "../src/integrations/teams-setup-refusals";
 
@@ -962,8 +962,7 @@ describe("Teams self-serve setup", () => {
         "This link is for a different Teams account than the Microsoft account you signed in with. If the link is yours, open it again and sign in to Microsoft with the account you use in Teams. Otherwise, message Opengeni in Teams to get a link for your own account.",
     });
 
-    // A sign-in started by the attacker can't be completed by the member, and a
-    // setup sign-in never completes a link.
+    // A sign-in started by the attacker can't be completed by the member.
     const attackerSignIn = await linkSignIn(
       provider,
       d,
@@ -976,9 +975,36 @@ describe("Teams self-serve setup", () => {
     ).toMatchObject({ status: 400, reason: "link_sign_in_expired" });
     await notLinked();
 
+    const memberProof = proofFor(memberActor, "Member");
+    // A setup sign-in can't complete a link, even when it is bound to it.
+    const linkState = (await linkSignIn(provider, d, member, memberProof, { oid: memberActor }))
+      .state;
+    const binding = JSON.parse(Buffer.from(linkState.split(".")[0]!, "base64url").toString("utf8"));
+    const setupState = mintTeamsAdminState(STATE_SECRET, {
+      ...binding,
+      purpose: "teams-admin-setup",
+    }).token;
+    expect(
+      await refusal(
+        linkTeamsAccount(d, member, {
+          token: memberProof,
+          microsoft: { code: "microsoft-code", state: setupState },
+        }),
+      ),
+    ).toMatchObject({ status: 400, reason: "link_sign_in_expired" });
+    // A refused sign-in doesn't use up the link.
+    expect(
+      await refusal(
+        linkTeamsAccount(d, member, {
+          token: memberProof,
+          microsoft: await linkSignIn(provider, d, member, memberProof, { oid: attacker }),
+        }),
+      ),
+    ).toMatchObject({ status: 403, reason: "link_identity_mismatch" });
+    expect(await getTeamsActor(client.db, installation, memberActor)).toBeNull();
+
     // The person the link names links it, with no administrator role. A guest
     // signs in to this tenant and gets its tid and their guest object ID.
-    const memberProof = proofFor(memberActor, "Member");
     await linkTeamsAccount(d, member, {
       token: memberProof,
       microsoft: await linkSignIn(provider, d, member, memberProof, {

@@ -501,6 +501,31 @@ test("a link opened by a different Microsoft account says whose it is and offers
   }
 });
 
+test("a link that can't succeed again sends the person back to Teams instead of retrying", async () => {
+  const used = "This link was already used. Message Opengeni in Teams to get a new link.";
+  prepare(async () => {
+    throw setupRefusal(409, "link_used", used);
+  });
+  const { savePendingTeamsLink } = await import("@/lib/teams-connect");
+  savePendingTeamsLink({ linkToken: "link-proof", workspaceId: ws });
+  window.history.replaceState(
+    null,
+    "",
+    `/teams/connect?code=microsoft-code&state=${encodeURIComponent(signedState("teams-account-link"))}`,
+  );
+  const view = await render(<TeamsConnectRoute />);
+  try {
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(view.container.textContent).toContain(used);
+    const labels = [...view.container.querySelectorAll("button")].map((b) => b.textContent);
+    expect(labels).toContain("Open Teams");
+    expect(labels).not.toContain("Try again");
+  } finally {
+    await view.cleanup();
+    window.history.replaceState(null, "", "/teams/connect");
+  }
+});
+
 test("a refused account link says which account is already linked and what to do", async () => {
   window.history.replaceState(null, "", `/workspaces/${ws}/plugins`);
   const linked =

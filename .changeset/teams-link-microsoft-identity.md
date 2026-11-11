@@ -1,6 +1,6 @@
 ---
-"@opengeni/api-router": patch
-"@opengeni/sdk": patch
+"@opengeni/api-router": minor
+"@opengeni/sdk": minor
 ---
 
 Linking a Teams account now requires a Microsoft sign-in as that Teams user. Before, an account-link URL from the bot worked for whoever opened it while signed in to Opengeni, so a forwarded link could link someone else's Teams account to the person who confirmed it. Confirming **Link your Teams account?** now starts a Microsoft sign-in (authorization code with PKCE, at the Teams tenant's own authority, delegated `openid profile` only) through the bot's Entra app and the existing `/teams/connect` redirect URI. On return, the API verifies the ID token as for self-serve setup, without the administrator role, and links only when its `tid` and `oid` equal the link's tenant and Teams user. A guest signs in to the connected tenant and gets its `tid` and their guest object ID, which is what Teams sends. A different Microsoft account is refused with `details.reason` `link_identity_mismatch` and a message naming the Teams account the link is for (its display name, now carried in new link URLs) and the Microsoft account that signed in. The link's 10-minute expiry and single use are unchanged, and a refused sign-in doesn't use up the link. `POST /v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in` starts the sign-in and `POST …/teams/link` now requires `microsoft: { code, state }`; the SDK adds `teamsApi().startLinkSignIn(token)` and an optional second `microsoft` argument to `linkAccount`. Self-hosted deployments must register `<web base URL>/teams/connect` as a Web redirect URI on the bot's Entra app even without self-serve setup.

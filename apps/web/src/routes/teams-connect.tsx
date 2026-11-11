@@ -22,6 +22,7 @@ import {
   teamsMicrosoftSignInPurpose,
   teamsMicrosoftFailureText,
   teamsErrorText,
+  teamsLinkSignInRefused,
   teamsMicrosoftReturn,
   teamsOwnAccountLinkedElsewhere,
   teamsRouteMissing,
@@ -71,15 +72,16 @@ function TeamsLinkReturn({
 }) {
   const { client } = useAppContext();
   const [result, setResult] = useState<
-    { kind: "linking" } | { kind: "linked" } | { kind: "failed"; message: string }
+    { kind: "linking" } | { kind: "linked" } | { kind: "failed"; message: string; retry: boolean }
   >(() =>
     microsoft.kind === "failed"
-      ? { kind: "failed", message: teamsMicrosoftFailureText(microsoft, "link") }
+      ? { kind: "failed", message: teamsMicrosoftFailureText(microsoft, "link"), retry: true }
       : pending
         ? { kind: "linking" }
         : {
             kind: "failed",
             message: "This link expired. Message Opengeni in Teams to get a new link.",
+            retry: false,
           },
   );
   const finished = useRef(false);
@@ -100,6 +102,7 @@ function TeamsLinkReturn({
             caught,
             "Microsoft sign-in couldn't be verified. Open the link from Teams again.",
           ),
+          retry: teamsLinkSignInRefused(caught),
         }),
       );
   }, [client, microsoft, pending]);
@@ -147,7 +150,7 @@ function TeamsLinkReturn({
         title="Couldn't link your Teams account"
         description={result.message}
         action={
-          pending && plugins ? (
+          pending && plugins && result.retry ? (
             <Button
               onClick={() =>
                 window.location.assign(

@@ -21,7 +21,8 @@ const Activity = z.object({
   from: z.object({
     id: opaque,
     aadObjectId: uuid,
-    name: z.string().max(512).optional(),
+    // Display only: an unusual name never drops the message.
+    name: z.string().optional().catch(undefined),
     role: z.string().optional(),
   }),
   recipient: z.object({ id: opaque }),
@@ -319,7 +320,7 @@ const ContextActivity = z.object({
   from: z.object({
     id: opaque,
     aadObjectId: uuid,
-    name: z.string().max(512).optional(),
+    name: z.string().optional().catch(undefined),
     role: z.string().optional(),
   }),
   recipient: z.object({ id: opaque }),

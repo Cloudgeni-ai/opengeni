@@ -244,3 +244,19 @@ export function teamsOwnAccountLinkedElsewhere(error: unknown): boolean {
   const details = (error as { details?: { reason?: unknown } }).details;
   return details?.reason === "opengeni_account_linked";
 }
+
+/**
+ * True when an account link was refused for its Microsoft sign-in, so the same
+ * link can still succeed with another sign-in. Other refusals (a used or
+ * expired link, a changed connection) need a new link from Teams.
+ */
+export function teamsLinkSignInRefused(error: unknown): boolean {
+  if (apiErrorDetailCode(error) !== TEAMS_CONNECTION_REFUSED_CODE) return false;
+  const details = (error as { details?: { reason?: unknown } }).details;
+  return (
+    details?.reason === "link_identity_mismatch" ||
+    details?.reason === "link_sign_in_required" ||
+    details?.reason === "link_sign_in_expired" ||
+    details?.reason === "link_sign_in_failed"
+  );
+}

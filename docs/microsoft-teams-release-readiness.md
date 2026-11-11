@@ -316,6 +316,9 @@ Staging acceptance for self-serve, in the dedicated test tenant:
 9. A workspace member opens someone else's account link and signs in to
    Microsoft as themselves: the link is refused with a message naming the Teams
    account it is for, and nothing is linked.
+10. A guest from another organization messages the bot, opens their link and
+    signs in to Microsoft with their home account. Microsoft signs them in to
+    the connected tenant as its guest, and they are linked.
 
 ## Account linking
 
