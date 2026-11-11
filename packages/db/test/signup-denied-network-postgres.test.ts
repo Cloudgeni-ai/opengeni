@@ -11,6 +11,7 @@ import {
   createOrganizationInvitation,
   evaluateSignupNetworkAccounts,
   freePlanCreditEligible,
+  rawRows,
   getSpendableCreditBalance,
   listSignupNetworkHolds,
   nestedPostgresSqlState,
@@ -366,9 +367,11 @@ test("captured networks outlive the denied account's sessions", async () => {
     await shared.admin`delete from opengeni_private.signup_network_owner_addresses
       where data_schema = ${shared.schema} and account_id = ${legacy.accountId}`;
     await decide(legacy.accountId, "denied");
-    const [captured] =
-      await shared.admin`select opengeni_private.capture_flagged_owner_session_networks(
-      ${shared.schema}, 5000) as count`;
+    // As the migration backfill runs it: the schema owner, outside any request.
+    const [captured] = await rawRows<{ count: number }>(
+      ownerClient!.db,
+      sql`select opengeni_private.capture_flagged_owner_session_networks(${shared.schema}, 5000) as count`,
+    );
     expect(Number(captured!.count)).toBeGreaterThanOrEqual(1);
     const afterLegacy = await owner([legacyIp]);
     expect(await decision(afterLegacy.accountId)).toMatchObject(HELD);
