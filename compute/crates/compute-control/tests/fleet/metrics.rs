@@ -356,10 +356,14 @@ async fn a_host_registering_afresh_and_refusing_as_full_is_counted() {
     // the restart alert counts, whichever replica leads.
     #[allow(clippy::cast_precision_loss)]
     let epoch = host.epoch() as f64;
-    until(Duration::from_secs(5), "its new epoch is reported", async || {
-        text = fleet.scrape().await;
-        value(&text, "compute_fleet_host_epoch{host_name=\"hosts-a\"}") == Some(epoch)
-    })
+    until(
+        Duration::from_secs(5),
+        "its new epoch is reported",
+        async || {
+            text = fleet.scrape().await;
+            value(&text, "compute_fleet_host_epoch{host_name=\"hosts-a\"}") == Some(epoch)
+        },
+    )
     .await;
 
     // It refuses a create as full: counted, and answered as no capacity.
