@@ -23,6 +23,7 @@ import {
   integrationDefinitionCardPostedMessage,
   integrationDefinitionSetupContext,
   integrationDefinitionSetup,
+  chatToolSelectionIncludes,
 } from "./integration-definition-capabilities";
 import { capabilityAccountReadiness } from "./capability-account-readiness";
 import { sessionChatUrl, withUserSetupCard, type UserSetupCardPost } from "./user-setup-card";
@@ -400,6 +401,13 @@ import {
   COMMAND_WAIT_MAX_COMMANDS,
 } from "./command-read";
 import {
+  ToolArgumentError,
+  isSdkToolArgumentRejectionMessage,
+  isToolArgumentRejection,
+  markToolArgumentRejection,
+  toolArgumentRejectionResult,
+} from "./tool-argument-error";
+import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
   boundSessionDetailMcp,
@@ -661,11 +669,11 @@ function sessionCreateValidationFailureResult(error: z4.ZodError) {
       ),
     },
   };
-  return {
+  return markToolArgumentRejection({
     content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
     structuredContent: envelope,
     isError: true as const,
-  };
+  });
 }
 
 export function orchestrationFailureEnvelope(
@@ -812,11 +820,12 @@ function orchestrationFailureResult(
       // Diagnostic construction must never replace the original tool outcome.
     }
   }
-  return {
+  const failure = {
     content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
     structuredContent: result,
     isError: true as const,
   };
+  return isToolArgumentRejection(error) ? markToolArgumentRejection(failure) : failure;
 }
 
 const FIRST_PARTY_MCP_TOOL_NAME_SET = new Set<string>(FIRST_PARTY_MCP_TOOL_NAMES);
@@ -1039,7 +1048,7 @@ function buildSessionCreateToolInput(
   });
 }
 
-class PolicyMcpServer extends McpServer {
+export class PolicyMcpServer extends McpServer {
   private registeredToolCount = 0;
 
   constructor(
@@ -1049,6 +1058,34 @@ class PolicyMcpServer extends McpServer {
     private readonly appActions: { startedByPerson: boolean; fullAccess: boolean } | null = null,
   ) {
     super({ name: "opengeni", version: "1.0.0" });
+    const sdk = this as unknown as {
+      createToolError(message: string): { _meta?: Record<string, unknown> };
+      executeToolHandler(tool: unknown, args: unknown, extra: unknown): Promise<unknown>;
+    };
+    // The SDK refuses arguments that do not match a tool's schema before the
+    // tool runs, and builds that error result from the message alone. Mark it
+    // as an argument rejection like the ones tools throw themselves.
+    const createToolError = sdk.createToolError.bind(this);
+    sdk.createToolError = (message) => {
+      const result = createToolError(message);
+      return isSdkToolArgumentRejectionMessage(message)
+        ? markToolArgumentRejection(result)
+        : result;
+    };
+    // A tool that refuses the caller's arguments throws; return the same error
+    // result the SDK would make from it, marked so it is not counted as a tool
+    // failure. Tool handlers themselves keep throwing.
+    const executeToolHandler = sdk.executeToolHandler.bind(this);
+    sdk.executeToolHandler = async (tool, args, extra) => {
+      try {
+        return await executeToolHandler(tool, args, extra);
+      } catch (error) {
+        if (error instanceof Error && isToolArgumentRejection(error)) {
+          return toolArgumentRejectionResult(error);
+        }
+        throw error;
+      }
+    };
   }
 
   /**
@@ -1286,7 +1323,8 @@ export function buildOpenGeniMcpServer(
     const authority = (await authorizedSocialConnections()).find(
       ({ connection }) => connection.id === connectionId,
     );
-    if (!authority) throw new Error(`Unknown or unavailable social connection: ${connectionId}`);
+    if (!authority)
+      throw new ToolArgumentError(`Unknown or unavailable social connection: ${connectionId}`);
     return authority;
   };
   const requireAuthorizedSocialConnectionForProvider = async (
@@ -1733,7 +1771,8 @@ export function buildOpenGeniMcpServer(
         const selected = connectionIds?.length
           ? connectionIds.map((id) => {
               const match = authorized.find(({ connection }) => connection.id === id);
-              if (!match) throw new Error(`Unknown or unavailable social connection: ${id}`);
+              if (!match)
+                throw new ToolArgumentError(`Unknown or unavailable social connection: ${id}`);
               return match;
             })
           : authorized;
@@ -1779,7 +1818,7 @@ export function buildOpenGeniMcpServer(
           const foundIds = new Set(connections.map((connection) => connection.id));
           const missing = [...selectedIds].filter((id) => !foundIds.has(id));
           if (missing.length > 0) {
-            throw new Error(`Unknown social connection IDs: ${missing.join(", ")}`);
+            throw new ToolArgumentError(`Unknown social connection IDs: ${missing.join(", ")}`);
           }
         }
         const sinceDate = since
@@ -2238,7 +2277,7 @@ export function buildOpenGeniMcpServer(
         return await requireVisibleScheduledTask(deps.db, grant, id);
       } catch (error) {
         if (error instanceof HTTPException && error.status === 404)
-          throw new Error(`Scheduled task not found: ${id}`, { cause: error });
+          throw new ToolArgumentError(`Scheduled task not found: ${id}`, { cause: error });
         throw error;
       }
     };
@@ -2463,7 +2502,7 @@ export function buildOpenGeniMcpServer(
           pausable = await requirePausableScheduledTask(deps.db, grant, id, viewer);
         } catch (error) {
           if (error instanceof HTTPException && error.status === 404)
-            throw new Error(`Scheduled task not found: ${id}`, { cause: error });
+            throw new ToolArgumentError(`Scheduled task not found: ${id}`, { cause: error });
           throw error;
         }
         if (pausable.access === "summary") {
@@ -2657,7 +2696,7 @@ export function buildOpenGeniMcpServer(
             target,
           ) !== "full"
         )
-          throw new Error(`Scheduled task not found: ${id}`);
+          throw new ToolArgumentError(`Scheduled task not found: ${id}`);
         const { task, changed } = await deleteScheduledTaskWithDurableCleanup(deps, {
           grant,
           taskId: id,
@@ -2749,15 +2788,20 @@ function registerSandboxFileArtifactTool(
     async ({ path, artifactId, visibility }, extra) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       if ((path === undefined) === (artifactId === undefined))
-        throw new Error("Pass exactly one of path or artifactId.");
+        throw new ToolArgumentError("Pass exactly one of path or artifactId.");
       if (artifactId !== undefined) {
         if (!visibility)
-          throw new Error("Pass visibility with artifactId to change who can open that file.");
+          throw new ToolArgumentError(
+            "Pass visibility with artifactId to change who can open that file.",
+          );
         const change = { grant, artifactId, visibility };
-        return json(
-          (await changeWorkspaceFileVisibility(deps, change)) ??
-            (await changeSiteAudienceForAgent(deps, change)),
-        );
+        const fileAccess = await changeWorkspaceFileVisibility(deps, change);
+        if (fileAccess)
+          return json({
+            ...fileAccess,
+            artifactReference: `[Open file](artifact:${artifactId})`,
+          });
+        return json(await changeSiteAudienceForAgent(deps, change));
       }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
       // A Codemode call names its operation in the worker's trusted call
@@ -2774,15 +2818,17 @@ function registerSandboxFileArtifactTool(
             ? operationId
             : null,
       });
-      return json(
-        await publishSandboxFileArtifact(deps, {
-          grant,
-          session,
-          path: path!,
-          visibility,
-          executionMachine,
-        }),
-      );
+      const receipt = await publishSandboxFileArtifact(deps, {
+        grant,
+        session,
+        path: path!,
+        visibility,
+        executionMachine,
+      });
+      return json({
+        ...receipt,
+        artifactReference: `[Open file](artifact:${receipt.artifact.artifactId})`,
+      });
     },
   );
 }
@@ -3091,7 +3137,7 @@ function registerSlackBotTools(
       if (!sessionId) throw new Error("Proposing an agent requires a chat started from Slack");
       await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
       const exactAvatar = avatarFromToolInput(avatar);
-      if (!exactAvatar) throw new Error("An icon is required");
+      if (!exactAvatar) throw new ToolArgumentError("An icon is required");
       return json(
         await proposeSlackAgentFromChat(deps, {
           grant,
@@ -3627,7 +3673,7 @@ function registerGoalTools(
     }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       if (text === undefined && successCriteria === undefined) {
-        throw new Error("goal_update requires text or successCriteria");
+        throw new ToolArgumentError("goal_update requires text or successCriteria");
       }
       const context = exactAgentCommandContext(grant, sessionId);
       const command = {
@@ -3842,7 +3888,7 @@ function registerGoalTools(
           goal.metadata.reportDeliveriesV1 ?? [],
         ).map((delivery) => ({
           ...delivery,
-          artifactReference: `[Open report](/workspaces/${grant.workspaceId}/artifacts/editable/${delivery.artifactId})`,
+          artifactReference: `[Open report](artifact:${delivery.artifactId})`,
         })),
         handoff: reply?.trim()
           ? "Your reply is this turn's final answer and ends the turn after this tool batch; if this turn still continues, give that answer as your final reply."
@@ -4002,8 +4048,10 @@ function registerWorkspaceArtifactTools(
         if (error instanceof SessionAuthorizationDeniedError) return false;
         throw error;
       });
-  const mutation = async (response: WorkspaceArtifactMutationResponse) =>
-    await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
+  const mutation = async (response: WorkspaceArtifactMutationResponse) => ({
+    ...(await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession)),
+    artifactReference: `[Open Site](artifact:${response.artifact.id})`,
+  });
   // A published Site follows its Site here exactly as through the API routes:
   // the same hook resyncs the edge and scans a version that became current.
   const siteMutation = async (response: WorkspaceArtifactMutationResponse, scan: boolean) =>
@@ -4099,6 +4147,7 @@ function registerWorkspaceArtifactTools(
         detail,
         version: projectedVersion,
         downloads,
+        artifactReference: `[Open Site](artifact:${artifactId})`,
       });
     },
   );
@@ -4591,7 +4640,9 @@ function registerWorkClaimTools(
     }) => {
       await authorize();
       if ((versionKind === undefined) !== (versionValue === undefined)) {
-        throw new Error("work_claim_upsert versionKind and versionValue must be supplied together");
+        throw new ToolArgumentError(
+          "work_claim_upsert versionKind and versionValue must be supplied together",
+        );
       }
       return json(
         await upsertWorkClaim(deps.db, {
@@ -5131,7 +5182,9 @@ function registerConnectedMachineTools(
         enrollment = enrollments.find((candidate) => candidate.id === sandbox?.enrollmentId);
       }
       if (!enrollment) {
-        throw new Error("machine not found in this access scope; use a sandboxes_list id");
+        throw new ToolArgumentError(
+          "machine not found in this access scope; use a sandboxes_list id",
+        );
       }
       if (enrollment.scope === "organization" && !grant.permissions.includes("account:admin")) {
         throw new MissingPermissionRefusal("account:admin");
@@ -6000,17 +6053,17 @@ function registerWorkspaceOrchestrationTools(
             decodedCursor?.orderBy ??
             (relevanceRequested ? "relevance" : "createdAt");
           if (decodedCursor && decodedCursor.orderBy !== orderBy) {
-            throw new Error("sessions_list cursor order does not match orderBy");
+            throw new ToolArgumentError("sessions_list cursor order does not match orderBy");
           }
           const normalizedUpdatedAfter =
             updatedAfter !== undefined
               ? normalizeSessionDiscoveryRevision(updatedAfter, "updatedAfter")
               : (decodedCursor?.updatedAfter ?? undefined);
           if (normalizedUpdatedAfter !== undefined && orderBy !== "updatedAt") {
-            throw new Error("sessions_list updatedAfter requires orderBy=updatedAt");
+            throw new ToolArgumentError("sessions_list updatedAfter requires orderBy=updatedAt");
           }
           if (decodedCursor && decodedCursor.updatedAfter !== (normalizedUpdatedAfter ?? null)) {
-            throw new Error("sessions_list cursor does not match updatedAfter");
+            throw new ToolArgumentError("sessions_list cursor does not match updatedAfter");
           }
           const page = await listSessionDiscoverySummaries(deps.db, grant.workspaceId, {
             limit: boundedSessionDiscoveryLimit(limit),
@@ -6089,7 +6142,7 @@ function registerWorkspaceOrchestrationTools(
       inThisWorkspaceOr("session_get", async ({ sessionId: requestedSessionId, detail }) => {
         const sessionId = requestedSessionId ?? exactAgentAttemptClaims(grant)?.sessionId;
         if (sessionId === undefined) {
-          throw new Error(
+          throw new ToolArgumentError(
             "session_get requires an explicit sessionId without authenticated current agent session context",
           );
         }
@@ -6101,7 +6154,7 @@ function registerWorkspaceOrchestrationTools(
         );
         const session = await getSession(deps.db, grant.workspaceId, sessionId);
         if (!session) {
-          throw new Error("session not found");
+          throw new ToolArgumentError("session not found");
         }
         const queue = await (
           detail === "full" ? getSessionQueueSnapshot : getSessionQueueMonitoringSummary
@@ -6247,7 +6300,7 @@ function registerWorkspaceOrchestrationTools(
           // or direct adapter calls: the canonical registry owns accepted types.
           const canonicalType = (type: string) => {
             const parsed = SessionEventType.safeParse(type);
-            if (!parsed.success) throw new Error(unknownSessionEventTypeMessage(type));
+            if (!parsed.success) throw new ToolArgumentError(unknownSessionEventTypeMessage(type));
             return parsed.data;
           };
           const includeTypes = requestedIncludeTypes?.map(canonicalType);
@@ -6255,7 +6308,7 @@ function registerWorkspaceOrchestrationTools(
           const latestClass =
             latest === undefined ? undefined : sessionEventLatestClassToSemanticClass(latest);
           if (requestedResultMode === "compact" && latestClass === undefined) {
-            throw new Error("resultMode=compact requires latest");
+            throw new ToolArgumentError("resultMode=compact requires latest");
           }
           await requireSession(deps.db, grant.workspaceId, sessionId);
           const auditRequested = [
@@ -6272,7 +6325,7 @@ function registerWorkspaceOrchestrationTools(
             ((view !== undefined && view !== "debug") || cursor !== undefined) &&
             auditRequested
           ) {
-            throw new Error(
+            throw new ToolArgumentError(
               sessionEventAuditSelectorMessage({
                 sessionId,
                 view,
@@ -6330,7 +6383,7 @@ function registerWorkspaceOrchestrationTools(
             includeArguments !== undefined ||
             includeOutput !== undefined
           ) {
-            throw new Error(
+            throw new ToolArgumentError(
               `cursor/callId/toolName/includeArguments/includeOutput require a non-debug view; view=debug pages with after/before. Use ${JSON.stringify(
                 callId === undefined &&
                   toolName === undefined &&
@@ -6354,7 +6407,7 @@ function registerWorkspaceOrchestrationTools(
               (filter) => filter !== undefined,
             )
           ) {
-            throw new Error("latest cannot be combined with event filters");
+            throw new ToolArgumentError("latest cannot be combined with event filters");
           }
           const mode = requestedMode ?? "monitoring";
           const direction = latestClass
@@ -6478,7 +6531,7 @@ function registerWorkspaceOrchestrationTools(
         async ({ targets, includeOwnPendingUpdates, waitFor, maxWaitSeconds }, extra) => {
           const distinct = new Set(targets.map((target) => target.sessionId));
           if (distinct.size !== targets.length) {
-            throw new Error("session_wait targets must name distinct sessions");
+            throw new ToolArgumentError("session_wait targets must name distinct sessions");
           }
           // Authorize and resolve every target exactly as session_events does,
           // before any live-fanout subscription exists for it.
@@ -6644,7 +6697,8 @@ function registerWorkspaceOrchestrationTools(
                 ...identity,
                 commandId: id,
               });
-              if (!command) throw new Error("Background command not found in this session");
+              if (!command)
+                throw new ToolArgumentError("Background command not found in this session");
               return command.state === "exited" || command.state === "lost";
             };
             const readOutput = async (
@@ -6673,7 +6727,8 @@ function registerWorkspaceOrchestrationTools(
               yieldTo: async () => await callerTurnSteerPending(callerSessionId),
             };
             if (commandIds === undefined && cursors === undefined) {
-              if (commandId === undefined) throw new Error("Pass commandId or commandIds");
+              if (commandId === undefined)
+                throw new ToolArgumentError("Pass commandId or commandIds");
               // A malformed cursor fails before any wait.
               parseCommandOutputCursor(cursor, commandId);
               return json(
@@ -6691,13 +6746,15 @@ function registerWorkspaceOrchestrationTools(
             const ids = [
               ...new Set([...(commandId === undefined ? [] : [commandId]), ...(commandIds ?? [])]),
             ];
-            if (ids.length === 0) throw new Error("Pass commandId or commandIds");
+            if (ids.length === 0) throw new ToolArgumentError("Pass commandId or commandIds");
             // Each cursor names its own command; match them up by that prefix.
             const cursorById = new Map<string, string>();
             for (const value of [...(cursor === undefined ? [] : [cursor]), ...(cursors ?? [])]) {
               const owner = ids.find((id) => value.startsWith(`${id}:`));
               if (owner === undefined)
-                throw new Error("Each cursor must belong to one of the listed commands");
+                throw new ToolArgumentError(
+                  "Each cursor must belong to one of the listed commands",
+                );
               parseCommandOutputCursor(value, owner);
               cursorById.set(owner, value);
             }
@@ -7186,7 +7243,7 @@ function registerWorkspaceOrchestrationTools(
             throw error;
           }
           if (accepted.action === "not_found") {
-            throw new Error("human-input request not found");
+            throw new ToolArgumentError("human-input request not found");
           }
           await publishDurableSessionEvents(
             deps.bus,
@@ -7394,7 +7451,7 @@ function registerProjectTools(
       },
       async ({ projectId }) => {
         const project = await getChannel(deps.db, grant.workspaceId, projectId);
-        if (!project) throw new Error("Project not found");
+        if (!project) throw new ToolArgumentError("Project not found");
         return json({ project });
       },
     );
@@ -7451,7 +7508,7 @@ function registerProjectTools(
           ...update,
           ...(exactAvatar !== undefined ? { avatar: exactAvatar } : {}),
         });
-        if (!project) throw new Error("Project not found");
+        if (!project) throw new ToolArgumentError("Project not found");
         return json({ project });
       },
     );
@@ -7478,7 +7535,7 @@ function registerProjectTools(
       },
       async ({ projectId }) => {
         if (!(await deleteChannel(deps.db, grant.workspaceId, projectId)))
-          throw new Error("Project not found");
+          throw new ToolArgumentError("Project not found");
         return json({ ok: true, projectId });
       },
     );
@@ -7501,7 +7558,7 @@ function registerProjectTools(
             channelId: projectId,
           }))
         )
-          throw new Error("Session not found");
+          throw new ToolArgumentError("Session not found");
         return json({ ok: true, sessionId, projectId });
       },
     );
@@ -7656,6 +7713,7 @@ function registerCapabilityDiscoveryTools(
     const availableFirstPartyTools = new Set<string>();
     const acceptedServerIds = new Set<string>();
     let accountSelectionKnown = false;
+    let chatIncludes = (_serverId: string) => true;
     if (
       items.some(
         (item) =>
@@ -7664,6 +7722,9 @@ function registerCapabilityDiscoveryTools(
       )
     ) {
       const claims = exactAgentCommandContext(grant, sessionId);
+      chatIncludes = chatToolSelectionIncludes(
+        await getSession(deps.db, grant.workspaceId, sessionId),
+      );
       const attemptCatalog = await getAttemptToolCatalog(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
@@ -7715,6 +7776,7 @@ function registerCapabilityDiscoveryTools(
                     accountSelectionKnown,
                     availableFirstPartyTools,
                     new Set((grant.metadata?.firstPartyMcpTools as string[] | undefined) ?? []),
+                    chatIncludes,
                   ),
       ),
     );
@@ -7870,7 +7932,7 @@ function registerCapabilityDiscoveryTools(
           (candidate) => candidate.id === capabilityId,
         ) ?? (await marketplacePluginCapabilityItem(deps.db, grant.workspaceId, capabilityId));
       if (!item || !capabilityCatalogItemIsTrustedForExposure(item)) {
-        throw new Error("Unknown or untrusted capability; search the catalog again.");
+        throw new ToolArgumentError("Unknown or untrusted capability; search the catalog again.");
       }
       const [[setup], inventory] = await Promise.all([
         setupProjections([item]),
@@ -7886,13 +7948,13 @@ function registerCapabilityDiscoveryTools(
       if (connectionId !== undefined) {
         reconnect = candidates.find((candidate) => candidate.connectionId === connectionId);
         if (!reconnect)
-          throw new Error(
+          throw new ToolArgumentError(
             `That connectionId is not an account of ${item.name} that stopped working. Search the catalog again for its setup.reconnect.`,
           );
       } else if (setup.status !== "ready") {
         const here = candidates.filter((candidate) => candidate.addedHere);
         if (here.length > 1)
-          throw new Error(
+          throw new ToolArgumentError(
             `Several ${item.name} accounts stopped working. Pass the connectionId of the one to reconnect, from setup.reconnect in capability_catalog_search.`,
           );
         reconnect = here[0];
@@ -8159,6 +8221,7 @@ async function capabilitySetupProjection(
   accountSelectionKnown: boolean,
   availableFirstPartyTools: ReadonlySet<string>,
   selectedFirstPartyTools: ReadonlySet<string>,
+  chatIncludes: (serverId: string) => boolean = () => true,
 ): Promise<CapabilitySetupProjection> {
   // The rule the Capabilities page uses to hide such entries: no card could
   // finish a connection this deployment cannot start.
@@ -8292,6 +8355,14 @@ async function capabilitySetupProjection(
         status: "ready",
         action: null,
         detail: "This capability has tools available in this turn.",
+      };
+    }
+    if (item.runtime.mcpServerId && !chatIncludes(item.runtime.mcpServerId)) {
+      return {
+        status: "unavailable",
+        action: null,
+        detail:
+          "This integration is enabled, but this chat's tool selection leaves it out. Include it in the chat's tools, then send a new message. This does not mean the account is disconnected; do not request reconnection based on missing tools alone.",
       };
     }
     if (
@@ -8713,7 +8784,7 @@ const SESSION_DISCOVERY_UUID =
 
 function normalizeSessionDiscoveryTimestamp(value: string, label: string): string {
   if (!SESSION_DISCOVERY_TIMESTAMP.test(value) || Number.isNaN(new Date(value).getTime())) {
-    throw new Error(`sessions_list ${label} must be an ISO UTC date-time`);
+    throw new ToolArgumentError(`sessions_list ${label} must be an ISO UTC date-time`);
   }
   // Preserve up to six fractional digits. Converting through JS Date would
   // discard PostgreSQL microseconds and can skip equal-millisecond rows.
@@ -8722,11 +8793,13 @@ function normalizeSessionDiscoveryTimestamp(value: string, label: string): strin
 
 function normalizeSessionDiscoveryRevision(value: string, label: string): string {
   if (!SESSION_DISCOVERY_REVISION.test(value)) {
-    throw new Error(`sessions_list ${label} must be a decimal activity revision`);
+    throw new ToolArgumentError(`sessions_list ${label} must be a decimal activity revision`);
   }
   const revision = BigInt(value);
   if (revision > SESSION_DISCOVERY_REVISION_MAX) {
-    throw new Error(`sessions_list ${label} exceeds the database activity revision range`);
+    throw new ToolArgumentError(
+      `sessions_list ${label} exceeds the database activity revision range`,
+    );
   }
   return revision.toString();
 }
@@ -8753,7 +8826,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
         (originSiteId !== null &&
           (typeof originSiteId !== "string" || !SESSION_DISCOVERY_UUID.test(originSiteId)))
       ) {
-        throw new Error("invalid cursor fields");
+        throw new ToolArgumentError("invalid cursor fields");
       }
       decoded = {
         v: originSiteId ? 4 : orderBy === "relevance" ? 3 : 2,
@@ -8848,7 +8921,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       typeof parsed.id !== "string" ||
       !SESSION_DISCOVERY_UUID.test(parsed.id)
     ) {
-      throw new Error("invalid cursor fields");
+      throw new ToolArgumentError("invalid cursor fields");
     }
     if (
       relevance &&
@@ -8857,10 +8930,10 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
         typeof parsed.filterHash !== "string" ||
         !/^[0-9a-f]{64}$/.test(parsed.filterHash))
     ) {
-      throw new Error("invalid relevance cursor fields");
+      throw new ToolArgumentError("invalid relevance cursor fields");
     }
     if (!relevance && (parsed.sortRank !== undefined || parsed.filterHash !== undefined)) {
-      throw new Error("chronological cursor cannot carry relevance fields");
+      throw new ToolArgumentError("chronological cursor cannot carry relevance fields");
     }
     const sortAt = normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt");
     const snapshotAt = normalizeSessionDiscoveryTimestamp(parsed.snapshotAt, "cursor snapshotAt");
@@ -8869,7 +8942,9 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       "cursor sortRevision",
     );
     if (BigInt(sortRevision) >= 1n << 64n) {
-      throw new Error("cursor sortRevision exceeds the database activity revision range");
+      throw new ToolArgumentError(
+        "cursor sortRevision exceeds the database activity revision range",
+      );
     }
     const snapshotRevision = normalizeSessionDiscoveryRevision(
       parsed.snapshotRevision,
@@ -8880,10 +8955,10 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
         ? null
         : normalizeSessionDiscoveryRevision(parsed.updatedAfter, "cursor updatedAfter");
     if (normalizedUpdatedAfter !== null && parsed.orderBy !== "updatedAt") {
-      throw new Error("incremental cursor requires updatedAt order");
+      throw new ToolArgumentError("incremental cursor requires updatedAt order");
     }
     if (parsed.orderBy === "createdAt" && (sortRevision !== "0" || snapshotRevision !== "0")) {
-      throw new Error("creation cursor cannot carry activity revisions");
+      throw new ToolArgumentError("creation cursor cannot carry activity revisions");
     }
     const orderBy: SessionDiscoveryOrderBy = relevance
       ? "relevance"
@@ -8901,7 +8976,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       ...(isV4 ? { originSiteId: parsed.originSiteId as string } : {}),
     };
   } catch {
-    throw new Error("sessions_list cursor is invalid");
+    throw new ToolArgumentError("sessions_list cursor is invalid");
   }
 }
 
@@ -9208,7 +9283,7 @@ export function capSessionDiscoveryPage(
 function parseMcpDate(raw: string, label: string): Date {
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) {
-    throw new Error(`${label} must be an ISO date-time`);
+    throw new ToolArgumentError(`${label} must be an ISO date-time`);
   }
   return date;
 }

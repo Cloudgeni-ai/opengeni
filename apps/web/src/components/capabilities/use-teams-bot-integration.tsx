@@ -8,7 +8,12 @@ import { ConfirmDialog } from "@opengeni/react/ui/confirm-dialog";
 import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import type { IntegrationAdapter } from "./use-api-integration-accounts";
 import { MICROSOFT_TEAMS_LOGO_URL } from "./use-microsoft-teams-integration";
-import { clearTeamsFragment, teamsErrorText, teamsFragmentToken } from "@/lib/teams-connect";
+import {
+  clearTeamsFragment,
+  savePendingTeamsLink,
+  teamsErrorText,
+  teamsFragmentToken,
+} from "@/lib/teams-connect";
 
 export function useTeamsBotIntegration({
   workspaceId,
@@ -71,9 +76,11 @@ export function useTeamsBotIntegration({
     linkRequest?.scope === scope ||
     error?.scope === scope,
   );
+  // The Teams app's own name, so this card matches the app people see in Teams.
+  const appName = status?.appName ?? "Opengeni";
   const model: IntegrationViewModel = {
     id: "teams-bot",
-    name: "Opengeni for Teams",
+    name: appName,
     description: "Start work with a channel mention or a private chat in Teams.",
     mark: { logoSrc: MICROSOFT_TEAMS_LOGO_URL, monogram: "MT" },
     chip:
@@ -109,7 +116,7 @@ export function useTeamsBotIntegration({
             label: "Your Teams account",
             description: status?.linked
               ? "Your Teams messages use your Opengeni access."
-              : "Message Opengeni in Teams to link your account.",
+              : `Message ${appName} in Teams to link your account.`,
             action: status?.linked
               ? { label: "Unlink account", onClick: () => setUnlink(true) }
               : {
@@ -135,8 +142,8 @@ export function useTeamsBotIntegration({
             message: installed
               ? "A workspace administrator manages this bot."
               : canManage && status?.setupAvailable
-                ? "Install the Opengeni app in Teams, then follow its setup link to connect this workspace."
-                : "Ask your administrator to set up Opengeni in Teams.",
+                ? `Install the ${appName} app in Teams, then follow its setup link to connect this workspace.`
+                : `Ask your administrator to set up ${appName} in Teams.`,
           },
     ...(deliveryNeedsAttention
       ? {
@@ -226,16 +233,16 @@ export function useTeamsBotIntegration({
             }
           }}
           title="Link your Teams account?"
-          description="Link the Teams account that opened this page to your signed-in Opengeni account. The bot will use your access when you ask it to work."
-          confirmLabel="Link my account"
+          description="To confirm the Teams account is yours, sign in to Microsoft with the account you use in Teams. It's then linked to your signed-in Opengeni account, and the bot uses your access when you ask it to work."
+          confirmLabel="Sign in with Microsoft"
           onConfirm={async () => {
             if (!linkRequest || linkRequest.scope !== scope) return false;
             try {
-              await api.linkAccount(linkRequest.token);
-              clearTeamsFragment("teams_link");
-              setLinkRequest(null);
-              await refresh();
-              toast.success("Teams account linked. Return to Teams to continue.");
+              // Microsoft returns to the setup page, which finishes the link.
+              const { authorizationUrl } = await api.startLinkSignIn(linkRequest.token);
+              savePendingTeamsLink({ linkToken: linkRequest.token, workspaceId });
+              window.location.assign(authorizationUrl);
+              return false;
             } catch (caught) {
               setLinkError(
                 teamsErrorText(

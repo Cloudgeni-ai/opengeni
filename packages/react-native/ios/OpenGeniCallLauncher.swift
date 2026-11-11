@@ -7,7 +7,18 @@ import Foundation
 public enum OpenGeniCallLauncher {
   /// Ask JavaScript to start a call. `target` is a session id, or nil to let the
   /// host choose (for example the session the user last had open).
-  public static func requestStart(target: String? = nil) {
-    OpenGeniCallCenter.shared.requestStart(target: target)
+  /// `workspaceId` names the session's workspace when the request knows it.
+  public static func requestStart(target: String? = nil, workspaceId: String? = nil) {
+    OpenGeniCallCenter.shared.requestStart(target: target, workspaceId: workspaceId)
+  }
+
+  /// The voice commands the app stored for the signed-in account.
+  public static func commands() -> [OpenGeniCallCommand] {
+    OpenGeniCallCommands.all()
+  }
+
+  /// The stored voice command with this id, if it still exists.
+  public static func command(id: String) -> OpenGeniCallCommand? {
+    OpenGeniCallCommands.command(id: id)
   }
 }

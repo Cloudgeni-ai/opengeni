@@ -42,9 +42,11 @@ import {
 import * as schema from "@opengeni/db/schema";
 import { eq, sql } from "drizzle-orm";
 import {
+  AnthropicProviderRejection,
   CompactionNeededError,
   AnthropicRequestSizeError,
   CompactionProviderResponseError,
+  compactionProviderFailureDiagnostics,
   createProductionAgentRuntime,
   EmptyCompactionSummaryError,
   DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
@@ -3368,27 +3370,6 @@ describe("standalone context compaction execution", () => {
   test("a summary failure outside the summary request is not replaced by trimming", async () => {
     const { workspaceId, session, scope } = await codexCompactedSession();
     const before = await getActiveSessionHistoryItems(client.db, workspaceId, session.id);
-    // A model switch keeps failing instead of trimming: the chat stays on
-    // Codex with its checkpoint, and the next turn asks for the rebuild again.
-    const rejected = new CompactionProviderResponseError(
-      { httpStatus: 400, type: "invalid_request_error" },
-      { error: { message: "max_tokens too large" } },
-    );
-    await expect(
-      maybeCompactContext(
-        client.db,
-        testSettings({ contextWindowTokens: 250_000 }),
-        scope,
-        null,
-        async () => {
-          throw rejected;
-        },
-        { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
-      ),
-    ).rejects.toBe(rejected);
-    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
-      "remote_v2",
-    );
     // Errors that are not the summary's own keep propagating unchanged.
     const unrelated = new Error("database unavailable");
     await expect(
@@ -3403,6 +3384,9 @@ describe("standalone context compaction execution", () => {
         { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
       ),
     ).rejects.toBe(unrelated);
+    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
+      "remote_v2",
+    );
     expect(
       (await getActiveSessionHistoryItems(client.db, workspaceId, session.id)).map(
         (row) => row.item,
@@ -3789,20 +3773,115 @@ describe("standalone context compaction execution", () => {
     ]);
   });
 
-  test("a model switch whose rebuild does not apply fails instead of keeping the Codex checkpoint", async () => {
+  test("a model switch whose summary the new model refuses trims history instead of failing every turn", async () => {
     const { workspaceId, session, scope } = await codexCompactedSession();
-    // The rebuilt context would not fit the new model, so nothing is installed.
+    // Production shape: Claude answers the summary request with HTTP 200 and
+    // stop_reason "refusal", which the runtime wraps like any provider failure.
+    const requests: string[] = [];
+    const refuse: CompactionSummarizer = async (_settings, input) => {
+      requests.push(JSON.stringify(input));
+      const refusal = new AnthropicProviderRejection("content_policy_violation", 200, "req_1");
+      throw new CompactionProviderResponseError(
+        compactionProviderFailureDiagnostics(refusal),
+        refusal,
+      );
+    };
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 250_000 }),
+      scope,
+      null,
+      refuse,
+      { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
+    );
+    expect(outcome).toMatchObject({ compacted: true });
+    // Asked once; the refused request is never repeated.
+    expect(requests).toHaveLength(1);
+    // The chat left Codex: its checkpoint is gone and the newest request is
+    // kept beside the trimmed-history note, so the turn runs on the new model.
+    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
+      "portable",
+    );
+    expect(await isSessionCompactionRequested(client.db, workspaceId, session.id)).toBe(false);
+    const active = (await getActiveSessionHistoryItems(client.db, workspaceId, session.id)).map(
+      (row) => row.item,
+    );
+    expect(active.some((item) => item.type === "compaction")).toBe(false);
+    expect(active).toContainEqual(expect.objectContaining({ role: "user", content: "latest ask" }));
+    expect(
+      active.some(
+        (item) =>
+          typeof item.content === "string" && item.content.startsWith(TRIMMED_CONTEXT_NOTICE),
+      ),
+    ).toBe(true);
+    const events = await listSessionEvents(client.db, workspaceId, session.id, {
+      after: 0,
+      limit: 200,
+    });
+    expect(
+      events.filter((event) => event.type === "session.context.compaction.skipped"),
+    ).toHaveLength(0);
+    const compacted = events.filter((event) => event.type === "session.context.compacted");
+    expect(compacted.at(-1)?.payload).toMatchObject({
+      implementation: DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
+      fallback: { reason: "provider_rejected" },
+    });
+  });
+
+  test("a model switch whose summary is too long to install trims instead of keeping the Codex checkpoint", async () => {
+    const { workspaceId, session, scope } = await codexCompactedSession();
+    // The rebuilt context would not fit the new model, so the summary is unusable.
     const tooLarge: CompactionSummarizer = async () => "summary ".repeat(200_000);
+    const outcome = await maybeCompactContext(
+      client.db,
+      testSettings({ contextWindowTokens: 250_000 }),
+      scope,
+      null,
+      tooLarge,
+      { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
+    );
+    expect(outcome).toMatchObject({ compacted: true });
+    expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
+      "portable",
+    );
+    const active = JSON.stringify(
+      (await getActiveSessionHistoryItems(client.db, workspaceId, session.id)).map(
+        (row) => row.item,
+      ),
+    );
+    expect(active).toContain(TRIMMED_CONTEXT_NOTICE);
+    expect(active).not.toContain("summary summary");
+    expect(active).not.toContain("opaque-codex-checkpoint");
+    const compacted = (
+      await listSessionEvents(client.db, workspaceId, session.id, { after: 0, limit: 200 })
+    ).filter((event) => event.type === "session.context.compacted");
+    expect(compacted.at(-1)?.payload).toMatchObject({
+      implementation: DETERMINISTIC_TRIM_COMPACTION_IMPLEMENTATION,
+      fallback: { reason: "summary_unusable" },
+    });
+  });
+
+  test("a model switch whose new model refuses the account fails instead of trimming", async () => {
+    const { workspaceId, session, scope } = await codexCompactedSession();
+    // An account refusal would refuse the next ordinary request too, so
+    // trimming would lose history and gain nothing.
+    const denied = new AnthropicProviderRejection("anthropic_permission_denied", 403);
+    const rejected = new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(denied),
+      denied,
+    );
     await expect(
       maybeCompactContext(
         client.db,
         testSettings({ contextWindowTokens: 250_000 }),
         scope,
         null,
-        tooLarge,
+        async () => {
+          throw rejected;
+        },
         { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
       ),
-    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
+    ).rejects.toBe(rejected);
     // The chat keeps Codex mode and its checkpoint, so the next turn on another
     // model asks for the rebuild again.
     expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
@@ -3962,25 +4041,30 @@ describe("standalone context compaction execution", () => {
     );
   });
 
-  test("a model switch whose newest batch alone exceeds the new window fails without sending that batch", async () => {
+  test("a model switch whose newest batch alone exceeds the new window trims without sending that batch", async () => {
     const { workspaceId, session, scope } = await codexCompactedSession([
       { type: "message", role: "user", content: "start" },
       { type: "message", role: "assistant", content: "x".repeat(400_000) },
     ]);
     const { summarize, requests } = smallWindowSummarizer();
-    await expect(
-      maybeCompactContext(client.db, smallWindowSettings(), scope, null, summarize, {
-        clearRequestedCompaction: true,
-        trigger: "operator",
-        codexCompactionMode: "portable",
-      }),
-    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
+    const outcome = await maybeCompactContext(
+      client.db,
+      smallWindowSettings(),
+      scope,
+      null,
+      summarize,
+      { clearRequestedCompaction: true, trigger: "operator", codexCompactionMode: "portable" },
+    );
+    expect(outcome).toMatchObject({ compacted: true });
     // Only the fitting first message was summarized; the oversized reply was
     // never sent, and nothing reached the provider as too long.
     expect(requests.every((request) => request.ok)).toBe(true);
     expect(requests.some((request) => JSON.stringify(request.input).includes("xxxx"))).toBe(false);
+    // The rebuilt context fits the new model, with the oversized reply shortened.
+    if (!outcome.compacted) throw new Error("expected the switch to compact");
+    expect(outcome.estimatedTokensAfter).toBeLessThan(SMALL_WINDOW);
     expect((await getSession(client.db, workspaceId, session.id))?.codexCompactionMode).toBe(
-      "remote_v2",
+      "portable",
     );
   });
 

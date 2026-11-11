@@ -5,6 +5,7 @@ import type {
   ConnectionOwnership,
   ProviderId,
   QuotaBlockClaim,
+  QuotaProviderDetail,
   SubscriptionConnection,
   SubscriptionQuota,
   SubscriptionSettingValues,
@@ -374,6 +375,21 @@ export function decodeSubscriptionQuota(row: {
   }
   const exhaustedClaim = exhaustedUntil === null ? null : decodeQuotaBlockClaim(raw.exhaustedClaim);
   if (exhaustedClaim) quota.exhaustedClaim = exhaustedClaim;
+  // Reduced service and provider details are optional too: a malformed
+  // value is dropped, never the quota.
+  if (typeof raw.constrainedUntil === "number" && Number.isFinite(raw.constrainedUntil))
+    quota.constrainedUntil = raw.constrainedUntil;
+  const details = raw.providerDetails;
+  if (details !== null && typeof details === "object" && !Array.isArray(details)) {
+    const parsed: Record<string, QuotaProviderDetail> = {};
+    for (const [key, part] of Object.entries(details)) {
+      if (part === null || typeof part !== "object" || Array.isArray(part)) continue;
+      const { observedAt, value } = part as Record<string, unknown>;
+      if (typeof observedAt === "number" && Number.isFinite(observedAt) && value !== undefined)
+        parsed[key] = { observedAt, value: value as QuotaProviderDetail["value"] };
+    }
+    if (Object.keys(parsed).length > 0) quota.providerDetails = parsed;
+  }
   return quota;
 }
 

@@ -52,6 +52,29 @@ function sameResource(connection: ConnectionMetadata, mcpUrl: string): boolean {
   return typeof url === "string" && accountMcpUrlGroup(url) === accountMcpUrlGroup(mcpUrl);
 }
 
+const text = (value: unknown) => (typeof value === "string" && value ? value : null);
+
+/**
+ * Whether a stored login is the account that just signed in (which has a
+ * verified identity). A stable account ID (see stableAccountSubjectKeyFor)
+ * decides alone once both have one, so a changed email is still the same
+ * account and a reused email is not. Otherwise the identity tuple decides: a
+ * login saved before its account ID was recorded is matched by its email, and
+ * reconnecting it records the ID.
+ */
+function sameVerifiedAccount(
+  stored: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+  keys: readonly string[] | undefined,
+  subjectKey: string | undefined,
+): boolean {
+  const storedSubject = subjectKey ? text(stored[subjectKey]) : null;
+  const incomingSubject = subjectKey ? text(incoming[subjectKey]) : null;
+  if (storedSubject && incomingSubject) return storedSubject === incomingSubject;
+  const expected = verifiedIdentity(stored, keys);
+  return !!expected && expected === verifiedIdentity(incoming, keys);
+}
+
 /** Call under the shared owner/resource transaction lock. Unknown identity is
  * not evidence of equality OR inequality: it cannot justify another account or
  * silently replacing an existing credential. This rule applies to every MCP.
@@ -73,6 +96,8 @@ export function decideOAuthAccountConnection(input: {
   grantedScopes: readonly string[];
   /** Absent when the service cannot identify accounts at all. */
   identityKeys?: readonly string[] | undefined;
+  /** The metadata key of the service's stable account ID, when it has one. */
+  subjectKey?: string | undefined;
   requestedConnectionId?: string | undefined;
 }):
   | { kind: "write" }
@@ -85,17 +110,33 @@ export function decideOAuthAccountConnection(input: {
       sameResource(connection, input.mcpUrl),
   );
   const identity = verifiedIdentity(input.metadata, input.identityKeys);
+  const sameAccountAs = (connection: ConnectionMetadata) =>
+    !!identity &&
+    sameVerifiedAccount(connection.metadata, input.metadata, input.identityKeys, input.subjectKey);
+  // One account is the same provider account wherever it was signed in from:
+  // the issuer names the account namespace, not the OAuth client. A deployment
+  // that replaces its registered client (Google, for example) must still see a
+  // login made with the earlier client as this account, or connecting again
+  // saves a duplicate and reconnecting it reads as a different account.
   const sameIssuer = (connection: ConnectionMetadata) =>
     connection.providerDomain === input.providerDomain &&
-    connection.metadata.authorizationServerIssuer === input.metadata.authorizationServerIssuer &&
-    connection.metadata.clientId === input.metadata.clientId;
+    connection.metadata.authorizationServerIssuer === input.metadata.authorizationServerIssuer;
   if (input.requestedConnectionId) {
     const requested = matching.find((connection) => connection.id === input.requestedConnectionId);
     if (!requested) return { kind: "reject", reason: "account_mismatch" };
     const expected = verifiedIdentity(requested.metadata, input.identityKeys);
     // A failed identity read is not evidence of a different account.
     if (expected && !identity) return { kind: "reject", reason: "account_identity_unavailable" };
-    if (expected && (!sameIssuer(requested) || expected !== identity)) {
+    // Nor is a failed account-ID read: once a login has its account ID, its
+    // email alone can't prove the sign-in is that account (an address can move
+    // to another account), so reconnecting it waits for a read that works.
+    if (
+      input.subjectKey &&
+      text(requested.metadata[input.subjectKey]) &&
+      !text(input.metadata[input.subjectKey])
+    )
+      return { kind: "reject", reason: "account_identity_unavailable" };
+    if (expected && (!sameIssuer(requested) || !sameAccountAs(requested))) {
       return { kind: "reject", reason: "account_mismatch" };
     }
     if (
@@ -107,7 +148,7 @@ export function decideOAuthAccountConnection(input: {
           (!identity ||
             !sameIssuer(connection) ||
             !verifiedIdentity(connection.metadata, input.identityKeys) ||
-            verifiedIdentity(connection.metadata, input.identityKeys) === identity),
+            sameAccountAs(connection)),
       )
     )
       return { kind: "reject", reason: "account_already_connected" };
@@ -119,7 +160,7 @@ export function decideOAuthAccountConnection(input: {
           connection.id !== requested.id &&
           connection.status !== "revoked" &&
           sameIssuer(connection) &&
-          verifiedIdentity(connection.metadata, input.identityKeys) === identity,
+          sameAccountAs(connection),
       )
     )
       return { kind: "reject", reason: "account_already_connected" };
@@ -148,9 +189,7 @@ export function decideOAuthAccountConnection(input: {
   }
   if (!live.length) return { kind: "write" };
   const sameAccount = live.filter(
-    (connection) =>
-      sameIssuer(connection) &&
-      verifiedIdentity(connection.metadata, input.identityKeys) === identity,
+    (connection) => sameIssuer(connection) && sameAccountAs(connection),
   );
   // Legacy duplicate records remain intact: keep a deterministic existing ID,
   // never rewrite accepted session/schedule bindings or union approval policies.

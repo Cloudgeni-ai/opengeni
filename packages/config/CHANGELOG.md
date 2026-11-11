@@ -1,5 +1,40 @@
 # @opengeni/config
 
+## 6.15.0
+
+### Minor Changes
+
+- 60d067d: Claude subscription usage now matches what Claude reports today. The usage refresh reads the account's limit reset grants (presenting Claude Code's CLI surface, which Claude requires for them) and, while at a limit, the at-limit reset program. `ClaudeSubscriptionUsage` gains optional `limitResets`, `wallReset`, `limits`, `extraUsage`, `surfaceWindows` and `serviceState`, and the SDK exports their types. The account page lists each grant with what it clears, resets left, expiry and whether it can be used now. `@opengeni/db` adds the adapter-level claim and claim-then-refresh helpers (idempotent request ids); Opengeni never claims a grant on its own.
+
+  The weekly limit model responses call `seven_day_overage_included` is treated as the weekly Fable limit: it limits Fable models only and shows as "Fable week". Responses served in the slow tier or grace zone mark a connection constrained (`SubscriptionQuota.constrainedUntil`): it still serves, but placement prefers accounts with plain capacity, and busy slow-tier slots are a short rate limit rather than the weekly limit.
+
+- 3bab763: `ConnectPanel` now keeps the organization approval help up when a sign-in comes back cancelled or denied with an administrator approval link stored on the attempt, for example after someone leaves Microsoft's "Need admin approval" page with Cancel or "Return to the application without granting consent". It used to treat the cancel as finished and quietly go back to the service list. The help offers the message for IT, the approval link, "Try signing in again" (a fresh setup for the same service unless the host passes `onRetry`) and "Back to connections". A plain cancel that stores no approval link still closes quietly.
+
+  `ConnectPanel`, `ConnectChooser`, `ConnectAccounts` and `ConnectionDiscovery` accept `finishInPopup`. Set it when your `onAuthorize` opens the provider's sign-in in a popup: the popup then ends on a small page that closes itself instead of loading your return URL, a second copy of your app, inside it. The closing page now says "Go back to where you started to continue" rather than naming the chat.
+
+  Once a service connects, older unfinished setups by the same person for the same service, owner and destination no longer appear in the pending list (`GET /v1/workspaces/:workspaceId/connect/attempts`), so a host's "continue setup" entry for that service goes away. Custom connections (MCP servers, OpenAPI and GraphQL sources) share one provider ID across different services and are never hidden this way.
+
+  The page a sign-in popup ends on and the page an administrator sees after the Microsoft approval link can now use the deployment's language: set `OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON` (fields `lang`, `signInFinishedTitle`, `signInFinishedBody`, `adminApprovedTitle`, `adminApprovedBody`, `adminNotApprovedTitle`, `adminNotApprovedBody`, `closeWindow`). Any field left out stays in English. `@opengeni/config` exports `parseConnectResultPageTextJson` and `ConnectResultPageTextSchema`.
+
+### Patch Changes
+
+- b110015: The API now drains its HTTP connections on shutdown instead of resetting them. A client that reused a pooled keep-alive connection while the pod was stopping could get ECONNRESET for a request the server had completed. From SIGTERM the API stops listening, closes idle keep-alive connections, marks every later response `Connection: close`, ends live event streams and closes WebSockets with 1001 so their clients resume elsewhere, and lets in-flight requests finish before closing its database, NATS and Temporal clients. New setting `OPENGENI_API_SHUTDOWN_GRACE_MS` (default 30000) is the time the process has after SIGTERM; the Helm chart renders it as the API pod's termination grace less its preStop drain, and requests still running 10 seconds before it ends are closed.
+- Updated dependencies [708848c]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [19ab8c3]
+- Updated dependencies [cd033ae]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [dfeab20]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+  - @opengeni/codex@6.15.0
+  - @opengeni/xai-subscription@6.15.0
+
 ## 6.14.0
 
 ### Minor Changes

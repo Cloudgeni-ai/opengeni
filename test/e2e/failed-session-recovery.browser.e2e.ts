@@ -841,7 +841,13 @@ async function installApi(
     if (path.endsWith("/editable-artifacts") || path.endsWith("/published-artifacts"))
       return json({ artifacts: [], nextCursor: null });
     if (path.endsWith("/github/app"))
-      return json({ configured: false, missing: [], installUrl: null });
+      return json({
+        configured: false,
+        status: "disabled",
+        missing: [],
+        installUrl: null,
+        installations: [],
+      });
     if (path.endsWith("/connections/github")) return json({ enabled: false, connection: null });
     if (path.endsWith("/feedback") || path.endsWith("/feedback/mine"))
       return json({ feedback: [], turns: [] });

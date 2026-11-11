@@ -37,6 +37,7 @@ import { FLUSH_DETAIL_PAGE_CLASS } from "@opengeni/react/ui/flush-form-page";
 import { MetaChip } from "@opengeni/react/ui/meta-chip";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@opengeni/react/ui/tooltip";
 import { cn } from "@opengeni/react/app/lib/utils";
+import { saveBlob } from "@opengeni/react/app/lib/save-blob";
 
 import {
   CopyAction,
@@ -194,12 +195,7 @@ function FieldValue({
                   result.encoding === "base64"
                     ? Uint8Array.from(atob(result.value), (char) => char.charCodeAt(0))
                     : new TextEncoder().encode(result.value);
-                const url = URL.createObjectURL(new Blob([bytes]));
-                const link = document.createElement("a");
-                link.href = url;
-                link.download = field.fileName ?? "file";
-                link.click();
-                setTimeout(() => URL.revokeObjectURL(url), 1_000);
+                saveBlob(new Blob([bytes]), field.fileName ?? "file");
               } catch (error) {
                 toast.error(vaultErrorText(error, "Couldn't download the file.", home));
               }

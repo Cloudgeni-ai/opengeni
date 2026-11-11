@@ -313,7 +313,7 @@ export function classifyRepositorySkillDiscoveryFailure(
   return propagated("unclassified");
 }
 
-type WorkspaceSkillDiscovery = Readonly<{
+export type WorkspaceSkillDiscovery = Readonly<{
   skills: readonly WorkspaceSkill[];
   warnings: readonly WorkspaceSkillWarning[];
   /** True only when the workspace was unreachable: `skills` is then empty and
@@ -371,6 +371,7 @@ type DiscoveredWorkspaceSkill = {
 export class WorkspaceSkillsCapability extends Capability {
   readonly type = "workspace-skills";
   private discovery?: Promise<WorkspaceSkillDiscovery>;
+  private publication?: Promise<void>;
 
   constructor(
     private readonly searchPaths: readonly WorkspaceSkillSearchPath[],
@@ -382,7 +383,10 @@ export class WorkspaceSkillsCapability extends Capability {
   }
 
   override bind(session: SandboxSessionLike): this {
-    if (this._session !== session) delete this.discovery;
+    if (this._session !== session) {
+      delete this.discovery;
+      delete this.publication;
+    }
     return super.bind(session);
   }
 
@@ -391,9 +395,9 @@ export class WorkspaceSkillsCapability extends Capability {
    * degrades to an empty, explicitly unavailable index instead of failing
    * instruction preparation: machine unavailability must surface through
    * sandbox tool results, never block the turn before the model runs. The
-   * degraded result is memoized only for this binding, so the run keeps a
-   * stable instruction prefix and pays the unreachable cost once; the next
-   * run clones and rebinds the capability and discovers again.
+   * degraded result is memoized only for this binding, so the run publishes
+   * one index and pays the unreachable cost once; the next run clones and
+   * rebinds the capability and discovers again.
    *
    * Any other failure that `classifyRepositorySkillDiscoveryFailure` marks
    * degradable (the workspace answered, but its skill folders could not be
@@ -404,8 +408,8 @@ export class WorkspaceSkillsCapability extends Capability {
    * A propagated failure is not remembered, so the next read discovers again.
    * With a deferred index the reader is often the first workspace operation,
    * where a transient box or route failure is likely; for the same reason a
-   * deferred index does not keep an unreachable result either (no prompt text
-   * depends on it).
+   * deferred index does not keep an unreachable result either (nothing the
+   * model reads depends on it).
    */
   private discover(): Promise<WorkspaceSkillDiscovery> {
     if (this.discovery) return this.discovery;
@@ -442,9 +446,9 @@ export class WorkspaceSkillsCapability extends Capability {
     return [
       tool({
         name: "repository_skill_read",
-        description: this.options.deferred
-          ? "Read current repository Skill files from the bound workspace. Name a skill as repository: followed by its SKILL.md path from the workspace root, for a skill folder in one of the folders the Repository skills section lists. Omit paths for SKILL.md; explicit relative paths read only those files. Set listFiles:true without paths for a bounded file inventory. This reads live files through the sandbox, including Connected Machines."
-          : "Read current repository Skill files from the bound workspace. Use the exact repository: identifier from the Repository skills index. Omit paths for SKILL.md; explicit relative paths read only those files. Set listFiles:true without paths for a bounded file inventory. This reads live files through the sandbox, including Connected Machines.",
+        // One description in every mode: a turn that switches between a
+        // deferred and a live index must not change the tool definitions.
+        description: REPOSITORY_SKILL_READ_DESCRIPTION,
         parameters: z.object({
           skill: z.string().min(1),
           paths: z.array(z.string().min(1).max(1024)).min(1).max(SKILL_READ_MAX_PATHS).optional(),
@@ -499,63 +503,114 @@ export class WorkspaceSkillsCapability extends Capability {
     ];
   }
 
+  /**
+   * The system prompt only says where repository skills live and how to use
+   * them; it depends on nothing but the search folders, so adding a skill,
+   * an unreachable workspace or a deferred turn never changes it. A live
+   * index is discovered and published before the first model request (see
+   * {@link WorkspaceSkillsOptions.publish}) and reaches the model as a
+   * Repository skills history item instead.
+   */
   override async instructions(): Promise<string | null> {
-    if (this.options.deferred) return deferredRepositorySkillsNotice(this.searchPaths);
-    const { skills, warnings, unavailable, degraded } = await this.discover();
-    const warningText = warnings.length
-      ? `\n\n### Skipped repository skills\nThese repository entries were omitted because their folders could not be read or their metadata or names conflict. Other skills remain available; correct the source files to use the omitted entries.\n${warnings.map((warning) => `- ${JSON.stringify(warning)}`).join("\n")}`
-      : "";
-    if (unavailable) {
-      return `## Repository skills
+    await this.publish();
+    return repositorySkillsNotice(this.searchPaths);
+  }
 
-Repository skills could not be indexed because the workspace was unreachable when this run started (for example, its Connected Machine is offline). Sandbox tools may fail until it reconnects; if that blocks the task, tell the user.${warningText}`;
-    }
+  /** The rendered index of the bound workspace, or null for a deferred run. */
+  async index(): Promise<RepositorySkillsIndex | null> {
+    if (this.options.deferred) return null;
+    return renderRepositorySkillsIndex(await this.discover());
+  }
 
-    if (degraded) {
-      return `## Repository skills
-
-${degradedRepositorySkillsNotice(degraded)}${warningText}`;
-    }
-    if (skills.length === 0) return warnings.length ? `## Repository skills${warningText}` : null;
-
-    const available = skills
-      .map(
-        (skill) =>
-          `- ${JSON.stringify({ id: repositorySkillId(skill), name: skill.name, description: skill.description, reader: "repository_skill_read", path: skill.path })}`,
-      )
-      .join("\n");
-    return `## Repository skills
-
-Repository skills are instructions already present in the live workspace. Read them with repository_skill_read using the exact repository: id below. The reader returns current live files; ordinary filesystem tools execute referenced scripts and read binary assets. Configured Skills use their separate skill_read index.
-
-### Available repository skills
-${available}
-
-### How to use repository skills
-- If the user names a skill, or the task clearly matches a skill description, read its complete SKILL.md before acting.
-- Resolve referenced scripts, references, assets, and templates relative to that skill directory.
-- Use only the minimum relevant skills for the turn, and say briefly which ones you are using.
-- Do not assume a skill remains applicable on later turns; evaluate the current request again.${warningText}`;
+  /**
+   * Publish this run's index once per binding, or null for a deferred run;
+   * a failed publication is retried.
+   */
+  private publish(): Promise<void> {
+    if (this.publication) return this.publication;
+    const publication = this.index().then(async (index) => {
+      await this.options.publish?.(index);
+    });
+    this.publication = publication;
+    publication.catch(() => {
+      if (this.publication === publication) delete this.publication;
+    });
+    return publication;
   }
 }
+
+/** A discovered index, rendered for the model. */
+export type RepositorySkillsIndex = Readonly<{
+  text: string;
+  /** No repository skill and nothing to report. */
+  empty: boolean;
+}>;
 
 export type WorkspaceSkillsOptions = Readonly<{
   /**
    * Do not index the workspace for this run: listing it would be the first
    * workspace operation and would prepare the workspace before the model
-   * answers. The model is told where to look instead; the instructions never
-   * touch the session, and the reader still works for exact identifiers.
+   * answers. The model keeps the index it already has (if any) and the
+   * folders named in the system prompt; nothing touches the session before
+   * the model runs, and the reader still works for exact identifiers.
    */
   deferred?: boolean;
+  /**
+   * Receives the run's index once discovery finishes, before the first model
+   * request, or null when a deferred run does not index the workspace. Without
+   * it the index is discovered but never shown.
+   */
+  publish?: (index: RepositorySkillsIndex | null) => Promise<void>;
 }>;
 
-/** Where to look, instead of an index that would prepare the workspace first. */
-function deferredRepositorySkillsNotice(searchPaths: readonly WorkspaceSkillSearchPath[]): string {
+const REPOSITORY_SKILL_READ_DESCRIPTION =
+  "Read current repository Skill files from the bound workspace. Name a skill by its exact repository: identifier, which is repository: followed by its SKILL.md path from the workspace root. Omit paths for SKILL.md; explicit relative paths read only those files. Set listFiles:true without paths for a bounded file inventory. This reads live files through the sandbox, including Connected Machines.";
+
+/** The stable system-prompt section: where to look and how to use what is found. */
+export function repositorySkillsNotice(searchPaths: readonly WorkspaceSkillSearchPath[]): string {
   const folders = searchPaths.map((searchPath) => searchPath.path).join(", ");
   const example = searchPaths[0]?.path ?? ".agents/skills";
   return `## Repository skills
 
-Repository skills are not listed here: the repository may not be ready until a tool first uses the workspace. If the task involves the repository, look for skill folders in ${folders} (paths from the workspace root), and read any relevant one's SKILL.md before acting, with file tools or repository_skill_read. A skill's identifier is repository: followed by its SKILL.md path, such as repository:${example}/<folder>/SKILL.md.`;
+Repository skills are instructions already present in the live workspace, in skill folders under ${folders} (paths from the workspace root). A skill's identifier is repository: followed by its SKILL.md path, such as repository:${example}/<folder>/SKILL.md. Read skills with repository_skill_read, which returns current live files; ordinary filesystem tools execute referenced scripts and read binary assets. Configured Skills use their separate skill_read index.
+
+Once the workspace has been indexed, its index appears in the conversation as a Repository skills context message; the latest one replaces earlier ones. If there is none, or it may be out of date, and the task involves the repository, look in those folders yourself.
+
+- If the user names a skill, or the task clearly matches a skill description, read its complete SKILL.md before acting.
+- Resolve referenced scripts, references, assets, and templates relative to that skill directory.
+- Use only the minimum relevant skills for the turn, and say briefly which ones you are using.
+- Do not assume a skill remains applicable on later turns; evaluate the current request again.`;
+}
+
+export function renderRepositorySkillsIndex(
+  discovery: WorkspaceSkillDiscovery,
+): RepositorySkillsIndex {
+  const { skills, warnings, unavailable, degraded } = discovery;
+  const warningText = warnings.length
+    ? `\n\n### Skipped repository skills\nThese repository entries were omitted because their folders could not be read or their metadata or names conflict. Other skills remain available; correct the source files to use the omitted entries.\n${warnings.map((warning) => `- ${JSON.stringify(warning)}`).join("\n")}`
+    : "";
+  if (unavailable) {
+    return {
+      text: `Repository skills could not be indexed because the workspace was unreachable when it was last checked (for example, its Connected Machine was offline). Sandbox tools may fail until it reconnects; if that blocks the task, tell the user.${warningText}`,
+      empty: false,
+    };
+  }
+  if (degraded) {
+    return { text: `${degradedRepositorySkillsNotice(degraded)}${warningText}`, empty: false };
+  }
+  if (skills.length === 0) {
+    return {
+      text: `No repository skills were found in the workspace.${warningText}`,
+      empty: warnings.length === 0,
+    };
+  }
+  const available = skills
+    .map(
+      (skill) =>
+        `- ${JSON.stringify({ id: repositorySkillId(skill), name: skill.name, description: skill.description, reader: "repository_skill_read", path: skill.path })}`,
+    )
+    .join("\n");
+  return { text: `### Available repository skills\n${available}${warningText}`, empty: false };
 }
 
 const MISS_LISTED_SKILLS = 20;
@@ -606,8 +661,8 @@ function degradedRepositorySkillsCause(errorClass: RepositorySkillDiscoveryError
 /** Short, class-specific model notice for an index that could not be built. */
 function degradedRepositorySkillsNotice(errorClass: RepositorySkillDiscoveryErrorClass): string {
   if (errorClass === "unsupported")
-    return "Repository skills are not indexed for this run (this workspace cannot list files).";
-  return `Repository skills are not indexed for this run (${degradedRepositorySkillsCause(errorClass)}). If a repository skill matters, try reading its SKILL.md directly.`;
+    return "Repository skills could not be indexed (this workspace cannot list files).";
+  return `Repository skills could not be indexed (${degradedRepositorySkillsCause(errorClass)}). If a repository skill matters, try reading its SKILL.md directly.`;
 }
 
 export function workspaceSkills(

@@ -180,7 +180,8 @@ function AgentCall({ session }: { session: SessionInputs }) {
 - `useNativeSessionRealtime` takes the same session inputs as `useSessionRealtime` from `@opengeni/react/session-realtime` (client, workspace, session, status, control, events). Pick the voice model with `useRealtimeModelSelection`. Native voice supports the WebRTC models; check with `nativeRealtimeModelSupported`.
 - `useNativeRealtimeCall` starts and ends the system call with the voice session and mirrors mute both ways. Without a call adapter, voice still works without a system call; on Android, `systemCall` stays false because there is no call screen.
 - When a live call is silent on one side, `notice` says why and the call view shows it: the microphone picks up no sound at all, or a reply arrived but did not play. The realtime snapshot carries the same as the `no_input_audio` and `output_silent` diagnostics.
-- Calls started outside the app (Siri, Phone recents, a home-screen quick action whose type ends in `.call`) arrive as `startRequested` events, or through `takePendingStartRequest()` after a cold launch. The host decides which session they talk to.
+- Calls started outside the app (Siri, Phone recents, a home-screen quick action whose type ends in `.call`, a voice command) arrive as `startRequested` events, or through `takePendingStartRequest()` after a cold launch. The host decides which session they talk to. A request that names a chat carries its `target` session and its `workspaceId`; `callFromOutside(sessionId, workspaceId)` calls a session in another workspace of the signed-in account. Requests wait natively until JavaScript takes them (for up to a minute), so a request that launched the app is not lost to an early listener, and each starts once.
+- **Voice commands:** `adapter.setCallCommands([{ id, workspaceId, sessionId, name }])` tells the system which chats the person can call by name. On iOS the generated intent offers them as its chat parameter ("Call Research in Opengeni"), and the app's App Shortcuts are refreshed; on Android each becomes a launcher shortcut (touch and hold the app icon), and `adapter.pinCallCommand(command)` asks the launcher to put one on the home screen. Write only the signed-in account's commands, and an empty list on sign-out. Commands are opt-in per chat: never pass every chat.
 - `NativeAgentCallProvider` defaults generic outside calls to a fresh realtime session; `resolveOutsideCall` can preserve a host's explicit preferences. An explicit session request still wins. Generic calls keep a generic system-recents handle; calling a named session records that session. Selecting another session as conversational context does not change the active voice session.
 
 ### iOS configuration
@@ -205,7 +206,9 @@ Expo autolinking picks up this package's call module. Add the config plugin to t
 ```
 
 - **Info.plist:** `UIBackgroundModes` gains `audio` and `voip` (CallKit refuses call requests from an app without `voip`, so the call would still talk but never appear as a system call), `NSUserActivityTypes` gains `INStartCallIntent` (redial from Phone recents), and `NSMicrophoneUsageDescription` is set unless the app already sets it.
-- **App Intent and App Shortcuts:** a generated Swift file in the app target declares a "start a call" intent and its Siri phrases. `{app}` stands for the app's name and must appear exactly once in each phrase (Siri requires it). Without any setup the action then works from Siri, Spotlight and the Shortcuts app, and can be assigned to the Action button. The intent opens the app and arrives as a `startRequested` event with no target, so the host chooses the session.
+- **App Intent and App Shortcuts:** a generated Swift file in the app target declares a "start a call" intent and its Siri phrases. `{app}` stands for the app's name and must appear exactly once in each phrase (Siri requires it). Without any setup the action then works from Siri, Spotlight and the Shortcuts app, and can be assigned to the Action button. The intent opens the app and arrives as a `startRequested` event with no target, so the host chooses the session. It requires an unlocked device (`authenticationPolicy = .requiresAuthentication`): from a locked phone Siri asks the person to unlock first.
+- **`chatPhrases`** (default `["Call {chat} in {app}", "Talk to {chat} in {app}"]`): the phrases for voice commands. `{chat}` (exactly once) stands for a command's name and `{app}` for the app's name. The intent's optional chat parameter lists exactly the commands set with `setCallCommands`, so each command appears as its own App Shortcut. Pass `[]` to offer none. `chatTitle` and `chatSummary` (`"Call {chat}"`) label the parameter in Shortcuts.
+- **Calls from Phone recents and "call … using" requests** (`INStartCallIntent`) on a locked phone wait for the person to unlock it, for up to 30 seconds, and are then dropped. "Locked" is what iOS reports as protected data being unavailable: with a passcode that starts about 10 seconds after the screen locks, so a request in those first seconds still starts, and a phone without a passcode never counts as locked. In CarPlay a locked phone asks for the unlock as well.
 - **`alternativeAppNames`:** extra names Siri accepts for the app (`INAlternativeAppNames`), for example the agent's own name, so "Call Agent" works in an app called something else.
 - Set `"appIntents": false` inside `call` to skip the generated intent.
 - **`androidSystemCall: true`** (inside `call`): Android calls become system calls, a self-managed Telecom call with a call notification and a foreground service that keeps it going with the screen off, so a cellular call holds it and Bluetooth headsets and watches answer and hang up. When the app uses `expo-notifications`, agents' calls also ring the phone like a phone call: the server's high-priority push shows the incoming-call notification and a full-screen ring screen on the lock screen, and answering hands the call to the same `incoming` events as on iOS. The plugin adds the permissions this needs (`MANAGE_OWN_CALLS`, the phone-call and microphone foreground service types, notifications and full-screen intents), the service, the ring screen and the messaging service. Play asks apps that declare these to explain them, so it is off by default; without it, Android calls play through the phone's call audio without a system call.
@@ -269,3 +272,29 @@ The ring arrives as a high-priority FCM data message (`android.priority: "HIGH"`
 ```
 
 `createExpoCallAdapter()` reports `incoming` on such a build as on one with Opengeni's own messaging service, so `NativeAgentCallProvider` takes the rings without further setup.
+
+### Full-screen rings on Android 14 and later
+
+From Android 14, Play grants `USE_FULL_SCREEN_INTENT` up front only to apps whose core function is calling or alarms. In any other app an agent's ring shows only as a heads-up notification, easy to miss on a locked phone, until the person allows full-screen notifications for the app in system settings. `useFullScreenRings(callAdapter)` tracks this and re-checks whenever the app returns to the foreground, for example from that setting:
+
+```tsx
+import { useFullScreenRings } from "@opengeni/react-native";
+
+const fullScreen = useFullScreenRings(callAdapter);
+
+<Switch
+  value={callsOn}
+  onValueChange={(on) => {
+    setCallsOn(on);
+    // Explains why in an alert and offers to open the setting; nothing when allowed.
+    if (on) fullScreen.ask();
+  }}
+/>;
+{callsOn && !fullScreen.allowed ? (
+  <Button title={fullScreen.messages.title} onPress={() => void fullScreen.openSettings()} />
+) : null}
+```
+
+- `allowed` is false only on Android 14 and later while the setting is off; it is true on iOS (CallKit always rings full screen), on older Android, and in builds that cannot ring.
+- `ask()` shows the explanation with "Not now" and "Open settings"; `openSettings()` opens the app's full-screen notification setting directly (or its notification settings where a phone has no such screen) and resolves false if nothing opened. `messages` holds the default, translatable text for a settings row or footer; pass `messages` to replace it.
+- The same check is on the call adapter for hosts without React state: `incoming.canRingFullScreen?.()` and `incoming.openFullScreenRingSettings?.()`, both absent where rings always show full screen.

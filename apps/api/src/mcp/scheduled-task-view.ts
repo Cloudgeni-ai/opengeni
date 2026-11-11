@@ -5,6 +5,7 @@ import type {
   ScheduledTaskScheduleSpec,
   ToolRef,
 } from "@opengeni/contracts";
+import { ToolArgumentError } from "./tool-argument-error";
 
 export const SCHEDULED_TASK_MCP_MAX_BYTES = 64 * 1024;
 /** Event triggers keep their conditions in a summary while they fit this. */
@@ -443,19 +444,21 @@ export function scheduledTaskPromptPage(
   expectedExecutionDigest?: string,
 ) {
   if (offset > 0 && !expectedExecutionDigest)
-    throw new Error("Continue with the executionDigest from the first prompt page");
+    throw new ToolArgumentError("Continue with the executionDigest from the first prompt page");
   if (expectedExecutionDigest !== undefined && expectedExecutionDigest !== task.executionDigest)
     throw new Error("Scheduled task changed. Restart the prompt read at offset 0.");
   const text = task.agentConfig.prompt;
   if (!Number.isInteger(offset) || offset < 0 || offset > text.length)
-    throw new Error("Invalid prompt offset");
+    throw new ToolArgumentError("Invalid prompt offset");
   const splitsPair = (at: number) =>
     at > 0 &&
     at < text.length &&
     /[\uD800-\uDBFF]/.test(text[at - 1]!) &&
     /[\uDC00-\uDFFF]/.test(text[at]!);
   if (splitsPair(offset))
-    throw new Error("Prompt offset splits a surrogate pair; use nextOffset from the previous page");
+    throw new ToolArgumentError(
+      "Prompt offset splits a surrogate pair; use nextOffset from the previous page",
+    );
   let end = Math.min(text.length, offset + 2048);
   if (splitsPair(end)) end -= 1;
   return {

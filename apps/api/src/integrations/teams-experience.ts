@@ -95,9 +95,9 @@ export const TEAMS_SHARED_CONNECT_TEXT =
 export function teamsAppOffInConversationText(appName: string = TEAMS_DEFAULT_APP_NAME): string {
   return `${appName} isn't turned on in this conversation. Send me a direct message to give me a task instead.`;
 }
-/** For a linked person whose account can't start chats in the connected workspace. */
+/** For a linked person whose account can't start chats in the organization's connected workspaces. */
 export const TEAMS_CANNOT_START_TEXT =
-  "Your Opengeni account can't start chats in the workspace your organization connected to Microsoft Teams. Ask an admin of that workspace to give you access to start chats, then message me again.";
+  "Your Opengeni account can't start chats in your organization's Opengeni workspaces. Ask an Opengeni admin in your organization to give you access to start chats, then message me again.";
 /** The same, in a group chat or channel, without naming one person's access there. */
 export const TEAMS_SHARED_CANNOT_START_TEXT =
   "I can't start a task for you here. Send me a direct message to see why.";

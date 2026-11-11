@@ -19,7 +19,7 @@ const REFUSALS = {
   ],
   consumer_tenant: [
     403,
-    "Only a work or school Microsoft 365 organization can connect Opengeni for Teams.",
+    "Only a work or school Microsoft 365 organization can connect Microsoft Teams to Opengeni.",
   ],
   token_exchange_failed: [
     400,
@@ -99,6 +99,28 @@ const REFUSALS = {
     409,
     "The Teams connection for this workspace changed while you were linking. Message Opengeni in Teams to get a new link.",
   ],
+  // The Microsoft sign-in that proves an account link's Teams identity.
+  link_sign_in_required: [
+    400,
+    "Sign in to Microsoft with the account you use in Teams to link it. Open the link from Teams again.",
+  ],
+  link_sign_in_expired: [
+    400,
+    "This Microsoft sign-in expired or belongs to another link. Open the link from Teams again.",
+  ],
+  link_sign_in_failed: [
+    400,
+    "Microsoft sign-in couldn't be verified. Open the link from Teams again.",
+  ],
+  link_consumer_tenant: [
+    403,
+    "Opengeni can only link a work or school Microsoft account. Sign in to Teams with one and message Opengeni again.",
+  ],
+  // Replaced by a message that names both accounts when they are known.
+  link_identity_mismatch: [
+    403,
+    "This link is for a different Teams account than the Microsoft account you signed in with. If the link is yours, open it again and sign in to Microsoft with the account you use in Teams. Otherwise, message Opengeni in Teams to get a link for your own account.",
+  ],
 } as const satisfies Record<string, readonly [400 | 403 | 409 | 422, string]>;
 
 export type TeamsConnectionRefusal = keyof typeof REFUSALS;
@@ -110,9 +132,15 @@ const ERROR_CODES = {
   422: "validation_failed",
 } as const;
 
-/** A Teams setup or account-link refusal whose message the page shows as is. */
-export function teamsConnectionRefused(reason: TeamsConnectionRefusal): ApiHttpError {
-  const [status, message] = REFUSALS[reason];
+/**
+ * A Teams setup or account-link refusal whose message the page shows as is.
+ * `message` replaces the default sentence with a more specific one.
+ */
+export function teamsConnectionRefused(
+  reason: TeamsConnectionRefusal,
+  message: string = REFUSALS[reason][1],
+): ApiHttpError {
+  const status = REFUSALS[reason][0];
   return new ApiHttpError(status, {
     code: ERROR_CODES[status],
     message,
@@ -120,6 +148,35 @@ export function teamsConnectionRefused(reason: TeamsConnectionRefusal): ApiHttpE
     outcomeUnknown: false,
     details: { code: TEAMS_CONNECTION_REFUSED_CODE, reason },
   });
+}
+
+/**
+ * An account link opened by a different Microsoft account than the Teams
+ * account it is for. Names the Teams account (its display name from the link)
+ * and the Microsoft account that signed in, when known, so whoever was sent
+ * someone else's link sees whose it is.
+ */
+export function teamsLinkIdentityMismatch(
+  teamsName: string | null | undefined,
+  signedInAs: string | null | undefined,
+): ApiHttpError {
+  const next = "Otherwise, message Opengeni in Teams to get a link for your own account.";
+  if (teamsName && signedInAs)
+    return teamsConnectionRefused(
+      "link_identity_mismatch",
+      `This link is for the Teams account “${teamsName}”, but you signed in to Microsoft as ${signedInAs}. If that Teams account is yours, open the link again and sign in to Microsoft with it. ${next}`,
+    );
+  if (teamsName)
+    return teamsConnectionRefused(
+      "link_identity_mismatch",
+      `This link is for the Teams account “${teamsName}”, not the Microsoft account you signed in with. If that Teams account is yours, open the link again and sign in to Microsoft with it. ${next}`,
+    );
+  if (signedInAs)
+    return teamsConnectionRefused(
+      "link_identity_mismatch",
+      `This link is for a different Teams account than ${signedInAs}, the Microsoft account you signed in with. If the link is yours, open it again and sign in to Microsoft with the account you use in Teams. ${next}`,
+    );
+  return teamsConnectionRefused("link_identity_mismatch");
 }
 
 /**

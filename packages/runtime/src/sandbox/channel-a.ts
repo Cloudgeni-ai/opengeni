@@ -276,6 +276,14 @@ export type WorkspaceFileDigest = {
   sha256: string;
 };
 
+/** How a file operation resolves its path. `workspace` (the default) keeps the
+ * service's own path scope. `shell` resolves a path the way the session's shell
+ * does, absolute as given and relative from the workspace root, and reaches it
+ * with the shell's own access, so any file that shell can read is readable.
+ * Only a caller that can run that shell asks for it. */
+export type SandboxFilePathScope = "workspace" | "shell";
+export type SandboxFilePathOptions = { pathScope?: SandboxFilePathScope };
+
 /** Upload one exact workspace file to a signed PUT URL from the box itself, so
  * its bytes never cross the control plane. The file must still have `sizeBytes`
  * and `sha256` before and after the upload. */
@@ -1094,8 +1102,16 @@ export class SandboxChannelAService {
     return { root: rootNode, revision: this.revision, truncated };
   }
 
-  async fsRead(req: FsReadRequest): Promise<FsReadResponse> {
+  async fsRead(req: FsReadRequest, options: SandboxFilePathOptions = {}): Promise<FsReadResponse> {
     this.assertFileSystemRoute(req.route);
+    if (options.pathScope === "shell" && !req.workspaceOnly) {
+      const path = this.shellFilePath(req.path);
+      // A Connected Machine reads host paths natively. A managed box's native
+      // read confines to the workspace, so read through its shell instead.
+      return this.fileReadScope === "machine"
+        ? await this.readFileAt(path, req)
+        : await this.fsReadViaExec(path, req, { confine: false });
+    }
     if (req.workspaceOnly) {
       const canonical = assertSafeRelPath(req.path, this.workspaceRoot);
       const relative = isConnectedMachineAbsolutePath(canonical)
@@ -1127,6 +1143,21 @@ export class SandboxChannelAService {
       this.fileReadScope === "machine" && isConnectedMachineAbsolutePath(req.path)
         ? resolveConnectedMachinePath(this.workspaceRoot, req.path)
         : assertSafeRelPath(req.path, this.workspaceRoot);
+    return await this.readFileAt(path, req);
+  }
+
+  /** The path the session's shell would open for `value`: absolute as given,
+   * relative from the workspace root (the shell's working directory). */
+  private shellFilePath(value: string): string {
+    try {
+      if (!isConnectedMachineAbsolutePath(this.workspaceRoot)) throw new Error("no root");
+      return resolveConnectedMachinePath(this.workspaceRoot, value.trim());
+    } catch {
+      throw new ChannelAValidationError(`file path is invalid: ${value}`);
+    }
+  }
+
+  private async readFileAt(path: string, req: FsReadRequest): Promise<FsReadResponse> {
     if (!this.session.readFile) {
       // No native readFile: read an exact descriptor through exec, retaining
       // workspace confinement for managed providers.
@@ -1242,20 +1273,24 @@ export class SandboxChannelAService {
   /** Binary-safe fallback for sessions without native reads. Match the resolved
    * path to the open descriptor's inode before reading; managed providers also
    * require that path to remain beneath the workspace. */
-  private async fsReadViaExec(path: string, req: FsReadRequest): Promise<FsReadResponse> {
+  private async fsReadViaExec(
+    path: string,
+    req: FsReadRequest,
+    { confine = this.fileReadScope === "workspace" }: { confine?: boolean } = {},
+  ): Promise<FsReadResponse> {
     const root = this.providerWorkspaceRoot();
-    const abs = this.fileReadPath(path);
+    const abs = !confine && isConnectedMachineAbsolutePath(path) ? path : this.fileReadPath(path);
     const script = [
       PORTABLE_REALPATH_EXISTING_FUNCTION,
       PORTABLE_DESCRIPTOR_FUNCTIONS,
-      ...(this.fileReadScope === "workspace"
+      ...(confine
         ? [
             `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
           ]
         : []),
       `exec 3<${shellQuote(abs)} || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      ...(this.fileReadScope === "workspace"
+      ...(confine
         ? [
             `case "$target" in "$root"|"\${root%/}/"*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
           ]
@@ -1913,15 +1948,19 @@ export class SandboxChannelAService {
 
   /** Size and SHA-256 of one regular workspace file, computed on the box. The
    * resolved file must stay inside the workspace root. */
-  async digestWorkspaceFile(value: string): Promise<WorkspaceFileDigest> {
-    const path = assertSafeRelPath(value, this.workspaceRoot);
+  async digestWorkspaceFile(
+    value: string,
+    options: SandboxFilePathOptions = {},
+  ): Promise<WorkspaceFileDigest> {
+    const shell = options.pathScope === "shell";
+    const path = shell ? this.shellFilePath(value) : assertSafeRelPath(value, this.workspaceRoot);
     const frame = crypto.randomUUID().replaceAll("-", "");
     const markers = workspaceFileMarkers("DIGEST", frame);
     const script = [
       "set +e",
       PORTABLE_REALPATH_EXISTING_FUNCTION,
       PORTABLE_SHA256_FILE_FUNCTION,
-      ...this.confinedWorkspaceFileScript(path, markers),
+      ...this.workspaceFileScript(path, markers, shell),
       `bytes=$(wc -c <"$target" | tr -d ' \\n') || { printf %s ${shellQuote(markers.unavailable)}; exit 70; }`,
       `digest=$(opengeni_sha256_file "$target") || { printf %s ${shellQuote(markers.unavailable)}; exit 70; }`,
       `printf '%s\\t%s\\t%s' ${shellQuote(markers.ok)} "$bytes" "$digest"`,
@@ -1954,8 +1993,14 @@ export class SandboxChannelAService {
    * never enter argv, environment, stdout or events. The file is verified
    * against the expected size and digest before and after the upload, so a
    * file changed mid-upload is reported instead of published. */
-  async exportWorkspaceFile(req: WorkspaceFileExportRequest): Promise<WorkspaceFileDigest> {
-    const path = assertSafeRelPath(req.path, this.workspaceRoot);
+  async exportWorkspaceFile(
+    req: WorkspaceFileExportRequest,
+    options: SandboxFilePathOptions = {},
+  ): Promise<WorkspaceFileDigest> {
+    const shell = options.pathScope === "shell";
+    const path = shell
+      ? this.shellFilePath(req.path)
+      : assertSafeRelPath(req.path, this.workspaceRoot);
     if (!Number.isSafeInteger(req.sizeBytes) || req.sizeBytes < 0) {
       throw new ChannelAValidationError("workspace export size is invalid");
     }
@@ -1974,7 +2019,7 @@ export class SandboxChannelAService {
       PORTABLE_SHA256_FILE_FUNCTION,
       `config=${shellQuote(configPath)}`,
       `trap 'rm -f "$config"' EXIT`,
-      ...this.confinedWorkspaceFileScript(path, markers),
+      ...this.workspaceFileScript(path, markers, shell),
       verify("before"),
       `curl --config "$config" --upload-file "$target" >/dev/null 2>&1 || { printf %s ${shellQuote(markers.unavailable)}; exit 73; }`,
       verify("after"),
@@ -2003,8 +2048,20 @@ export class SandboxChannelAService {
   }
 
   /** Shell steps that set `$target` to the resolved regular file at `path`,
-   * failing with the frame's markers when it is missing or escapes the root. */
-  private confinedWorkspaceFileScript(path: string, markers: WorkspaceFileMarkers): string[] {
+   * failing with the frame's markers when it is missing or escapes the root.
+   * A shell-scoped `path` is already the absolute path the shell opens and is
+   * not confined to the root. */
+  private workspaceFileScript(
+    path: string,
+    markers: WorkspaceFileMarkers,
+    shell = false,
+  ): string[] {
+    if (shell) {
+      return [
+        `target=$(opengeni_realpath_existing ${shellQuote(path)}) || { printf %s ${shellQuote(markers.missing)}; exit 66; }`,
+        `test -f "$target" || { printf %s ${shellQuote(markers.notFile)}; exit 65; }`,
+      ];
+    }
     const file = this.workspaceRoot ? this.joinRoot(path) : `./${path}`;
     return [
       `root=$(opengeni_realpath_existing ${shellQuote(this.providerWorkspaceRoot())}) || { printf %s ${shellQuote(markers.unavailable)}; exit 70; }`,

@@ -97,6 +97,7 @@ import {
   CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
   CODEX_USAGE_LIMIT_ERROR_TYPE,
   CodexReloginRequired,
+  classifyCodexClientVersionRejection,
   classifyCodexEncryptedArtifactRejection,
   classifyCodexEntitlementRejection,
   classifyCodexResponseTimeoutError,
@@ -104,6 +105,7 @@ import {
   isCodexTransportError,
 } from "@opengeni/codex";
 import {
+  CODEX_CLIENT_VERSION_REJECTED_CODE,
   CodexPlanEntitlementError,
   codexPlanEntitlementFailurePayload,
   codexRequestRejectedFailurePayload,
@@ -1759,15 +1761,22 @@ function transientTransportCode(error: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * Closed provider codes of a safety refusal: the provider judged this
+ * request's content. Claude reports one with HTTP 200 (`stop_reason:
+ * "refusal"`), others with a 400 or a failed response.
+ */
+export const PROVIDER_SAFETY_REFUSAL_CODE =
+  /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy|misalignment_policy_violation)$/;
+
 function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
   if (error instanceof ResponsesStreamingTerminalError) {
     return error.category === "safety" ? error.detail : undefined;
   }
   return collectErrorStrings(error).find(
     (value) =>
-      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy|misalignment_policy_violation)$/.test(
-        value,
-      ) || /\bthis request was blocked by our safety systems\b/i.test(value),
+      PROVIDER_SAFETY_REFUSAL_CODE.test(value) ||
+      /\bthis request was blocked by our safety systems\b/i.test(value),
   );
 }
 
@@ -2764,6 +2773,22 @@ function baseAgentRunFailurePayload(
   // Shared subscription core placement outcomes carry their own typed copy.
   if (error instanceof SubscriptionCoreCodexTurnError) {
     return error.payload;
+  }
+  // The Codex backend gated this model above the client version Opengeni
+  // presents. That is not about the account: no account was switched or
+  // cooled down, and the model works again once the presented version is new
+  // enough. The provider's own text ("upgrade to the latest app or CLI")
+  // addresses Codex users, so it stays in `detail`.
+  const clientVersionRejection = classifyCodexClientVersionRejection(error);
+  if (clientVersionRejection) {
+    return {
+      error:
+        "The Codex service needs a newer client than this Opengeni version for this model. " +
+        "Choose another model for now; this one works again once Opengeni is updated.",
+      code: CODEX_CLIENT_VERSION_REJECTED_CODE,
+      retryable: false,
+      detail: clientVersionRejection.message,
+    };
   }
   const entitlementRejection = classifyCodexEntitlementRejection(error);
   if (entitlementRejection) {

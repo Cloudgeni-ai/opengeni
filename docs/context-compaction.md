@@ -257,6 +257,35 @@ cached prefix inside a conversation.
 Responses expose only counts of dropped blocks by closed reason, not signatures
 or prompt data. This reset can lose old reasoning and cost new reasoning tokens;
 it is not a claim that a client-generated checkpoint preserves prefix binding.
+
+Every other change of binding is handled by one replay policy for opaque
+reasoning on every route (`opaque-reasoning-replay.ts`), the same one that keeps
+OpenAI `encrypted_content` with its issuing provider. On the direct API Claude
+now drops mismatched blocks itself; the policy keeps it from having to (a drop
+also discards every later thinking block) and keeps requests valid where
+`drop_block` is stripped or does not apply. A Claude signed thinking
+block records the binding it was issued under: the platform and account, the
+model and, for prefix-bound models, a digest of the system prompt (which a
+session can change between turns, for example when a turn adds a repository
+Skill). A request under another binding leaves the block out, as Claude itself
+does with a block whose binding no longer matches; canonical history keeps the
+signed block, so a switch back replays it natively. Claude's own thinking is
+never resent as readable assistant text: shown back to Claude that way it can
+trip Claude's safety systems, which then refuse the request and every retry of
+it. This works on every Claude transport, including
+gateways that do not forward the binding beta. Blocks stored before bindings
+were recorded stay native until Claude refuses them. A refused replay never
+fails the turn: the request is sent once more with the blocks the refusal
+concerns (those with no recorded binding, the one it names and every signed
+block after it) left out, and
+those are remembered per provider in the worker process (a process-local memory
+shared by the provider's sessions). If Claude refuses that too, the request is
+sent with plain history, with no thinking blocks, encrypted search results or
+citations, which it always accepts. Each fallback is recorded for operators
+as a `thinkingBlocksDropped` reason (`opengeni_refused_replay`,
+`opengeni_plain_history`) on the model usage and
+the `opengeni_model_thinking_blocks_dropped_total` metric; the person sees
+nothing.
 See Anthropic's [preserved thinking](https://platform.claude.com/docs/en/build-with-claude/preserved-thinking).
 
 Both the preflight refusal and a real HTTP 413 before a response stream use the

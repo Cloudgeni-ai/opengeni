@@ -3019,6 +3019,7 @@
         "BrowserDownloadSaveRequest"
       ],
       "response": [
+        "BrowserDownloadSaveProgress",
         "BrowserDownloadSaveResponse"
       ]
     },
@@ -6132,6 +6133,15 @@
     {
       "method": "POST",
       "path": "/v1/workspaces/:workspaceId/integrations/teams/link",
+      "sdk": [
+        "teamsApi"
+      ],
+      "request": [],
+      "response": []
+    },
+    {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in",
       "sdk": [
         "teamsApi"
       ],
@@ -11630,6 +11640,7 @@
         "$.identity": "string? null",
         "$.instructions": "string?",
         "$.renderer": "ref(AgentRenderer)?",
+        "$.titleInstructions": "string? null",
         "$.vaultPolicy": "ref(VaultPolicy)?"
       }
     },
@@ -13387,6 +13398,18 @@
         "$.downloads[]": "ref(BrowserDownload)"
       }
     },
+    "BrowserDownloadSaveProgress": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.downloadId": "string!",
+        "$.operationId": "string!",
+        "$.retryAfterMs": "integer!",
+        "$.state": "const!=[\"\\\"uploading\\\"\"]"
+      }
+    },
     "BrowserDownloadSaveRequest": {
       "io": [
         "input"
@@ -14374,6 +14397,98 @@
         "$.endpointUrl": "string?"
       }
     },
+    "ClaudeExtraUsage": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.currency": "string! null",
+        "$.disabledReason": "string! null",
+        "$.isEnabled": "boolean! null",
+        "$.monthlyLimit": "number! null",
+        "$.usedCredits": "number! null",
+        "$.utilization": "number! null"
+      }
+    },
+    "ClaudeLimitResetGrant": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.blocking": "array!",
+        "$.blocking[]": "string",
+        "$.clears": "array!",
+        "$.clears[]": "string",
+        "$.endsAt": "string! null",
+        "$.givesBackWeekly": "boolean!",
+        "$.id": "string!",
+        "$.kind": "enum!=[\"\\\"fable\\\"\",\"\\\"full\\\"\",\"\\\"session\\\"\",\"\\\"weekly\\\"\"]",
+        "$.label": "string! null",
+        "$.paused": "boolean!",
+        "$.percentUsed": "object!",
+        "$.percentUsed{}": "number",
+        "$.resetsLeft": "integer! null",
+        "$.resetsTotal": "integer! null",
+        "$.startsAt": "string! null",
+        "$.type": "string! null",
+        "$.unavailableReason": "string! null",
+        "$.usableNow": "boolean!",
+        "$.useRequiresLimit": "boolean!"
+      }
+    },
+    "ClaudeLimitResets": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.atLimit": "boolean!",
+        "$.cooldownUntil": "string! null",
+        "$.eligible": "boolean!",
+        "$.exhausted": "array!",
+        "$.exhausted[]": "string",
+        "$.grants": "array!",
+        "$.grants[]": "ref(ClaudeLimitResetGrant)",
+        "$.ineligibleReason": "string! null",
+        "$.nextGrantId": "string! null",
+        "$.observedAt": "string!",
+        "$.weeklyResetsAt": "string! null"
+      }
+    },
+    "ClaudeServiceState": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.fallbackAvailable": "boolean! null",
+        "$.fallbackPercentage": "number! null",
+        "$.grace": "object! null",
+        "$.grace.fiveHourUtilization": "number! null",
+        "$.grace.sevenDayUtilization": "number! null",
+        "$.observedAt": "string!",
+        "$.overageDailyCapPaused": "boolean! null",
+        "$.overageDisabledReason": "string! null",
+        "$.overageInUse": "boolean! null",
+        "$.overageScope": "string! null",
+        "$.retryAfterSeconds": "number! null",
+        "$.slow": "object! null",
+        "$.slow.budgetResetsAt": "string! null",
+        "$.slow.budgetUtilization": "number! null",
+        "$.slow.maxWaitSeconds": "number! null",
+        "$.slow.offer": "string! null",
+        "$.slow.retryAfterSeconds": "number! null",
+        "$.slow.status": "string! null",
+        "$.surpassedThresholds": "array!",
+        "$.surpassedThresholds[]": "object",
+        "$.surpassedThresholds[].threshold": "number!",
+        "$.surpassedThresholds[].windowId": "enum!=[\"\\\"five_hour\\\"\",\"\\\"overage\\\"\",\"\\\"seven_day\\\"\",\"\\\"seven_day_overage_included\\\"\"]",
+        "$.upgradePaths": "array!",
+        "$.upgradePaths[]": "string"
+      }
+    },
     "ClaudeSubscriptionAccount": {
       "io": [
         "output"
@@ -14478,15 +14593,53 @@
         "$": "object",
         "$.connected": "boolean!",
         "$.credentialVersion": "integer! null",
+        "$.extraUsage": "ref(ClaudeExtraUsage)? null",
+        "$.limitResets": "ref(ClaudeLimitResets)? null",
+        "$.limits": "array?",
+        "$.limits[]": "ref(ClaudeUsageLimit)",
         "$.observedAt": "string! null",
         "$.refreshCheckedAt": "string! null",
         "$.refreshStatus": "enum!=[\"\\\"available\\\"\",\"\\\"not_checked\\\"\",\"\\\"reconnect\\\"\",\"\\\"scope_required\\\"\",\"\\\"unavailable\\\"\"]",
         "$.requestRestrictions": "array?",
         "$.requestRestrictions[]": "ref(ClaudeUsageRequestStatus)",
         "$.requestStatus": "ref(ClaudeUsageRequestStatus)? null",
+        "$.serviceState": "ref(ClaudeServiceState)? null",
         "$.source": "enum! null=[\"\\\"provider\\\"\",\"\\\"response_headers\\\"\"]",
+        "$.surfaceWindows": "array?",
+        "$.surfaceWindows[]": "ref(ClaudeSurfaceUsageWindow)",
+        "$.wallReset": "ref(ClaudeWallReset)? null",
         "$.windows": "array!",
         "$.windows[]": "ref(ClaudeUsageWindow)"
+      }
+    },
+    "ClaudeSurfaceUsageWindow": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.id": "enum!=[\"\\\"seven_day_cowork\\\"\",\"\\\"seven_day_oauth_apps\\\"\",\"\\\"seven_day_omelette\\\"\"]",
+        "$.resetsAt": "string! null",
+        "$.usedPercent": "number! null"
+      }
+    },
+    "ClaudeUsageLimit": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.allowancePercentOfWeekly": "number! null",
+        "$.group": "string! null",
+        "$.isActive": "boolean!",
+        "$.kind": "string!",
+        "$.modelId": "string! null",
+        "$.modelName": "string! null",
+        "$.percent": "number! null",
+        "$.resetsAt": "string! null",
+        "$.severity": "string! null",
+        "$.surface": "string! null",
+        "$.usedPercentOfWeekly": "number! null"
       }
     },
     "ClaudeUsageRequestStatus": {
@@ -14525,6 +14678,22 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"five_hour\\\"\",\"\\\"overage\\\"\",\"\\\"seven_day\\\"\",\"\\\"seven_day_fable\\\"\",\"\\\"seven_day_opus\\\"\",\"\\\"seven_day_overage_included\\\"\",\"\\\"seven_day_sonnet\\\"\"]"
+      }
+    },
+    "ClaudeWallReset": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.available": "boolean!",
+        "$.eligible": "boolean!",
+        "$.inExperiment": "boolean!",
+        "$.ineligibleReason": "string! null",
+        "$.nextAvailableAt": "string! null",
+        "$.observedAt": "string!",
+        "$.resetsPerWeek": "integer! null",
+        "$.weeklyResetsAt": "string! null"
       }
     },
     "ClearWorkspaceAllowanceRequest": {
@@ -19152,10 +19321,19 @@
         "$.createdAt": "string!",
         "$.githubAccountId": "integer! null",
         "$.installationId": "integer!",
+        "$.issue": "ref(GitHubInstallationIssue)? null",
         "$.lifecycle": "ref(GitHubInstallationLifecycle)!",
         "$.repositoryCount": "integer!",
         "$.repositoryScope": "ref(GitHubRepositoryScope)!",
         "$.updatedAt": "string!"
+      }
+    },
+    "GitHubInstallationIssue": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"account_changed\\\"\",\"\\\"github_unreachable\\\"\",\"\\\"no_repositories\\\"\",\"\\\"owner_unconfirmed\\\"\",\"\\\"suspended\\\"\",\"\\\"uninstalled\\\"\"]"
       }
     },
     "GitHubInstallationLifecycle": {
@@ -26643,6 +26821,7 @@
         "$.identity": "string! null",
         "$.renderer": "ref(AgentRenderer)!",
         "$.source": "ref(ResolvedAgentConfigSource)!",
+        "$.titleInstructions": "string?",
         "$.unavailable": "array!",
         "$.unavailable[]": "ref(AgentCapabilityId)",
         "$.unavailableReasons": "object?",
@@ -31212,6 +31391,7 @@
         "$.accountOwnerLabel": "string?",
         "$.actionDigest": "string!",
         "$.approveLabel": "string!",
+        "$.approveLabelCode": "enum?=[\"\\\"allow\\\"\",\"\\\"approve_action\\\"\"]",
         "$.approvedBy": "enum?=[\"\\\"account_owner\\\"\",\"\\\"you\\\"\"]",
         "$.availableActions": "array!",
         "$.availableActions[]": "enum=[\"\\\"approve\\\"\",\"\\\"reject\\\"\"]",
@@ -31225,6 +31405,7 @@
         "$.id": "string!",
         "$.moreFields": "integer!",
         "$.reason": "string!",
+        "$.reasonCode": "ref(ToolReviewReasonCode)?",
         "$.revision": "string!",
         "$.samples": "array?",
         "$.samples[]": "object",
@@ -31236,6 +31417,7 @@
         "$.selectionKind": "enum?=[\"\\\"messages\\\"\",\"\\\"threads\\\"\"]",
         "$.status": "ref(ToolReviewStatus)!",
         "$.title": "string!",
+        "$.toolName": "string?",
         "$.updatedAt": "string!",
         "$.version": "const!=[\"1\"]"
       }
@@ -31927,12 +32109,22 @@
       ],
       "shape": {
         "$": "object",
+        "$.booleanValue": "boolean?",
         "$.count": "integer?",
+        "$.key": "string?",
         "$.label": "string!",
         "$.path": "string!",
         "$.preview": "string!",
         "$.protected": "boolean?",
         "$.truncated": "boolean!"
+      }
+    },
+    "ToolReviewReasonCode": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"asks_by_default\\\"\",\"\\\"asks_by_setting\\\"\",\"\\\"blocked_by_conflict\\\"\",\"\\\"blocked_by_default\\\"\",\"\\\"blocked_by_setting\\\"\"]"
       }
     },
     "ToolReviewStatus": {
@@ -35930,6 +36122,12 @@
       "ChatSession": "type",
       "ChatSessionLineageResponse": "type",
       "ChatSessionListResponse": "type",
+      "ClaudeExtraUsage": "type",
+      "ClaudeLimitResetClaim": "type",
+      "ClaudeLimitResetClaimResult": "type",
+      "ClaudeLimitResetGrant": "type",
+      "ClaudeLimitResets": "type",
+      "ClaudeServiceState": "type",
       "ClaudeSubscriptionAccount": "type",
       "ClaudeSubscriptionAccountsResponse": "type",
       "ClaudeSubscriptionOAuthCompleteRequest": "type",
@@ -35937,8 +36135,11 @@
       "ClaudeSubscriptionOAuthStartResponse": "type",
       "ClaudeSubscriptionSetupTokenRequest": "type",
       "ClaudeSubscriptionUsage": "type",
+      "ClaudeSurfaceUsageWindow": "type",
+      "ClaudeUsageLimit": "type",
       "ClaudeUsageRequestStatus": "type",
       "ClaudeUsageWindow": "type",
+      "ClaudeWallReset": "type",
       "ClearWorkspaceAllowanceRequest": "type",
       "ClearWorkspaceAllowanceResponse": "type",
       "ClientAgentConfig": "type",
@@ -36291,6 +36492,8 @@
       "FileSystemCapability": "type",
       "FileSystemRouteIdentity": "type",
       "FileUploadData": "type",
+      "FileUploadSource": "type",
+      "FileUploadTarget": "type",
       "FirstPartyMcpToolName": "type",
       "ForkSessionRequest": "type",
       "ForkSessionResponse": "type",
@@ -36355,6 +36558,7 @@
       "GitHubAppSetupMode": "type",
       "GitHubBindingStatus": "type",
       "GitHubInstallationBinding": "type",
+      "GitHubInstallationIssue": "type",
       "GitHubInstallationLifecycle": "type",
       "GitHubRepositoriesResponse": "type",
       "GitHubRepository": "type",
@@ -38956,6 +39160,7 @@
       "teamsApi": "value",
       "TeamsBotStatus": "type",
       "TeamsInstallOptions": "type",
+      "TeamsLinkSignInStart": "type",
       "TeamsMicrosoftSignInResult": "type",
       "TeamsMicrosoftSignInStart": "type"
     },

@@ -222,6 +222,16 @@ export type ToolGatewayCaller = z.infer<typeof ToolGatewayCaller>;
  */
 export const FIRST_PARTY_MCP_CALLER_META_KEY = "opengeniCaller";
 
+/**
+ * Result `_meta` key a first-party tool sets on an error result when it
+ * refused the caller's arguments before doing any work (a schema mismatch, a
+ * bad combination of fields, an unknown ID). The caller made the mistake, not
+ * the tool, so the call is recorded as `rejected` rather than as a tool
+ * failure. Only the first-party server is trusted to set it; the model never
+ * sees `_meta`.
+ */
+export const FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY = "opengeni/argumentRejected";
+
 export const AttemptToolCatalog = /* @__PURE__ */ defineSchema(() =>
   z
     .object({

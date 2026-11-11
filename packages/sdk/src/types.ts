@@ -4882,6 +4882,25 @@ export type ClaudeUsageRequestStatus = {
   source?: "response_headers" | "provider" | undefined;
 };
 export type { SubscriptionUsagePool, SubscriptionUsagePoolsResponse } from "@opengeni/contracts";
+import type {
+  ClaudeExtraUsage,
+  ClaudeLimitResets,
+  ClaudeServiceState,
+  ClaudeSurfaceUsageWindow,
+  ClaudeUsageLimit,
+  ClaudeWallReset,
+} from "@opengeni/contracts";
+export type {
+  ClaudeExtraUsage,
+  ClaudeLimitResetClaim,
+  ClaudeLimitResetClaimResult,
+  ClaudeLimitResetGrant,
+  ClaudeLimitResets,
+  ClaudeServiceState,
+  ClaudeSurfaceUsageWindow,
+  ClaudeUsageLimit,
+  ClaudeWallReset,
+} from "@opengeni/contracts";
 
 export type ClaudeSubscriptionUsage = {
   connected: boolean;
@@ -4893,6 +4912,18 @@ export type ClaudeSubscriptionUsage = {
   refreshCheckedAt: string | null;
   requestStatus?: ClaudeUsageRequestStatus | null | undefined;
   requestRestrictions?: ClaudeUsageRequestStatus[] | undefined;
+  /** Limit reset grants Claude offers the account (absent: not read yet). */
+  limitResets?: ClaudeLimitResets | null | undefined;
+  /** The at-the-limit reset program, read only while the account is at a limit. */
+  wallReset?: ClaudeWallReset | null | undefined;
+  /** Claude's limit list, with each scoped limit's share of the weekly limit. */
+  limits?: ClaudeUsageLimit[] | undefined;
+  /** Paid extra usage; null when Claude reports none. */
+  extraUsage?: ClaudeExtraUsage | null | undefined;
+  /** Weekly limits of other Claude surfaces, for information only. */
+  surfaceWindows?: ClaudeSurfaceUsageWindow[] | undefined;
+  /** Service state from the newest model response (fallback, overage, slow tier, grace). */
+  serviceState?: ClaudeServiceState | null | undefined;
 };
 
 export type OrganizationModelProviderConnection = {
@@ -9316,17 +9347,48 @@ export type FileDownloadUrlResponse = {
   expiresAt: string;
 };
 
+/** Where a {@link FileUploadSource} sends its bytes: the signed object-storage PUT. */
+export type FileUploadTarget = {
+  /** Pre-signed URL; it carries its own authority, so send no API credentials or cookies. */
+  url: string;
+  /** Headers the PUT must carry exactly (the signature covers them, content type included). */
+  headers: Record<string, string>;
+  /** Exact number of bytes the PUT must send. */
+  sizeBytes: number;
+  /** Aborted when the upload's deadline passes; stop the transfer then. */
+  signal: AbortSignal;
+};
+
+/**
+ * File bytes the caller sends itself, for example a native upload streamed
+ * from disk with progress, so a long video never has to be held in memory.
+ * The SDK still opens and completes the upload; `send` performs only the
+ * signed PUT and reports its HTTP status.
+ */
+export type FileUploadSource = {
+  /** Exact size of the bytes `send` will PUT. */
+  sizeBytes: number;
+  send(target: FileUploadTarget): Promise<{ status: number }>;
+};
+
 /** Bytes accepted by the `uploadFile` helper. */
-export type FileUploadData = Blob | ArrayBuffer | Uint8Array | string;
+export type FileUploadData = Blob | ArrayBuffer | Uint8Array | string | FileUploadSource;
 
 export type UploadFileInput = {
   scope?: "workspace" | "personal";
   filename: string;
   contentType: string;
   data: FileUploadData;
+  /**
+   * Hex SHA-256 of the bytes. Computed from `data` when omitted, except for a
+   * {@link FileUploadSource}, whose bytes the SDK never reads: without one the
+   * server records the digest itself for files small enough to show the model inline.
+   */
   sha256?: string | undefined;
   /** Optional deadline for the signed object-storage PUT. */
   timeoutMs?: number | undefined;
+  /** Cancels the upload: the step in flight is aborted and the call rejects. */
+  signal?: AbortSignal | undefined;
   /** The upload is an app-shot (images only): the window it shows and what it said. */
   appShot?: AppShotCapture | undefined;
 };
@@ -10511,12 +10573,25 @@ export type GitHubAppSetupMode = "platform" | "operator";
 
 export type GitHubInstallationLifecycle = "active" | "suspended" | "deleted" | "unverified";
 
+/**
+ * Why an installation is not active, in terms of the fix. Null while active;
+ * servers before this field omit it.
+ */
+export type GitHubInstallationIssue =
+  | "uninstalled"
+  | "suspended"
+  | "no_repositories"
+  | "owner_unconfirmed"
+  | "github_unreachable"
+  | "account_changed";
+
 export type GitHubInstallationBinding = {
   installationId: number;
   githubAccountId: number | null;
   accountLogin: string | null;
   accountType: string | null;
   lifecycle: GitHubInstallationLifecycle;
+  issue?: GitHubInstallationIssue | null | undefined;
   repositoryScope: GitHubRepositoryScope;
   repositoryCount: number;
   /** Opengeni-owned entry point for changing the installation's repository allowlist. */
@@ -11854,6 +11929,12 @@ export type AgentConfigRequest = {
   /** Alias of the session `instructions` field. */
   instructions?: string | undefined;
   renderer?: AgentRenderer | undefined;
+  /**
+   * How automatic chat titles are written, added after the title request's
+   * fixed rules (max 8,000 chars), for example "If the messages have no clear
+   * language, write the title in Norwegian bokmål."; null clears it.
+   */
+  titleInstructions?: string | null | undefined;
   /** Vaults this session may use (input only); intersected with the parent's policy. */
   vaultPolicy?: VaultPolicy | undefined;
 };
@@ -11902,6 +11983,8 @@ export type ResolvedAgentConfig = {
     | "deployment_default"
     | "inherited"
     | "legacy_conversion";
+  /** The host's title instructions; absent when none are set. */
+  titleInstructions?: string | undefined;
 };
 
 export type AgentEffectiveTools = {

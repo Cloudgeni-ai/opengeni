@@ -7,6 +7,7 @@ import {
   EventSourceSigningSecretInput,
   EventSourceVisibility,
   isReadyEventSourceKey,
+  stableJson,
   WEBHOOK_FORMAT_PRESET_NAMES,
   WebhookFormat,
   webhookFormatOfPreset,
@@ -43,6 +44,7 @@ import {
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import { githubAppWebhookPort } from "../github-access";
+import { ToolArgumentError } from "./tool-argument-error";
 
 type JsonResult = (value: unknown) => { content: Array<{ type: "text"; text: string }> };
 
@@ -66,7 +68,7 @@ const FormatInput = z4
 function parseFormat(format: Record<string, unknown>): WebhookFormat {
   const parsed = WebhookFormat.safeParse(format);
   if (parsed.success) return parsed.data;
-  throw new Error(`The format is not valid:\n${z4.prettifyError(parsed.error)}`);
+  throw new ToolArgumentError(`The format is not valid:\n${z4.prettifyError(parsed.error)}`);
 }
 
 /**
@@ -76,17 +78,15 @@ function parseFormat(format: Record<string, unknown>): WebhookFormat {
  */
 function assertResolvedSecret(signingSecret: string | undefined): void {
   if (signingSecret !== undefined && containsSecretReference(signingSecret)) {
-    throw new Error(
+    throw new ToolArgumentError(
       "signingSecret is still a secret reference because this agent can't use secrets. Ask a person to paste the secret in Automations.",
     );
   }
 }
 
-/** What a trigger can name on a source, without empty fields. */
-function eventTypeForModel(type: EventTypeDescriptor) {
+/** The fields conditions can match on a type and its MCP arguments, without empty ones. */
+function eventTypeDetails(type: EventTypeDescriptor) {
   return {
-    type: type.type,
-    description: type.description,
     ...(type.fields.length > 0
       ? {
           fields: type.fields.map(({ field, description }) =>
@@ -95,8 +95,33 @@ function eventTypeForModel(type: EventTypeDescriptor) {
         }
       : {}),
     ...(type.argumentsSchema ? { argumentsSchema: type.argumentsSchema } : {}),
+  };
+}
+
+/** What a trigger can name on a source, with its details unless they are given once for every type. */
+function eventTypeForModel(type: EventTypeDescriptor, withDetails: boolean) {
+  return {
+    type: type.type,
+    description: type.description,
+    ...(withDetails ? eventTypeDetails(type) : {}),
     ...(type.available ? {} : { unavailable: type.unavailableReason ?? "Not available" }),
   };
+}
+
+/**
+ * A source's event types. When every type has the same fields and arguments
+ * schema, as on a server whose events share one shape, they are given once
+ * in `everyEventType` instead of repeated for each of possibly hundreds of
+ * types.
+ */
+function eventTypesForModel(types: EventTypeDescriptor[]) {
+  const [first, ...rest] = types.map(eventTypeDetails);
+  const shared =
+    first && rest.length > 0 && Object.keys(first).length > 0 ? stableJson(first) : null;
+  const same = shared !== null && rest.every((details) => stableJson(details) === shared);
+  return same
+    ? { everyEventType: first, eventTypes: types.map((type) => eventTypeForModel(type, false)) }
+    : { eventTypes: types.map((type) => eventTypeForModel(type, true)) };
 }
 
 function sourceForModel(
@@ -238,7 +263,7 @@ export function registerEventTools(
             ...sourceForModel(source, webhookBaseUrl),
             ...(manages && source.format ? { format: source.format } : {}),
           },
-          eventTypes: eventTypes.map(eventTypeForModel),
+          ...eventTypesForModel(eventTypes),
           ...(source.kind === "webhook"
             ? {
                 recentDeliveries: deliveries.map((delivery) => ({
@@ -293,7 +318,7 @@ export function registerEventTools(
     },
     async ({ eventId, scheduledTaskRunId, offset }) => {
       if ((eventId === undefined) === (scheduledTaskRunId === undefined))
-        throw new Error("Pass either eventId or scheduledTaskRunId");
+        throw new ToolArgumentError("Pass either eventId or scheduledTaskRunId");
       if (eventId) {
         const [event] = await getInboundEvents(deps.db, grant.workspaceId, [eventId]);
         const visible =
@@ -309,11 +334,11 @@ export function registerEventTools(
             () => false,
           ));
         if (!event || !visible)
-          throw new Error(`Event not found: ${eventId}. Events are kept for 30 days.`);
+          throw new ToolArgumentError(`Event not found: ${eventId}. Events are kept for 30 days.`);
         return json({ event });
       }
       const run = await getEventRunOccurrence(deps.db, grant.workspaceId, scheduledTaskRunId!);
-      if (!run) throw new Error(`Run ${scheduledTaskRunId} is not an event run`);
+      if (!run) throw new ToolArgumentError(`Run ${scheduledTaskRunId} is not an event run`);
       await requireVisibleTask(run.taskId);
       const start = offset ?? 0;
       const events = run.occurrence.events.slice(start, start + RUN_EVENTS_PAGE_SIZE);
@@ -364,7 +389,7 @@ export function registerEventTools(
     },
     async ({ name, preset, format, signingSecret, visibility }) => {
       if ((preset === undefined) === (format === undefined))
-        throw new Error("Pass either preset or format");
+        throw new ToolArgumentError("Pass either preset or format");
       assertResolvedSecret(signingSecret);
       const request = CreateEventSourceRequest.parse({
         kind: "webhook",
@@ -411,7 +436,7 @@ export function registerEventTools(
         Object.entries(changes).filter(([, value]) => value !== undefined),
       );
       if (format) patch.format = parseFormat(format);
-      if (Object.keys(patch).length === 0) throw new Error("Pass at least one change");
+      if (Object.keys(patch).length === 0) throw new ToolArgumentError("Pass at least one change");
       const updated = await updateEventSourceForViewer({
         db: deps.db,
         settings: deps.settings,

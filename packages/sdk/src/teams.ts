@@ -3,6 +3,11 @@ import type { OpenGeniClient } from "./client";
 export type TeamsBotStatus = {
   enabled: boolean;
   configured: boolean;
+  /**
+   * The name of this deployment's Teams app, as people see it in Teams.
+   * Absent from servers that predate it.
+   */
+  appName?: string;
   setupAvailable: boolean;
   installation: { tenantId: string; workspaceId: string; active: boolean } | null;
   linked: boolean;
@@ -10,6 +15,8 @@ export type TeamsBotStatus = {
 };
 
 export type TeamsMicrosoftSignInStart = { authorizationUrl: string | null };
+/** The Microsoft sign-in that proves the Teams user an account link names. */
+export type TeamsLinkSignInStart = { authorizationUrl: string };
 /** The `code` and `state` Microsoft returned to the setup page. */
 export type TeamsMicrosoftSignInResult = { code: string; state: string };
 /**
@@ -50,8 +57,20 @@ export function teamsApi(client: Pick<OpenGeniClient, "requestJson">, workspaceI
         ...(options.replaceOwnLink ? { replaceOwnLink: true } : {}),
       }),
     disconnectBot: () => client.requestJson<{ ok: true }>("DELETE", `${base}/bot`),
-    linkAccount: (token: string) =>
-      client.requestJson<{ ok: true }>("POST", `${base}/link`, { token }),
+    /**
+     * Starts the Microsoft sign-in that proves the person opening an account
+     * link is the Teams user it names. Microsoft returns to the setup page.
+     */
+    startLinkSignIn: (token: string) =>
+      client.requestJson<TeamsLinkSignInStart>("POST", `${base}/link/microsoft-sign-in`, {
+        token,
+      }),
+    /** Links the account once `microsoft` proves the Teams user the link names. */
+    linkAccount: (token: string, microsoft?: TeamsMicrosoftSignInResult) =>
+      client.requestJson<{ ok: true }>("POST", `${base}/link`, {
+        token,
+        ...(microsoft ? { microsoft } : {}),
+      }),
     unlinkAccount: () => client.requestJson<{ ok: true }>("DELETE", `${base}/link`),
   };
 }

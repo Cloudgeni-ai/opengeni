@@ -7181,6 +7181,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:create"
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in",
+    "request": [],
+    "response": [],
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
+    "permission": "sessions:create"
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/learning/revisions",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/learning/revisions",
@@ -8919,7 +8928,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "BrowserDownloadSaveRequest"
     ],
+    "query": [
+      "respondAsync"
+    ],
     "response": [
+      "BrowserDownloadSaveProgress",
       "BrowserDownloadSaveResponse"
     ],
     "permission": "sessions:control"

@@ -1,4 +1,5 @@
 import { EphemeralChromiumContextPool } from "./chromium-context-pool";
+import { discardBrowserCaches, sweepStoppedBrowserCaches } from "./browser-cache";
 import { UnsettledCleanupError } from "./cleanup-error";
 import { restoredTabUrl } from "./restored-tab-url";
 import { selectManagedChromiumExecutable, type VerifiedHeadlessShell } from "./headless-shell";
@@ -25,6 +26,8 @@ import type {
   BrowserWorkspaceFileStageRequest,
   BrowserWorkspaceFileStageResponse,
   BrowserDownloadExportRequest as BrowserDownloadExportRequestValue,
+  BrowserDownloadUploadRequest as BrowserDownloadUploadRequestValue,
+  BrowserDownloadUploadStatus as BrowserDownloadUploadStatusValue,
   BrowserDownloadExportReceipt as BrowserDownloadExportReceiptValue,
   BrowserExternalAuthResult as BrowserExternalAuthResultValue,
 } from "@opengeni/contracts";
@@ -33,6 +36,7 @@ import {
   BROWSER_PROFILE_ARTIFACT_FORMAT,
   BROWSER_WAIT_HOLD_MAX_MS,
   BrowserDownloadExportRequest,
+  BrowserDownloadUploadRequest,
   BrowserRevisionMaterialization as BrowserRevisionMaterializationSchema,
   NetworkRouteConsistency,
   type NetworkRouteConsistency as NetworkRouteConsistencyValue,
@@ -41,6 +45,7 @@ import {
   BrowserInteractionController,
   InteractionControllerError,
   InteractionDefiniteDriverError,
+  type BrowserControllerActionReceipt,
   type BrowserInteractionAuthority,
   type BrowserInteractionDriver,
 } from "@opengeni/interaction";
@@ -93,6 +98,7 @@ import {
   inspectOwnedManagedBrowserProcess,
   stopEndedManagedBrowserProcess,
   assertManagedBrowserProfileUnused,
+  managedProfileUseInventory,
   type OwnedManagedBrowserProcess,
 } from "./runner";
 import {
@@ -582,7 +588,7 @@ export class BrowserSupervisor {
     artifactPath: string,
     authority: BrowserStateUploadAuthority,
   ) => Promise<void>;
-  private readonly uploadDownload: typeof uploadBrowserDownload;
+  private readonly uploadFile: typeof uploadBrowserDownload;
   private readonly inspectOwnedProcess: typeof inspectOwnedManagedBrowserProcess;
   private readonly stopEndedProcess: typeof stopEndedManagedBrowserProcess;
   private readonly assertProfileUnused: typeof assertManagedBrowserProfileUnused;
@@ -619,6 +625,7 @@ export class BrowserSupervisor {
   private detachedWaiting = 0;
   private detachedSweep: Promise<string[]> | null = null;
   private attachedSweep: Promise<string[]> | null = null;
+  private cacheSweep: Promise<string[]> | null = null;
   private readonly connectAttachedBridge: AttachedBrowserBridgeConnector;
   /** Sessions whose failed attached cleanup was already reported. */
   private readonly attachedLeftoverWarnings = new Set<string>();
@@ -645,7 +652,7 @@ export class BrowserSupervisor {
               this.connectAttachedBridge,
             )));
     this.uploadArtifact = options.uploadArtifact ?? uploadBrowserStateArtifact;
-    this.uploadDownload = options.uploadDownload ?? uploadBrowserDownload;
+    this.uploadFile = options.uploadDownload ?? uploadBrowserDownload;
     this.inspectOwnedProcess = options.inspectOwnedProcess ?? inspectOwnedManagedBrowserProcess;
     this.stopEndedProcess = options.stopEndedProcess ?? stopEndedManagedBrowserProcess;
     this.assertProfileUnused = options.assertProfileUnused ?? assertManagedBrowserProfileUnused;
@@ -754,6 +761,53 @@ export class BrowserSupervisor {
       this.attachedSweep = null;
     });
     return await this.attachedSweep;
+  }
+
+  /**
+   * Drops what stopped browsers no longer need. Every session directory
+   * whose browser is not running loses its disposable caches; its profile
+   * state, journals and downloads stay for a later resume. Caches that
+   * sessions which already ended left under ~/.cache (Linux launches before
+   * the cache directory was named) are removed. Sessions this controller
+   * holds or acts on, and profiles a running browser uses, are left alone.
+   * Runs at startup; ending or stopping a browser later removes its caches
+   * as it goes. Returns the session ids whose caches were removed.
+   */
+  async releaseStoppedBrowserCaches(): Promise<string[]> {
+    if (this.closed) return [];
+    this.cacheSweep ??= sweepStoppedBrowserCaches({
+      sessionsDirectory: join(this.rootDirectory, "sessions"),
+      busy: (browserSessionId) =>
+        this.sessions.has(browserSessionId) ||
+        this.creating.has(browserSessionId) ||
+        this.ending.has(browserSessionId) ||
+        this.adopting.has(browserSessionId) ||
+        this.endingWorkingCopies.has(browserSessionId) ||
+        this.releasingDetached.has(browserSessionId),
+      profileInUse: managedProfileUseInventory,
+      stopped: () => this.closed,
+    })
+      .catch((error: unknown) => {
+        console.warn("browserd.cache_sweep_failed", { error: errorMessage(error) });
+        return [];
+      })
+      .finally(() => {
+        this.cacheSweep = null;
+      });
+    return await this.cacheSweep;
+  }
+
+  /** The browser on this session's profile has stopped: its caches go.
+   * Best effort, since they never decide anything a later resume needs. */
+  private async discardStoppedBrowserCaches(sessionDirectory: string): Promise<void> {
+    try {
+      await discardBrowserCaches(sessionDirectory);
+    } catch (error) {
+      console.warn("browserd.cache_discard_failed", {
+        sessionDirectory,
+        error: errorMessage(error),
+      });
+    }
   }
 
   private async sweepAttachedLeftovers(): Promise<string[]> {
@@ -876,6 +930,7 @@ export class BrowserSupervisor {
         if (record.process.profileDirectory === profileDirectory) {
           await this.closeHandedOffBrowser(record.process);
           await this.stopEndedProcess(profileDirectory, record.process);
+          await this.discardStoppedBrowserCaches(sessionDirectory);
         }
         await removeDetachedBrowserRecord(sessionDirectory);
       })();
@@ -978,6 +1033,7 @@ export class BrowserSupervisor {
             terminate: async () => {
               await runner.terminate();
               await rm(poolDirectory, { recursive: true, force: true });
+              await this.discardStoppedBrowserCaches(poolDirectory);
             },
           };
         },
@@ -1018,6 +1074,9 @@ export class BrowserSupervisor {
       // ended serve nothing and never exit on their own. Startup must not
       // fail because one of them could not be stopped.
       await reapOrphanedAgentBrowserDaemons(supervisor.rootDirectory).catch(() => 0);
+      // Caches of browsers that are no longer running, including those of
+      // sessions that ended before launches kept caches in the session.
+      void supervisor.releaseStoppedBrowserCaches();
     }
     // Browsers an earlier controller handed off and nobody used since are
     // stopped now rather than at the first sweep; recent ones are counted so
@@ -1531,6 +1590,7 @@ export class BrowserSupervisor {
       this.detachedWaiting === 0 &&
       this.detachedSweep === null &&
       this.attachedSweep === null &&
+      this.cacheSweep === null &&
       this.isIdle()
     );
   }
@@ -1656,7 +1716,7 @@ export class BrowserSupervisor {
   async action(
     command: BrowserActionCommand,
     options: BrowserObservationNoticeOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<BrowserControllerActionReceipt> {
     const runtime = this.requireActive({
       browserSessionId: command.browserSessionId,
       controllerGeneration: command.controllerGeneration,
@@ -1826,7 +1886,26 @@ export class BrowserSupervisor {
         "browser placement cannot publish device-local downloads",
       );
     }
-    return await store.export(request, this.uploadDownload);
+    return await store.export(request, this.uploadFile);
+  }
+
+  async uploadDownload(
+    reference: BrowserSessionReference,
+    requestInput: BrowserDownloadUploadRequestValue,
+  ): Promise<BrowserDownloadUploadStatusValue> {
+    const { waitMs, ...request } = BrowserDownloadUploadRequest.parse(requestInput);
+    const store = this.requireActive(reference).downloadStore;
+    if (!store) {
+      throw new InteractionControllerError(
+        "unsupported",
+        "browser placement cannot publish device-local downloads",
+      );
+    }
+    return {
+      operationId: request.operationId,
+      downloadId: request.downloadId,
+      receipt: await store.upload(request, this.uploadFile, waitMs),
+    };
   }
 
   /** Starts recording the session's tab; the recording follows the agent to
@@ -1921,7 +2000,7 @@ export class BrowserSupervisor {
     return recording.transferTo(
       target.toString(),
       async () => {
-        await this.uploadDownload(bundle.path, upload, {
+        await this.uploadFile(bundle.path, upload, {
           sizeBytes: bundle.sizeBytes,
           sha256: bundle.sha256,
         });
@@ -2168,6 +2247,7 @@ export class BrowserSupervisor {
 
   private async performClose(): Promise<void> {
     await this.attachedSweep?.catch(() => undefined);
+    await this.cacheSweep?.catch(() => undefined);
     await Promise.allSettled([...this.creationRequests]);
     await Promise.allSettled([...this.creating.values()]);
     // A browser already unused for the idle release time is stopped, not
@@ -3361,8 +3441,8 @@ export class BrowserSupervisor {
       abandoned = false;
     }
     if (!abandoned) throw workingRuntimeUnavailable();
-    if (!removeState) return;
-    await rm(sessionDirectory, { recursive: true, force: true });
+    if (removeState) await rm(sessionDirectory, { recursive: true, force: true });
+    await this.discardStoppedBrowserCaches(sessionDirectory);
   }
 
   /** An explicit end of a session this controller no longer holds in memory
@@ -3410,6 +3490,8 @@ export class BrowserSupervisor {
       journal.close();
     }
     if (removeState) await rm(sessionDirectory, { recursive: true, force: true });
+    // Its browser was stopped above; a kept profile keeps only its state.
+    await this.discardStoppedBrowserCaches(sessionDirectory);
   }
 
   /** Move an interrupted launch of this exact generation out of the session's
@@ -3469,6 +3551,9 @@ export class BrowserSupervisor {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
     await rename(sessionDirectory, target);
+    // The set-aside directory stays byte for byte; only the ~/.cache
+    // counterpart of the now empty session path goes.
+    await this.discardStoppedBrowserCaches(sessionDirectory);
   }
 
   private retireWorkingRuntime(runtime: Runtime) {
@@ -3763,6 +3848,12 @@ export class BrowserSupervisor {
       } catch (error) {
         failures.push(error);
       }
+    }
+    // A browser that stopped needs no caches, whether its session is removed
+    // or kept for a later resume. One handed off to the next controller keeps
+    // running and keeps them.
+    if (driverClosed && !keepBrowserRunning) {
+      await this.discardStoppedBrowserCaches(runtime.sessionDirectory);
     }
     if (failures.length > 0) {
       throw new AggregateError(failures, "browser session cleanup did not complete cleanly");

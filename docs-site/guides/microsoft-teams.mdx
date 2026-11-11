@@ -69,14 +69,17 @@ connect it. Send `help` at any time to get the button again.
 1. In Teams, open a 1:1 chat with Opengeni and send a message.
 2. Choose **Link account**. Opengeni opens in your browser.
 3. Sign in to Opengeni if asked, check the workspace, and choose
-   **Link my account**.
-4. Go back to Teams and send your request again.
+   **Sign in with Microsoft**.
+4. Sign in to Microsoft with the account you use in Teams. This proves the
+   Teams account is yours; Opengeni asks only for your basic profile.
+5. Go back to Teams and send your request again.
 
 The link is tied to the Teams account it was sent to and links it to the
-Opengeni account you are signed in with, so don't forward it. Links expire
-after 10 minutes or once used; send Opengeni a new message to get a new one. To
-link from a group chat or channel, message Opengeni directly first; it never
-posts account links in shared conversations.
+Opengeni account you are signed in with. It works only for someone who signs in
+to Microsoft as that Teams account; anyone else is told whose link it is and
+nothing is linked. Links expire after 10 minutes or once used; send Opengeni a
+new message to get a new one. To link from a group chat or channel, message
+Opengeni directly first; it never posts account links in shared conversations.
 
 ## Use Opengeni in Teams
 
@@ -175,14 +178,14 @@ data, where it is stored, and the providers that process it.
 ## Unlink, disconnect or remove the app
 
 - **Unlink your account.** Send `unlink` (or `disconnect`) in your 1:1 chat with Opengeni, or
-  in Opengeni open **Capabilities** in the connected workspace, find
-  **Opengeni for Teams** and choose **Unlink account**. Opengeni stops accepting
+  in Opengeni open **Capabilities** in the connected workspace, find the
+  card with your Teams app's name and the Teams logo and choose **Unlink account**. Opengeni stops accepting
   work from your Teams account until you link it again, and replies that were
   not yet sent are dropped. This deletes your account link, and group chats you
   are in stop accepting work until you link again. Your Opengeni chats and the
   delivery records stay.
 - **Disconnect your organization.** A workspace administrator opens
-  **Capabilities** > **Opengeni for Teams** and chooses **Disconnect bot**.
+  **Capabilities**, finds the card with your Teams app's name and chooses **Disconnect bot**.
   Opengeni stops accepting work from your organization's Teams, drops messages
   and replies not yet delivered, and deletes the conversation context it kept.
   Tasks already running continue in Opengeni. Existing chats, account links and
