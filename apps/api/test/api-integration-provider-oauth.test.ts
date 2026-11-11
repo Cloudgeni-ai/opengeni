@@ -2104,6 +2104,10 @@ describe("API Integration provider OAuth", () => {
       );
       expect(refused.status, path).toBe(400);
       expect(await refused.text()).toContain("Not approved");
+      // A plain approval link without state (as in a setup guide).
+      const plain = await app.request(`${path}?admin_consent=True&tenant=tenant-1`);
+      expect(plain.status, path).toBe(200);
+      expect(await plain.text()).toContain("Approved");
     }
   });
 });

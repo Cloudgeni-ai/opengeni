@@ -103,6 +103,7 @@ import { isPersonalIntegrationSetupCandidate } from "@opengeni/contracts/persona
 import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
 import {
   canonicalMcpEndpointUrl,
+  microsoftDynamicsProductForMcpUrl,
   MICROSOFT_DYNAMICS_CAPABILITY_ID,
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
 } from "@opengeni/contracts/microsoft-dynamics";
@@ -585,8 +586,16 @@ export async function createCatalogItem(input: {
         message: "A connection with this ID already exists. Only an admin can change it.",
       });
   }
+  // A Dynamics environment signs in through its reviewed Microsoft profile,
+  // as the person: record that with the entry so every card shows its sign-in
+  // (not a server review) and connects the person's own account.
+  const dynamicsEndpoint =
+    input.payload.endpointUrl && microsoftDynamicsProductForMcpUrl(input.payload.endpointUrl)
+      ? input.payload.endpointUrl
+      : null;
   const metadata = {
     ...input.payload.metadata,
+    ...(dynamicsEndpoint ? { defaultConnectionOwnership: "personal" } : {}),
     ...(input.payload.kind === "mcp" &&
     input.payload.endpointUrl &&
     !input.payload.metadata.mcpServerId
@@ -607,6 +616,13 @@ export async function createCatalogItem(input: {
     endpointUrl: input.payload.endpointUrl ?? null,
     installUrl: input.payload.installUrl ?? null,
     authModel: input.payload.authModel?.trim() || null,
+    ...(dynamicsEndpoint
+      ? {
+          authKind: "oauth2" as const,
+          mcpUrl: dynamicsEndpoint,
+          providerDomain: new URL(dynamicsEndpoint).hostname,
+        }
+      : {}),
     metadata,
     ...(input.memberCreate ? { createOnly: true } : {}),
   });

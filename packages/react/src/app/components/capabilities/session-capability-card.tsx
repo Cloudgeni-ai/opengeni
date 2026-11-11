@@ -83,6 +83,12 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
     (id: string, restoreFocus: boolean, open = false) => setRegistered({ id, restoreFocus, open }),
     [],
   );
+  // Setup opens once, right after the person chose to connect; never again
+  // when the card re-renders as another kind after the catalog reloads.
+  const openedSetup = useCallback(
+    () => setRegistered((current) => (current?.open ? { ...current, open: false } : current)),
+    [],
+  );
   if (props.item.setupRequest && !registered) {
     return (
       <SessionCustomMcpCard
@@ -221,6 +227,7 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
         returnUrl={page.href()}
         onConfigured={props.onConfigured}
         openOnMount={registered?.open ?? false}
+        onOpenedOnMount={openedSetup}
       />
     );
   }
@@ -231,6 +238,7 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       item={item}
       restoreFocus={registered?.restoreFocus ?? false}
       openSetup={registered?.open ?? false}
+      onOpenedSetup={openedSetup}
     />
   );
 }
@@ -242,10 +250,12 @@ function ScopedSessionCapabilityCard({
   onConfigured,
   restoreFocus = false,
   openSetup = false,
+  onOpenedSetup,
 }: SessionCapabilityCardProps & {
   restoreFocus?: boolean | undefined;
   /** Open setup at once: the person already chose to connect on the card before. */
   openSetup?: boolean | undefined;
+  onOpenedSetup?: (() => void) | undefined;
 }) {
   const context = useAppContext();
   const recommendation = item.capability!;
@@ -262,9 +272,12 @@ function ScopedSessionCapabilityCard({
     if (!openSetup) return;
     // After the card that asked to connect is gone: a dialog opened while its
     // button still held focus would close again at once.
-    const frame = requestAnimationFrame(() => setExpanded(true));
+    const frame = requestAnimationFrame(() => {
+      setExpanded(true);
+      onOpenedSetup?.();
+    });
     return () => cancelAnimationFrame(frame);
-  }, [openSetup]);
+  }, [openSetup, onOpenedSetup]);
   useEffect(() => {
     if (!restoreFocus) return;
     // The review dialog's opener is removed when the new connection card

@@ -1,3 +1,4 @@
+import { OrganizationApprovalHelp } from "../organization-approval-help";
 import type { OpenGeniBrowserClient as OpenGeniClient } from "@opengeni/sdk/browser";
 import type { ChatClient } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
@@ -33,6 +34,8 @@ export type SessionMcpCapabilityCardProps = {
   reconnectConnectionId?: string | undefined;
   /** Open setup at once: the person already chose to connect on the card before. */
   openOnMount?: boolean | undefined;
+  /** Setup was opened for `openOnMount`; the host stops asking. */
+  onOpenedOnMount?: (() => void) | undefined;
 };
 
 export type McpConnectionCardProps = Omit<SessionMcpCapabilityCardProps, "sessionId"> & {
@@ -92,6 +95,7 @@ function ScopedCard({
   ownershipCopy,
   reconnectConnectionId,
   openOnMount = false,
+  onOpenedOnMount,
 }: McpConnectionCardProps) {
   const t = useOpenGeniText();
   const [windows] = useState(() => browserConnectWindowHost(window));
@@ -126,7 +130,10 @@ function ScopedCard({
     if (!openOnMount) return;
     // After the card that asked to connect is gone: a dialog opened while its
     // button still held focus would close again at once.
-    const frame = requestAnimationFrame(openNow);
+    const frame = requestAnimationFrame(() => {
+      openNow();
+      onOpenedOnMount?.();
+    });
     return () => cancelAnimationFrame(frame);
     // Once per mount; the flow's functions change on every render.
     // oxlint-disable-next-line react-hooks/exhaustive-deps
@@ -165,7 +172,13 @@ function ScopedCard({
   const introduction = hostDescription || presentation?.introduction || "";
   const abilities = hostDescription ? [] : (presentation?.capabilities ?? []);
   const lead = introduction || item?.description || rationale;
-  const address = item?.mcpUrl ?? item?.providerDomain ?? "";
+  // A reviewed service is known by its host; a hand-added server by its exact address.
+  const address = technical
+    ? (item?.mcpUrl ?? item?.providerDomain ?? "")
+    : (item?.providerDomain ?? item?.mcpUrl ?? "");
+  const approval = flow.approval;
+  const adminApproval = approval && approval.reason !== "unfinished" ? approval : null;
+  const approvalNote = approval?.reason === "unfinished" ? approval : null;
   const detailRows = item
     ? [
         item.description && item.description !== lead
@@ -185,7 +198,7 @@ function ScopedCard({
         address
           ? { key: "address", label: t("sessionMcpCapabilityCard.detailsAddress"), value: address }
           : null,
-        item.kind === "mcp"
+        item.kind === "mcp" && technical
           ? {
               key: "type",
               label: t("sessionMcpCapabilityCard.detailsType"),
@@ -233,7 +246,7 @@ function ScopedCard({
     >
       <div className="og-session-capability-setup">
         {flow.error ? <p role="alert">{flow.error}</p> : null}
-        {flow.notice ? (
+        {flow.notice && !approval ? (
           <p role="status" className="og-session-capability-notice">
             {flow.notice}
           </p>
@@ -296,8 +309,20 @@ function ScopedCard({
                   {t("sessionMcpCapabilityCard.connectADifferentAccount")}
                 </button>
               </>
+            ) : !connected && adminApproval ? (
+              // The organization has to approve first: that help is the step,
+              // with signing in again as its last action.
+              <OrganizationApprovalHelp
+                approval={adminApproval}
+                serviceName={item.name}
+                retryDisabled={busy}
+                onRetry={flow.signIn}
+              />
             ) : !connected ? (
               <>
+                {approvalNote ? (
+                  <OrganizationApprovalHelp approval={approvalNote} serviceName={item.name} />
+                ) : null}
                 {!item.connectionRef && !personalOnly && !reconnecting ? (
                   <fieldset disabled={busy}>
                     <legend>

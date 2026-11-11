@@ -626,10 +626,29 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
       throw new DataverseError("Dataverse could not be reached. Try again.");
     }
     if (response.status === 401) {
-      await response.body?.cancel().catch(() => undefined);
       // Dataverse authenticates before it changes anything, so a 401 applied
       // nothing and one retry with a refreshed sign-in is safe for writes too.
-      if (!refreshed) return await this.request(toolName, request, signal, true);
+      if (!refreshed) {
+        await response.body?.cancel().catch(() => undefined);
+        return await this.request(toolName, request, signal, true);
+      }
+      // A fresh sign-in Dataverse still refuses with its own error is about
+      // the person (no access to this environment), not the sign-in; asking
+      // them to reconnect would only loop.
+      const refusal = await readResponseJsonBounded<unknown>(
+        response,
+        RESPONSE_MAX_BYTES,
+        "Dataverse response",
+        { signal: deadline },
+      ).catch(() => null);
+      const refusalMessage =
+        refusal && typeof refusal === "object" && !Array.isArray(refusal)
+          ? (refusal as { error?: { message?: unknown } }).error?.message
+          : undefined;
+      if (typeof refusalMessage === "string" && refusalMessage.trim())
+        throw new DataverseError(
+          `${dataverseErrorMessage(response, refusal as Record<string, unknown>)} The signed-in Microsoft account may not have access to this Dynamics environment; its Dynamics admin can add the user.`,
+        );
       await this.reportAuthNeeded(
         {
           status: "auth_needed",

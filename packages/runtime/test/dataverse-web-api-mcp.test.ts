@@ -353,6 +353,21 @@ describe("Dataverse Web API bridge", () => {
     expect(authNeeded).toHaveLength(1);
   });
 
+  test("a fresh sign-in Dataverse still refuses with its own error explains access, not reconnect", async () => {
+    const { instance, calls, authNeeded } = server(() =>
+      Response.json(
+        { error: { code: "0x80072560", message: "The user is not a member of the organization." } },
+        { status: 401 },
+      ),
+    );
+    const result = await instance.callToolResult("dataverse_query", { path: "accounts" });
+    expect(calls).toHaveLength(2);
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("not a member of the organization");
+    expect(text(result)).toContain("may not have access to this Dynamics environment");
+    expect(authNeeded).toHaveLength(0);
+  });
+
   test("a missing connection surfaces the connect card", async () => {
     const { instance, authNeeded } = server(
       () => Response.json({}),

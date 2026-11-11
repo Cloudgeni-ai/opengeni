@@ -3,7 +3,11 @@ import { CapabilityCatalogItem } from "@opengeni/contracts";
 import { AppContext } from "@opengeni/react/app/app-context";
 import { SessionCapabilityCard } from "@opengeni/react/app/components/capabilities/session-capability-card";
 import { ThisComputerCard } from "@opengeni/react/this-computer";
-import { SessionIntegrationCapabilityCard, type AuthNeededItem } from "@opengeni/react";
+import {
+  McpConnectionCard,
+  SessionIntegrationCapabilityCard,
+  type AuthNeededItem,
+} from "@opengeni/react";
 
 import { KitSection, StateCell, StatesGrid } from "../kit";
 import { ChatFrame, lead, showPart } from "./chat-shared";
@@ -45,11 +49,12 @@ const DYNAMICS = CapabilityCatalogItem.parse({
   kind: "mcp",
   source: "manual",
   name: "Microsoft Dynamics",
-  description: "Microsoft Dynamics environment contoso.crm4.dynamics.com.",
+  // As createCatalogItem stores an environment the person connects.
   providerDomain: "contoso.crm4.dynamics.com",
   endpointUrl: "https://contoso.crm4.dynamics.com/api/mcp",
   mcpUrl: "https://contoso.crm4.dynamics.com/api/mcp",
   authKind: "oauth2",
+  metadata: { defaultConnectionOwnership: "personal", mcpServerId: "microsoft-dynamics-kit" },
   runtime: { available: true, mcpServerId: "microsoft-dynamics-kit" },
 });
 const added: CapabilityCatalogItem[] = [];
@@ -460,6 +465,138 @@ function SignInCard({ entry }: { entry: (typeof SIGN_IN)[number] }) {
   );
 }
 
+/* ----------------------------------------------------------------------------
+   Microsoft Dynamics journey: the environment's connect dialog against a fake
+   Connect backend, in each state the person can meet. The approval states
+   recover the attempt Microsoft ended, as the card does after a reload.
+   -------------------------------------------------------------------------- */
+
+const DYNAMICS_APPROVAL_URL =
+  "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=2b52f1a0-3c32-4103-a554-e6e3f3d483ff&scope=https%3A%2F%2Fcontoso.crm4.dynamics.com%2Fuser_impersonation&redirect_uri=https%3A%2F%2Fapp.opengeni.ai%2Fv1%2Fintegrations%2Foauth%2Fcallback&state=microsoft_admin_consent";
+
+type DynamicsState = "ready" | "required" | "possible" | "connected";
+
+function dynamicsClient(state: DynamicsState) {
+  const ended =
+    state === "required"
+      ? {
+          state: "failed",
+          error: {
+            code: "admin_consent_required",
+            message: `Your organization requires a Microsoft administrator to approve Opengeni first. Send your administrator this approval link: ${DYNAMICS_APPROVAL_URL} After they approve, connect again.`,
+            retryable: true,
+          },
+        }
+      : {
+          state: "cancelled",
+          error: {
+            code: "provider_denied",
+            message: `Microsoft did not grant access. If Microsoft said your organization needs an administrator to approve this app, send your administrator this approval link: ${DYNAMICS_APPROVAL_URL} After they approve, connect again.`,
+            retryable: true,
+          },
+        };
+  const attempt = {
+    id: `attempt-dynamics-${state}`,
+    workspaceId: "ws-kit",
+    providerId: "mcp-oauth",
+    ownership: "personal",
+    revision: 3,
+    nextAction: { type: "none" },
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "credential",
+    expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    ...ended,
+  };
+  const connected = state === "connected";
+  const transport = new Proxy(
+    { recover: async () => structuredClone(attempt), get: async () => structuredClone(attempt) },
+    {
+      get(target, key) {
+        if (typeof key !== "string") return undefined;
+        if (key in target) return (target as Record<string, unknown>)[key];
+        return async () => [];
+      },
+    },
+  );
+  const account = {
+    id: "connection-dynamics-kit",
+    subjectId: "kit-person",
+    kind: "oauth2",
+    status: "active",
+    providerDomain: "contoso.crm4.dynamics.com",
+    metadata: { mcpUrl: DYNAMICS.mcpUrl, accountLabel: "maya@contoso.com" },
+  };
+  return new Proxy(
+    {
+      connectTransport: () => transport,
+      listCapabilities: async () => ({
+        items: [
+          connected
+            ? {
+                ...DYNAMICS,
+                enabled: true,
+                connectionRef: {
+                  providerDomain: "contoso.crm4.dynamics.com",
+                  kind: "oauth2",
+                  subjectScope: "subject",
+                },
+              }
+            : { ...DYNAMICS, enabled: false },
+        ],
+      }),
+      listOwnConnectionAccounts: async () => (connected ? [account] : []),
+      listConnections: async () => (connected ? [account] : []),
+      getSession: async () => ({
+        id: "session-kit",
+        tools: [],
+        toolPolicy: { mode: "explicit" },
+      }),
+    } as Record<string, unknown>,
+    {
+      get(target, key) {
+        if (typeof key !== "string") return undefined;
+        if (key in target) return target[key];
+        if (key === "then") return undefined;
+        return async () => emptyList();
+      },
+    },
+  );
+}
+
+function DynamicsDialog({ state }: { state: DynamicsState }) {
+  const [fake] = useState(() => {
+    const key = `opengeni:session-connect:ws-kit:session-kit:${DYNAMICS.id}`;
+    try {
+      if (state === "required" || state === "possible")
+        sessionStorage.setItem(key, `attempt-dynamics-${state}`);
+      else sessionStorage.removeItem(key);
+    } catch {
+      /* Preview only. */
+    }
+    return dynamicsClient(state);
+  });
+  return (
+    <McpConnectionCard
+      client={fake as never}
+      workspaceId="ws-kit"
+      sessionId="session-kit"
+      capabilityId={DYNAMICS.id}
+      name="Microsoft Dynamics"
+      rationale="Connect your Dynamics 365 environment so I can look up your open opportunities."
+      returnUrl="https://app.example.com/chat"
+      dialogOnly
+    />
+  );
+}
+
+const DYNAMICS_STATES: { label: string; state: DynamicsState }[] = [
+  { label: "Sign in (after Connect)", state: "ready" },
+  { label: "Back from Microsoft's \u201cNeed admin approval\u201d page", state: "possible" },
+  { label: "Microsoft says only an admin can approve", state: "required" },
+  { label: "Connected", state: "connected" },
+];
+
 export default function ChatConnectSection() {
   const oauth = CARDS.oauth!;
   const dynamics = CARDS.dynamics!;
@@ -478,6 +615,35 @@ export default function ChatConnectSection() {
                 <Card item={dynamics.item} />
               </ChatFrame>
             </StateCell>
+          </StatesGrid>
+        ) : null}
+        {showPart("dynamics") ? (
+          <StatesGrid title="Microsoft Dynamics" columns={1}>
+            <StateCell label="The agent asks for the environment" align="stretch">
+              <ChatFrame
+                events={lead(
+                  "Connect Microsoft Dynamics.",
+                  "What's the web address you open Dynamics at? Open Dynamics and copy it from your browser's address bar; it looks like https://contoso.crm4.dynamics.com.",
+                )}
+                status="idle"
+                height={260}
+              />
+            </StateCell>
+            <StateCell label={dynamics.label} align="stretch">
+              <ChatFrame events={lead(...dynamics.ask)} status="idle" height={420}>
+                <Card item={dynamics.item} />
+              </ChatFrame>
+            </StateCell>
+            {/* One dialog at a time: add &dialog=ready|possible|required|connected. */}
+            {DYNAMICS_STATES.filter(
+              (entry) =>
+                typeof window !== "undefined" &&
+                new URLSearchParams(window.location.search).get("dialog") === entry.state,
+            ).map((entry) => (
+              <StateCell key={entry.state} label={entry.label} align="stretch">
+                <DynamicsDialog state={entry.state} />
+              </StateCell>
+            ))}
           </StatesGrid>
         ) : null}
         {showPart("signin") ? (

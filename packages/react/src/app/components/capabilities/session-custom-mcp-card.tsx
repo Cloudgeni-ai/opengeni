@@ -8,6 +8,7 @@ import { Input } from "../../../ui/input";
 import { Label } from "../../../ui/label";
 import { SessionCapabilityFrame } from "../../../components/session-capability-frame";
 import { PreparedMcpSetupCard } from "./prepared-mcp-setup-card";
+import { bundledServiceLogo } from "../../../connection-service-presentation";
 import {
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
   microsoftDynamicsProductForMcpUrl,
@@ -98,11 +99,15 @@ function MicrosoftDynamicsCard({ item, workspaceId, onRegistered }: Props) {
             endpointUrl,
           })
         ).id;
+      // The chat reads the new entry from the workspace catalog: reload it
+      // first, so the card that follows is the environment's sign-in.
+      await context.refreshWorkspaceMcpServers(workspaceId).catch(() => undefined);
       onRegistered(id, false, true);
     } catch (failure) {
       // A lost response may still have added it: look again before retrying.
       const found = await existing().catch(() => undefined);
       if (found) {
+        await context.refreshWorkspaceMcpServers(workspaceId).catch(() => undefined);
         onRegistered(found.id, false, true);
         return;
       }
@@ -116,23 +121,23 @@ function MicrosoftDynamicsCard({ item, workspaceId, onRegistered }: Props) {
     <SessionCapabilityFrame
       name={MICROSOFT_DYNAMICS_CONNECTION_NAME}
       subtitle={host}
-      logo={null}
+      logo={bundledServiceLogo({ id: "", mcpUrl: endpointUrl })}
       typeLabel=""
       description={error ?? proposal.rationale}
       clampDescription={!error}
       skill={false}
       expanded={false}
       complete={false}
-      actionLabel="Connect"
+      actionLabel={`Connect ${MICROSOFT_DYNAMICS_CONNECTION_NAME}`}
       opensDialog={false}
-      note="You'll sign in with your Microsoft work account."
+      note="Sign in with your Microsoft work account."
       onOpen={() => void connect()}
       onClose={() => undefined}
       busy={busy}
       actionUnavailable={
         canManage
           ? undefined
-          : "Someone who can add connections to this workspace needs to connect it first."
+          : `Ask a workspace admin to add ${MICROSOFT_DYNAMICS_CONNECTION_NAME}. Then you can sign in here.`
       }
     />
   );

@@ -306,10 +306,35 @@ import {
   MICROSOFT_DYNAMICS_CAPABILITY_ID,
   MICROSOFT_DYNAMICS_CONNECTION_NAME,
   microsoftDynamicsMcpEndpoint,
+  type MicrosoftDynamicsProduct,
 } from "@opengeni/contracts/microsoft-dynamics";
 
 /** What the agent needs before it can show a Microsoft Dynamics Connect card. */
-const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. Ask the person for the web address they open Dynamics at (for example https://contoso.crm4.dynamics.com; any page of it works), then call custom_mcp_setup_request with name "${MICROSOFT_DYNAMICS_CONNECTION_NAME}" and that address as endpointUrl. Its card signs them in with their Microsoft work account.`;
+const MICROSOFT_DYNAMICS_SETUP_DETAIL = `Each connection is one Dynamics environment. Ask the person for the web address they open Dynamics at (for example https://contoso.crm4.dynamics.com; any page of it works). If they don't know it, they can open Dynamics and copy the address bar, or find Environment URL in the Power Platform admin center. Then call custom_mcp_setup_request with name "${MICROSOFT_DYNAMICS_CONNECTION_NAME}" and that address as endpointUrl. Its card signs them in with their Microsoft work account.`;
+
+/**
+ * Why a Microsoft Dynamics address can't be connected here, in words the
+ * agent can pass on, or null when it can. `product` is null when the address
+ * is not a recognized Dynamics environment.
+ */
+function microsoftDynamicsSetupProblem(
+  settings: ApiRouteDeps["settings"],
+  product: MicrosoftDynamicsProduct | null,
+): string | null {
+  if (
+    !settings.microsoftDynamicsClientId?.trim() ||
+    !settings.microsoftDynamicsClientSecret?.trim()
+  )
+    return "Microsoft Dynamics isn't available on this Opengeni deployment yet. Nothing was posted; tell the person.";
+  if (!product)
+    return "That isn't a Dynamics environment address. Ask the person to open Dynamics and copy the address bar (it looks like https://contoso.crm4.dynamics.com), or find Environment URL in the Power Platform admin center, then call custom_mcp_setup_request again. Business Central isn't supported yet.";
+  if (
+    product === "finance_operations" &&
+    settings.microsoftDynamicsFinanceOperationsEnabled !== true
+  )
+    return "Dynamics 365 Finance and Operations isn't available here yet; only Dynamics 365 Sales and other Dataverse environments can be connected. Nothing was posted; tell the person.";
+  return null;
+}
 import {
   changeWorkspaceFileVisibility,
   codemodeCallExecutionMachine,
@@ -8110,10 +8135,22 @@ function registerCapabilityDiscoveryTools(
     },
     async ({ name, endpointUrl: suppliedEndpointUrl, rationale, ownership, mcpSetup }) => {
       await authorize();
-      // A Dynamics environment address becomes its connection endpoint.
-      const endpointUrl = mcpSetup
-        ? suppliedEndpointUrl
-        : canonicalMcpEndpointUrl(suppliedEndpointUrl);
+      // A Dynamics environment address becomes its connection endpoint and
+      // signs in through Microsoft; say plainly when this deployment can't.
+      const dynamics = microsoftDynamicsMcpEndpoint(suppliedEndpointUrl);
+      if (
+        dynamics ||
+        name.trim().toLowerCase() === MICROSOFT_DYNAMICS_CONNECTION_NAME.toLowerCase()
+      ) {
+        const unavailable = microsoftDynamicsSetupProblem(deps.settings, dynamics?.product ?? null);
+        if (unavailable) return json({ status: "unavailable", message: unavailable });
+      }
+      const endpointUrl = dynamics
+        ? dynamics.mcpUrl
+        : mcpSetup
+          ? suppliedEndpointUrl
+          : canonicalMcpEndpointUrl(suppliedEndpointUrl);
+      if (dynamics) mcpSetup = undefined;
       const payload = ToolAuthNeededPayload.parse({
         serverId: "opengeni",
         toolName: "custom_mcp_setup_request",

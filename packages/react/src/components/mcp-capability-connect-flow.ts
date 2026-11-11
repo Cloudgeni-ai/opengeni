@@ -33,6 +33,9 @@ import {
   sessionCapabilityTools,
 } from "../session-capability-policy";
 import { workspaceHasNobodyToShareWith } from "../workspace-sharing";
+import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
+import { organizationAppApproval, type OrganizationAppApproval } from "@opengeni/contracts/connect";
+import { organizationApprovalFor, type OrganizationApproval } from "../connect-setup-model";
 
 const GOOGLE_DRIVE_MCP_URL = "https://drivemcp.googleapis.com/mcp/v1";
 /** Google's connectors only ever connect a person's own account; the API refuses sharing. */
@@ -68,7 +71,9 @@ export function personalReconnectTarget(
 
 function personalOnlyService(item: Pick<CapabilityCatalogItem, "mcpUrl" | "endpointUrl"> | null) {
   const url = item?.mcpUrl ?? item?.endpointUrl;
-  return !!url && PERSONAL_ONLY_MCP_URLS.has(url);
+  // A Dynamics connection acts as the person, with their own Dynamics
+  // security roles: sharing it would let others act as them.
+  return !!url && (PERSONAL_ONLY_MCP_URLS.has(url) || !!microsoftDynamicsProductForMcpUrl(url));
 }
 
 /** The OAuth MCP connect card, as a renderer draws it. */
@@ -98,6 +103,12 @@ export type McpCapabilityConnect = {
   setOwnership: (ownership: ConnectOwnership) => void;
   /** The sign-in button says "Try signing in again" rather than continuing. */
   retrySignIn: boolean;
+  /**
+   * The person's organization must, or may have to, approve the app first:
+   * the provider said so, declined (how leaving its "needs admin approval"
+   * page comes back), or the person gave up on its sign-in page.
+   */
+  approval: OrganizationApproval | null;
   open: () => void;
   signIn: () => void;
   addHere: () => void;
@@ -172,6 +183,9 @@ export function useMcpCapabilityConnect({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [retryFresh, setRetryFresh] = useState(false);
+  // A sign-in the person left (closed its window or stopped waiting): its
+  // page may have said an administrator has to approve the app.
+  const [leftSignIn, setLeftSignIn] = useState<OrganizationAppApproval | null>(null);
   const [ownership, setOwnership] = useState<ConnectOwnership>(
     personalOnly ? "personal" : "workspace",
   );
@@ -312,13 +326,19 @@ export function useMcpCapabilityConnect({
     setError(null);
     setNotice(null);
     setRetryFresh(false);
+    setLeftSignIn(null);
     try {
       await action(active);
     } catch (failure) {
       if (active()) {
-        if (failure instanceof ConnectPopupClosedError)
+        if (failure instanceof ConnectPopupClosedError) {
           setNotice(t("connectSetup.signInWindowClosed"));
-        else
+          const left = controller.getSnapshot().attempt;
+          if (left?.nextAction.type === "authorize")
+            setLeftSignIn(
+              organizationAppApproval(left.nextAction.url, left.nextAction.organizationApprovalUrl),
+            );
+        } else
           setError(
             // This flow's own steps explain themselves; a server or network
             // failure gets the card's plain line instead of its raw text.
@@ -670,6 +690,15 @@ export function useMcpCapabilityConnect({
     else void begin();
   }
 
+  const attempt = view.attempt;
+  const approval = busy
+    ? null
+    : attempt && (attempt.error || !leftSignIn)
+      ? organizationApprovalFor(attempt)
+      : leftSignIn
+        ? { reason: "unfinished" as const, url: leftSignIn.approvalUrl, appId: leftSignIn.appId }
+        : null;
+
   return {
     controller,
     view,
@@ -689,6 +718,7 @@ export function useMcpCapabilityConnect({
     /** The sign-in button says "Try signing in again" rather than continuing. */
     retrySignIn:
       retryFresh || (Boolean(error || notice) && view.attempt?.nextAction.type === "authorize"),
+    approval,
     open: () => void open(),
     signIn,
     addHere: () => void addHere(),
