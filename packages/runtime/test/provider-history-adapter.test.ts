@@ -557,26 +557,40 @@ describe("projectHistoryForProvider", () => {
 });
 
 /**
- * Result call IDs that Chat Completions would reject: the SDK's Chat converter
- * puts consecutive function calls into one assistant `tool_calls` message and
- * ends that message at any other item, and each tool message must answer a
- * call of the assistant message directly before its run of tool messages.
+ * What Chat Completions would reject: the SDK's Chat converter puts
+ * consecutive function calls into one assistant `tool_calls` message and ends
+ * that message at any other item. Each tool message must answer a call of the
+ * assistant message directly before its run of tool messages (else `orphan`),
+ * and every call must be answered in that run (else `unanswered`).
  */
-function chatOrphanedResults(items: Item[]): string[] {
-  const orphaned: string[] = [];
+function chatToolProblems(items: Item[]): string[] {
+  const problems: string[] = [];
   let group: Set<string> | null = null;
+  let unanswered = new Set<string>();
   let previous: unknown;
+  const endRun = () => {
+    for (const id of unanswered) problems.push(`unanswered ${id}`);
+    unanswered = new Set();
+  };
   for (const item of items) {
     const id = String(item.callId ?? (item.providerData as Item | undefined)?.callId);
     if (item.type === "function_call") {
-      if (previous !== "function_call" || !group) group = new Set();
+      if (previous !== "function_call" || !group) {
+        endRun();
+        group = new Set();
+      }
       group.add(id);
+      unanswered.add(id);
     } else if (item.type === "function_call_result") {
-      if (!group?.has(id)) orphaned.push(id);
-    } else group = null;
+      if (!group?.has(id) || !unanswered.delete(id)) problems.push(`orphan ${id}`);
+    } else {
+      endRun();
+      group = null;
+    }
     previous = item.type;
   }
-  return orphaned;
+  endRun();
+  return problems;
 }
 
 describe("historical facts never separate a tool call from its result", () => {
@@ -598,6 +612,7 @@ describe("historical facts never separate a tool call from its result", () => {
     item.role === "assistant" &&
     typeof item.content === "string" &&
     item.content.startsWith("[Opengeni historical");
+  const shape = (items: Item[]) => items.map((item) => (isFact(item) ? "fact" : String(item.type)));
   // One Responses step: three function calls and a client-executed tool
   // search in one parallel batch, the search's output first.
   const parallelStep = (): Item[] => [
@@ -617,7 +632,7 @@ describe("historical facts never separate a tool call from its result", () => {
     const items = parallelStep();
     const before = structuredClone(items);
     const projected = projectHistoryForProvider(items, "chat");
-    expect(chatOrphanedResults(projected)).toEqual([]);
+    expect(chatToolProblems(projected)).toEqual([]);
     expect(projected.slice(0, 4)).toEqual(items.slice(0, 4));
     expect(projected.slice(4, 7)).toEqual([R("a"), R("b"), R("c")]);
     expect(projected.slice(7, 9).every(isFact)).toBe(true);
@@ -656,8 +671,8 @@ describe("historical facts never separate a tool call from its result", () => {
       { type: "apply_patch_call_output", callId: "p", status: "completed" },
     ];
     const projected = projectHistoryForProvider(items, "chat");
-    expect(chatOrphanedResults(projected)).toEqual([]);
-    expect(projected.map((item) => (isFact(item) ? "fact" : String(item.type)))).toEqual([
+    expect(chatToolProblems(projected)).toEqual([]);
+    expect(shape(projected)).toEqual([
       "message",
       "function_call",
       "function_call",
@@ -695,8 +710,7 @@ describe("historical facts never separate a tool call from its result", () => {
     const steps: Item[][] = [
       parallelStep(),
       [user("again"), C("e"), searchCall("f"), searchOutput("f"), R("e")],
-      [user("lost"), C("lost"), searchCall("g")],
-      [user("after a lost call"), C("h"), R("h")],
+      [user("more"), C("g"), C("h"), R("g"), searchOutput("i"), R("h")],
     ];
     let history: Item[] = [];
     let previous: string[] = [];
@@ -705,9 +719,56 @@ describe("historical facts never separate a tool call from its result", () => {
       const projected = projectHistoryForProvider(history, "chat");
       const sent = projected.map((item) => JSON.stringify(item));
       expect(sent.slice(0, previous.length)).toEqual(previous);
-      expect(chatOrphanedResults(projected)).toEqual([]);
+      expect(chatToolProblems(projected)).toEqual([]);
       previous = sent;
     }
+  });
+
+  test("a stored call that never got a result holds nothing back past the next person message", () => {
+    // History repair normally drops such a call before projection.
+    const items = [user("lost"), C("lost"), searchCall("g"), user("next"), C("h"), R("h")];
+    const projected = projectHistoryForProvider(items, "chat");
+    expect(shape(projected)).toEqual([
+      "message",
+      "function_call",
+      "fact",
+      "message",
+      "function_call",
+      "function_call_result",
+    ]);
+    expect(chatToolProblems(projected)).toEqual(["unanswered lost"]);
+  });
+
+  test("Chat moves runtime notices inside a step after its results; a person's message ends it", () => {
+    const notice: Item = { type: "message", role: "developer", content: "runtime notice" };
+    const items = [user("go"), C("a"), C("b"), R("a"), notice, searchOutput("d"), R("b")];
+    const projected = projectHistoryForProvider(items, "chat");
+    expect(chatToolProblems(projected)).toEqual([]);
+    expect(projected.slice(0, 5)).toEqual([user("go"), C("a"), C("b"), R("a"), R("b")]);
+    expect(projected[5]).toMatchObject({ role: "system", content: "runtime notice" });
+    expect(isFact(projected[6]!)).toBe(true);
+
+    // A tool disclosure that Chat receives as a machine-origin user message.
+    const disclosure = toolDisclosureItem([OBSERVE], { viaToolInvoke: true });
+    const hoisted = projectHistoryForProvider(
+      [user("go"), C("a"), C("b"), R("a"), disclosure, searchOutput("d"), R("b")],
+      "chat",
+      { hoistsSystemMessages: true },
+    );
+    expect(chatToolProblems(hoisted)).toEqual([]);
+    expect(hoisted.map((item) => item.role ?? item.type)).toEqual([
+      "user",
+      "function_call",
+      "function_call",
+      "function_call_result",
+      "function_call_result",
+      "user",
+      "assistant",
+    ]);
+
+    // A person's message is never moved; the calls it interrupts stay open.
+    const steered = [user("go"), C("a"), C("b"), R("a"), user("stop"), R("b")];
+    expect(projectHistoryForProvider(steered, "chat")).toBe(steered);
   });
 
   test("Claude keeps facts inside the reply and moves them only out of a step's results", () => {
@@ -719,15 +780,28 @@ describe("historical facts never separate a tool call from its result", () => {
       anthropicMessages(projected as ModelRequest["input"]).map((message) => message.role),
     ).toEqual(["user", "assistant", "user", "assistant"]);
 
-    // An output that came between the step's results moves after them.
+    // An output and a system notice that came between the step's results move
+    // back before them, so the next reply still starts with its own thinking.
+    const thinking: Item = {
+      type: "reasoning",
+      content: [],
+      providerData: {
+        anthropic: { block: { type: "thinking", thinking: "next", signature: "sig" } },
+      },
+    };
+    const notice: Item = { type: "message", role: "system", content: "runtime notice" };
     const between = [
       user("go"),
       C("a"),
       C("b"),
       searchCall("d"),
       R("a"),
+      notice,
       searchOutput("d"),
       R("b"),
+      thinking,
+      C("e"),
+      R("e"),
     ];
     const moved = projectHistoryForProvider(between, "anthropic-messages");
     expect(moved.map((item) => item.type)).toEqual([
@@ -735,20 +809,27 @@ describe("historical facts never separate a tool call from its result", () => {
       "function_call",
       "function_call",
       "tool_search_call",
-      "function_call_result",
-      "function_call_result",
+      "message",
       "tool_search_output",
+      "function_call_result",
+      "function_call_result",
+      "reasoning",
+      "function_call",
+      "function_call_result",
     ]);
     const claude = anthropicMessages(moved as ModelRequest["input"]);
     expect(claude.map((message) => message.role)).toEqual([
       "user",
       "assistant",
       "user",
+      "system",
       "assistant",
+      "user",
     ]);
     expect(claude[2]!.content.map((block: any) => block.type)).toEqual([
       "tool_result",
       "tool_result",
     ]);
+    expect(claude[4]!.content[0]).toMatchObject({ type: "thinking" });
   });
 });
