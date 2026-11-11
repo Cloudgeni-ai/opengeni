@@ -11,7 +11,6 @@ import {
   createOrganizationInvitation,
   evaluateSignupNetworkAccounts,
   freePlanCreditEligible,
-  rawRows,
   getSpendableCreditBalance,
   listSignupNetworkHolds,
   nestedPostgresSqlState,
@@ -22,6 +21,7 @@ import {
   type SignupNetworkSource,
   type SignupNetworkVelocityChanges,
 } from "../src";
+import { rawRows } from "../src/database";
 import {
   ensureCanonicalHumanIdentityForAuthUser,
   getCanonicalHumanExactLoginBindingForAuthUser,
