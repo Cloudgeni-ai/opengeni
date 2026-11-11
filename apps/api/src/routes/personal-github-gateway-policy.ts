@@ -9,9 +9,11 @@ import {
   type Database,
   type ResolvedConnectorActionPolicy,
 } from "@opengeni/db";
-import { githubSensitiveRequestDecision } from "@opengeni/core";
+import {
+  GITHUB_SENSITIVE_REQUEST_POLICY_NAME,
+  githubSensitiveRequestDecision,
+} from "@opengeni/core";
 import type { PersonalGitHubGitBrokerClaims } from "@opengeni/github";
-import { GITHUB_SENSITIVE_REQUEST_POLICY_NAME } from "@opengeni/runtime/github-rest-mcp";
 import { createHash } from "node:crypto";
 import {
   ZERO_OID,
@@ -90,9 +92,14 @@ export type GatewayPolicyLookup = (input: {
 }) => Promise<"allow" | "ask" | "block">;
 
 /**
- * The strictest decision of a write's policy actions, and the action that
- * gave it. A sensitive write adds the Settings and deletions action, which
- * asks without an explicit choice for it.
+ * The strictest decision of a write's policy actions, and the policy action
+ * an approval records. A sensitive write adds the Settings and deletions
+ * action, which asks without an explicit choice for it. A write whose
+ * repositories the gateway can't confirm (`unscoped`) asks even when every
+ * policy allows it; Block still wins.
+ *
+ * The recorded action doesn't depend on the decisions, so an approved request
+ * still matches its approval when it runs again after a policy change.
  */
 export async function strictestGatewayPolicy(
   action: GatewayDecisionInput["action"],
@@ -103,18 +110,18 @@ export async function strictestGatewayPolicy(
     ...(action.sensitive ? [GITHUB_SENSITIVE_REQUEST_POLICY_NAME] : []),
   ];
   let strictest: "allow" | "ask" | "block" = "allow";
-  let decidingTool = tools[0]!;
   for (const toolName of tools) {
     const decision =
       toolName === GITHUB_SENSITIVE_REQUEST_POLICY_NAME
         ? await lookup({ toolName, defaultDecision: "ask", decide: githubSensitiveRequestDecision })
         : await lookup({ toolName, defaultDecision: "allow" });
-    if (DECISION_RANK[decision] > DECISION_RANK[strictest]) {
-      strictest = decision;
-      decidingTool = toolName;
-    }
+    if (DECISION_RANK[decision] > DECISION_RANK[strictest]) strictest = decision;
   }
-  return { decision: strictest, toolName: decidingTool };
+  if (action.unscoped && strictest === "allow") strictest = "ask";
+  return {
+    decision: strictest,
+    toolName: action.sensitive ? GITHUB_SENSITIVE_REQUEST_POLICY_NAME : tools[0]!,
+  };
 }
 
 /**

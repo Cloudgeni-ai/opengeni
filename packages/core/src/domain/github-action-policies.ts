@@ -3,7 +3,7 @@ import type {
   GitHubActionPolicyActorState,
   GitHubActionPolicyDecision,
   GitHubActionPolicyEffectiveDecision,
-  GitHubActionPolicyGroup,
+  PersonalGitHubActionPolicyGroup,
 } from "@opengeni/contracts";
 import {
   listConnectorActionPolicies,
@@ -19,6 +19,8 @@ import {
   GITHUB_SENSITIVE_REQUEST_POLICY_NAME,
 } from "@opengeni/runtime/github-rest-mcp";
 
+export { GITHUB_SENSITIVE_REQUEST_POLICY_NAME };
+
 export const GITHUB_ACTION_POLICY_GROUP_TOOL_NAMES = {
   routine: GITHUB_REST_WRITE_TOOL_NAMES.filter(
     (toolName) => toolName !== "pull_request_review_submit" && toolName !== "pull_request_merge",
@@ -26,7 +28,7 @@ export const GITHUB_ACTION_POLICY_GROUP_TOOL_NAMES = {
   review: ["pull_request_review_submit"],
   merge: ["pull_request_merge"],
   sensitive: [GITHUB_SENSITIVE_REQUEST_POLICY_NAME],
-} as const satisfies Record<GitHubActionPolicyGroup, readonly string[]>;
+} as const satisfies Record<PersonalGitHubActionPolicyGroup, readonly string[]>;
 
 const groupedToolNames = Object.values(GITHUB_ACTION_POLICY_GROUP_TOOL_NAMES).flat();
 if (
@@ -39,7 +41,7 @@ if (
 /** Settings and deletions exists only for Your GitHub: the workspace app has no gateway. */
 export function githubActionPolicyGroupApplies(
   actor: GitHubActionPolicyActor,
-  group: GitHubActionPolicyGroup,
+  group: PersonalGitHubActionPolicyGroup,
 ): boolean {
   return group !== "sensitive" || actor.kind === "personal";
 }
@@ -101,7 +103,7 @@ function effectiveToolDecision(
 function effectiveGroupDecision(
   policies: readonly ConnectorActionPolicySnapshotEntry[],
   actor: GitHubActionPolicyActorBinding,
-  group: GitHubActionPolicyGroup,
+  group: PersonalGitHubActionPolicyGroup,
 ): GitHubActionPolicyEffectiveDecision {
   const decisions = new Set(
     GITHUB_ACTION_POLICY_GROUP_TOOL_NAMES[group].map((toolName) =>
@@ -158,7 +160,7 @@ export async function updateGitHubActionPolicyGroup(
     workspaceId: string;
     subjectId: string;
     actor: GitHubActionPolicyActorBinding;
-    group: GitHubActionPolicyGroup;
+    group: PersonalGitHubActionPolicyGroup;
     decision: GitHubActionPolicyDecision;
   },
 ): Promise<GitHubActionPolicyActorState> {

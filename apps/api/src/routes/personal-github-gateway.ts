@@ -26,6 +26,7 @@ import {
   classifyGitHubRestRequest,
   GRAPHQL_NODE_IDS_MAX,
   refRewriteFollowsPolicy,
+  unscopedWrite,
   type GitHubGatewayAction,
   type GitHubGatewayRepositoryRef,
 } from "../integrations/github-gateway-requests";
@@ -635,13 +636,6 @@ function defaultBranchRefName(value: unknown): string | null {
   return typeof name === "string" && name.length > 0 ? name : null;
 }
 
-/** Sensitive whatever the refs it changes. */
-function markSensitive(action: GitHubGatewayAction): GitHubGatewayAction {
-  if (action.kind !== "write") return action;
-  const { refRewrites: _ignored, ...rest } = action;
-  return { ...rest, sensitive: true };
-}
-
 /**
  * A force update or deletion is sensitive unless every ref it touches is a
  * branch other than its repository's default branch, in a repository the
@@ -786,14 +780,14 @@ export async function handlePersonalGitHubGatewayRequest(
       }
       const nodeRepositories = await resolveNodeRepositories(services, authority, graphql.nodeIds);
       if (nodeRepositories === null) {
-        action = markSensitive(action);
+        action = unscopedWrite(action);
       } else {
         writeTargets += nodeRepositories.length;
         for (const repository of nodeRepositories) checks.push({ repository, access: "write" });
       }
       // A repository mutation whose repository the gateway could not find
       // (an input shape it does not know) asks.
-      if (writeTargets === 0 && !graphql.accountLevel) action = markSensitive(action);
+      if (writeTargets === 0 && !graphql.accountLevel) action = unscopedWrite(action);
     }
   } else {
     const rest = classifyGitHubRestRequest(method, pathname, parsedBody ?? null);

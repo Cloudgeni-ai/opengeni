@@ -123,6 +123,22 @@ describe("GitHub gateway GraphQL classification", () => {
     expect(result.mutations).toEqual(["createPullRequest"]);
   });
 
+  test("requests the gateway can't read or scope are unscoped", () => {
+    expect(classifyGitHubGraphqlRequest({ query: "mutation {" }).action).toMatchObject({
+      sensitive: true,
+      unscoped: true,
+      title: "Unrecognised GitHub GraphQL request",
+    });
+    const tooMany = Array.from(
+      { length: 51 },
+      (_, index) =>
+        `m${index}: createCommitOnBranch(input: {branch: {repositoryNameWithOwner: "acme/r${index}", branchName: "f"}}) { clientMutationId }`,
+    );
+    expect(
+      classifyGitHubGraphqlRequest({ query: `mutation { ${tooMany.join(" ")} }` }).action,
+    ).toMatchObject({ sensitive: true, unscoped: true });
+  });
+
   test("merges follow the merge policy; deletions and unknown mutations always ask", () => {
     expect(
       classifyGitHubGraphqlRequest({
@@ -272,6 +288,9 @@ describe("GitHub gateway force updates and deletions of refs", () => {
     expect(refRewriteFollowsPolicy("refs/heads/", "main")).toBe(false);
     expect(refRewriteFollowsPolicy("refs/heads/a/../main", "main")).toBe(false);
     expect(refRewriteFollowsPolicy("refs/heads/.hidden", "main")).toBe(false);
+    // A `%` the gateway couldn't decode might name another ref on GitHub.
+    expect(refRewriteFollowsPolicy("refs/heads/%6Dain%", "main")).toBe(false);
+    expect(refRewriteFollowsPolicy("refs/heads/x%00", "main")).toBe(false);
   });
 
   test("REST deletions and force updates name their ref and still ask until confirmed", () => {
@@ -329,6 +348,28 @@ describe("GitHub gateway force updates and deletions of refs", () => {
       sensitive: true,
       title: "Delete branch or tag",
     });
+  });
+
+  test("account and organization writes are unscoped: the repository allowlist can't cover them", () => {
+    expect(rest("PUT", "/orgs/acme/actions/secrets/TOKEN", { encrypted_value: "x" })).toEqual({
+      action: {
+        kind: "write",
+        tools: [],
+        sensitive: true,
+        unscoped: true,
+        title: "Change GitHub account data",
+      },
+      repository: null,
+    });
+    expect(rest("DELETE", "/user/keys/1").action).toMatchObject({
+      sensitive: true,
+      unscoped: true,
+      title: "Delete on GitHub",
+    });
+    // A repository write is checked against the allowlist instead.
+    expect(
+      rest("PUT", "/repos/acme/widgets/environments/staging/secrets/X", {}).action,
+    ).not.toHaveProperty("unscoped");
   });
 
   test("environment secrets and other settings are sensitive, with no policy action of their own", () => {

@@ -49,6 +49,12 @@ export type GitHubGatewayAction =
        * they chose otherwise); the strictest decision wins.
        */
       sensitive: boolean;
+      /**
+       * The gateway can't confirm which repositories this changes, so the
+       * repository allowlist can't apply: it asks whatever the policy says
+       * (Block still wins). Always also sensitive.
+       */
+      unscoped?: true;
       title: string;
       /**
        * Force updates and deletions of these refs. They set `sensitive`; the
@@ -77,6 +83,13 @@ function sensitive(title: string, tools: readonly string[] = []): GitHubGatewayA
   return write(tools, title, true);
 }
 
+/** A write the repository allowlist can't cover: see `unscoped`. */
+export function unscopedWrite(action: GitHubGatewayAction): GitHubGatewayAction {
+  if (action.kind !== "write") return action;
+  const { refRewrites: _ignored, ...rest } = action;
+  return { ...rest, sensitive: true, unscoped: true };
+}
+
 /**
  * Force-updating or deleting `ref` follows the person's policy when it is a
  * branch other than the repository's default branch. Tags, other refs, the
@@ -89,7 +102,8 @@ export function refRewriteFollowsPolicy(ref: string, defaultBranch: string | nul
     branch.length > 0 &&
     branch.split("/").every((part) => part.length > 0 && !part.startsWith(".")) &&
     !branch.includes("..") &&
-    !/[\u0000-\u0020\u007f~^:?*[\\]/u.test(branch) &&
+    // `%`: a name the gateway couldn't decode could reach GitHub as another ref.
+    !/[\u0000-\u0020\u007f~^:?*[\\%]/u.test(branch) &&
     branch.toLowerCase() !== defaultBranch.toLowerCase()
   );
 }
@@ -382,9 +396,10 @@ export function classifyGitHubRestRequest(
   if (segments[0] === "notifications") {
     return { action: routine("Change notifications"), repository: null };
   }
+  // Account and organization writes name no repository the allowlist covers.
   return {
-    action: sensitive(
-      normalizedMethod === "DELETE" ? "Delete on GitHub" : "Change GitHub account data",
+    action: unscopedWrite(
+      sensitive(normalizedMethod === "DELETE" ? "Delete on GitHub" : "Change GitHub account data"),
     ),
     repository: null,
   };
@@ -930,7 +945,7 @@ export type GitHubGraphqlClassification = {
  */
 export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassification {
   const unknown = (title: string): GitHubGraphqlClassification => ({
-    action: sensitive(title),
+    action: unscopedWrite(sensitive(title)),
     repositories: [],
     mutationRepositories: [],
     accountLevel: false,
@@ -1122,18 +1137,18 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
     if (mapped.sensitive) anySensitive = true;
     titles.push(mapped.title);
   }
-  // Too many named repositories to check: ask.
-  if (named.size > GRAPHQL_NODE_IDS_MAX) anySensitive = true;
   const action = write(
     [...tools],
     [...new Set(titles)].join(", ").slice(0, 200),
     anySensitive || unknownRewrite || rewriteTargets.length > 0,
   );
+  const confirmed =
+    rewriteTargets.length > 0 && !unknownRewrite && action.kind === "write"
+      ? { ...action, refRewrites: { targets: rewriteTargets, sensitiveOtherwise: anySensitive } }
+      : action;
   return {
-    action:
-      rewriteTargets.length > 0 && !unknownRewrite && action.kind === "write"
-        ? { ...action, refRewrites: { targets: rewriteTargets, sensitiveOtherwise: anySensitive } }
-        : action,
+    // Too many named repositories to check: ask.
+    action: named.size > GRAPHQL_NODE_IDS_MAX ? unscopedWrite(action) : confirmed,
     repositories,
     mutationRepositories: [...named.values()],
     accountLevel: mutations.every((name) => ACCOUNT_LEVEL_MUTATIONS.has(name)),

@@ -21661,17 +21661,22 @@ export type GitHubActionPolicyEffectiveDecision = z.infer<
   typeof GitHubActionPolicyEffectiveDecision
 >;
 
-/**
- * `sensitive` (Settings and deletions) covers what Your GitHub does through
- * `gh` and Git that is hard to undo: repository settings, secrets, variables
- * and environments, deletions, tag and default-branch rewrites, and requests
- * the gateway does not recognise. It applies only to personal actors and
- * defaults to Ask.
- */
 export const GitHubActionPolicyGroup = /* @__PURE__ */ defineSchema(() =>
-  z.enum(["routine", "review", "merge", "sensitive"]),
+  z.enum(["routine", "review", "merge"]),
 );
 export type GitHubActionPolicyGroup = z.infer<typeof GitHubActionPolicyGroup>;
+
+/**
+ * The groups of a personal actor. `sensitive` (Settings and deletions) covers
+ * what Your GitHub does through `gh` and Git that is hard to undo: repository
+ * settings, secrets, variables and environments, deletions, tag and
+ * default-branch rewrites, and requests the gateway does not recognise. It
+ * defaults to Ask.
+ */
+export const PersonalGitHubActionPolicyGroup = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["routine", "review", "merge", "sensitive"]),
+);
+export type PersonalGitHubActionPolicyGroup = z.infer<typeof PersonalGitHubActionPolicyGroup>;
 
 export const GitHubActionPolicyActor = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
@@ -21730,7 +21735,8 @@ export type GitHubActionPoliciesResponse = z.infer<typeof GitHubActionPoliciesRe
 export const UpdateGitHubActionPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     actor: GitHubActionPolicyActor,
-    group: GitHubActionPolicyGroup,
+    /** `sensitive` applies only to personal actors. */
+    group: PersonalGitHubActionPolicyGroup,
     decision: GitHubActionPolicyDecision,
   }),
 );

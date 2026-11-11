@@ -1343,6 +1343,7 @@ export type {
   GitHubActionPolicyDecision,
   GitHubActionPolicyEffectiveDecision,
   GitHubActionPolicyGroup,
+  PersonalGitHubActionPolicyGroup,
   GitHubAppInfo,
   GitHubAppSetupMode,
   GitHubBindingStatus,

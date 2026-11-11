@@ -19097,14 +19097,6 @@
         "$": "enum=[\"\\\"allow\\\"\",\"\\\"ask\\\"\",\"\\\"block\\\"\",\"\\\"mixed\\\"\"]"
       }
     },
-    "GitHubActionPolicyGroup": {
-      "io": [
-        "input"
-      ],
-      "shape": {
-        "$": "enum=[\"\\\"merge\\\"\",\"\\\"review\\\"\",\"\\\"routine\\\"\",\"\\\"sensitive\\\"\"]"
-      }
-    },
     "GitHubAppInfo": {
       "io": [
         "output"
@@ -24950,6 +24942,14 @@
         "$.owner.name": "string!",
         "$.owner.subjectId": "string!",
         "$.prefix": "string!"
+      }
+    },
+    "PersonalGitHubActionPolicyGroup": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"merge\\\"\",\"\\\"review\\\"\",\"\\\"routine\\\"\",\"\\\"sensitive\\\"\"]"
       }
     },
     "PersonalGitHubConnectionStatusResponse": {
@@ -32340,7 +32340,7 @@
         "$": "object",
         "$.actor": "ref(GitHubActionPolicyActor)!",
         "$.decision": "ref(AtlassianReadPolicy)!",
-        "$.group": "ref(GitHubActionPolicyGroup)!"
+        "$.group": "ref(PersonalGitHubActionPolicyGroup)!"
       }
     },
     "UpdateMachineAgentResponse": {
@@ -36875,6 +36875,7 @@
       "PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING": "value",
       "PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION": "value",
       "PersonalApiKey": "type",
+      "PersonalGitHubActionPolicyGroup": "type",
       "PersonalGitHubConnectionMetadata": "type",
       "PersonalGitHubConnectionStatusResponse": "type",
       "PersonalGitHubDisconnectRequest": "type",

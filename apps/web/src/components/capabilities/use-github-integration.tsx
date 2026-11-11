@@ -9,7 +9,7 @@ import type {
   GitHubActionPoliciesResponse,
   GitHubActionPolicyActorState,
   GitHubActionPolicyDecision,
-  GitHubActionPolicyGroup,
+  PersonalGitHubActionPolicyGroup,
 } from "@opengeni/sdk";
 
 import type {
@@ -51,7 +51,7 @@ export const GITHUB_APP_SECTION = {
 export const GITHUB_LOGO_URL = "/capability-logos/github.svg";
 
 const GITHUB_ACTION_POLICY_GROUPS: Array<{
-  id: GitHubActionPolicyGroup;
+  id: PersonalGitHubActionPolicyGroup;
   label: string;
   description: string;
 }> = [
@@ -75,7 +75,7 @@ const GITHUB_ACTION_POLICY_GROUPS: Array<{
     id: "sensitive",
     label: "Settings and deletions",
     description:
-      "Repository settings, secrets, environments, deletions, and changes to tags or the default branch made with gh or Git.",
+      "Repository settings, secrets, environments, deletions, and other hard-to-undo or unrecognised changes made with gh or Git.",
   },
 ];
 
@@ -225,7 +225,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
 
   async function updateActionPolicy(
     actor: GitHubActionPolicyActorState,
-    group: GitHubActionPolicyGroup,
+    group: PersonalGitHubActionPolicyGroup,
     decision: GitHubActionPolicyDecision,
   ) {
     // The endpoint returns the whole actor. Permit one save at a time so older
@@ -536,12 +536,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     : actionPolicies?.enabled
       ? actionPolicies.actors.flatMap((actor) =>
           GITHUB_ACTION_POLICY_GROUPS.flatMap((group) => {
-            const value =
-              actor.kind === "personal"
-                ? actor.groups[group.id]
-                : group.id === "sensitive"
-                  ? undefined
-                  : actor.groups[group.id];
+            // Settings and deletions is present for Your GitHub only.
+            const value = actor.groups[group.id];
             if (value === undefined) return [];
             const optionId = githubActionPolicyOptionId(actor, group.id);
             return [
@@ -748,7 +744,7 @@ function githubEmptyRepositoriesMessage(installations: GitHubAppInfo["installati
 
 function githubActionPolicyOptionId(
   actor: GitHubActionPolicyActorState,
-  group: GitHubActionPolicyGroup,
+  group: PersonalGitHubActionPolicyGroup,
 ): string {
   const actorId =
     actor.kind === "workspace_app"

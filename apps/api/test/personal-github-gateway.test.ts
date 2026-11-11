@@ -8,9 +8,11 @@ import {
   type PersonalGitHubGatewayAuthority,
   type PersonalGitHubGatewayServices,
 } from "../src/routes/personal-github-gateway";
-import type {
-  GatewayDecision,
-  GatewayDecisionInput,
+import {
+  strictestGatewayPolicy,
+  type GatewayDecision,
+  type GatewayDecisionInput,
+  type GatewayPolicyLookup,
 } from "../src/routes/personal-github-gateway-policy";
 
 const claims = { connectionId: "connection-1" } as unknown as PersonalGitHubGitBrokerClaims;
@@ -342,7 +344,27 @@ describe("personal GitHub gateway", () => {
         query: 'mutation { addStar(input: {starrableId: "R_kgDOWidgets"}) { clientMutationId } }',
       }),
     });
-    expect(decisions[0]!.action).toMatchObject({ sensitive: true });
+    expect(decisions[0]!.action).toMatchObject({ sensitive: true, unscoped: true });
+  });
+
+  test("a mutation on a node without a repository asks even when every policy allows it", async () => {
+    const { send, decisions } = harness({
+      respond: (_url, init) =>
+        bodyText(init).includes("OpengeniGatewayNodes")
+          ? Response.json({ data: { nodes: [{ __typename: "BranchProtectionRule" }] } })
+          : Response.json({ data: {} }),
+    });
+    await send("/graphql", {
+      method: "POST",
+      body: JSON.stringify({
+        query:
+          'mutation { deleteBranchProtectionRule(input: {branchProtectionRuleId: "BPR_other"}) { clientMutationId } }',
+      }),
+    });
+    const action = decisions[0]!.action;
+    expect(action).toMatchObject({ sensitive: true, unscoped: true });
+    const allowEverything: GatewayPolicyLookup = async () => "allow";
+    expect((await strictestGatewayPolicy(action, allowEverything)).decision).toBe("ask");
   });
 });
 

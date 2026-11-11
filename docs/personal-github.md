@@ -410,8 +410,10 @@ user`, `gh repo list <org>`) and search pass as the person. GraphQL
 `repository(...)` reads are checked like REST ones, also under
 `organization`, `user`, `repositoryOwner` and `viewer`; `node(id:)` reads are
 not. GraphQL mutations are checked against the repositories their input names
-(node IDs, `repositoryNameWithOwner`, github.com URLs); when those can't be
-found, the request asks. The gateway replaces
+(node IDs, `repositoryNameWithOwner`, github.com URLs). When those can't be
+found, or a write names no repository (account and organization writes, or a
+request the gateway can't read), the allowlist can't apply, so the request
+always asks, whatever the person's policies say (Block still wins). The gateway replaces
 `Authorization` with the person's token, never forwards the bearer, does not
 follow redirects, forwards only the request headers GitHub needs, buffers
 API bodies up to 32 MiB (larger ones get 413), streams uploads and responses,
@@ -450,9 +452,10 @@ tools use, so one setting covers both:
   branch protection, transfer, archive and visibility, approving deployments
   or fork workflow runs. So do REST writes and GraphQL mutations the gateway
   doesn't recognise. The policy asks until the person chooses otherwise; a
-  connection-wide Allow for every GitHub tool does not cover it (a
-  connection-wide Block does). Only Your GitHub has it: the workspace app has
-  no `gh` gateway.
+  connection-wide Allow for every GitHub tool does not cover it, and a
+  connection-wide Block covers it only while Settings and deletions has no
+  choice of its own. Only Your GitHub has it: the workspace app has no `gh`
+  gateway.
 - Block always wins. Unattended sessions refuse instead of asking.
 
 A request that needs approval is not sent. `gh` prints `Waiting for approval:

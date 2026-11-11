@@ -3,7 +3,7 @@ import {
   resolveConnectorActionPolicy,
   type ConnectorActionPolicySnapshotEntry,
 } from "@opengeni/db";
-import { GITHUB_SENSITIVE_REQUEST_POLICY_NAME } from "@opengeni/runtime/github-rest-mcp";
+import { GITHUB_SENSITIVE_REQUEST_POLICY_NAME } from "@opengeni/core";
 import {
   PERSONAL_GITHUB_POLICY_SERVER_ID,
   strictestGatewayPolicy,
@@ -84,7 +84,8 @@ describe("Settings and deletions in the gateway's decision", () => {
     ];
     expect(await strictestGatewayPolicy(tagDeletion, lookupIn(askFirst))).toEqual({
       decision: "ask",
-      toolName: "ref_create",
+      // Not the deciding action: an approval must still match after a policy change.
+      toolName: GITHUB_SENSITIVE_REQUEST_POLICY_NAME,
     });
     const blocked = [
       policy("ref_create", "allow"),
@@ -117,5 +118,38 @@ describe("Settings and deletions in the gateway's decision", () => {
         )
       ).decision,
     ).toBe("allow");
+  });
+
+  test("a write whose repositories can't be confirmed asks even when everything is allowed", async () => {
+    const unscoped: GatewayDecisionInput["action"] = {
+      ...environmentSecret,
+      unscoped: true,
+      title: "Unrecognised GitHub GraphQL request",
+    };
+    const allowAll = [policy("*", "allow"), policy(GITHUB_SENSITIVE_REQUEST_POLICY_NAME, "allow")];
+    expect(await strictestGatewayPolicy(unscoped, lookupIn(allowAll))).toEqual({
+      decision: "ask",
+      toolName: GITHUB_SENSITIVE_REQUEST_POLICY_NAME,
+    });
+    expect(
+      (
+        await strictestGatewayPolicy(
+          unscoped,
+          lookupIn([policy(GITHUB_SENSITIVE_REQUEST_POLICY_NAME, "block")]),
+        )
+      ).decision,
+    ).toBe("block");
+  });
+
+  test("records the same action whatever the decisions", async () => {
+    const routine: GatewayDecisionInput["action"] = {
+      kind: "write",
+      tools: ["issue_create", "ref_create"],
+      sensitive: false,
+      title: "Create issue",
+    };
+    expect(
+      (await strictestGatewayPolicy(routine, lookupIn([policy("ref_create", "ask")]))).toolName,
+    ).toBe("issue_create");
   });
 });
