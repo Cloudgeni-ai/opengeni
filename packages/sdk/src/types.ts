@@ -4882,6 +4882,25 @@ export type ClaudeUsageRequestStatus = {
   source?: "response_headers" | "provider" | undefined;
 };
 export type { SubscriptionUsagePool, SubscriptionUsagePoolsResponse } from "@opengeni/contracts";
+import type {
+  ClaudeExtraUsage,
+  ClaudeLimitResets,
+  ClaudeServiceState,
+  ClaudeSurfaceUsageWindow,
+  ClaudeUsageLimit,
+  ClaudeWallReset,
+} from "@opengeni/contracts";
+export type {
+  ClaudeExtraUsage,
+  ClaudeLimitResetClaim,
+  ClaudeLimitResetClaimResult,
+  ClaudeLimitResetGrant,
+  ClaudeLimitResets,
+  ClaudeServiceState,
+  ClaudeSurfaceUsageWindow,
+  ClaudeUsageLimit,
+  ClaudeWallReset,
+} from "@opengeni/contracts";
 
 export type ClaudeSubscriptionUsage = {
   connected: boolean;
@@ -4893,6 +4912,18 @@ export type ClaudeSubscriptionUsage = {
   refreshCheckedAt: string | null;
   requestStatus?: ClaudeUsageRequestStatus | null | undefined;
   requestRestrictions?: ClaudeUsageRequestStatus[] | undefined;
+  /** Limit reset grants Claude offers the account (absent: not read yet). */
+  limitResets?: ClaudeLimitResets | null | undefined;
+  /** The at-the-limit reset program, read only while the account is at a limit. */
+  wallReset?: ClaudeWallReset | null | undefined;
+  /** Claude's limit list, with each scoped limit's share of the weekly limit. */
+  limits?: ClaudeUsageLimit[] | undefined;
+  /** Paid extra usage; null when Claude reports none. */
+  extraUsage?: ClaudeExtraUsage | null | undefined;
+  /** Weekly limits of other Claude surfaces, for information only. */
+  surfaceWindows?: ClaudeSurfaceUsageWindow[] | undefined;
+  /** Service state from the newest model response (fallback, overage, slow tier, grace). */
+  serviceState?: ClaudeServiceState | null | undefined;
 };
 
 export type OrganizationModelProviderConnection = {

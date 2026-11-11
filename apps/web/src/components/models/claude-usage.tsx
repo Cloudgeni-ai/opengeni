@@ -177,6 +177,9 @@ export function useClaudeUsage({
   };
 }
 
+/** The weekly Fable limit's two names. */
+const FABLE_WINDOW_IDS = new Set<string>(["seven_day_fable", "seven_day_overage_included"]);
+
 /**
  * The windows Claude reported for this account, labelled the shared way.
  * Only reported windows, and on Ultra (sold without a 5-hour limit) the 5h
@@ -207,11 +210,28 @@ export function claudeUsageListWindows(
   );
 }
 
-/** Claude's per-window statuses in the shared shape. */
+/**
+ * Claude's per-window statuses in the shared shape. The weekly Fable limit
+ * has two names (the usage endpoint's `seven_day_fable`, a model response's
+ * `seven_day_overage_included`): the newer reading of the two is shown once.
+ */
 export function claudeWindowInputs(
   windows: readonly ClaudeUsageWindow[],
 ): SubscriptionWindowInput[] {
-  return windows.map((window) => ({
+  const fable = windows
+    .filter((window) => FABLE_WINDOW_IDS.has(window.id))
+    .reduce<ClaudeUsageWindow | null>(
+      (newest, window) => (!newest || window.observedAt > newest.observedAt ? window : newest),
+      null,
+    );
+  const shown = windows.flatMap((window) =>
+    !FABLE_WINDOW_IDS.has(window.id)
+      ? [window]
+      : window === fable
+        ? [{ ...window, id: "seven_day_fable" as const }]
+        : [],
+  );
+  return shown.map((window) => ({
     id: window.id,
     usedPercent: window.usedPercent,
     resetsAt: window.resetsAt,
