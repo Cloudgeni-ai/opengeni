@@ -8198,6 +8198,10 @@ export type CreateCapabilityCatalogItemInput = {
   endpointUrl?: string | null;
   installUrl?: string | null;
   authModel?: string | null;
+  /** A known service's sign-in, when the address identifies it (e.g. Microsoft Dynamics). */
+  authKind?: "oauth2" | null;
+  mcpUrl?: string | null;
+  providerDomain?: string | null;
   metadata?: Record<string, unknown>;
   /**
    * Insert only: an existing workspace row with this id is returned unchanged
@@ -10976,11 +10980,11 @@ export async function upsertCapabilityCatalogItem(
         endpointUrl: input.endpointUrl ?? null,
         installUrl: input.installUrl ?? null,
         authModel: input.authModel ?? null,
-        providerDomain: null,
+        providerDomain: input.providerDomain ?? null,
         surfaceType: null,
         transport: null,
-        mcpUrl: null,
-        authKind: null,
+        mcpUrl: input.mcpUrl ?? null,
+        authKind: input.authKind ?? null,
         credentialFacts: [],
         tier: null,
         provenance: null,

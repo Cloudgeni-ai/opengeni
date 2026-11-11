@@ -11,7 +11,13 @@ export type CaseKind =
   /** The agent reports which account it is connected to. */
   | "identity"
   /** An ambiguous request that needs the right one of several integrations. */
-  | "routing";
+  | "routing"
+  /**
+   * A request that names no system any of several integrations could serve.
+   * Runs with nothing connected; the agent should ask which one the person
+   * uses (or offer the options) instead of picking one.
+   */
+  | "clarify";
 
 /** Failure categories reported in the results matrix. */
 export type FailureCategory =
@@ -56,7 +62,8 @@ export type IntegrationId =
   | "outlook_calendar"
   | "clickup"
   | "onedrive"
-  | "sharepoint";
+  | "sharepoint"
+  | "microsoft_dynamics";
 
 export type IntegrationSpec = {
   id: IntegrationId;

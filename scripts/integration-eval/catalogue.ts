@@ -17,7 +17,9 @@ import type { EvalCase, IntegrationId } from "./types";
  *
  * Kinds: not_connected (run in a workspace with no connections; expects the
  * connect card), read, write (expects an approval; the harness approves and
- * verifies), identity, routing. `core` rows form the model × effort grid.
+ * verifies), identity, routing, clarify (a request naming no system; run with
+ * nothing connected, expects the agent to ask which system or offer several).
+ * `core` rows form the model × effort grid.
  */
 
 const i = (pattern: string) => new RegExp(pattern, "i");
@@ -667,6 +669,55 @@ export const CASES: readonly EvalCase[] = [
     prompt: "On our SharePoint, which vendor is listed in the Kestrel vendor contacts list?",
     expectAnswer: [i("marlow")],
     servedBy: ["onedrive"],
+  },
+
+  // ── Microsoft Dynamics (Dataverse / Dynamics 365 Sales) ───────────────────
+  ...notConnected("microsoft_dynamics", [
+    {
+      slug: "opportunities",
+      prompt: "What open opportunities do we have in Dynamics 365?",
+      forbid: [i("bluefin logistics renewal")],
+    },
+  ]),
+  {
+    id: "microsoft_dynamics.read.opportunity",
+    integration: "microsoft_dynamics",
+    kind: "read",
+    prompt:
+      "In Dynamics 365, what's the estimated revenue of the Bluefin Logistics renewal opportunity, and who is the account's primary contact?",
+    expectAnswer: [i("18,?000|18k"), i("ada")],
+  },
+  {
+    id: "microsoft_dynamics.read.account-city",
+    integration: "microsoft_dynamics",
+    kind: "read",
+    prompt: "Which city is Copperleaf Dental's account in, according to Dynamics 365?",
+    expectAnswer: [i("bergen")],
+  },
+  {
+    id: "microsoft_dynamics.write.account",
+    integration: "microsoft_dynamics",
+    kind: "write",
+    prompt: 'Create an account in Dynamics 365 named "Halcyon eval {RUN}".',
+    verify: "receipts_only",
+  },
+  {
+    id: "microsoft_dynamics.write.denied",
+    integration: "microsoft_dynamics",
+    kind: "write",
+    decision: "reject",
+    prompt: 'Create an account in Dynamics 365 named "Halcyon eval {RUN} denied".',
+    verify: "receipts_only",
+  },
+  {
+    id: "microsoft_dynamics.clarify.unnamed-crm",
+    integration: "microsoft_dynamics",
+    kind: "clarify",
+    prompt: "Which of my opportunities close this month?",
+    expectAnswer: [
+      i("which (crm|system|tool|app|platform)|what (crm|system|tool)|hubspot|salesforce|pipedrive"),
+    ],
+    note: "No system is named: the agent must not pick Dynamics (or any one CRM) by itself.",
   },
 
   // ── Choosing between integrations ─────────────────────────────────────────

@@ -696,6 +696,12 @@ const SettingsSchema = z.object({
   // Google Calendar shares the Gmail OAuth client; enable once its consent screen lists the Calendar scopes.
   googleCalendarEnabled: EnvBoolean.default(false),
   microsoftTeamsToolsEnabled: EnvBoolean.default(false),
+  // Pre-registered multi-tenant Microsoft Entra app for Microsoft Dynamics MCP
+  // servers (Dataverse/Dynamics 365 Sales; Finance & Operations behind its own
+  // flag). Microsoft offers no dynamic client registration for these servers.
+  microsoftDynamicsClientId: z.string().optional(),
+  microsoftDynamicsClientSecret: z.string().optional(),
+  microsoftDynamicsFinanceOperationsEnabled: EnvBoolean.optional(),
   microsoftTeamsAllowedWorkspaceIds: z.preprocess(
     (value) =>
       typeof value === "string"
@@ -6059,6 +6065,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     googleDriveMcpEnabled: optional("OPENGENI_GOOGLE_DRIVE_MCP_ENABLED"),
     googleCalendarEnabled: optional("OPENGENI_GOOGLE_CALENDAR_ENABLED"),
     microsoftTeamsToolsEnabled: optional("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED"),
+    microsoftDynamicsClientId: optional("OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID"),
+    microsoftDynamicsClientSecret: optional("OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET"),
+    microsoftDynamicsFinanceOperationsEnabled: optional(
+      "OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED",
+    ),
     microsoftTeamsAllowedWorkspaceIds: optional("OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS"),
     teamsBotEnabled: optional("OPENGENI_TEAMS_BOT_ENABLED"),
     teamsBotAllowedTenantIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS"),
@@ -12756,6 +12767,14 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
         "OPENGENI_INTEGRATIONS_STATE_SECRET is required when OPENGENI_INTEGRATIONS_ENABLED=true outside local/test",
       );
     }
+  }
+  if (
+    Boolean(settings.microsoftDynamicsClientId?.trim()) !==
+    Boolean(settings.microsoftDynamicsClientSecret?.trim())
+  ) {
+    throw new Error(
+      "OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID and OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET must be configured together",
+    );
   }
   if (Boolean(settings.slackClientId) !== Boolean(settings.slackClientSecret)) {
     throw new Error(

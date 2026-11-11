@@ -8,6 +8,8 @@ import gmailLogo from "./assets/gmail.ico";
 import googleCalendarLogo from "./assets/google-calendar.svg";
 import googleDriveLogo from "./assets/google-drive.svg";
 import outlookLogo from "./assets/outlook.ico";
+import dynamicsLogo from "./assets/dynamics-365.svg";
+import { microsoftDynamicsProductForMcpUrl } from "@opengeni/contracts/microsoft-dynamics";
 
 /** Passive service identity only. Never selects an account or grants tool access. */
 const services: Record<string, { name: string; logo: string; mcpUrl?: string }> = {
@@ -88,6 +90,8 @@ function registryCapabilityIdPrefix(mcpUrl: string): string {
 export function bundledServiceLogo(
   item: Pick<CapabilityCatalogItem, "id"> & Partial<Pick<CapabilityCatalogItem, "mcpUrl">>,
 ): string | null {
+  // Every Dynamics environment has its own host.
+  if (item.mcpUrl && microsoftDynamicsProductForMcpUrl(item.mcpUrl)) return dynamicsLogo;
   for (const service of Object.values(services)) {
     if (!service.mcpUrl) continue;
     if (
