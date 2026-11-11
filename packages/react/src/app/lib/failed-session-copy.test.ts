@@ -2,11 +2,21 @@ import { expect, test } from "bun:test";
 import { machineAccessNeededMessage } from "@opengeni/contracts/machine-access";
 import {
   chatComposerPlaceholder,
+  detailBeyondHeadline,
   failedSessionCopy,
   failureFallbackReason,
 } from "./failed-session-copy";
 
 const summary = { failedAt: null, consecutiveRecoveryCount: null };
+test("Details never repeats the headline it sits under", () => {
+  expect(detailBeyondHeadline("Machine access needed.", " Machine  access needed.\n")).toBe(
+    undefined,
+  );
+  expect(detailBeyondHeadline("This model isn’t available.", "HTTP 404 model_not_found")).toBe(
+    "HTTP 404 model_not_found",
+  );
+  expect(detailBeyondHeadline("Anything", undefined)).toBe(undefined);
+});
 test("only explicit model availability evidence suggests another model", () => {
   for (const reason of [
     "The model is not supported with this account.",
@@ -17,6 +27,7 @@ test("only explicit model availability evidence suggests another model", () => {
     expect(failedSessionCopy({ ...summary, reason }, false, false, true)).toEqual({
       reason: "This model isn’t available. Choose another below.",
       unavailableModel: true,
+      detail: reason,
     });
   }
   for (const reason of [
@@ -364,7 +375,11 @@ test("authored worker copy and Opengeni credit failures keep their own wording",
       recordedDetail: `${codex}\n429 You exceeded your current quota`,
       failureCode: "codex_usage_limit_reached",
     }),
-  ).toEqual({ reason: codex, unavailableModel: false });
+  ).toEqual({
+    reason: codex,
+    unavailableModel: false,
+    detail: `${codex}\n429 You exceeded your current quota`,
+  });
   const credits = "Insufficient Opengeni credits for this turn";
   expect(failedSessionCopy({ ...summary, reason: credits, recordedDetail: credits })).toEqual({
     reason: credits,
@@ -479,7 +494,7 @@ test("preclaim presentation preserves existing authored database and structural 
       failureCode: "db_failure",
       recordedDetail: "synthetic diagnostic",
     }),
-  ).toEqual({ reason: database, unavailableModel: false });
+  ).toEqual({ reason: database, unavailableModel: false, detail: "synthetic diagnostic" });
   expect(
     failedSessionCopy({
       ...summary,
@@ -629,7 +644,7 @@ test("a turn refused for machine access says so, never a database error", () => 
   const recorded = "Machine access needed: this chat isn’t allowed to use “Studio Mac” right now.";
   expect(
     failedSessionCopy({ ...summary, reason: recorded, failureCode: "machine_access_required" }),
-  ).toEqual({ reason: recorded, unavailableModel: false, machineAccess: true });
+  ).toEqual({ reason: recorded, unavailableModel: false, machineAccess: true, detail: recorded });
   expect(
     failedSessionCopy({ ...summary, reason: null, failureCode: "machine_access_required" }),
   ).toEqual({

@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserActionCommand, BrowserObservation, BrowserTarget } from "@opengeni/contracts";
 import {
+  InteractionDefiniteDriverError,
   InteractionControllerError,
   InteractionOutcomeUnknownDriverError,
 } from "@opengeni/interaction";
@@ -561,6 +562,85 @@ describe("BrowserControlServer", () => {
       {
         beforeDriverOperation: (name) => {
           calls.push(name);
+        },
+      },
+    );
+  });
+
+  test("a website's failure reason goes beside the receipt or error, only to callers that ask", async () => {
+    let failure: Error | null = null;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = (
+          await json(
+            await request(server, "/v1/browser-sessions", {
+              method: "POST",
+              token: adminToken,
+              body: createBody(reference),
+            }),
+          )
+        ).data.observation as BrowserObservation;
+        const actions = `/v1/browser-sessions/${reference.browserSessionId}/actions`;
+        const unknown = new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "browser action failed after it sent input (timeout: its server did not respond)",
+        );
+        unknown.failureReason = "destination_not_answered";
+        failure = unknown;
+        const act = async (query: string) =>
+          await json(
+            await request(server, `${actions}${query}`, {
+              method: "POST",
+              token: controlToken,
+              body: { ...command(created), operationId: randomUUID() },
+            }),
+          );
+        // Receipts are parsed strictly: a caller that did not ask never gets it.
+        const plain = await act("?receiptTargets=1&receiptNotes=2");
+        expect(plain.data.state).toBe("outcome_unknown");
+        expect(plain.data).not.toHaveProperty("failureReason");
+        const asked = await act("?receiptFailureReason=1");
+        expect(asked.data.state).toBe("outcome_unknown");
+        expect(asked.data.failureReason).toBe("destination_not_answered");
+        // The error callers and models are shown is the same either way.
+        expect(asked.data.error).toEqual(plain.data.error);
+
+        // A refused tab open carries it beside the error, never inside it.
+        const notAnswered = new InteractionDefiniteDriverError(
+          "timeout",
+          "browser could not load the requested URL: its server did not respond within 20 seconds",
+          true,
+        );
+        notAnswered.failureReason = "destination_not_answered";
+        failure = notAnswered;
+        const refused = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets`,
+          { method: "POST", token: controlToken, body: { url: "https://down.example.test/" } },
+        );
+        expect(refused.status).toBe(504);
+        const body = (await refused.json()) as { error: unknown; failureReason?: unknown };
+        expect(body.error).toEqual({
+          code: "timeout",
+          message: notAnswered.message,
+          retryable: false,
+        });
+        expect(body.failureReason).toBe("destination_not_answered");
+
+        // A typed failure without a reason adds nothing.
+        failure = new InteractionDefiniteDriverError("resource_unavailable", "proxy failed", true);
+        const ours = (await (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/targets`, {
+            method: "POST",
+            token: controlToken,
+            body: { url: "https://example.test/" },
+          })
+        ).json()) as Record<string, unknown>;
+        expect(ours).not.toHaveProperty("failureReason");
+      },
+      {
+        beforeDriverOperation: (name) => {
+          if ((name === "dispatch" || name === "openTarget") && failure) throw failure;
         },
       },
     );

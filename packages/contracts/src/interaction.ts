@@ -2726,6 +2726,47 @@ export const InteractionError = /* @__PURE__ */ defineSchema(() =>
 );
 export type InteractionError = z.infer<typeof InteractionError>;
 
+/**
+ * Why a website the browser was asked to load failed, when the failure is on
+ * the website's side rather than the browser's or its controller's: its server
+ * did not answer, its name did not resolve, the connection to it failed, its
+ * TLS certificate or handshake failed, or it answered with a response the
+ * browser could not use.
+ */
+export const INTERACTION_DESTINATION_FAILURE_REASONS = [
+  "destination_not_answered",
+  "destination_name_not_resolved",
+  "destination_connection_failed",
+  "destination_tls_failed",
+  "destination_response_invalid",
+] as const;
+export type InteractionDestinationFailureReason =
+  (typeof INTERACTION_DESTINATION_FAILURE_REASONS)[number];
+
+/**
+ * Operator-only classification of why an interaction failed or ended with an
+ * unknown outcome, for metrics and logs. A controller sends it beside, never
+ * inside, the interaction error, so callers and models are shown the same
+ * error with or without it. It is either a destination-side reason, or the
+ * specific error code behind a generic `outcome_unknown` (an action that
+ * failed with `timeout` after it had already sent input, say).
+ */
+export type InteractionFailureReason =
+  | InteractionError["code"]
+  | InteractionDestinationFailureReason;
+
+const INTERACTION_FAILURE_REASONS: ReadonlySet<string> = new Set<string>([
+  ...InteractionError.shape.code.options,
+  ...INTERACTION_DESTINATION_FAILURE_REASONS,
+]);
+
+/** Validates a failure reason received from another process. */
+export function parseInteractionFailureReason(value: unknown): InteractionFailureReason | null {
+  return typeof value === "string" && INTERACTION_FAILURE_REASONS.has(value)
+    ? (value as InteractionFailureReason)
+    : null;
+}
+
 /** Upper bound on distinct secret references one interaction command may carry. */
 export const INTERACTION_MAX_SECRET_VALUES = 64;
 
@@ -3454,6 +3495,14 @@ export const BROWSER_ACTION_RECEIPT_NOTES_VERSION = 2;
  * Controllers that predate the field ignore the parameter, and callers that
  * do not send it never receive the field. */
 export const BROWSER_OBSERVATION_NOTICES_PARAMETER = "notices";
+
+/** Query parameter (value "1") by which a caller asks a browser controller to
+ * include the operator-only `failureReason` (see InteractionFailureReason) in
+ * an action receipt it returns. It is not part of BrowserActionReceipt: the
+ * caller removes it before parsing the receipt and never passes it on.
+ * Controllers that predate it ignore the parameter, and callers that do not
+ * send it never receive the field. */
+export const BROWSER_ACTION_RECEIPT_FAILURE_REASON_PARAMETER = "receiptFailureReason";
 
 export const BrowserActionReceipt = /* @__PURE__ */ defineSchema(() =>
   z

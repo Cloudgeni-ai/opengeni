@@ -337,3 +337,59 @@ describe("opening a conversation in the native session screen", () => {
     expect(repaired.getSessionLineage).toBe(1);
   });
 });
+
+describe("uploads from the native session screen", () => {
+  test("a private chat's attachments are Only me, as in the web app; a shared chat's are the workspace's", async () => {
+    for (const [tenancy, expected] of [
+      [{ visibility: "private" }, "personal"],
+      [{ visibility: "workspace" }, "workspace"],
+    ] as const) {
+      const backend = server(8);
+      const scopes: unknown[] = [];
+      Object.assign(backend.client, {
+        getSession: async () => ({ ...SESSION, tenancy }),
+        uploadFile: async (_workspaceId: string, input: { scope?: unknown }) => {
+          scopes.push(input.scope);
+          return new Promise(() => undefined);
+        },
+      });
+      let addFiles: ((files: never[]) => Promise<void>) | null = null;
+      let loaded = false;
+      function Probe() {
+        const controller = useOpenGeniNativeSession({
+          client: backend.client,
+          workspaceId: WORKSPACE_ID,
+          sessionId: SESSION_ID,
+        });
+        addFiles = controller.attachments.addFiles as never;
+        loaded = controller.session.session !== null && controller.session.session !== undefined;
+        return null;
+      }
+      const mounted = mountWithRealScheduling(
+        <OpenGeniReactNativeProvider adapters={nativeAdapters}>
+          <Probe />
+        </OpenGeniReactNativeProvider>,
+      );
+      try {
+        await settle();
+        expect(loaded).toBe(true);
+        // The upload never settles here: only its request matters.
+        void addFiles!([
+          {
+            id: "doc-1",
+            uri: "file:///doc-1.txt",
+            name: "doc-1.txt",
+            contentType: "text/plain",
+            sizeBytes: 0,
+            kind: "document",
+          } as never,
+        ]);
+        await settle(50);
+        expect(scopes).toEqual([expected]);
+      } finally {
+        await mounted.unmount();
+        await settle(10);
+      }
+    }
+  });
+});

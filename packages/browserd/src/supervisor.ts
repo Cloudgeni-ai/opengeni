@@ -41,6 +41,7 @@ import {
   BrowserInteractionController,
   InteractionControllerError,
   InteractionDefiniteDriverError,
+  type BrowserControllerActionReceipt,
   type BrowserInteractionAuthority,
   type BrowserInteractionDriver,
 } from "@opengeni/interaction";
@@ -1656,7 +1657,7 @@ export class BrowserSupervisor {
   async action(
     command: BrowserActionCommand,
     options: BrowserObservationNoticeOptions = {},
-  ): Promise<BrowserActionReceipt> {
+  ): Promise<BrowserControllerActionReceipt> {
     const runtime = this.requireActive({
       browserSessionId: command.browserSessionId,
       controllerGeneration: command.controllerGeneration,

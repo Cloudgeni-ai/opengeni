@@ -28,6 +28,11 @@ import OpenAI, { APIError } from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { projectChatToolImages } from "./chat-tool-images";
 import {
+  opaqueReasoningFingerprint,
+  rejectedOpaqueReasoningFilter,
+  rememberRefusedOpaqueReasoning,
+} from "./opaque-reasoning-replay";
+import {
   chatRouteHoistsSystemMessages,
   projectHistoryForProvider,
   responsesRouteDeclaresAdditionalTools,
@@ -43,11 +48,7 @@ import {
   type ChatReasoning,
 } from "./chat-reasoning";
 import { instrumentedModelFetch } from "./model-provider-client";
-import {
-  CODEX_MODEL_ID_PREFIX,
-  classifyEncryptedArtifactRejection,
-  opaqueProviderArtifactFingerprint,
-} from "@opengeni/codex";
+import { CODEX_MODEL_ID_PREFIX, classifyEncryptedArtifactRejection } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
@@ -319,32 +320,6 @@ export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   }
 }
 
-/** Bound on remembered refused artifacts per provider (process-local). */
-const REFUSED_ARTIFACTS_PER_PROVIDER = 4_096;
-const refusedArtifacts = new Map<string, Set<string>>();
-const artifactFingerprints = new WeakMap<object, string | null>();
-
-function artifactFingerprint(item: Record<string, unknown>): string | null {
-  let fingerprint = artifactFingerprints.get(item);
-  if (fingerprint === undefined) {
-    fingerprint = opaqueProviderArtifactFingerprint(item);
-    artifactFingerprints.set(item, fingerprint);
-  }
-  return fingerprint;
-}
-
-function rememberRefusedArtifacts(scope: string, items: readonly Record<string, unknown>[]) {
-  let refused = refusedArtifacts.get(scope);
-  if (!refused) refusedArtifacts.set(scope, (refused = new Set()));
-  for (const item of items) {
-    const fingerprint = artifactFingerprint(item);
-    if (!fingerprint) continue;
-    refused.add(fingerprint);
-    if (refused.size > REFUSED_ARTIFACTS_PER_PROVIDER)
-      refused.delete(refused.values().next().value as string);
-  }
-}
-
 function hasNativeOpaqueReasoning(item: unknown): item is Record<string, unknown> {
   if (!item || typeof item !== "object") return false;
   const record = item as Record<string, unknown>;
@@ -401,7 +376,7 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     if (!classifyEncryptedArtifactRejection(error)) return false;
     const sent = this.lastNativeOpaqueArtifacts;
     if (sent.length === 0) return false;
-    rememberRefusedArtifacts(this.provider.id, sent);
+    rememberRefusedOpaqueReasoning(this.provider.id, sent.map(opaqueReasoningFingerprint));
     this.lastNativeOpaqueArtifacts = [];
     return true;
   }
@@ -565,21 +540,14 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     try {
       request = withDeclaredReasoning(request, this.declaredReasoning);
       const scope = this.provider.id;
-      const refused = refusedArtifacts.get(scope);
+      const isRejectedArtifact = rejectedOpaqueReasoningFilter(scope);
       const input =
         typeof request.input === "string"
           ? request.input
           : (projectHistoryForProvider(request.input, "responses", {
               declaresAdditionalTools: responsesRouteDeclaresAdditionalTools(this.provider.kind),
               artifactScope: scope,
-              ...(refused?.size
-                ? {
-                    isRejectedArtifact: (item: Record<string, unknown>) => {
-                      const fingerprint = artifactFingerprint(item);
-                      return fingerprint !== null && refused.has(fingerprint);
-                    },
-                  }
-                : {}),
+              ...(isRejectedArtifact ? { isRejectedArtifact } : {}),
             }) as ModelRequest["input"]);
       this.lastNativeOpaqueArtifacts =
         typeof input === "string" ? [] : (input as unknown[]).filter(hasNativeOpaqueReasoning);

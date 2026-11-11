@@ -9,9 +9,12 @@ import {
   type InteractionInterventionMutationResponse,
 } from "@opengeni/contracts";
 import { createObservability } from "@opengeni/observability";
+import { BrowserControlRequestError } from "@opengeni/runtime/sandbox";
 import {
+  interactionFailureReasonFromError,
   observeBrowserActionResult,
   observeComputerActionResult,
+  observeInteractionRouteOutcome,
   observeInterventionMutation,
   observeLifecycleResult,
 } from "../src/interaction-metrics";
@@ -118,6 +121,109 @@ describe("interaction metrics projection", () => {
     const metrics = await observability.prometheusMetrics();
     expect(metrics).not.toContain("opengeni_interaction_operations_total");
     expect(metrics).not.toContain("opengeni_interaction_interventions_total");
+  });
+
+  test("names why an action failed or its outcome is unknown, website failures apart", async () => {
+    const observability = createObservability(settings, { component: "api" });
+    const navigate = browserRequest({ type: "navigate", url: "https://example.test/" });
+    // A website that never answered: the controller's reason beside the
+    // receipt names it, not the generic outcome_unknown.
+    observeBrowserActionResult(
+      observability,
+      performance.now(),
+      navigate,
+      actionReceipt("browser", "outcome_unknown", "outcome_unknown") as BrowserActionReceipt,
+      "destination_not_answered",
+    );
+    // The specific failure behind a generic outcome_unknown.
+    observeBrowserActionResult(
+      observability,
+      performance.now(),
+      navigate,
+      actionReceipt("browser", "outcome_unknown", "outcome_unknown") as BrowserActionReceipt,
+      "timeout",
+    );
+    // Without a reason, an outcome_unknown keeps its own error code.
+    observeBrowserActionResult(
+      observability,
+      performance.now(),
+      navigate,
+      actionReceipt("browser", "outcome_unknown", "controller_lost") as BrowserActionReceipt,
+    );
+    observeBrowserActionResult(
+      observability,
+      performance.now(),
+      navigate,
+      actionReceipt("browser", "outcome_unknown", "tab_not_responding") as BrowserActionReceipt,
+    );
+    // A reason from another process is checked against the closed set.
+    observeBrowserActionResult(
+      observability,
+      performance.now(),
+      navigate,
+      actionReceipt("browser", "failed", "driver_failed") as BrowserActionReceipt,
+      "https://example.test/" as never,
+    );
+    // A completed action has no failure reason, whatever was passed.
+    observeBrowserActionResult(
+      observability,
+      performance.now(),
+      navigate,
+      actionReceipt("browser", "completed") as BrowserActionReceipt,
+      "destination_not_answered",
+    );
+
+    const metrics = await observability.prometheusMetrics();
+    const count = (outcome: string, reason: string) =>
+      new RegExp(
+        `opengeni_interaction_operations_total\\{[^}]*outcome="${outcome}"[^}]*reason="${reason}"[^}]*\\} 1\\b`,
+      );
+    expect(metrics).toMatch(count("outcome_unknown", "destination_not_answered"));
+    expect(metrics).toMatch(count("outcome_unknown", "timeout"));
+    expect(metrics).toMatch(count("outcome_unknown", "controller_lost"));
+    expect(metrics).toMatch(count("outcome_unknown", "tab_not_responding"));
+    expect(metrics).toMatch(count("failed", "driver_failed"));
+    expect(metrics).toMatch(count("completed", "none"));
+    expect(metrics).not.toMatch(/outcome="outcome_unknown"[^}]*reason="none"/);
+    expect(metrics).not.toMatch(/opengeni_interaction_operations_total\{[^}]*reason="unknown"/);
+  });
+
+  test("names a website failure behind a refused tab open", async () => {
+    const observability = createObservability(settings, { component: "api" });
+    const route = "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets";
+    const refused = (failureReason: "destination_not_answered" | null) =>
+      new BrowserControlRequestError(
+        504,
+        { code: "timeout", message: "server did not respond", retryable: true },
+        null,
+        failureReason,
+      );
+    // The API's HTTP error wraps the controller's refusal.
+    const wrapped = new Error("route failed", { cause: refused("destination_not_answered") });
+    expect(interactionFailureReasonFromError(wrapped)).toBe("destination_not_answered");
+    expect(interactionFailureReasonFromError(refused(null))).toBeNull();
+    expect(interactionFailureReasonFromError(new Error("other"))).toBeNull();
+    expect(interactionFailureReasonFromError(undefined)).toBeNull();
+    for (const [failureReason, method] of [
+      [interactionFailureReasonFromError(wrapped), "POST"],
+      [null, "POST"],
+    ] as const) {
+      observeInteractionRouteOutcome(observability, {
+        method,
+        route,
+        status: 504,
+        durationMs: 20_000,
+        rejectionReason: "unclassified",
+        failureReason,
+      });
+    }
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_interaction_operations_total\{[^}]*operation="open_target"[^}]*outcome="failed"[^}]*reason="destination_not_answered"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_interaction_operations_total\{[^}]*operation="open_target"[^}]*outcome="failed"[^}]*reason="timeout"[^}]*\} 1\b/,
+    );
   });
 });
 
