@@ -216,9 +216,7 @@ bun test --timeout 30000 ./apps/api/test/native-report-delivery.test.ts \\
       ["artifact-outbox-dispatcher-image", "artifact_outbox_dispatcher_image"],
     ].map(([jobName, stepId]) =>
       parsed.jobs[jobName]?.steps?.find(
-        (step) =>
-          step.uses === "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a" &&
-          step.id === stepId,
+        (step) => step.uses === "./.github/actions/docker-build-retry" && step.id === stepId,
       ),
     );
     expect(serverBuilds.map((step) => step?.id)).toEqual([

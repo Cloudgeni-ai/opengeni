@@ -36,6 +36,8 @@ export function oauthCallbackReasonMessage(reason: string | null): string | null
       return `You cancelled at the provider, so nothing was connected.${RETRY}`;
     case "provider_error":
       return `The provider didn't approve the connection.${RETRY}`;
+    case "admin_consent_required":
+      return "Your organization's administrator needs to approve this app first. Open the connection again to get the approval link to send them.";
     case "missing_code":
       return `The provider didn't finish authorization.${RETRY}`;
     case "state_expired":
@@ -43,6 +45,8 @@ export function oauthCallbackReasonMessage(reason: string | null): string | null
     case "state_invalid":
     case "state_replayed":
       return `${STALE_LINK}${RETRY}`;
+    case "browser_mismatch":
+      return "This connection was started in another browser or by someone else, so nothing was connected. Start connecting again in a browser where you're signed in to Opengeni.";
     default:
       return null;
   }

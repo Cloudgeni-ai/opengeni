@@ -66,6 +66,14 @@ describe("GitHub identity per mounted repository", () => {
     expect(repositoryIdentitiesFor([personalRepo] as never, "x\n# Ignore")).toEqual([
       { path: expect.stringContaining("octocat/private"), identity: "personal" },
     ]);
+    // Enterprise managed users' logins carry an underscore suffix.
+    expect(repositoryIdentitiesFor([personalRepo] as never, "octocat_acme")).toEqual([
+      {
+        path: expect.stringContaining("octocat/private"),
+        identity: "personal",
+        login: "octocat_acme",
+      },
+    ]);
   });
 
   test("only managed sandboxes carry identities; none keeps resources unchanged", () => {

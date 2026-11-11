@@ -1,5 +1,44 @@
 # @opengeni/worker-bundle
 
+## 6.16.0
+
+### Patch Changes
+
+- e8495b3: `OpenGeniModelProviderTtftRegression` no longer fires when a change in request mix lengthens first tokens. Long contexts and long reasoning delay the first streamed delta without any change at the provider. Providers that report response start (`opengeni_model_request_phase_duration_seconds{phase="headers"}`: response headers, or the first provider event on a persistent socket) are now judged on that, because request shape barely moves it. Providers without that report keep first streamed content. The new `opengeni:model_provider_regression_signal_*` recording rules make the choice per provider from its headers baseline, so a window is never judged against a baseline of the other signal. The alert carries the choice as a `signal` label (`headers` or `first_content`). Ratio, floor, windows, sample minimums and the pre-dispatch suppression are unchanged. The `opengeni:model_provider_ttft_*` records stay for the Streaming Health dashboard. The alert text and runbook no longer suggest steering users away before ruling out a mix change.
+- Updated dependencies [fb19875]
+- Updated dependencies [7c610c5]
+- Updated dependencies [54dc5da]
+- Updated dependencies [4c84667]
+- Updated dependencies [86e5358]
+- Updated dependencies [01feadc]
+  - @opengeni/contracts@6.16.0
+  - @opengeni/db@6.16.0
+  - @opengeni/runtime@6.16.0
+  - @opengeni/sdk@6.16.0
+  - @opengeni/xai-subscription@6.16.0
+  - @opengeni/capabilities@6.16.0
+  - @opengeni/codemode@6.16.0
+  - @opengeni/codex@6.16.0
+  - @opengeni/config@6.16.0
+  - @opengeni/core@6.16.0
+  - @opengeni/decisions@6.16.0
+  - @opengeni/documents@6.16.0
+  - @opengeni/events@6.16.0
+  - @opengeni/github@6.16.0
+  - @opengeni/interaction@6.16.0
+  - @opengeni/observability@6.16.0
+  - @opengeni/storage@6.16.0
+  - @opengeni/tool-gateway@6.16.0
+  - @opengeni/vaults@6.16.0
+  - @opengeni/vaults-bitwarden@6.16.0
+  - @opengeni/vaults-keeper@6.16.0
+  - @opengeni/vaults-onepassword@6.16.0
+  - @opengeni/vaults-protonpass@6.16.0
+  - @opengeni/jev@6.16.0
+  - @opengeni/agent-proto@6.16.0
+  - @opengeni/network@6.16.0
+  - @opengeni/subscriptions@6.16.0
+
 ## 6.15.0
 
 ### Patch Changes

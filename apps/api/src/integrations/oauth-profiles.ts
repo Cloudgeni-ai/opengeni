@@ -18,6 +18,11 @@ import {
   OFFICIAL_GOOGLE_CALENDAR_MCP_URL as RUNTIME_GOOGLE_CALENDAR_MCP_URL,
   googleCalendarToolSupportsScopes,
 } from "@opengeni/runtime/google-calendar-rest-mcp";
+import {
+  MICROSOFT_DYNAMICS_PRODUCT_LABELS,
+  microsoftDynamicsDefaultScope,
+  microsoftDynamicsProductForMcpUrl,
+} from "@opengeni/contracts/microsoft-dynamics";
 import { canonicalProviderDomain } from "./provider-domain";
 
 /**
@@ -83,6 +88,7 @@ const GOOGLE_CONNECTOR_AUTHORIZE_PARAMS = {
 } as const;
 
 const SLACK_OAUTH_ORIGIN = "https://slack.com";
+const MICROSOFT_LOGIN_ORIGIN = "https://login.microsoftonline.com";
 const SLACK_MCP_ORIGIN = "https://mcp.slack.com";
 const GOOGLE_OAUTH_ISSUER_ORIGIN = "https://accounts.google.com";
 const GOOGLE_TOKEN_ORIGIN = "https://oauth2.googleapis.com";
@@ -125,6 +131,8 @@ export type OAuthProviderProfile = {
   match: {
     mcpUrls?: readonly string[];
     providerDomains?: readonly string[];
+    /** Per-customer endpoints (one host per environment) recognized by shape. */
+    mcpUrl?: (mcpUrl: string) => boolean;
   };
   /**
    * Canonical provider identity forced when the profile matches by URL, so a
@@ -137,8 +145,15 @@ export type OAuthProviderProfile = {
   requireProviderDomain?: { domain: string; message: string };
   /** Outside a local test environment, the start URL must be exactly this. */
   requireExactMcpUrl?: { url: string; message: string };
-  /** Deployment-managed client credentials must be configured (503 otherwise). */
+  /**
+   * Deployment-managed client credentials must be configured (503 otherwise).
+   * The profile, not the authorization server, selects this client, so a
+   * shared authorization server (Microsoft Entra ID) never lends it to other
+   * resources.
+   */
   requireDeploymentClient?: { key: DeploymentManagedClientKey; message: string };
+  /** Deployment switch for the matched endpoint: a 503 message when it is off. */
+  unavailableMessage?: (settings: Settings, mcpUrl: string) => string | null;
   /** Suggested ownership; explicit choices remain subject to requiredOwnership. */
   defaultOwnership?: ConnectionOwnership;
   /** Built-in-only ownership restriction, including old reconnect/callback state. */
@@ -193,6 +208,23 @@ export type OAuthProviderProfile = {
   confidentialClientRequired?: boolean;
   /** Built-in API bridge discovery; catalog metadata cannot redirect this seam. */
   providerOAuthDiscovery?: { issuer: string; metadataUrl: string };
+  /**
+   * One fixed authorization server for many per-customer resources. Its
+   * metadata is read from the pinned URL and `defaultScopes` names the
+   * delegated scopes for each resource. `pkceS256` records PKCE support the
+   * server documents but does not advertise (Microsoft Entra ID).
+   */
+  fixedAuthorizationServer?: {
+    issuer: string;
+    metadataUrl: string;
+    pkceS256: "documented";
+    defaultScopes: (mcpUrl: string) => readonly string[];
+  };
+  /**
+   * Send the authorized scopes again when refreshing. Microsoft Entra ID
+   * refresh tokens span resources, so a refresh names the resource scope.
+   */
+  sendScopeOnRefresh?: boolean;
   /** Built-in read-only remote proof; discovery alone may be publicly accessible. */
   remoteToolVerification?: { toolName: string; arguments: Record<string, unknown> };
   localToolVerification?: {
@@ -468,11 +500,62 @@ const OFFICIAL_GOOGLE_CALENDAR_PROFILE: OAuthProviderProfile = {
   },
 };
 
+/**
+ * Microsoft Dynamics MCP servers (Dataverse for Dynamics 365 Sales and
+ * Customer Service, and Finance and Operations). Every customer environment
+ * has its own host; all sign in through Microsoft Entra ID with one
+ * deployment-registered multi-tenant app, since Microsoft offers no dynamic
+ * client registration. Entra's v2 endpoints take the resource in the scope,
+ * not RFC 8707's `resource` parameter.
+ */
+const MICROSOFT_DYNAMICS_PROFILE: OAuthProviderProfile = {
+  key: "microsoft-dynamics",
+  match: { mcpUrl: (mcpUrl) => microsoftDynamicsProductForMcpUrl(mcpUrl) !== null },
+  rejectCallerOAuthClient: {
+    message: "Microsoft Dynamics OAuth client credentials are deployment-managed",
+  },
+  requireDeploymentClient: {
+    key: "microsoft-dynamics",
+    message:
+      "Microsoft Dynamics requires OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID and OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET",
+  },
+  unavailableMessage: (settings, mcpUrl) =>
+    microsoftDynamicsProductForMcpUrl(mcpUrl) === "finance_operations" &&
+    !settings.microsoftDynamicsFinanceOperationsEnabled
+      ? `${MICROSOFT_DYNAMICS_PRODUCT_LABELS.finance_operations} isn't available on this deployment yet.`
+      : null,
+  authorizationServer: {
+    issuerOrigins: [MICROSOFT_LOGIN_ORIGIN],
+    authorizationEndpointOrigins: [MICROSOFT_LOGIN_ORIGIN],
+    tokenEndpointOrigins: [MICROSOFT_LOGIN_ORIGIN],
+    message: "Microsoft Dynamics authorization metadata did not remain bound to Microsoft Entra ID",
+    skipInLocalTest: true,
+  },
+  fixedAuthorizationServer: {
+    issuer: `${MICROSOFT_LOGIN_ORIGIN}/{tenantid}/v2.0`,
+    metadataUrl: `${MICROSOFT_LOGIN_ORIGIN}/organizations/v2.0/.well-known/openid-configuration`,
+    pkceS256: "documented",
+    defaultScopes: (mcpUrl) => {
+      const scope = microsoftDynamicsDefaultScope(mcpUrl);
+      return scope ? [scope] : [];
+    },
+  },
+  sendResourceParameter: false,
+  sendScopeOnRefresh: true,
+  // Each person reaches Dynamics with their own security roles.
+  defaultOwnership: "personal",
+  requiredOwnership: {
+    ownership: "personal",
+    message: "Microsoft Dynamics connects each person's own account",
+  },
+};
+
 const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [
   HOSTED_SLACK_PROFILE,
   OFFICIAL_GMAIL_PROFILE,
   OFFICIAL_DRIVE_PROFILE,
   OFFICIAL_GOOGLE_CALENDAR_PROFILE,
+  MICROSOFT_DYNAMICS_PROFILE,
 ];
 
 /** What a verifier may read besides its own calls: the token endpoint's response,
@@ -808,7 +891,7 @@ const RESERVED_AUTHORIZATION_SERVERS: readonly {
   },
 ];
 
-export type DeploymentManagedClientKey = "slack";
+export type DeploymentManagedClientKey = "slack" | "microsoft-dynamics";
 
 /**
  * Pre-registered deployment clients resolved from dedicated settings, keyed by
@@ -836,6 +919,20 @@ export const DEPLOYMENT_MANAGED_CLIENTS: readonly {
           }
         : null,
   },
+  {
+    // Selected only by the Microsoft Dynamics profile: Microsoft Entra ID
+    // serves countless other resources, which must never receive this client.
+    key: "microsoft-dynamics",
+    issuerOrigins: [],
+    resolve: (settings) =>
+      settings.microsoftDynamicsClientId?.trim() && settings.microsoftDynamicsClientSecret?.trim()
+        ? {
+            clientId: settings.microsoftDynamicsClientId.trim(),
+            clientSecret: settings.microsoftDynamicsClientSecret.trim(),
+            tokenEndpointAuthMethod: "client_secret_post",
+          }
+        : null,
+  },
 ];
 
 export function deploymentManagedClientFor(
@@ -852,7 +949,7 @@ export function builtInOAuthProfileFor(input: {
   providerDomain?: string | undefined;
 }): OAuthProviderProfile | null {
   for (const profile of BUILT_IN_OAUTH_PROFILES) {
-    if (profile.match.mcpUrls?.includes(input.mcpUrl)) {
+    if (profile.match.mcpUrls?.includes(input.mcpUrl) || profile.match.mcpUrl?.(input.mcpUrl)) {
       return profile;
     }
     if (

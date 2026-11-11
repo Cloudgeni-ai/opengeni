@@ -8,6 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write # dispatch PR CI on the pull request's exact head
   contents: write
   pull-requests: write
 
@@ -51,11 +52,33 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git switch -C "$branch"
           git commit -am "chore(images): update browser engines" -m "$summary"
-          git push --force origin "$branch"
-          body="$(printf 'Automated pin refresh.\n\n%s\n\nThe Chrome .deb SHA-256 was checked against the downloaded bytes, and the Chromium snapshot was checked to list both packages on amd64 and arm64.' "$summary")"
-          if gh pr view "$branch" --json state --jq .state 2>/dev/null | grep -q OPEN; then
-            gh pr edit "$branch" --body "$body"
+          # A force push to the PR replaces its head, which throws away a running
+          # merge batch that holds it. Push only when the pins actually differ from
+          # the open PR's, and never while it is in a batch (the next run retries).
+          pr_state="$(gh pr view "$branch" --json state,labels --jq '.state + " " + ([.labels[].name] | join(","))' 2>/dev/null || true)"
+          mapfile -t changed < <(git diff --name-only HEAD~1 HEAD)
+          if [[ "$pr_state" == OPEN* ]] && git fetch --quiet --depth=2 origin "$branch" &&
+            [ "$(git diff --name-only FETCH_HEAD~1 FETCH_HEAD)" = "$(printf '%s\n' "${changed[@]}")" ] &&
+            git diff --quiet FETCH_HEAD HEAD -- "${changed[@]}"; then
+            head_sha="$(git rev-parse FETCH_HEAD)"
+            echo "The open pull request already carries these pins; its head stays $head_sha."
+            checks="$(gh api "repos/$GITHUB_REPOSITORY/commits/$head_sha/check-runs?check_name=PR%20CI" --jq .total_count)"
+            if [ "$checks" != 0 ]; then exit 0; fi
+          elif [[ "$pr_state" == OPEN* && ",${pr_state#* }," == *,in-batch,* ]]; then
+            echo "The pull request is in a running merge batch; leaving it unchanged until the next run."
+            exit 0
           else
-            gh pr create --base main --head "$branch" \
-              --title "chore(images): update browser engines" --body "$body"
+            git push --force origin "$branch"
+            head_sha="$(git rev-parse HEAD)"
+            body="$(printf 'Automated pin refresh.\n\n%s\n\nThe Chrome .deb SHA-256 was checked against the downloaded bytes, and the Chromium snapshot was checked to list both packages on amd64 and arm64.' "$summary")"
+            if [[ "$pr_state" == OPEN* ]]; then
+              gh pr edit "$branch" --body "$body"
+            else
+              gh pr create --base main --head "$branch" \
+                --title "chore(images): update browser engines" --body "$body"
+            fi
           fi
+          # Pushes made with GITHUB_TOKEN start no pull_request workflows, and the
+          # merge batcher batches a PR only once PR CI passed on its exact head.
+          number="$(gh pr view "$branch" --json number --jq .number)"
+          gh workflow run pr-ci.yml --ref "$branch" -f pr_number="$number" -f head_sha="$head_sha"

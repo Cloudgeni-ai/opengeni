@@ -1,7 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
+import { join } from "node:path";
 import type postgres from "postgres";
 import { tool } from "@openai/agents";
+import { SessionSkills, type SessionSkill } from "@opengeni/contracts";
 import {
   bootstrapWorkspace,
   createDb,
@@ -24,6 +28,12 @@ import { postgresWireBudget } from "./postgres-wire-budget";
 // model response. It measures durable tool checkpoints, not connector dispatch
 // or external execution. Cycles are protocol boundaries, not serial latency.
 // OPENGENI_BENCH_WORKER_CHILD=1 exercises a child with an active root parent.
+// OPENGENI_BENCH_WORKER_SKILLS_BYTES=<n> gives the session (and its parent)
+// inline Skill folders of about n bytes of the repository's own Markdown, as a
+// host that attaches its own Skills does. Each sample then also records the
+// server's statement time and TOAST reads for sessions statements, and a
+// digest of every model request with ids and times masked, so two revisions
+// can show that the model received identical input.
 type Sample = {
   operation: string;
   statements: number;
@@ -34,11 +44,28 @@ type Sample = {
   cpuMs: number;
   queries: Record<string, number>;
   scopeStatements: Record<string, number>;
+  server?: ServerStatementCost;
+  modelInputDigest?: string;
+};
+type ServerStatementCost = {
+  /** Top-level statements and their total execution time, from pg_stat_statements. */
+  statements: number;
+  execMs: number;
+  /** Top-level statements that read or lock the sessions table. */
+  sessionStatements: number;
+  sessionExecMs: number;
+  /** Statements that read the sessions.skills column, by normalized statement text. */
+  skillsStatements: Record<string, number>;
+  /** Blocks of the sessions TOAST relation read (hit or read) by any statement. */
+  sessionToastBlocks: number;
 };
 const samples: Sample[] = [];
 const childSession = process.env.OPENGENI_BENCH_WORKER_CHILD === "1";
 const toolCount = Number(process.env.OPENGENI_BENCH_WORKER_TOOLS ?? "0");
 if (toolCount !== 0 && toolCount !== 5) throw new Error("Worker fixture supports 0 or 5 tools");
+const skillsBytes = Number(process.env.OPENGENI_BENCH_WORKER_SKILLS_BYTES ?? "0");
+if (!Number.isInteger(skillsBytes) || skillsBytes < 0 || skillsBytes > 4_000_000)
+  throw new Error("Invalid inline Skills fixture size");
 const streamChunks = Number(process.env.OPENGENI_BENCH_STREAM_CHUNKS ?? "0");
 const streamDelayMs = Number(process.env.OPENGENI_BENCH_STREAM_DELAY_MS ?? "0");
 if (
@@ -74,6 +101,8 @@ function instrumentTransactions(db: Database): void {
 let current: Sample | undefined;
 const shared = await acquireSharedTestDatabase("worker-resource-benchmark");
 if (!shared) throw new Error("Local PostgreSQL required");
+const sessionSkills = skillsBytes ? await benchmarkSessionSkills(skillsBytes) : [];
+if (skillsBytes) await shared.admin`create extension if not exists pg_stat_statements`;
 const upstream = new URL(shared.appUrl);
 const relay = createServer((frontend) => {
   const backend = createConnection({ host: upstream.hostname, port: Number(upstream.port) });
@@ -133,6 +162,8 @@ const measure = async <T>(operation: string, run: () => Promise<T>): Promise<T> 
     scopeStatements: {},
   };
   current = sample;
+  const serverBefore = skillsBytes ? await sessionsToastBlocks() : 0;
+  if (skillsBytes) await shared.admin`select pg_stat_statements_reset()`;
   const started = performance.now(),
     cpu = process.cpuUsage();
   try {
@@ -142,9 +173,100 @@ const measure = async <T>(operation: string, run: () => Promise<T>): Promise<T> 
     const used = process.cpuUsage(cpu);
     sample.cpuMs = (used.user + used.system) / 1000;
     current = undefined;
+    if (skillsBytes) sample.server = await serverStatementCost(serverBefore);
     samples.push(sample);
   }
 };
+
+/** Real Markdown from this repository's docs, split into Skill folders. */
+async function benchmarkSessionSkills(totalBytes: number): Promise<SessionSkill[]> {
+  const docs = join(import.meta.dir, "../../docs");
+  const names = (await readdir(docs)).filter((name) => name.endsWith(".md")).sort();
+  const skills: unknown[] = [];
+  let remaining = totalBytes;
+  for (const name of names) {
+    if (remaining <= 0) break;
+    const text = (await readFile(join(docs, name), "utf8")).slice(0, Math.min(remaining, 60_000));
+    const skillName = `bench-${name
+      .toLowerCase()
+      .replace(/\.md$/u, "")
+      .replace(/[^a-z0-9-]/gu, "-")}`.slice(0, 64);
+    skills.push({
+      files: [
+        {
+          path: "SKILL.md",
+          content: `---\nname: ${skillName}\ndescription: Benchmark Skill built from docs/${name}.\n---\n\n# ${skillName}\n\nRead references/guide.md when it applies.\n`,
+        },
+        { path: "references/guide.md", content: text },
+      ],
+    });
+    remaining -= text.length;
+  }
+  return SessionSkills.parse(skills);
+}
+
+async function sessionsToastBlocks(): Promise<number> {
+  // Statistics are flushed by backends asynchronously; force this view fresh.
+  await shared!.admin`select pg_stat_clear_snapshot()`;
+  const [row] = await shared!.admin<{ blocks: string }[]>`
+    select coalesce(sum(coalesce(toast_blks_hit, 0) + coalesce(toast_blks_read, 0)), 0) as blocks
+    from pg_statio_all_tables where relid = 'public.sessions'::regclass`;
+  return Number(row?.blocks ?? 0);
+}
+
+async function serverStatementCost(toastBefore: number): Promise<ServerStatementCost> {
+  // Backends report table I/O statistics when they go idle; give them a moment.
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
+  const [row] = await shared!.admin<
+    {
+      statements: string;
+      execMs: number;
+      sessionStatements: string;
+      sessionExecMs: number;
+    }[]
+  >`select
+      coalesce(sum(calls), 0) as statements,
+      coalesce(sum(total_exec_time), 0)::float8 as "execMs",
+      coalesce(sum(calls) filter (where query ~* '\\mfrom "?sessions"?\\M'), 0) as "sessionStatements",
+      coalesce(sum(total_exec_time) filter (where query ~* '\\mfrom "?sessions"?\\M'), 0)::float8
+        as "sessionExecMs"
+    from pg_stat_statements
+    where toplevel and dbid = (select oid from pg_database where datname = current_database())
+      and query !~* 'pg_stat_statements_reset|pg_statio_all_tables|pg_stat_clear_snapshot'`;
+  return {
+    statements: Number(row?.statements ?? 0),
+    execMs: Number(row?.execMs ?? 0),
+    sessionStatements: Number(row?.sessionStatements ?? 0),
+    sessionExecMs: Number(row?.sessionExecMs ?? 0),
+    skillsStatements: Object.fromEntries(
+      (
+        await shared!.admin<{ query: string; calls: string }[]>`
+          select left(regexp_replace(query, '\\s+', ' ', 'g'), 160) as query, sum(calls) as calls
+          from pg_stat_statements
+          where toplevel and dbid = (select oid from pg_database where datname = current_database())
+            and query ~ '\\mskills\\M' and query ~* '\\msessions\\M'
+          group by 1 order by 2 desc`
+      ).map((statement) => [statement.query, Number(statement.calls)]),
+    ),
+    sessionToastBlocks: (await sessionsToastBlocks()) - toastBefore,
+  };
+}
+
+/** Model input with ids, times and random call ids masked; identical input, identical digest. */
+function modelInputDigest(requests: unknown[]): string {
+  const masked = JSON.stringify(requests, null, 1)
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/giu, "<uuid>")
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/gu, "<time>")
+    .replace(
+      /\[Message sent [A-Za-z]+ \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\]/gu,
+      "[Message sent <time>]",
+    );
+  const digest = createHash("sha256").update(masked).digest("hex");
+  // Set OPENGENI_BENCH_MODEL_INPUT_DIR to keep the masked input for a diff.
+  if (process.env.OPENGENI_BENCH_MODEL_INPUT_DIR)
+    void Bun.write(join(process.env.OPENGENI_BENCH_MODEL_INPUT_DIR, `${digest}.json`), masked);
+  return digest;
+}
 try {
   // Production initializes its service graph once per process. Rebuilding it
   // for every sample would charge startup heap inspection and catalog loading
@@ -200,6 +322,7 @@ try {
       sandboxBackend: "none" as const,
       resources: [],
       metadata: {},
+      skills: sessionSkills,
     };
     const parent = childSession ? await createSession(client.db, sessionInput) : null;
     const session = await createSession(client.db, {
@@ -253,6 +376,7 @@ try {
       throw new Error(
         `Unexpected turn result: ${JSON.stringify(result)}, calls=${model.calls}, tools=${executedTools}`,
       );
+    samples.at(-1)!.modelInputDigest = modelInputDigest(model.requests);
     if (toolCount) {
       // Verify persistence outside the measured operation, not just invocation.
       const history = await getActiveSessionHistoryItemsPaged(
@@ -317,6 +441,7 @@ try {
     fixture: {
       toolCount,
       childSession,
+      skillsBytes,
       streamChunks,
       streamDelayMs,
       serviceLifetime: "process",

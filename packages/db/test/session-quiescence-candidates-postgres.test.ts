@@ -196,22 +196,42 @@ test.each(["attempt", "process-admission", "active-process"] as const)(
   },
 );
 
-test("an independently adopted background command does not hold its old turn open", async () => {
-  const ctx = await fixture();
-  const owner = await writer(ctx, "active-process");
+async function adoptBackgroundCommand(ctx: Fixture, processId: string) {
   await shared.admin.begin(async (tx) => {
     await tx`set local session_replication_role = replica`;
     await tx`insert into session_background_commands ${tx({
-      id: owner.processId,
+      id: processId,
       account_id: ctx.grant.accountId,
       workspace_id: ctx.grant.workspaceId,
       session_id: ctx.session.id,
-      retained_process_id: owner.processId,
+      retained_process_id: processId,
       provider: "managed",
       state: "running",
     })}`;
   });
+}
+
+test("an independently adopted background command does not hold its old turn open", async () => {
+  const ctx = await fixture();
+  const owner = await writer(ctx, "active-process");
+  await adoptBackgroundCommand(ctx, owner.processId);
   expect(await observe(ctx)).toEqual({ kind: "idle" });
+});
+
+test("a session with no writer, interruption or recovery rows skips the exact quiescence query", async () => {
+  const ctx = await fixture();
+  captured.length = 0;
+  expect(await observe(ctx)).toEqual({ kind: "idle" });
+  expect(captured).toHaveLength(0);
+  // A superseded predecessor's recovery debt is not receipt debt either.
+  await shared.admin`update session_turn_attempts set outcome = 'interrupted_recoverable'
+    where id = ${ctx.rows[0]!.id}`;
+  expect(await observe(ctx)).toEqual({ kind: "idle" });
+  expect(captured).toHaveLength(0);
+  // Once a quiescence row exists, the exact query decides.
+  const owner = await writer(ctx, "attempt");
+  expect(await observe(ctx)).toEqual({ kind: "cancellation-wait", attemptId: owner.attemptId });
+  expect(captured.length).toBeGreaterThan(0);
 });
 
 test("legacy lost Modal exec stays a physical writer while inference may inspect it", async () => {
@@ -285,6 +305,10 @@ function nodes(root: PlanNode): PlanNode[] {
 
 test("the real work peek evaluates writer subqueries only for candidates in a long idle session", async () => {
   const ctx = await fixture(1200);
+  // An adopted background command keeps the session idle but still makes it
+  // a possible writer session, so the exact query runs and is captured.
+  const owner = await writer(ctx, "active-process");
+  await adoptBackgroundCommand(ctx, owner.processId);
   await shared.admin`analyze session_turn_attempts`;
   captured.length = 0;
   expect(await observe(ctx)).toEqual({ kind: "idle" });

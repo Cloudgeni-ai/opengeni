@@ -60,6 +60,7 @@ import {
 } from "@opengeni/config";
 import {
   acceptSessionHumanInputResponse,
+  type SessionWithoutSkills,
   acceptSessionApprovalDecision,
   SessionApprovalAnswerError,
   SessionApprovalForbiddenError,
@@ -1566,17 +1567,23 @@ async function publishSlackAppHome(
   // Host session authorization is resolved at publication time, before the
   // database query, so App Home cannot leak rows through a stale broad list.
   const authorizationScope = await requireSessionAuthorizationListScope(deps, grant, "core");
-  const sessions: Awaited<ReturnType<typeof listSessionsForSubject>>["sessions"] = [];
+  // App Home shows no Skill folders, so its reads leave them unread.
+  const sessions: SessionWithoutSkills[] = [];
   try {
     let cursor: ReturnType<typeof decodeSessionListCursor> | undefined;
     do {
       await renewLease();
-      const page = await listSessionsForSubject(deps.db, installation.workspaceId, {
-        subjectId: grant.subjectId,
-        limit: 500,
-        ...(cursor ? { cursor } : {}),
-        ...(authorizationScope ? { authorizationScope } : {}),
-      });
+      const page = await listSessionsForSubject(
+        deps.db,
+        installation.workspaceId,
+        {
+          subjectId: grant.subjectId,
+          limit: 500,
+          ...(cursor ? { cursor } : {}),
+          ...(authorizationScope ? { authorizationScope } : {}),
+        },
+        "omit",
+      );
       if (!cursor) sessions.push(...page.pinned);
       sessions.push(...page.sessions);
       if (!page.nextCursor) break;

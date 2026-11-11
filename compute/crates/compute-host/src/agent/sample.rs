@@ -257,6 +257,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
         self.retire_unused();
         self.retire_unused_images();
         self.measure_relief();
+        self.measure_resting_disks();
         self.check_guests();
         self.refill();
     }

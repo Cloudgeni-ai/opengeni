@@ -1,3 +1,7 @@
+import {
+  oauthBrowserBindingForStart,
+  oauthCallbackBrowser,
+} from "../integrations/oauth-browser-binding";
 import { createHash, createHmac } from "node:crypto";
 import {
   authorizationHoldsOrganizationAdministration,
@@ -7,6 +11,7 @@ import {
   WORKSPACE_SETTINGS_REFUSAL,
   workspaceSettingsAuthorized,
 } from "@opengeni/core";
+import { storedConnectionIntegrationKey } from "../integrations/stored-connection-integration-key";
 import { withDesktopAppReturnPath } from "../desktop-app-return";
 import {
   assertClaudeWorkspaceCredential,
@@ -484,7 +489,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           })
         : persist(database);
     // Only the canonical workspace model-key lane is outside integration policy.
-    // Generic credentials have no validated protocol/curated target in this contract.
+    // Other credentials count as the integration their own data names (an MCP
+    // server's OAuth credential), else as unclassified, which a restricted
+    // policy refuses.
     const modelKey = workspaceProviderApiKeyConnectionKind({
       subjectId: createConnectionSubjectId(payload, grant.subjectId),
       providerDomain: canonicalProviderDomain(payload.providerDomain),
@@ -496,7 +503,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       : withOrganizationIntegrationAcquisition(
           db,
           { accountId: grant.accountId, workspaceId },
-          [null],
+          [storedConnectionIntegrationKey({ kind: payload.kind, metadata: payload.metadata })],
           commit,
         );
   });
@@ -1194,7 +1201,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                   Date.parse(payload.expiresAt) > Date.parse(existing.expiresAt))) ||
               (payload.status === "active" && existing.status !== "active"))
           ) {
-            assertOrganizationIntegrationAllowed(policy, null);
+            // Judged by what the connection is after this update.
+            assertOrganizationIntegrationAllowed(
+              policy,
+              storedConnectionIntegrationKey({
+                kind: payload.kind ?? existing.kind,
+                metadata: payload.metadata ?? existing.metadata,
+              }),
+            );
           }
           if (changesCredentialDestination && existing.subjectId === null) {
             // A shared credential stays bound to the destination it was issued
@@ -1367,6 +1381,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         subjectId: grant.subjectId,
         personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
+        browserBinding: oauthBrowserBindingForStart(c, settings, access, {
+          externalContinuation: externalActorContinuationForAuthorization(access),
+        }),
         requestUrl: c.req.url,
         payload,
       },
@@ -1394,6 +1411,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           workspaceId,
           subjectId: grant.subjectId,
           personalOwnershipAllowed: isPersonalConnectionOwnerPrincipal(access),
+          browserBinding: oauthBrowserBindingForStart(c, settings, access, {
+            externalContinuation: externalActorContinuationForAuthorization(access),
+          }),
           requestUrl: c.req.url,
           payload: withDesktopAppReturnPath(c, parsed),
         }),
@@ -1405,7 +1425,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertIntegrationsEnabled();
     // An administrator returning from an approval link derived from a
     // Microsoft sign-in that uses this callback, not a connect attempt.
-    if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
+    // A plain approval link (as in the setup guide) carries no state; Microsoft
+    // still returns admin_consent or the tenant, which no sign-in has.
+    if (
+      c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE ||
+      (!c.req.query("state") &&
+        !c.req.query("code") &&
+        (c.req.query("admin_consent") !== undefined || c.req.query("tenant") !== undefined))
+    )
       return microsoftAdminConsentResultPage(
         {
           adminConsent: c.req.query("admin_consent"),
@@ -1420,6 +1447,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("error_description")
         ? { errorDescription: c.req.query("error_description") }
         : {}),
+      browser: await oauthCallbackBrowser(c, deps),
       requestUrl: c.req.url,
     };
     const result = isApiIntegrationProviderOAuthState(input.state, deps.settings)
@@ -1439,7 +1467,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/integrations/provider-oauth/callback", async (c) => {
     assertIntegrationsEnabled();
     // An administrator returning from the Microsoft approval link, not a connect attempt.
-    if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
+    // A plain approval link (as in the setup guide) carries no state; Microsoft
+    // still returns admin_consent or the tenant, which no sign-in has.
+    if (
+      c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE ||
+      (!c.req.query("state") &&
+        !c.req.query("code") &&
+        (c.req.query("admin_consent") !== undefined || c.req.query("tenant") !== undefined))
+    )
       return microsoftAdminConsentResultPage(
         {
           adminConsent: c.req.query("admin_consent"),
@@ -1454,6 +1489,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(c.req.query("error_description")
         ? { errorDescription: c.req.query("error_description") }
         : {}),
+      browser: await oauthCallbackBrowser(c, deps),
       requestUrl: c.req.url,
     });
     if (result.exactReturn)

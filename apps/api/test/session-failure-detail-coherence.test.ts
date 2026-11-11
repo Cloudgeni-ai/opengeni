@@ -58,7 +58,10 @@ function afterSessionSelect(db: Database, afterRead: () => Promise<void>): Datab
       if (property === "select")
         return (fields: any) => {
           const query = target.select(fields);
-          return fields?.session === schema.sessions ? wrapQuery(query) : query;
+          // The detail read selects the session row together with its event cursor.
+          return fields?.session && fields?.cursor === schema.sessionEventCursors
+            ? wrapQuery(query)
+            : query;
         };
       const value = Reflect.get(target, property);
       return typeof value === "function" ? value.bind(target) : value;

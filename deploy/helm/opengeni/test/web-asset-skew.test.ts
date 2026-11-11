@@ -205,6 +205,21 @@ describe.skipIf(!helm)("previous web assets", () => {
     expect(pod.volumes[1]).toEqual({ name: "previous-web-assets", emptyDir: {} });
   });
 
+  test("the web server reads its content-security sources from this release's API", async () => {
+    const env = webDeployment(
+      await render({
+        ...webImage("v2"),
+        web: { ...(webImage("v2").web as object), demoApiBaseUrl: "https://demo.example.test" },
+      }),
+    ).spec.template.spec.containers[0].env as { name: string; value: string }[];
+    expect(
+      env.find((entry) => entry.name === "OPENGENI_WEB_CONTENT_SECURITY_API_URL")?.value,
+    ).toMatch(/^http:\/\/[a-z0-9-]+-api:\d+$/u);
+    expect(env.find((entry) => entry.name === "OPENGENI_DEMO_API_URL")?.value).toBe(
+      "https://demo.example.test",
+    );
+  });
+
   test("the first upgrade that ships this carries the live pre-feature web image", async () => {
     // The live Deployment predates the feature: no annotation, no init containers.
     const deployment = webDeployment(await render(webImage("v2"), liveWeb(image("v1"))));

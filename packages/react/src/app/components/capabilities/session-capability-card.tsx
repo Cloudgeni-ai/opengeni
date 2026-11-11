@@ -74,9 +74,19 @@ type SessionCapabilityCardProps = {
 export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
   const page = usePage();
   const context = useAppContext();
-  const [registered, setRegistered] = useState<{ id: string; restoreFocus: boolean } | null>(null);
+  const [registered, setRegistered] = useState<{
+    id: string;
+    restoreFocus: boolean;
+    open: boolean;
+  } | null>(null);
   const onRegistered = useCallback(
-    (id: string, restoreFocus: boolean) => setRegistered({ id, restoreFocus }),
+    (id: string, restoreFocus: boolean, open = false) => setRegistered({ id, restoreFocus, open }),
+    [],
+  );
+  // Setup opens once, right after the person chose to connect; never again
+  // when the card re-renders as another kind after the catalog reloads.
+  const openedSetup = useCallback(
+    () => setRegistered((current) => (current?.open ? { ...current, open: false } : current)),
     [],
   );
   if (props.item.setupRequest && !registered) {
@@ -216,6 +226,8 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
         reconnectConnectionId={capabilityReconnectConnectionId(item)}
         returnUrl={page.href()}
         onConfigured={props.onConfigured}
+        openOnMount={registered?.open ?? false}
+        onOpenedOnMount={openedSetup}
       />
     );
   }
@@ -225,6 +237,8 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       {...props}
       item={item}
       restoreFocus={registered?.restoreFocus ?? false}
+      openSetup={registered?.open ?? false}
+      onOpenedSetup={openedSetup}
     />
   );
 }
@@ -235,7 +249,14 @@ function ScopedSessionCapabilityCard({
   sessionId,
   onConfigured,
   restoreFocus = false,
-}: SessionCapabilityCardProps & { restoreFocus?: boolean | undefined }) {
+  openSetup = false,
+  onOpenedSetup,
+}: SessionCapabilityCardProps & {
+  restoreFocus?: boolean | undefined;
+  /** Open setup at once: the person already chose to connect on the card before. */
+  openSetup?: boolean | undefined;
+  onOpenedSetup?: (() => void) | undefined;
+}) {
   const context = useAppContext();
   const recommendation = item.capability!;
   const [expanded, setExpanded] = useState(false);
@@ -247,6 +268,16 @@ function ScopedSessionCapabilityCard({
   // Read with the card rather than the dialog, so the answer is known before
   // the person opens setup and the sharing question never flashes.
   const nobodyToShareWith = useNobodyToShareWith(context.client, workspaceId);
+  useEffect(() => {
+    if (!openSetup) return;
+    // After the card that asked to connect is gone: a dialog opened while its
+    // button still held focus would close again at once.
+    const frame = requestAnimationFrame(() => {
+      setExpanded(true);
+      onOpenedSetup?.();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [openSetup, onOpenedSetup]);
   useEffect(() => {
     if (!restoreFocus) return;
     // The review dialog's opener is removed when the new connection card

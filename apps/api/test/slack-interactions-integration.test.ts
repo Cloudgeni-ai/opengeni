@@ -29,6 +29,7 @@ import {
   claimSessionWorkForAttempt,
   createConnection,
   createDb,
+  createAgent,
   createRig,
   setWorkspaceDefaultRig,
   bindAuthorizedGitHubInstallationRepositories,
@@ -12404,6 +12405,34 @@ describe("Slack agents", () => {
       "1765000000.000100",
     );
     expect(await agentInteractions(value.routed!.workspaceId)).toHaveLength(1);
+  }, 90_000);
+
+  test("an agent made in the app answers by name in Slack with no Slack step", async () => {
+    if (!available) return;
+    const { value, home } = await agentFixture();
+    const { agent } = await createAgent(client.db, home, {
+      visibility: "workspace",
+      ownerSubjectId: null,
+      name: "Growth Analyst",
+      description: "Talks about growth and usage numbers.",
+      avatar: null,
+      instructions: "Answer with numbers.",
+      firstMessage: "",
+      memoryEnabled: false,
+      origin: "app",
+      sourceSessionId: null,
+      createdBySubjectId: value.owner.subjectId,
+      maxPerWorkspace: 100,
+    });
+
+    await mention(value, "C_AGENTS", "1765000000.000300", "+growth analyst how many users?");
+
+    const [chat] = await agentInteractions(value.owner.workspaceId);
+    expect(chat).toMatchObject({ slack_agent_id: agent.id });
+    const [session] = await shared!.admin<{ agent_id: string | null; initial_message: string }[]>`
+      select agent_id::text, initial_message from sessions where id = ${chat!.session_id}`;
+    expect(session!.agent_id).toBe(agent.id);
+    expect(session!.initial_message).toContain("how many users?");
   }, 90_000);
 
   test("a channel set to an agent answers plain mentions; naming another agent switches the thread", async () => {

@@ -9,8 +9,8 @@ import { z } from "zod";
  * authority, delegated `openid profile` only), and the verified ID token must
  * name the exact Teams tenant (`tid`) and Teams user (`oid`) from the proof.
  * Self-serve setup also requires a tenant administrator role in `wids` (the
- * app's `groupMembershipClaims` must include `DirectoryRole`); account linking
- * requires only the identity.
+ * app's `groupMembershipClaims` must include `DirectoryRole`); setup by an
+ * operator-approved installer and account linking require only the identity.
  *
  * A guest signs in to the Teams tenant itself (the authority names it), so the
  * token carries that tenant's `tid` and the guest's object ID there, which is
@@ -41,8 +41,11 @@ const uuid = z.string().uuid();
 const State = z
   .object({
     version: z.literal(1),
-    /** Setup requires a tenant administrator; an account link only the identity. */
-    purpose: z.enum(["teams-admin-setup", "teams-account-link"]),
+    /**
+     * Self-serve setup requires a tenant administrator; setup by an
+     * operator-approved installer and an account link only the identity.
+     */
+    purpose: z.enum(["teams-admin-setup", "teams-installer-setup", "teams-account-link"]),
     proofNonce: uuid,
     tenantId: uuid,
     actorId: uuid,
@@ -191,8 +194,8 @@ export type TeamsAdminIdentity = {
 /**
  * Exchanges the code and verifies the ID token: signature from Microsoft's
  * published keys, issuer for exactly this tenant, audience, expiry, nonce, and
- * `tid`/`oid` equal to the Teams tenant and user. For setup (the state's
- * signed purpose) it also requires an administrator role.
+ * `tid`/`oid` equal to the Teams tenant and user. For self-serve setup (the
+ * state's signed purpose) it also requires an administrator role.
  */
 export async function verifyTeamsAdminSignIn(
   config: TeamsAdminSignInConfig,

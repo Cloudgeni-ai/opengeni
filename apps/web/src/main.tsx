@@ -1,3 +1,5 @@
+// Before anything renders or parses: the page's content hosting and Zod's JIT.
+import "./lib/content-security-boot";
 import "./lib/crypto-random-uuid";
 // Must evaluate before ./App creates the router from the current URL.
 import "./lib/signup-attribution-boot";

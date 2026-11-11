@@ -19,6 +19,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { parseRequestJson } from "../http/request-body";
+import { ensureAgentInLinkedSlack } from "../integrations/agent-slack-availability";
 import { requireUsableSessionAvatar } from "./session-avatar";
 
 /**
@@ -37,6 +38,24 @@ export function registerBotTemplateRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, permission);
     const viewer = await botTemplateViewerForGrant(db, grant);
     return { grant, viewer, workspaceId };
+  }
+
+  // A template is an agent (same id), so a shared one works in every linked
+  // Slack workspace too. Best effort: this older API keeps accepting names
+  // Slack can't use, and the agent page says why such an agent isn't there.
+  async function placeInLinkedSlack(
+    accountId: string,
+    workspaceId: string,
+    template: { id: string; visibility: "private" | "workspace" },
+  ): Promise<void> {
+    try {
+      await ensureAgentInLinkedSlack(deps, { accountId, workspaceId }, template);
+    } catch (error) {
+      console.warn("[bot-templates] could not make a template available in Slack", {
+        templateId: template.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   function templateIdParam(c: Context): string {
@@ -82,6 +101,7 @@ export function registerBotTemplateRoutes(app: Hono, deps: ApiRouteDeps): void {
       viewer,
       request,
     });
+    await placeInLinkedSlack(grant.accountId, workspaceId, template);
     return c.json(BotTemplateResponse.parse({ template }), 201);
   });
 
@@ -106,6 +126,7 @@ export function registerBotTemplateRoutes(app: Hono, deps: ApiRouteDeps): void {
       viewer,
       request,
     });
+    await placeInLinkedSlack(grant.accountId, workspaceId, template);
     return c.json(BotTemplateResponse.parse({ template }));
   });
 

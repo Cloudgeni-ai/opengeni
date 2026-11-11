@@ -31,6 +31,7 @@ function pull(number: number, extra: Partial<QueuedPull> = {}): QueuedPull {
     queuedAt: NOW - 30 * MINUTE + number,
     greenAt: NOW - 20 * MINUTE,
     conflict: null,
+    parked: null,
     renumber: [],
     regenerate: false,
     slots: [],
@@ -593,14 +594,36 @@ describe("nextBatch", () => {
 });
 
 describe("decide", () => {
-  test("ejects conflicting PRs", () => {
-    const actions = decide(observe([pull(1, { conflict: "it conflicts with main." }), pull(2)]));
+  test("ejects PRs that cannot land as they are", () => {
+    const actions = decide(observe([pull(1, { conflict: "its PR CI failed." }), pull(2)]));
     expect(actions[0]).toMatchObject({
       kind: "eject",
       number: 1,
-      reason: "it conflicts with main.",
+      reason: "its PR CI failed.",
     });
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([2]);
+  });
+
+  test("skips PRs that conflict with main, keeping them queued, and tells each head once", () => {
+    const reason = "it conflicts with main in `a.ts`";
+    const actions = decide(
+      observe([
+        pull(1, { parked: { reason, noted: false } }),
+        pull(2, { parked: { reason, noted: true } }),
+        pull(3),
+      ]),
+    );
+    expect(actions.map((a) => a.kind)).toEqual(["park", "build"]);
+    expect(actions[0]).toEqual({ kind: "park", number: 1, headSha: sha(1), reason });
+    expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([3]);
+
+    // A member of the running batch that now conflicts is rebuilt out of it.
+    const running = decide(
+      observe([pull(1), pull(2, { parked: { reason, noted: false } })], [batch([1, 2])]),
+    );
+    expect(running.map((a) => a.kind)).toEqual(["park", "abandon", "build"]);
+    expect(running[1]).toMatchObject({ reason: "#2 conflicts with main", changed: 2 });
+    expect(running[2]?.kind === "build" && running[2].members.map((p) => p.number)).toEqual([1]);
   });
 
   test("moves a migration main took the number of, and batches the PR only after that", () => {

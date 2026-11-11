@@ -587,7 +587,19 @@ describe("managed-human session surface inside their own personal workspace", ()
         ownership: ["workspace", "personal"],
       }),
     );
-    const returnUrl = "https://HOST.example:443/settings?x=%2f#Exact";
+    // A signed-in person returns only to this deployment's own origins (CASA 5.1.2).
+    const external = await human.app.request(`${base}/attempts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "mcp-bearer",
+        ownership: "personal",
+        returnUrl: "https://HOST.example:443/settings",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(external.status).toBe(400);
+    const returnUrl = "http://127.0.0.1:3000/settings?x=%2f#Exact";
     const input = {
       providerId: "mcp-bearer",
       ownership: "personal",

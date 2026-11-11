@@ -2526,6 +2526,31 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "GET /v1/config/content-security",
+    "method": "GET",
+    "path": "/v1/config/content-security",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/image-proxy",
+    "method": "GET",
+    "path": "/v1/image-proxy",
+    "request": [],
+    "query": [
+      "ticket",
+      "url"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/image-proxy/ticket",
+    "method": "GET",
+    "path": "/v1/image-proxy/ticket",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/organizations/:accountId/insights/calls",
     "method": "GET",
     "path": "/v1/organizations/:accountId/insights/calls",

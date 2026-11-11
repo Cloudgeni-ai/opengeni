@@ -6,6 +6,15 @@
     <title>Opengeni</title>
     <!-- Office requires office.js from Microsoft's CDN; it defines Office and Excel. -->
     <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+    <script id="opengeni-zod-jitless">
+      // The page's Content-Security-Policy has no 'unsafe-eval'. Zod decides
+      // whether to compile object parsers with `new Function` when each
+      // schema is created, which happens while the app's modules load, so
+      // turn that off before any module runs (Zod reads this shared object).
+      globalThis.__zod_globalConfig = Object.assign(globalThis.__zod_globalConfig || {}, {
+        jitless: true,
+      });
+    </script>
   </head>
   <body>
     <div id="root"></div>

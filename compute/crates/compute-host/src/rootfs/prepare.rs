@@ -13,8 +13,16 @@
 //! takes minutes: the first starts the build and every ask until it ends
 //! hears that it is under way. A host builds one image at a time, in
 //! scratch space emptied before and after each build. Once stored, an
-//! image is the answer to every later ask; a failed build is told to the
-//! next ask, and the one after that builds again.
+//! image is the answer to every ask for [`TOLD_FOR`]; a failed build is
+//! told to the next ask, and the one after that builds again.
+//!
+//! The control service asks only for an image it has no record of, and
+//! forgets a stored image nothing uses, with its record, no sooner than an
+//! hour after it was last recorded (compute-control's `UNUSED_FOR`). So an
+//! ask long after the store may be for an image the store no longer
+//! holds, and the host's word that it stored it then is no longer true:
+//! past [`TOLD_FOR`] the host builds the image again, which is a new
+//! image, stored anew.
 //!
 //! A build ends by keeping the image in the host's cache of images
 //! ([`Cache`]), so this host serves it without a fetch, and then storing
@@ -55,6 +63,11 @@ const STORE_AGAIN_MOST: Duration = Duration::from_secs(10 * 60);
 /// for an image, so one it has not asked for in this long it no longer
 /// wants (a later release names another).
 const UNASKED_AFTER: Duration = Duration::from_secs(30 * 60);
+/// How long a stored image is the answer to asks for it: time for every
+/// replica of the control service to hear of it, and less than the hour a
+/// stored image nothing uses is kept (compute-control's `UNUSED_FOR`), so
+/// an image told is one the store still holds.
+const TOLD_FOR: Duration = Duration::from_secs(30 * 60);
 
 /// How a host builds sandbox images.
 #[derive(Clone, Debug)]
@@ -186,8 +199,21 @@ enum Standing {
         prepared: Prepared,
         asked: Instant,
     },
-    Done(Prepared),
+    /// Stored at `stored`, and the answer until [`TOLD_FOR`] after.
+    Done {
+        prepared: Prepared,
+        stored: Instant,
+    },
     Failed(String),
+}
+
+impl Standing {
+    fn done(prepared: Prepared) -> Self {
+        Self::Done {
+            prepared,
+            stored: Instant::now(),
+        }
+    }
 }
 
 /// Builds a host's images, one at a time.
@@ -266,11 +292,14 @@ impl Preparer {
                     message,
                 });
             }
-            Some(Standing::Done(prepared)) => {
+            Some(Standing::Done { prepared, stored }) if stored.elapsed() < TOLD_FOR => {
                 let progress = Progress::Prepared(prepared.clone());
-                builds.insert(image.to_owned(), Standing::Done(prepared));
+                builds.insert(image.to_owned(), Standing::Done { prepared, stored });
                 return Ok(progress);
             }
+            // Stored too long ago to say the store still holds it: built
+            // again.
+            Some(Standing::Done { .. }) | None => {}
             Some(Standing::Running) => {
                 builds.insert(image.to_owned(), Standing::Running);
                 return Ok(Progress::Preparing);
@@ -282,7 +311,6 @@ impl Preparer {
                 builds.insert(image.to_owned(), Standing::Storing { prepared, asked });
                 return Ok(Progress::Preparing);
             }
-            None => {}
         }
         builds.insert(image.to_owned(), Standing::Running);
         drop(builds);
@@ -331,7 +359,7 @@ impl Preparer {
                     seconds = started.elapsed().as_secs_f64(),
                     "built and stored a sandbox image"
                 );
-                Standing::Done(prepared)
+                Standing::done(prepared)
             }
             Ok(Stored::NotKept) => {
                 tracing::warn!(%image, %id, "a sandbox image was removed before it was stored");
@@ -369,7 +397,7 @@ impl Preparer {
             match self.builder.store(id).await {
                 Ok(Stored::Done) => {
                     tracing::info!(%image, %id, tries, "stored a sandbox image built earlier");
-                    self.settle(image, Standing::Done(prepared));
+                    self.settle(image, Standing::done(prepared));
                     return;
                 }
                 Ok(Stored::NotKept) => {
@@ -826,6 +854,27 @@ mod tests {
             );
         }
         assert_eq!(fake.started.load(Ordering::SeqCst), 1, "built once");
+    }
+
+    /// The control service forgets a stored image nothing uses, and asks
+    /// again when a name next uses its OCI image: by then the store may
+    /// not hold what this host stored, so it builds a new image.
+    #[tokio::test(start_paused = true)]
+    async fn an_image_stored_long_ago_is_built_again_when_asked_for() {
+        let (fake, preparer) = preparer();
+        fake.go.add_permits(1);
+        let first = settled(&preparer, PINNED).await.unwrap();
+        tokio::time::sleep(TOLD_FOR / 2).await;
+        assert_eq!(preparer.prepare(PINNED).unwrap(), first, "still told");
+        assert_eq!(fake.started.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(TOLD_FOR / 2).await;
+        assert_eq!(preparer.prepare(PINNED).unwrap(), Progress::Preparing);
+        fake.go.add_permits(1);
+        let again = settled(&preparer, PINNED).await.unwrap();
+        assert_ne!(again, first, "a new image");
+        assert_eq!(fake.started.load(Ordering::SeqCst), 2, "built again");
+        assert_eq!(fake.stores(), 2, "and stored anew");
     }
 
     #[tokio::test]
