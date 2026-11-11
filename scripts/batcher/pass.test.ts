@@ -5,10 +5,12 @@ import type {
   CommitSummary,
   GitHub,
   MergeResult,
+  PullFile,
   PullSummary,
   RunSummary,
 } from "./github";
 import { GitHubError, GitHubNetworkError } from "./github";
+import { MAINTAINER, type Review } from "../ci/model-request-review";
 import {
   CI_WORKFLOW,
   DEFAULT_SETTINGS,
@@ -48,6 +50,8 @@ interface FakePull {
   merged?: string;
   headRef?: string;
   conflicting?: boolean;
+  author?: string;
+  reviews?: Review[];
 }
 
 /**
@@ -156,6 +160,7 @@ class FakeGitHub implements GitHub {
         labels: p.labels,
         labeledAt: NOW - 3_600_000 + p.number,
         autoMergeAt: null,
+        author: p.author ?? "contributor",
       }));
   }
 
@@ -191,8 +196,15 @@ class FakeGitHub implements GitHub {
     };
   }
 
-  async pullFiles(number: number) {
+  async pullFiles(number: number): Promise<PullFile[] | null> {
     return this.pulls.get(number)!.files.map((path) => ({ path, status: "added" }));
+  }
+
+  reviewReads: number[] = [];
+
+  async reviews(number: number) {
+    this.reviewReads.push(number);
+    return this.pulls.get(number)!.reviews ?? [];
   }
 
   /** The files of every PR applied in that commit, directly in the directory. */
@@ -1660,5 +1672,120 @@ describe("the in-batch label", () => {
     gh.finishCi(gh.batch().sha, "success");
     await run(gh, options());
     expect(gh.pulls.get(1)!.merged).toBeDefined();
+  });
+});
+
+describe("model request review", () => {
+  const GUARDED = "packages/runtime/src/anthropic-messages.ts";
+  const review = (head: string, state = "APPROVED", extra: Partial<Review> = {}): Review => ({
+    login: MAINTAINER,
+    state,
+    commitId: head,
+    body: "",
+    submittedAt: NOW - 60_000,
+    ...extra,
+  });
+
+  test("a PR that changes model request files waits for the maintainer's approval of its head", async () => {
+    const gh = new FakeGitHub();
+    const lines: string[] = [];
+    gh.addPull(1, { files: [GUARDED, "packages/runtime/test/x.test.ts"] });
+    gh.addPull(2);
+    await run(gh, { ...options(), log: (line) => lines.push(line) });
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+    expect(gh.reviewReads).toEqual([1]);
+    expect(lines.some((l) => l.startsWith("Holding #1: it changes model request files"))).toBe(
+      true,
+    );
+    // Holding is not ejecting: it stays queued without a comment.
+    expect(gh.comments).toEqual([]);
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+  });
+
+  test("only an approval of the exact current head counts, and a later review revokes it", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: [GUARDED] });
+    const head = gh.pulls.get(1)!.head;
+    gh.pulls.get(1)!.reviews = [
+      review("0".repeat(40)),
+      review(head, "APPROVED", { login: "someone-else" }),
+      review(head, "COMMENTED", { body: "/approve-model-request" }),
+    ];
+    await run(gh, options());
+    expect([...gh.refs.keys()].filter((name) => name.startsWith("batch/"))).toEqual([]);
+
+    gh.pulls.get(1)!.reviews!.push(review(head, "APPROVED"));
+    gh.pulls.get(1)!.reviews!.push(review(head, "CHANGES_REQUESTED", { submittedAt: NOW }));
+    await run(gh, options());
+    expect([...gh.refs.keys()].filter((name) => name.startsWith("batch/"))).toEqual([]);
+
+    gh.pulls.get(1)!.reviews!.push(review(head, "APPROVED", { submittedAt: NOW + 1 }));
+    await run(gh, options());
+    gh.finishCi(gh.batch().sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.merged).toBeDefined();
+  });
+
+  test("on his own PR the maintainer approves with a comment review on the head", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: [GUARDED], author: MAINTAINER });
+    const head = gh.pulls.get(1)!.head;
+    gh.pulls.get(1)!.reviews = [review(head, "COMMENTED", { body: "/approve-model-request\nok" })];
+    await run(gh, options());
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+  });
+
+  test("a running batch whose member loses its approval is cancelled and rebuilt without it", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: [GUARDED] });
+    gh.addPull(2);
+    const head = gh.pulls.get(1)!.head;
+    gh.pulls.get(1)!.reviews = [review(head)];
+    await run(gh, options());
+    const first = gh.batch();
+    expect(first.manifest.members.map((m) => m.number)).toEqual([1, 2]);
+
+    // Dismissed after the batch started; CI then passes.
+    gh.pulls.get(1)!.reviews = [review(head, "DISMISSED")];
+    gh.finishCi(first.sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.merged).toBeUndefined();
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+    expect(gh.comments.map((c) => c.number)).toEqual([1]);
+    expect(gh.comments[0]!.body).toContain(
+      "needs the maintainer's approval of its model request changes",
+    );
+  });
+
+  test("a member's new head with the tested tree lands only with an approval of that head", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: [GUARDED] });
+    gh.addPull(2);
+    const old = gh.pulls.get(1)!.head;
+    gh.pulls.get(1)!.reviews = [review(old)];
+    await run(gh, options());
+    const built = gh.batch();
+    expect(built.manifest.members.map((m) => m.number)).toEqual([1, 2]);
+
+    // Rebased: the same tree, a new head whose PR CI has not finished yet.
+    const fresh = hash("head:1 rebased");
+    gh.sameContent.set(fresh, old);
+    gh.pulls.get(1)!.head = fresh;
+    gh.pulls.get(1)!.ci = "running";
+    gh.finishCi(built.sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.merged).toBeUndefined();
+    expect(gh.pulls.get(2)!.merged).toBeUndefined();
+    expect(gh.comments.map((c) => c.number)).toEqual([1]);
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+  });
+
+  test("too many files to list needs the approval too", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.pullFiles = async () => null;
+    await run(gh, options());
+    expect([...gh.refs.keys()].filter((name) => name.startsWith("batch/"))).toEqual([]);
+    expect(gh.reviewReads).toEqual([1]);
   });
 });

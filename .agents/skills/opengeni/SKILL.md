@@ -273,6 +273,10 @@ the cost with leaner platforms. Before you add or change this text:
 - Keep the cached prefix stable. Per-turn data, times and caller context go in
   the user message, never in instructions or tool definitions (see
   `AGENTS.md`).
+- Changes under the model request section of `.github/CODEOWNERS` (these
+  modules among them) land only with the maintainer's approval of the PR's
+  head. Open them as drafts with a plain risk note and never approve them
+  yourself (`AGENTS.md`, "Model request changes").
 - Measure the change. Record the byte or token delta in a new entry file,
   `agent-instructions/prompt-changelog/<YYYY-MM-DD>-<slug>.md` (one file per
   change, named by date and branch topic; see its `README.md`), keep the

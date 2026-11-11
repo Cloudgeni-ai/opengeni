@@ -58,11 +58,19 @@
     },
     {
       "path": ".github/workflows/merge-batcher.yml",
-      "sha256": "0708f7a28630d87f65dc6d280344b1e526350aacae9e66b54401c8dc7fb0884f"
+      "sha256": "b663503108f16d920bffba626bfe196c17811abb596d64267ca174c971a15c36"
     },
     {
       "path": ".github/workflows/merge-content.yml",
       "sha256": "b0334ee5addff16539d0f28b8632195f7e00f781e065e06b803ec168e9f95a7c"
+    },
+    {
+      "path": ".github/workflows/model-request-review-signal.yml",
+      "sha256": "f2f4493da9d5547de5188cdaac997c35660c23d56ad9af5b97d92ee250d7ae5b"
+    },
+    {
+      "path": ".github/workflows/model-request-review.yml",
+      "sha256": "a07b0841fd2f469fa2efc4d12cd6cb5723dfdc888ce67e0cffbd5a84f62b54cd"
     },
     {
       "path": ".github/workflows/open-version-pr.yml",
@@ -1462,6 +1470,24 @@
       "job": "content",
       "step": "Recompute landed merge content",
       "sha256": "58808325ef978e67fac85965381b0808323d1adb509b66a3bba9530e37523799"
+    },
+    {
+      "workflow": ".github/workflows/model-request-review-signal.yml",
+      "job": "signal",
+      "step": "Signal",
+      "sha256": "04db7e53af37976bc554eb647fd5eca55d0d67f2a547b9afa23bd38775048a97"
+    },
+    {
+      "workflow": ".github/workflows/model-request-review.yml",
+      "job": "evaluate",
+      "step": "Report the gate after a review",
+      "sha256": "46e796d352e300fa0a32c942c4df2954c2f2524ab157354831316cd1ad536ea3"
+    },
+    {
+      "workflow": ".github/workflows/model-request-review.yml",
+      "job": "evaluate",
+      "step": "Report the gate for a pushed or opened PR",
+      "sha256": "9329ab82c7bdbbd705a5d390d2d2b27cc53a23091353c5b96318da3461ca616a"
     },
     {
       "workflow": ".github/workflows/open-version-pr.yml",
