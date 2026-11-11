@@ -265,13 +265,26 @@ now drops mismatched blocks itself; the policy keeps it from having to (a drop
 also discards every later thinking block) and keeps requests valid where
 `drop_block` is stripped or does not apply. A Claude signed thinking
 block records the binding it was issued under: the platform and account, the
-model and, for prefix-bound models, a digest of the system prompt (which a
-session can change between turns, for example when a turn adds a repository
-Skill). A request under another binding replays the block as readable
+model and, for prefix-bound models, a digest of the system prompt and of the
+tools as sent (which a session can change between turns, for example when a
+turn adds a repository Skill; tools loaded by discovery are declared in
+messages and leave the tools unchanged). The reply in progress keeps its
+thinking native whatever its binding, unless Claude drops it (below). A request
+under another binding replays the block as readable
 historical reasoning text; canonical history keeps the signed block, so a switch
 back replays it natively. This works on every Claude transport, including
 gateways that do not forward the binding beta. Blocks stored before bindings
-were recorded stay native until Claude refuses them. A refused replay never
+were recorded stay native until Claude refuses or drops them. When a successful
+response reports that Claude dropped blocks itself (`thinking_dropped` in
+`input_transformations`, for a prefix mismatch the recorded binding does not
+cover), the block each entry names and every signed block after it are
+remembered the same way, together with the response's own thinking, which
+Claude signed while those blocks were absent. The next request replays them as
+text, so Claude has nothing left to drop. This holds even if the response is
+then refused or cut short. A block dropped because the model or account cannot
+read it (`model_binding_mismatch`, `organization_binding_mismatch`) is not an
+edit: Claude drops only that block and reads it again once a model or account
+that can returns, so it stays native. A refused replay never
 fails the turn: the request is sent once more with the blocks the refusal
 concerns (those with no recorded binding, the one it names and every signed
 block after it) as text, and

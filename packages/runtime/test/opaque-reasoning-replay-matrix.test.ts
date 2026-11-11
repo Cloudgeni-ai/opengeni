@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import type { ModelRequest } from "@openai/agents";
 import { getOrCreateTrace } from "@openai/agents-core";
@@ -89,24 +89,64 @@ function claudeProvider({ transport, account }: Endpoint): ResolvedModelProvider
   } as ResolvedModelProvider;
 }
 
-/** What a signature binds: platform and credential, model, and (prefix-bound) system. */
-function signature(issuer: string, model: string, system: string): string {
-  const digest = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 12);
-  const bound = PREFIX_BOUND.has(model) && system !== INPUT_INDEPENDENT ? system : "";
-  return `sig-${digest(`${issuer}\0${model}`).slice(0, 8)}${digest(bound)}`;
+const digest = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 12);
+
+/**
+ * What a signature binds: platform and credential, model, and for a
+ * prefix-bound model the system prompt, the tools and every message before
+ * the block, without thinking blocks (see `boundPrefix`).
+ */
+function signature(issuer: string, model: string, system: string, prefix = ""): string {
+  const bound =
+    PREFIX_BOUND.has(model) && system !== INPUT_INDEPENDENT ? `${system}\0${prefix}` : "";
+  return `sig-${digest(issuer).slice(0, 4)}${digest(model).slice(0, 4)}${digest(bound)}`;
 }
 /** Marks the platform, account and model part of a signature only. */
 const INPUT_INDEPENDENT = "\0";
 
+/**
+ * The tools and the messages before `messages[m].content[c]`, as Claude
+ * checks them. Thinking blocks are not part of it (so a dropped block changes
+ * nothing, but thinking replayed as text does), and neither are cache markers.
+ */
+function boundPrefix(body: any, m: number, c: number): string {
+  const unmarked = ({ cache_control: _marker, ...block }: any) => block;
+  const messages = [
+    ...body.messages.slice(0, m),
+    {
+      role: body.messages[m]?.role ?? "assistant",
+      content: body.messages[m]?.content ?? [],
+    },
+  ].map((message: any, index: number) => ({
+    role: message.role,
+    content: (index === m ? message.content.slice(0, c) : message.content)
+      .filter((block: any) => block.type !== "thinking" && block.type !== "redacted_thinking")
+      .map(unmarked),
+  }));
+  return JSON.stringify({ tools: (body.tools ?? []).map(unmarked), messages });
+}
+
+/** Claude's reason for dropping a block: the part of its binding that failed first. */
+function dropReason(secret: string, issuer: string, model: string): string {
+  if (!secret.startsWith(`sig-${digest(issuer).slice(0, 4)}`))
+    return "organization_binding_mismatch";
+  if (secret.slice(8, 12) !== digest(model).slice(0, 4)) return "model_binding_mismatch";
+  return "prefix_binding_mismatch";
+}
+
+type Drop = { type: "thinking_dropped"; path: string; reason: string };
+
 const issuerOf = (provider: ResolvedModelProvider) =>
   `${new URL(provider.baseUrl!).host}|${provider.apiKey}`;
 
-type Sent = { body: any; betas: string[]; refused: boolean };
+type Sent = { body: any; betas: string[]; refused: boolean; dropped: Drop[] };
 
 /** Simulated Claude platforms behind every endpoint above. */
 function claudePlatform(options: {
   streamed: boolean;
   honorsDropBlock?: boolean;
+  /** Report drops without the `path` of each dropped block. */
+  omitsDropPaths?: boolean;
   /** Refuse every replayed thinking block, valid or not. */
   refusesAllThinking?: boolean;
   /** Name the last refused block instead of the first. */
@@ -126,11 +166,16 @@ function claudePlatform(options: {
       .map((block: any) => block.text)
       .filter((text: string) => !text.startsWith("x-anthropic-billing-header"))
       .join("\n\n");
-    const expected = signature(issuer, body.model, system);
+    const expected = (m: number, c: number) =>
+      signature(issuer, body.model, system, boundPrefix(body, m, c));
+    const bindingControls = betas.includes("thinking-binding-controls-2026-08-01");
+    // Claude drops a block whose prefix no longer matches and every thinking
+    // block after it; a block the model or account cannot read is dropped on
+    // its own. Each one is listed in `input_transformations`.
     const dropsMismatched =
       options.honorsDropBlock === true &&
       body.thinking?.block_binding?.prefix_mismatch_behavior === "drop_block" &&
-      betas.includes("thinking-binding-controls-2026-08-01");
+      bindingControls;
     // The reply in progress (after the last message the person wrote, not a
     // tool result) is checked only for platform, account and model: a new
     // chat's first request carries a one-shot system addition, and Claude
@@ -145,6 +190,8 @@ function claudePlatform(options: {
     });
     const inProgress = signature(issuer, body.model, INPUT_INDEPENDENT);
     let at: string | undefined;
+    const dropped: Drop[] = [];
+    let cascading = false;
     body.messages.forEach((message: any, m: number) =>
       message.content.forEach((block: any, c: number) => {
         const secret =
@@ -153,20 +200,37 @@ function claudePlatform(options: {
             : block.type === "redacted_thinking"
               ? block.data
               : undefined;
+        const path = `messages.${m}.content.${c}`;
         if (secret === undefined || (at && !options.namesLastRefused)) return;
+        if (cascading) {
+          dropped.push({
+            type: "thinking_dropped",
+            path,
+            reason: "prefix_binding_mismatch",
+          });
+          return;
+        }
         const valid =
-          secret === expected ||
-          (m > lastUser && secret.startsWith(inProgress.slice(0, 12))) ||
-          dropsMismatched;
-        if (options.refusesAllThinking || !valid) at = `messages.${m}.content.${c}`;
+          secret === expected(m, c) || (m > lastUser && secret.startsWith(inProgress.slice(0, 12)));
+        if (options.refusesAllThinking || !valid) {
+          if (dropsMismatched && !options.refusesAllThinking) {
+            const reason = dropReason(secret, issuer, body.model);
+            dropped.push({ type: "thinking_dropped", path, reason });
+            cascading = reason === "prefix_binding_mismatch";
+          } else at = path;
+        }
       }),
     );
     const refused = at !== undefined;
-    sent.push({ body, betas, refused });
+    sent.push({ body, betas, refused, dropped });
     if (refused) return Response.json(rejection(at), { status: 400 });
     issued += 1;
     const content = [
-      { type: "thinking", thinking: `Reasoning ${issued}.`, signature: expected },
+      {
+        type: "thinking",
+        thinking: `Reasoning ${issued}.`,
+        signature: expected(body.messages.length, 0),
+      },
       { type: "text", text: `Answer ${issued}.` },
     ];
     const message = {
@@ -177,6 +241,13 @@ function claudePlatform(options: {
       content,
       stop_reason: "end_turn",
       usage: { input_tokens: 10, output_tokens: 5 },
+      ...(bindingControls
+        ? {
+            input_transformations: options.omitsDropPaths
+              ? dropped.map(({ path: _path, ...entry }) => entry)
+              : dropped,
+          }
+        : {}),
     };
     if (!options.streamed) return Response.json(message, { headers: { "request-id": "req_ok" } });
     const frames = [
@@ -247,9 +318,15 @@ const thinkingBlocks = (body: any): Item[] =>
 const reasoningBlock = (output: Item[]) =>
   output.find((item) => item.type === "reasoning")!.providerData.anthropic.block;
 
-type Leg = { endpoint: Endpoint; model: string; system: string };
+type Leg = {
+  endpoint: Endpoint;
+  model: string;
+  system: string;
+  tools?: ModelRequest["tools"];
+};
 
 beforeEach(() => clearRefusedOpaqueReasoning());
+afterAll(() => clearRefusedOpaqueReasoning());
 
 describe("Claude to Claude: every switch a chat can make", () => {
   const rows: Array<[string, Leg, Leg, "native" | "readable"]> = [];
@@ -270,6 +347,12 @@ describe("Claude to Claude: every switch a chat can make", () => {
         "readable",
       ],
       [`${name}: a model switch`, { ...same, model: "claude-sonnet-5-5" }, same, "readable"],
+      [
+        `${name}: the tools changed since (an integration connected)`,
+        same,
+        { ...same, tools: [lookupTool] as ModelRequest["tools"] },
+        "readable",
+      ],
     );
   }
   const opus55 = (endpoint: Endpoint, system = BASE_SYSTEM) => ({
@@ -300,40 +383,46 @@ describe("Claude to Claude: every switch a chat can make", () => {
     ],
   );
 
-  for (const streamed of [false, true])
-    for (const [label, first, second, expected] of rows)
-      test(`${label} (stream=${streamed})`, async () => {
-        const platform = claudePlatform({ streamed });
-        const model = (leg: Leg) =>
-          new AnthropicMessagesModel(claudeProvider(leg.endpoint), leg.model, platform.fetch);
-        const opening = [user("Add a delete action for the agent.")];
-        const earlier = await run(model(first), request(opening, first.system), streamed);
-        const history = [
-          ...opening,
-          ...persisted(earlier),
-          user("Okay, and we added the delete action? And what did we decide on approvals?"),
-        ];
-        const canonical = JSON.stringify(history);
+  for (const honorsDropBlock of [false, true])
+    for (const streamed of [false, true])
+      for (const [label, first, second, expected] of rows)
+        test(`${label} (stream=${streamed}${honorsDropBlock ? ", drop_block honored" : ""})`, async () => {
+          const platform = claudePlatform({ streamed, honorsDropBlock });
+          const model = (leg: Leg) =>
+            new AnthropicMessagesModel(claudeProvider(leg.endpoint), leg.model, platform.fetch);
+          const legRequest = (input: Item[], leg: Leg) => ({
+            ...request(input, leg.system),
+            tools: leg.tools ?? [],
+          });
+          const opening = [user("Add a delete action for the agent.")];
+          const earlier = await run(model(first), legRequest(opening, first), streamed);
+          const history = [
+            ...opening,
+            ...persisted(earlier),
+            user("Okay, and we added the delete action? And what did we decide on approvals?"),
+          ];
+          const canonical = JSON.stringify(history);
 
-        const later = await run(model(second), request(history, second.system), streamed);
+          const later = await run(model(second), legRequest(history, second), streamed);
 
-        // Never refused: no failed request, no retry.
-        expect(platform.sent.map(({ refused }) => refused)).toEqual([false, false]);
-        expect(JSON.stringify(later)).toContain("Answer 2.");
-        const body = platform.sent[1]!.body;
-        const block = reasoningBlock(earlier);
-        if (expected === "native") {
-          expect(thinkingBlocks(body)).toEqual([block]);
-        } else {
-          expect(thinkingBlocks(body)).toEqual([]);
-          expect(JSON.stringify(body)).not.toContain(block.signature);
-          expect(JSON.stringify(body.messages)).toContain(`${HISTORICAL}Reasoning 1.`);
-        }
-        // Nothing reaches the wire that the provider did not issue.
-        expect(JSON.stringify(body)).not.toContain("opengeni.artifact_origin");
-        // Canonical history is untouched: a switch back replays it natively.
-        expect(JSON.stringify(history)).toBe(canonical);
-      });
+          // Never refused: no failed request, no retry, and nothing for Claude to drop.
+          expect(platform.sent.map(({ refused }) => refused)).toEqual([false, false]);
+          expect(platform.sent.flatMap(({ dropped }) => dropped)).toEqual([]);
+          expect(JSON.stringify(later)).toContain("Answer 2.");
+          const body = platform.sent[1]!.body;
+          const block = reasoningBlock(earlier);
+          if (expected === "native") {
+            expect(thinkingBlocks(body)).toEqual([block]);
+          } else {
+            expect(thinkingBlocks(body)).toEqual([]);
+            expect(JSON.stringify(body)).not.toContain(block.signature);
+            expect(JSON.stringify(body.messages)).toContain(`${HISTORICAL}Reasoning 1.`);
+          }
+          // Nothing reaches the wire that the provider did not issue.
+          expect(JSON.stringify(body)).not.toContain("opengeni.artifact_origin");
+          // Canonical history is untouched: a switch back replays it natively.
+          expect(JSON.stringify(history)).toBe(canonical);
+        });
 
   for (const streamed of [false, true])
     test(`switching back to the issuing binding replays the earlier thinking natively (stream=${streamed})`, async () => {
@@ -407,6 +496,260 @@ describe("history stored before bindings were recorded (the exact ae0245f3 state
         expect(platform.sent.map(({ refused }) => refused)).toEqual([true, false, false]);
         expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([reasoningBlock(output)]);
       });
+});
+
+describe("Claude drops a stale block itself (drop_block on the direct API)", () => {
+  const tools = [lookupTool] as ModelRequest["tools"];
+  /** Signed under the earlier system prompt by an earlier build: no binding recorded. */
+  const legacyHistory = (provider: ResolvedModelProvider): Item[] => {
+    const stale = {
+      type: "thinking",
+      thinking: "The delete action belongs in the agent tools.",
+      signature: signature(issuerOf(provider), "claude-opus-5-5", BASE_SYSTEM),
+    };
+    return [
+      user("Add a delete action for the agent."),
+      {
+        type: "reasoning",
+        content: [{ type: "input_text", text: stale.thinking }],
+        providerData: { anthropic: { block: stale } },
+      },
+      {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "Added the delete action." }],
+      },
+      user("Okay, and we added the delete action?"),
+    ];
+  };
+  const drops = (platform: { sent: Sent[] }) => platform.sent.map(({ dropped }) => dropped.length);
+
+  for (const streamed of [false, true])
+    for (const [name, endpoint] of Object.entries(ENDPOINTS))
+      for (const next of ["the next turn", "the same turn's tool loop"] as const)
+        test(`${name}: dropped once, then sent as text until it converges, in ${next} (stream=${streamed})`, async () => {
+          const platform = claudePlatform({ streamed, honorsDropBlock: true });
+          const provider = claudeProvider(endpoint);
+          const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", platform.fetch);
+          const history = legacyHistory(provider);
+          const send = async () =>
+            run(model, { ...request(history, WITH_NEW_SKILL), tools }, streamed);
+
+          const first = await send();
+          // Claude drops the stale block itself: the request succeeds.
+          expect(platform.sent.map(({ refused }) => refused)).toEqual([false]);
+          expect(platform.sent[0]!.dropped).toEqual([
+            {
+              type: "thinking_dropped",
+              path: "messages.1.content.0",
+              reason: "prefix_binding_mismatch",
+            },
+          ]);
+
+          history.push(
+            ...persisted(first),
+            ...(next === "the next turn"
+              ? [user("Thanks. Now the approvals?")]
+              : [
+                  {
+                    type: "function_call",
+                    callId: "call_1",
+                    name: "lookup",
+                    arguments: "{}",
+                  },
+                  {
+                    type: "function_call_result",
+                    callId: "call_1",
+                    output: "found",
+                  },
+                ]),
+          );
+          const second = await send();
+          // The stale block goes back as text, and so does the thinking Claude
+          // signed while it was dropped: there is nothing left to drop.
+          expect(drops(platform)).toEqual([1, 0]);
+          const body = platform.sent[1]!.body;
+          expect(thinkingBlocks(body)).toEqual([]);
+          for (const thought of ["The delete action belongs in the agent tools.", "Reasoning 1."])
+            expect(JSON.stringify(body.messages)).toContain(`${HISTORICAL}${thought}`);
+
+          // Thinking signed with the text in place stays native from then on.
+          history.push(...persisted(second), user("And the delete confirmation?"));
+          await send();
+          expect(drops(platform)).toEqual([1, 0, 0]);
+          expect(platform.sent.map(({ refused }) => refused)).toEqual([false, false, false]);
+          expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([reasoningBlock(second)]);
+        });
+
+  test("Claude's drops are counted for operators, never shown to the person", async () => {
+    const platform = claudePlatform({ streamed: false, honorsDropBlock: true });
+    const provider = claudeProvider(API);
+    const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", platform.fetch);
+    const response = await model.getResponse(request(legacyHistory(provider), WITH_NEW_SKILL));
+    expect(response.providerData?.anthropic?.thinkingBlocksDropped).toEqual({
+      prefix_binding_mismatch: 1,
+    });
+    expect(JSON.stringify(response.output)).not.toContain("thinking_dropped");
+  });
+
+  for (const streamed of [false, true])
+    test(`tools that change within a turn keep that turn's thinking native until the turn ends (stream=${streamed})`, async () => {
+      const platform = claudePlatform({ streamed, honorsDropBlock: true });
+      const model = new AnthropicMessagesModel(
+        claudeProvider(API),
+        "claude-opus-5-5",
+        platform.fetch,
+      );
+      const first = await run(model, request([user("Look it up.")], BASE_SYSTEM), streamed);
+      // An integration connects: the same turn continues with more tools.
+      // (The simulator, like production evidence for the system prompt,
+      // accepts the reply in progress; a drop of it would be learned.)
+      const loop = [
+        user("Look it up."),
+        ...persisted(first),
+        { type: "function_call", callId: "call_1", name: "lookup", arguments: "{}" },
+        { type: "function_call_result", callId: "call_1", output: "found" },
+      ];
+      const second = await run(model, { ...request(loop, BASE_SYSTEM), tools }, streamed);
+      expect(thinkingBlocks(platform.sent[1]!.body)).toEqual([reasoningBlock(first)]);
+
+      // The next turn has the new tools: the earlier turn's thinking, issued
+      // before the tool arrived, goes back as text, with nothing to drop.
+      const next = [...loop, ...persisted(second), user("Next.")];
+      await run(model, { ...request(next, BASE_SYSTEM), tools }, streamed);
+      expect(platform.sent.map(({ refused }) => refused)).toEqual([false, false, false]);
+      expect(drops(platform)).toEqual([0, 0, 0]);
+      expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([]);
+    });
+
+  test("thinking before the block Claude dropped stays native", async () => {
+    const platform = claudePlatform({ streamed: false, honorsDropBlock: true });
+    const model = new AnthropicMessagesModel(
+      claudeProvider(API),
+      "claude-opus-5-5",
+      platform.fetch,
+    );
+    const first = await run(model, request([user("One")], BASE_SYSTEM), false);
+    const history: Item[] = [
+      user("One"),
+      ...persisted(first),
+      user("Two"),
+      {
+        type: "reasoning",
+        content: [{ type: "input_text", text: "Stored before bindings." }],
+        providerData: {
+          anthropic: {
+            block: {
+              type: "thinking",
+              thinking: "Stored before bindings.",
+              signature: signature(issuerOf(claudeProvider(API)), "claude-opus-5-5", "Old system"),
+            },
+          },
+        },
+      },
+      { type: "message", role: "assistant", content: [{ type: "output_text", text: "Ok." }] },
+      user("Three"),
+    ];
+    const second = await run(model, request(history, BASE_SYSTEM), false);
+    expect(drops(platform)).toEqual([0, 1]);
+    history.push(...persisted(second), user("Four"));
+    await run(model, request(history, BASE_SYSTEM), false);
+    expect(drops(platform)).toEqual([0, 1, 0]);
+    expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([reasoningBlock(first)]);
+  });
+
+  test("a block the model cannot read is dropped on its own and nothing is learned", async () => {
+    const platform = claudePlatform({ streamed: false, honorsDropBlock: true });
+    const provider = claudeProvider(API);
+    const model = new AnthropicMessagesModel(provider, "claude-sonnet-5-5", platform.fetch);
+    // Opus 5.5 thinking stored before bindings were recorded; Sonnet 5.5 cannot read it.
+    const history = legacyHistory(provider);
+    const first = await run(model, request(history, BASE_SYSTEM), false);
+    expect(platform.sent[0]!.dropped.map(({ reason }) => reason)).toEqual([
+      "model_binding_mismatch",
+    ]);
+    history.push(...persisted(first), user("Thanks."));
+    await run(model, request(history, BASE_SYSTEM), false);
+    // Not an edit: Claude keeps dropping only that block, and the thinking
+    // after it stays native and valid.
+    expect(drops(platform)).toEqual([1, 1]);
+    expect(thinkingBlocks(platform.sent[1]!.body)).toEqual([
+      history[1]!.providerData.anthropic.block,
+      reasoningBlock(first),
+    ]);
+  });
+
+  test("a drop is learned even when the response itself is not kept", async () => {
+    const provider = claudeProvider(API);
+    const bodies: any[] = [];
+    const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", (async (
+      _url: unknown,
+      init?: RequestInit,
+    ) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return Response.json({
+        id: `msg_${bodies.length}`,
+        type: "message",
+        role: "assistant",
+        content: [],
+        stop_reason: "refusal",
+        usage: { input_tokens: 1, output_tokens: 1 },
+        input_transformations:
+          bodies.length === 1
+            ? [
+                {
+                  type: "thinking_dropped",
+                  path: "messages.1.content.0",
+                  reason: "prefix_binding_mismatch",
+                },
+              ]
+            : [],
+      });
+    }) as typeof globalThis.fetch);
+    const history = legacyHistory(provider);
+    for (let attempt = 0; attempt < 2; attempt += 1)
+      await expect(model.getResponse(request(history, WITH_NEW_SKILL))).rejects.toThrow();
+    expect(thinkingBlocks(bodies[0])).toHaveLength(1);
+    expect(thinkingBlocks(bodies[1])).toEqual([]);
+  });
+
+  test("a drop report without paths implicates the blocks sent with no recorded binding", async () => {
+    const platform = claudePlatform({
+      streamed: false,
+      honorsDropBlock: true,
+      omitsDropPaths: true,
+    });
+    const provider = claudeProvider(API);
+    const model = new AnthropicMessagesModel(provider, "claude-opus-5-5", platform.fetch);
+    const history = legacyHistory(provider);
+    const first = await run(model, request(history, WITH_NEW_SKILL), false);
+    history.push(...persisted(first), user("Thanks."));
+    await run(model, request(history, WITH_NEW_SKILL), false);
+    expect(drops(platform)).toEqual([1, 0]);
+    expect(thinkingBlocks(platform.sent[1]!.body)).toEqual([]);
+  });
+
+  test("a block bound to this very binding that Claude still drops is learned the same way", async () => {
+    // A mismatch Opengeni's recorded binding does not cover: an earlier
+    // message changed, so Claude drops the block.
+    const platform = claudePlatform({ streamed: false, honorsDropBlock: true });
+    const model = new AnthropicMessagesModel(
+      claudeProvider(API),
+      "claude-opus-5-5",
+      platform.fetch,
+    );
+    const opening = [user("One")];
+    const first = await run(model, request(opening, BASE_SYSTEM), false);
+    const history = [user("Zero"), ...opening, ...persisted(first), user("Two")];
+    const second = await run(model, request(history, BASE_SYSTEM), false);
+    expect(drops(platform)).toEqual([0, 1]);
+    history.push(...persisted(second), user("Three"));
+    await run(model, request(history, BASE_SYSTEM), false);
+    expect(drops(platform)).toEqual([0, 1, 0]);
+    expect(thinkingBlocks(platform.sent[2]!.body)).toEqual([]);
+    expect(JSON.stringify(platform.sent[2]!.body.messages)).toContain(`${HISTORICAL}Reasoning 1.`);
+  });
 });
 
 describe("compaction", () => {

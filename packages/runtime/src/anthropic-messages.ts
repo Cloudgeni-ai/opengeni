@@ -153,15 +153,20 @@ const REASONING_REPLAY_REJECTION =
  * recorded on it and compared on every later request (see
  * opaque-reasoning-replay). Anthropic binds a signature to the organization,
  * platform and model that issued it; a prefix-bound model's signature also
- * binds the system prompt, which a session can change between turns (for
- * example a repository Skill added mid-chat); that is what Claude's refusal
- * names. Tools are left out: loading a tool changes them between requests of
- * one turn. Earlier messages change only through compaction, which resets the
- * prefix explicitly. Any other refusal is caught by the one retry. A digest
- * keeps credentials and prompt text out of stored history.
+ * binds the system prompt and the tools as sent, which a session can change
+ * between turns (for example a repository Skill added mid-chat, or an
+ * integration connected; tools loaded by discovery are declared in messages
+ * and leave the tools unchanged); that is what Claude's refusal names. The
+ * reply in progress stays native whatever its binding, so tools that change
+ * within a turn affect only earlier turns. Earlier messages change only
+ * through compaction, which resets the prefix explicitly. Any other mismatch
+ * is caught by the one retry, or learned from Claude's own drop report
+ * (`thinkingClaudeDropped`). A digest keeps credentials, prompt text and
+ * schemas out of stored history.
  */
 export function claudeReplayScope(
-  request: Pick<ModelRequest, "systemInstructions">,
+  request: Pick<ModelRequest, "systemInstructions"> &
+    Partial<Pick<ModelRequest, "tools" | "handoffs">>,
   model: string,
   provider: ClaudeRequestProvider,
 ): string {
@@ -169,9 +174,30 @@ export function claudeReplayScope(
     .update(provider.baseUrl ?? "https://api.anthropic.com/v1")
     .update("\0")
     .update(anthropicSearchAccountScope(provider) ?? `provider:${provider.id}`);
-  if (claudeNativeModelProfile(model)?.prefixBoundThinking)
+  if (claudeNativeModelProfile(model)?.prefixBoundThinking) {
     binding.update("\0").update(request.systemInstructions ?? "");
+    const tools = anthropicWireTools({
+      tools: request.tools ?? [],
+      handoffs: request.handoffs ?? [],
+    });
+    // A request without tools keeps the binding it had before tools were part
+    // of it. Claude compares values, not JSON key order.
+    if (tools.length) binding.update("\0tools\0").update(canonicalJson(tools));
+  }
   return `claude:${model}:${binding.digest("base64url").slice(0, 22)}`;
+}
+
+/** JSON with object keys sorted, so equal values always serialize the same. */
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, entry: unknown) =>
+    entry && typeof entry === "object" && !Array.isArray(entry)
+      ? Object.fromEntries(
+          Object.entries(entry as Record<string, unknown>).sort(([a], [b]) =>
+            a < b ? -1 : a > b ? 1 : 0,
+          ),
+        )
+      : entry,
+  );
 }
 
 /**
@@ -287,12 +313,60 @@ function refusedBlockFingerprints(
   body: Json,
   sent: readonly string[],
 ): string[] {
-  const at = /\bmessages\.(\d+)\.content\.(\d+)\b/.exec(String(error.detail ?? ""));
-  if (!at) return [];
+  const from = sentBlockIndex(String(error.detail ?? ""), body, sent);
+  return from < 0 ? [] : sent.slice(from);
+}
+
+/** Where in `sent` the signed block a `messages.N.content.M` path names is, or -1. */
+function sentBlockIndex(path: string, body: Json, sent: readonly string[]): number {
+  const at = /\bmessages\.(\d+)\.content\.(\d+)\b/.exec(path);
+  if (!at) return -1;
   const block = body.messages?.[Number(at[1])]?.content?.[Number(at[2])];
   const named = block && typeof block === "object" ? claudeThinkingFingerprint(block) : null;
-  const from = named ? sent.indexOf(named) : -1;
-  return from < 0 ? [] : sent.slice(from);
+  return named ? sent.indexOf(named) : -1;
+}
+
+/** What a successful request sent natively, kept to read Claude's drop report. */
+type SentThinking = { body: Json; sent: readonly string[]; unbound: readonly string[] };
+const sentThinking = new WeakMap<Response, SentThinking>();
+
+/**
+ * Drops that are not prefix edits: a block the model cannot read, or one from
+ * another account. Claude drops only that block, keeps the rest valid, and
+ * reads it again once a model or account that can returns. Replaying it as
+ * text would itself edit the prefix of every later block, so it stays native.
+ */
+const BLOCK_ONLY_DROPS = new Set(["model_binding_mismatch", "organization_binding_mismatch"]);
+
+/**
+ * The signed blocks a successful response says Claude dropped itself
+ * (`thinking.block_binding` with `drop_block`): a block whose prefix no longer
+ * matched (a mismatch Opengeni's recorded binding does not cover, such as
+ * history stored before bindings were recorded, or an edit to earlier
+ * messages), and every thinking block after it. Each `thinking_dropped` entry
+ * names one block by its `path`; the earliest named block and every signed
+ * block after it are implicated. A report without a usable path implicates,
+ * conservatively, the earliest block sent with no recorded binding onward, or
+ * else the last blocks sent, one per entry (Claude drops a suffix). Block-only
+ * drops (`BLOCK_ONLY_DROPS`) implicate nothing. Only Claude's own entries are
+ * read, never Opengeni's records.
+ */
+function thinkingClaudeDropped(message: Json, response: Response): string[] {
+  const context = sentThinking.get(response);
+  const drops = Array.isArray(message.input_transformations)
+    ? message.input_transformations.filter(
+        (entry: Json) =>
+          entry?.type === "thinking_dropped" && !BLOCK_ONLY_DROPS.has(String(entry.reason)),
+      )
+    : [];
+  if (!context?.sent.length || !drops.length) return [];
+  const { body, sent, unbound } = context;
+  const named = drops
+    .map((entry: Json) => sentBlockIndex(String(entry.path ?? ""), body, sent))
+    .filter((index: number) => index >= 0);
+  let from = named.length ? Math.min(...named) : sent.findIndex((f) => unbound.includes(f));
+  if (from < 0) from = Math.max(0, sent.length - drops.length);
+  return sent.slice(from);
 }
 
 /**
@@ -470,6 +544,30 @@ export function anthropicToolName(name: string, namespace?: string): string {
   const identity = JSON.stringify([namespace ?? null, name]);
   return "og_" + createHash("sha256").update(identity).digest("hex").slice(0, 60);
 }
+
+/** A request's tools in the order and form Claude receives them (without cache markers). */
+function anthropicWireTools(request: Pick<ModelRequest, "tools" | "handoffs">): Json[] {
+  const tools: Json[] = request.tools.map((tool) => {
+    // Claude's own server-side search, at the agent's tool position so the
+    // tools prefix is identical on every request of the conversation.
+    if (isHostedWebSearchTool(tool)) return { ...ANTHROPIC_WEB_SEARCH_TOOL };
+    if (tool.type !== "function")
+      throw new AnthropicProtocolError(`Claude does not support the ${tool.type} tool transport`);
+    return {
+      name: anthropicToolName(tool.name, tool.namespace),
+      description: tool.description,
+      input_schema: structuredClone(tool.parameters),
+    };
+  });
+  for (const handoff of request.handoffs)
+    tools.push({
+      name: anthropicToolName(handoff.toolName),
+      description: handoff.toolDescription,
+      input_schema: structuredClone(handoff.inputJsonSchema),
+    });
+  return tools;
+}
+
 function toolNames(request: ModelRequest): Map<string, { name: string; namespace?: string }> {
   const names = new Map<string, { name: string; namespace?: string }>();
   const add = (wireName: string, identity: { name: string; namespace?: string }) => {
@@ -986,24 +1084,7 @@ export function buildAnthropicRequest(
             ? thinkingAsText(block)
             : block,
         );
-  const tools: Json[] = request.tools.map((tool) => {
-    // Claude's own server-side search, at the agent's tool position so the
-    // tools prefix is identical on every request of the conversation.
-    if (isHostedWebSearchTool(tool)) return { ...ANTHROPIC_WEB_SEARCH_TOOL };
-    if (tool.type !== "function")
-      throw new AnthropicProtocolError(`Claude does not support the ${tool.type} tool transport`);
-    return {
-      name: anthropicToolName(tool.name, tool.namespace),
-      description: tool.description,
-      input_schema: structuredClone(tool.parameters),
-    };
-  });
-  for (const handoff of request.handoffs)
-    tools.push({
-      name: anthropicToolName(handoff.toolName),
-      description: handoff.toolDescription,
-      input_schema: structuredClone(handoff.inputJsonSchema),
-    });
+  const tools = anthropicWireTools(request);
   // Up to four breakpoints: tools, instructions, previous request, current history.
   // A split system adds one after its stable prefix; when all five would apply,
   // the tools breakpoint yields because the stable prefix already covers tools.
@@ -1611,6 +1692,11 @@ export class AnthropicMessagesModel implements Model {
       const prepared = await this.prepare(request, stream, replay);
       try {
         const response = await this.dispatch(request, prepared);
+        sentThinking.set(response, {
+          body: prepared.body,
+          sent: prepared.signedThinking,
+          unbound: history.unbound,
+        });
         const asText = history.all - prepared.signedThinking.length;
         if (asText > 0 && replay.fallback !== "binding")
           replayTransformations.set(
@@ -1648,6 +1734,26 @@ export class AnthropicMessagesModel implements Model {
         }
       }
     }
+  }
+
+  /**
+   * Learns from blocks Claude dropped itself on a successful response, so
+   * later requests send them as readable text and Claude has nothing to drop
+   * (opaque-reasoning-replay). Left native, a dropped block is dropped again
+   * on every request, with every thinking block after it, including the
+   * reply in progress. The response's own thinking (`message`, when one is
+   * kept) was signed with the dropped blocks absent; once those come back as
+   * text it would no longer match either, so it goes back as text too.
+   * Thinking issued from then on is signed with the text in place and stays
+   * native. The memory is per process, like refusals: a new process learns it
+   * again from one more drop.
+   */
+  private rememberDroppedThinking(dropped: readonly string[], message?: Json): void {
+    if (!dropped.length) return;
+    const issued = (Array.isArray(message?.content) ? message.content : []).flatMap(
+      (block: Json) => claudeThinkingFingerprint(block) ?? [],
+    );
+    rememberRefusedOpaqueReasoning(this.provider.id, [...dropped, ...issued]);
   }
 
   private async dispatch(
@@ -1740,19 +1846,29 @@ export class AnthropicMessagesModel implements Model {
     const replayScope = claudeReplayScope(request, this.model, this.provider);
     let merged: Json | undefined;
     let requestId: string | undefined;
-    for (let continuation = 0; ; continuation += 1) {
-      const current = merged
-        ? pausedTurnRequest(request, merged, names, searchQueries, accountScope, replayScope)
-        : request;
-      const response = await this.send(current, false);
-      requestId = response.headers.get("request-id") ?? undefined;
-      const message = withReplayTransformations(object(await response.json()), response);
-      if (message.stop_reason === "refusal")
-        throw new AnthropicProviderRejection("content_policy_violation", 200, requestId);
-      merged = mergePausedMessage(merged, message);
-      if (message.stop_reason !== "pause_turn") break;
-      assertPauseContinuationAllowed(continuation);
+    const dropped: string[] = [];
+    try {
+      for (let continuation = 0; ; continuation += 1) {
+        const current = merged
+          ? pausedTurnRequest(request, merged, names, searchQueries, accountScope, replayScope)
+          : request;
+        const response = await this.send(current, false);
+        requestId = response.headers.get("request-id") ?? undefined;
+        const raw = object(await response.json());
+        dropped.push(...thinkingClaudeDropped(raw, response));
+        const message = withReplayTransformations(raw, response);
+        if (message.stop_reason === "refusal")
+          throw new AnthropicProviderRejection("content_policy_violation", 200, requestId);
+        merged = mergePausedMessage(merged, message);
+        if (message.stop_reason !== "pause_turn") break;
+        assertPauseContinuationAllowed(continuation);
+      }
+    } catch (error) {
+      // Claude dropped those blocks even though no response is kept.
+      this.rememberDroppedThinking(dropped);
+      throw error;
     }
+    this.rememberDroppedThinking(dropped, merged!);
     return anthropicResponse(
       merged!,
       requestId,
@@ -1775,6 +1891,7 @@ export class AnthropicMessagesModel implements Model {
     const replayScope = claudeReplayScope(request, this.model, this.provider);
     let merged: Json | undefined;
     let requestId: string | undefined;
+    const dropped: string[] = [];
     const partial: AnthropicPartialMessage = {};
     try {
       for (let continuation = 0; ; continuation += 1) {
@@ -1794,11 +1911,15 @@ export class AnthropicMessagesModel implements Model {
           partial,
         );
         requestId = streamed.requestId;
+        dropped.push(...streamed.dropped);
         merged = mergePausedMessage(merged, streamed.message);
         if (streamed.message.stop_reason !== "pause_turn") break;
         assertPauseContinuationAllowed(continuation);
       }
     } catch (error) {
+      // Claude dropped those blocks even though the response is cut short; a
+      // preempted reply keeps no thinking of its own.
+      this.rememberDroppedThinking([...dropped, ...(partial.dropped ?? [])]);
       if (!isModelPreempted(request.signal)) throw error;
       // A Steer cut the stream short. Keep the text blocks Claude already
       // closed (content_block_stop); drop everything else (see
@@ -1826,6 +1947,7 @@ export class AnthropicMessagesModel implements Model {
       });
       return;
     }
+    this.rememberDroppedThinking(dropped, merged!);
     const result = anthropicResponse(
       merged!,
       requestId,
@@ -1854,9 +1976,13 @@ export class AnthropicMessagesModel implements Model {
       textRunStart?: number;
     },
     partial: AnthropicPartialMessage = {},
-  ): AsyncGenerator<ResponseStreamEvent, { message: Json; requestId: string | undefined }> {
+  ): AsyncGenerator<
+    ResponseStreamEvent,
+    { message: Json; requestId: string | undefined; dropped: string[] }
+  > {
     partial.message = undefined;
     partial.blocks = undefined;
+    partial.dropped = undefined;
     const response = await this.send(request, true);
     if (!response.body) throw new AnthropicProtocolError("Claude returned an empty stream");
     partial.requestId = response.headers.get("request-id") ?? undefined;
@@ -1934,6 +2060,7 @@ export class AnthropicMessagesModel implements Model {
           if (message) throw new AnthropicProtocolError("Duplicate Claude message_start");
           message = object(event.message);
           partial.message = message;
+          partial.dropped = thinkingClaudeDropped(message, response);
           if (!continuation.started) yield { type: "response_started" };
           break;
         case "content_block_start":
@@ -2038,6 +2165,7 @@ export class AnthropicMessagesModel implements Model {
             .sort(([a], [b]) => a - b)
             .map(([, state]) => state.block);
           return {
+            dropped: partial.dropped ?? [],
             message: withReplayTransformations(message, response),
             requestId: response.headers.get("request-id") ?? undefined,
           };
@@ -2053,6 +2181,8 @@ type AnthropicPartialMessage = {
   message?: Json | undefined;
   blocks?: Map<number, { block: Json; stopped: boolean; item: number }> | undefined;
   requestId?: string | undefined;
+  /** Blocks Claude reported dropping for the current request (at message_start). */
+  dropped?: string[] | undefined;
 };
 
 /**

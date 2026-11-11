@@ -1,15 +1,20 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeEach, expect, test } from "bun:test";
 import type { ModelRequest } from "@openai/agents";
 import type { ResolvedModelProvider } from "@opengeni/config";
 import { AnthropicMessagesModel } from "../src/anthropic-messages";
 import { anthropicCompactionRequest } from "../src/anthropic-compaction";
 import { buildSummaryItem } from "../src/context-compaction";
+import { clearRefusedOpaqueReasoning } from "../src/opaque-reasoning-replay";
 import {
   ANTHROPIC_REQUEST_MAX_BYTES,
   AnthropicRequestSizeError,
   anthropicRequestSize,
   findAnthropicRequestSizeError,
 } from "../src/anthropic-request-size";
+
+// Claude's drop reports below teach the process-wide replay memory.
+beforeEach(() => clearRefusedOpaqueReasoning());
+afterAll(() => clearRefusedOpaqueReasoning());
 
 const provider: ResolvedModelProvider = {
   id: "claude",

@@ -12,8 +12,9 @@ import { opaqueProviderArtifactFingerprint } from "@opengeni/codex";
  * Claude. A request whose binding differs replays the item as readable
  * historical text (`projectHistoryForProvider` with `artifactScope`). Items
  * stored before origins were recorded stay native until the provider refuses
- * them; the refusal is remembered here so the one retry, and every later
- * request in this process, sends them as text instead.
+ * them, or (Claude with `drop_block`) reports that it dropped them; that is
+ * remembered here so the one retry, and every later request in this process,
+ * sends them as text instead.
  */
 
 /** Claude's signed thinking block on a reasoning item, when it has one. */
