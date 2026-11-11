@@ -16,6 +16,7 @@ import {
   GITHUB_REST_MCP_APP_SERVER_ID,
   GITHUB_REST_MCP_PERSONAL_SERVER_ID,
   GITHUB_REST_WRITE_TOOL_NAMES,
+  GITHUB_SENSITIVE_REQUEST_POLICY_NAME,
 } from "@opengeni/runtime/github-rest-mcp";
 
 export const GITHUB_ACTION_POLICY_GROUP_TOOL_NAMES = {
@@ -24,6 +25,7 @@ export const GITHUB_ACTION_POLICY_GROUP_TOOL_NAMES = {
   ),
   review: ["pull_request_review_submit"],
   merge: ["pull_request_merge"],
+  sensitive: [GITHUB_SENSITIVE_REQUEST_POLICY_NAME],
 } as const satisfies Record<GitHubActionPolicyGroup, readonly string[]>;
 
 const groupedToolNames = Object.values(GITHUB_ACTION_POLICY_GROUP_TOOL_NAMES).flat();
@@ -32,6 +34,40 @@ if (
   GITHUB_REST_WRITE_TOOL_NAMES.some((toolName) => !groupedToolNames.includes(toolName))
 ) {
   throw new Error("GitHub action policy groups must cover every write tool exactly once");
+}
+
+/** Settings and deletions exists only for Your GitHub: the workspace app has no gateway. */
+export function githubActionPolicyGroupApplies(
+  actor: GitHubActionPolicyActor,
+  group: GitHubActionPolicyGroup,
+): boolean {
+  return group !== "sensitive" || actor.kind === "personal";
+}
+
+export class GitHubActionPolicyGroupNotApplicableError extends Error {
+  constructor() {
+    super("Settings and deletions applies only to Your GitHub");
+  }
+}
+
+/**
+ * The Settings and deletions decision as the `gh` and Git gateway applies it:
+ * an explicit choice for it, else Ask. A connection-wide Allow for every tool
+ * does not cover it (it was set before this choice existed), but a
+ * connection-wide Block does.
+ */
+export function githubSensitiveRequestDecision(
+  resolved: ReturnType<typeof resolveConnectorActionPolicy>,
+): GitHubActionPolicyDecision {
+  if (!resolved.managed) return "ask";
+  if (!resolved.entry) return resolved.decision;
+  if (
+    resolved.entry.toolName !== GITHUB_SENSITIVE_REQUEST_POLICY_NAME &&
+    resolved.entry.policy !== "block"
+  ) {
+    return "ask";
+  }
+  return resolved.entry.policy;
 }
 
 export type GitHubActionPolicyActorBinding = {
@@ -52,6 +88,9 @@ function effectiveToolDecision(
     toolName,
     actionName: toolName,
   });
+  if (toolName === GITHUB_SENSITIVE_REQUEST_POLICY_NAME) {
+    return githubSensitiveRequestDecision(resolved);
+  }
   // Match connector_write admission: absent policy inherits repository capability.
   // This is a policy projection, not a grant of repository or provider access.
   if (!resolved.managed) return "allow";
@@ -92,7 +131,7 @@ export function projectGitHubActionPolicyActor(
         kind: "personal",
         connectionId: binding.actor.connectionId,
         label: binding.label,
-        groups,
+        groups: { ...groups, sensitive: effectiveGroupDecision(policies, binding, "sensitive") },
       };
 }
 
@@ -123,6 +162,9 @@ export async function updateGitHubActionPolicyGroup(
     decision: GitHubActionPolicyDecision;
   },
 ): Promise<GitHubActionPolicyActorState> {
+  if (!githubActionPolicyGroupApplies(input.actor.actor, input.group)) {
+    throw new GitHubActionPolicyGroupNotApplicableError();
+  }
   await upsertConnectorActionPolicies(
     db,
     GITHUB_ACTION_POLICY_GROUP_TOOL_NAMES[input.group].map((toolName) => ({

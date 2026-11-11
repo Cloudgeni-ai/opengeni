@@ -212,7 +212,7 @@ describe("personal GitHub gateway", () => {
     expect(response.status).toBe(200);
     expect(decisions).toHaveLength(1);
     expect(decisions[0]!.title).toBe("Create issue on acme/widgets");
-    expect(decisions[0]!.action).toMatchObject({ tools: ["issue_create"], alwaysAsk: false });
+    expect(decisions[0]!.action).toMatchObject({ tools: ["issue_create"], sensitive: false });
     expect(decisions[0]!.reviewArguments).toEqual({
       request: "POST /repos/acme/widgets/issues",
       body: { title: "Bug", body: "Details" },
@@ -342,7 +342,7 @@ describe("personal GitHub gateway", () => {
         query: 'mutation { addStar(input: {starrableId: "R_kgDOWidgets"}) { clientMutationId } }',
       }),
     });
-    expect(decisions[0]!.action).toMatchObject({ alwaysAsk: true });
+    expect(decisions[0]!.action).toMatchObject({ sensitive: true });
   });
 });
 
@@ -426,7 +426,7 @@ describe("personal GitHub gateway review fixes", () => {
         query: 'mutation { createIssue(input: {title: "x"}) { issue { id } } }',
       }),
     });
-    expect(decisions[0]!.action).toMatchObject({ alwaysAsk: true });
+    expect(decisions[0]!.action).toMatchObject({ sensitive: true });
   });
 
   test("GraphQL reads under an owner login are scoped", async () => {
@@ -663,17 +663,44 @@ describe("force updates and deletions of refs", () => {
     expect(decisions.map((decision) => [decision.title, decision.action])).toEqual([
       [
         "Delete branch or tag on acme/widgets",
-        expect.objectContaining({ tools: ["ref_create"], alwaysAsk: false }),
+        expect.objectContaining({ tools: ["ref_create"], sensitive: false }),
       ],
       [
         "Force-update branch on acme/widgets",
-        expect.objectContaining({ tools: ["ref_create"], alwaysAsk: false }),
+        expect.objectContaining({ tools: ["ref_create"], sensitive: false }),
       ],
-      ["Delete branch or tag on acme/widgets", expect.objectContaining({ alwaysAsk: false })],
-      ["Force-update branch on acme/widgets", expect.objectContaining({ alwaysAsk: false })],
-      ["Delete branch or tag on acme/widgets", expect.objectContaining({ alwaysAsk: false })],
+      ["Delete branch or tag on acme/widgets", expect.objectContaining({ sensitive: false })],
+      ["Force-update branch on acme/widgets", expect.objectContaining({ sensitive: false })],
+      ["Delete branch or tag on acme/widgets", expect.objectContaining({ sensitive: false })],
     ]);
     expect(upstream.some((request) => request.init.method === "DELETE")).toBe(true);
+  });
+
+  test("an agent's merged branch that gh names with encoded slashes follows the person's policy", async () => {
+    // What `gh pr merge --delete-branch` sends for em/staging-live-binary-readiness.
+    const { respond } = github();
+    const { send, decisions, upstream } = harness({ respond });
+    const response = await send(
+      "/repos/acme/widgets/git/refs/heads%2Fem%2Fstaging-live-binary-readiness",
+      { method: "DELETE" },
+    );
+    expect(response.status).toBe(200);
+    expect(decisions.map((decision) => [decision.title, decision.action])).toEqual([
+      [
+        "Delete branch or tag on acme/widgets",
+        expect.objectContaining({ tools: ["ref_create"], sensitive: false }),
+      ],
+    ]);
+    expect(
+      upstream.some(
+        (request) =>
+          request.init.method === "DELETE" &&
+          request.url.endsWith("/git/refs/heads%2Fem%2Fstaging-live-binary-readiness"),
+      ),
+    ).toBe(true);
+    // The default branch, encoded the same way, stays sensitive.
+    await send("/repos/acme/widgets/git/refs/heads%2Fmain", { method: "DELETE" });
+    expect(decisions.at(-1)?.action).toEqual(expect.objectContaining({ sensitive: true }));
   });
 
   test("of the default branch, a tag or an unconfirmed ref always ask", async () => {
@@ -719,7 +746,7 @@ describe("force updates and deletions of refs", () => {
     );
     expect(decisions.map((decision) => decision.action)).toHaveLength(8);
     expect(
-      decisions.every((decision) => decision.action.kind === "write" && decision.action.alwaysAsk),
+      decisions.every((decision) => decision.action.kind === "write" && decision.action.sensitive),
     ).toBe(true);
   });
 
@@ -732,8 +759,8 @@ describe("force updates and deletions of refs", () => {
       graphql('mutation { deleteRef(input: {refId: "REF_kwDOFeature1"}) { clientMutationId } }'),
     );
     expect(decisions.map((decision) => decision.action)).toEqual([
-      expect.objectContaining({ alwaysAsk: true }),
-      expect.objectContaining({ alwaysAsk: true }),
+      expect.objectContaining({ sensitive: true }),
+      expect.objectContaining({ sensitive: true }),
     ]);
   });
 
@@ -748,8 +775,8 @@ describe("force updates and deletions of refs", () => {
       authorized.some((call) => call.url === "https://api.github.com/repos/acme/widgets"),
     ).toBe(true);
     expect(decisions.map((decision) => decision.action)).toEqual([
-      expect.objectContaining({ alwaysAsk: false }),
-      expect.objectContaining({ alwaysAsk: false }),
+      expect.objectContaining({ sensitive: false }),
+      expect.objectContaining({ sensitive: false }),
     ]);
   });
 
@@ -759,7 +786,7 @@ describe("force updates and deletions of refs", () => {
       const context = harness({ respond });
       context.services.decide = async (_identity, input) => {
         context.decisions.push(input);
-        return policy === "allow" && !input.action.alwaysAsk
+        return policy === "allow" && !input.action.sensitive
           ? { kind: "allow" }
           : {
               kind: "refuse",

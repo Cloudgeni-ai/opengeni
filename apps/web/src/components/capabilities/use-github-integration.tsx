@@ -70,6 +70,13 @@ const GITHUB_ACTION_POLICY_GROUPS: Array<{
     label: "Merge pull requests",
     description: "Merge, squash, or rebase a pull request. This can change protected branches.",
   },
+  {
+    // Only Your GitHub has it: it covers what agents do with gh and Git.
+    id: "sensitive",
+    label: "Settings and deletions",
+    description:
+      "Repository settings, secrets, environments, deletions, and changes to tags or the default branch made with gh or Git.",
+  },
 ];
 
 /**
@@ -528,31 +535,41 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       ]
     : actionPolicies?.enabled
       ? actionPolicies.actors.flatMap((actor) =>
-          GITHUB_ACTION_POLICY_GROUPS.map((group) => {
-            const value = actor.groups[group.id];
+          GITHUB_ACTION_POLICY_GROUPS.flatMap((group) => {
+            const value =
+              actor.kind === "personal"
+                ? actor.groups[group.id]
+                : group.id === "sensitive"
+                  ? undefined
+                  : actor.groups[group.id];
+            if (value === undefined) return [];
             const optionId = githubActionPolicyOptionId(actor, group.id);
-            return {
-              kind: "choice" as const,
-              id: optionId,
-              label: `${actor.label} · ${group.label}`,
-              description: `${group.description} Applies to new attempts; existing approvals keep their original policy. Repository access and session approval settings still apply.`,
-              value,
-              choices: [
-                ...(value === "mixed" ? [{ value: "mixed", label: "Mixed", disabled: true }] : []),
-                { value: "ask", label: "Ask every time" },
-                { value: "allow", label: "Allow" },
-                { value: "block", label: "Block" },
-              ],
-              disabled:
-                actionPolicyBusy !== null ||
-                (actor.kind === "workspace_app" ? !canManage : !canManagePersonal),
-              busy: actionPolicyBusy === optionId,
-              onChange: (next: string) => {
-                if (next === "allow" || next === "ask" || next === "block") {
-                  void updateActionPolicy(actor, group.id, next);
-                }
+            return [
+              {
+                kind: "choice" as const,
+                id: optionId,
+                label: `${actor.label} · ${group.label}`,
+                description: `${group.description} Applies to new attempts; existing approvals keep their original policy. Repository access and session approval settings still apply.`,
+                value,
+                choices: [
+                  ...(value === "mixed"
+                    ? [{ value: "mixed", label: "Mixed", disabled: true }]
+                    : []),
+                  { value: "ask", label: "Ask every time" },
+                  { value: "allow", label: "Allow" },
+                  { value: "block", label: "Block" },
+                ],
+                disabled:
+                  actionPolicyBusy !== null ||
+                  (actor.kind === "workspace_app" ? !canManage : !canManagePersonal),
+                busy: actionPolicyBusy === optionId,
+                onChange: (next: string) => {
+                  if (next === "allow" || next === "ask" || next === "block") {
+                    void updateActionPolicy(actor, group.id, next);
+                  }
+                },
               },
-            };
+            ];
           }),
         )
       : [];

@@ -635,18 +635,18 @@ function defaultBranchRefName(value: unknown): string | null {
   return typeof name === "string" && name.length > 0 ? name : null;
 }
 
-/** Ask whatever the policy, and whatever the refs it changes. */
-function alwaysAsk(action: GitHubGatewayAction): GitHubGatewayAction {
+/** Sensitive whatever the refs it changes. */
+function markSensitive(action: GitHubGatewayAction): GitHubGatewayAction {
   if (action.kind !== "write") return action;
   const { refRewrites: _ignored, ...rest } = action;
-  return { ...rest, alwaysAsk: true };
+  return { ...rest, sensitive: true };
 }
 
 /**
- * A force update or deletion asks unless every ref it touches is a branch
- * other than its repository's default branch, in a repository the gateway
- * has already checked; then the person's policy decides. Anything the
- * gateway can't confirm keeps asking.
+ * A force update or deletion is sensitive unless every ref it touches is a
+ * branch other than its repository's default branch, in a repository the
+ * gateway has already checked; then the person's branch policy decides.
+ * Anything the gateway can't confirm stays sensitive.
  */
 async function applyRefRewritePolicy(
   services: PersonalGitHubGatewayServices,
@@ -656,7 +656,7 @@ async function applyRefRewritePolicy(
   checks: GatewayRepositoryCheck[],
 ): Promise<GitHubGatewayAction> {
   if (action.kind !== "write" || !action.refRewrites) return action;
-  const { targets, alwaysAskOtherwise } = action.refRewrites;
+  const { targets, sensitiveOtherwise } = action.refRewrites;
   const nodeIds = [
     ...new Set(
       targets.flatMap((target) =>
@@ -709,7 +709,7 @@ async function applyRefRewritePolicy(
     }
     if (!ref || !refRewriteFollowsPolicy(ref, defaultBranch)) return action;
   }
-  return { ...action, alwaysAsk: alwaysAskOtherwise };
+  return { ...action, sensitive: sensitiveOtherwise };
 }
 
 function reviewArgumentsFor(
@@ -786,14 +786,14 @@ export async function handlePersonalGitHubGatewayRequest(
       }
       const nodeRepositories = await resolveNodeRepositories(services, authority, graphql.nodeIds);
       if (nodeRepositories === null) {
-        action = alwaysAsk(action);
+        action = markSensitive(action);
       } else {
         writeTargets += nodeRepositories.length;
         for (const repository of nodeRepositories) checks.push({ repository, access: "write" });
       }
       // A repository mutation whose repository the gateway could not find
       // (an input shape it does not know) asks.
-      if (writeTargets === 0 && !graphql.accountLevel) action = alwaysAsk(action);
+      if (writeTargets === 0 && !graphql.accountLevel) action = markSensitive(action);
     }
   } else {
     const rest = classifyGitHubRestRequest(method, pathname, parsedBody ?? null);

@@ -72,6 +72,8 @@ type State = {
   selectionLoaded?: boolean;
   /** All my repositories, at this access. */
   allRepositoriesAccess?: "read" | "write";
+  /** Action approvals as the server reports them; absent when off. */
+  sensitive?: "allow" | "ask" | "block";
 };
 
 function personalRepository(
@@ -163,13 +165,55 @@ const STATES: State[] = [
     connected: false,
     repositories: 0,
   },
+  {
+    key: "approvals",
+    label: "Action approvals: Settings and deletions starts at Ask",
+    permissions: MANAGER,
+    bound: true,
+    connected: true,
+    repositories: 3,
+    sensitive: "ask",
+  },
+  {
+    key: "approvals-allowed",
+    label: "Action approvals: the person allowed Settings and deletions",
+    permissions: MANAGER,
+    bound: true,
+    connected: true,
+    repositories: 3,
+    sensitive: "allow",
+  },
 ];
 
 function fakeContext(state: State) {
   const client = new Proxy(
     {
       connectTransport: () => ({}),
-      getGitHubActionPolicies: async () => ({ enabled: false, actors: [] }),
+      getGitHubActionPolicies: async () =>
+        state.sensitive
+          ? {
+              enabled: true,
+              actors: [
+                {
+                  kind: "workspace_app",
+                  installationId: 71,
+                  label: "Opengeni bot on acme",
+                  groups: { routine: "allow", review: "ask", merge: "ask" },
+                },
+                {
+                  kind: "personal",
+                  connectionId: personalConnection.id,
+                  label: `@${personalConnection.metadata.githubLogin}`,
+                  groups: {
+                    routine: "allow",
+                    review: "allow",
+                    merge: "allow",
+                    sensitive: state.sensitive,
+                  },
+                },
+              ],
+            }
+          : { enabled: false, actors: [] },
     } as Record<string, unknown>,
     {
       get(target, key) {

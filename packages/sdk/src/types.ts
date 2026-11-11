@@ -10550,16 +10550,33 @@ export type GitHubRepositoriesResponse = {
 
 export type GitHubActionPolicyDecision = "allow" | "ask" | "block";
 export type GitHubActionPolicyEffectiveDecision = GitHubActionPolicyDecision | "mixed";
-export type GitHubActionPolicyGroup = "routine" | "review" | "merge";
+/**
+ * `sensitive` (Settings and deletions) applies only to Your GitHub: repository
+ * settings, secrets, environments, deletions, tag and default-branch rewrites
+ * and unrecognised requests made with `gh` or Git. It defaults to Ask.
+ */
+export type GitHubActionPolicyGroup = "routine" | "review" | "merge" | "sensitive";
 
 export type GitHubActionPolicyActor =
   | { kind: "workspace_app"; installationId: number }
   | { kind: "personal"; connectionId: string };
 
-export type GitHubActionPolicyActorState = GitHubActionPolicyActor & {
-  label: string;
-  groups: Record<GitHubActionPolicyGroup, GitHubActionPolicyEffectiveDecision>;
-};
+export type GitHubActionPolicyActorState =
+  | {
+      kind: "workspace_app";
+      installationId: number;
+      label: string;
+      groups: Record<
+        Exclude<GitHubActionPolicyGroup, "sensitive">,
+        GitHubActionPolicyEffectiveDecision
+      >;
+    }
+  | {
+      kind: "personal";
+      connectionId: string;
+      label: string;
+      groups: Record<GitHubActionPolicyGroup, GitHubActionPolicyEffectiveDecision>;
+    };
 
 export type GitHubActionPoliciesResponse = {
   enabled: boolean;

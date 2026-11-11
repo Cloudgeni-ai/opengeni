@@ -33,11 +33,11 @@ describe("GitHub gateway REST classification", () => {
     expect(rest("POST", "/repos/acme/widgets/pulls").action).toMatchObject({
       kind: "write",
       tools: ["pull_request_create"],
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(rest("PUT", "/repos/acme/widgets/pulls/3/merge").action).toMatchObject({
       tools: ["pull_request_merge"],
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(rest("POST", "/repos/acme/widgets/pulls/3/reviews").action).toMatchObject({
       tools: ["pull_request_review_submit"],
@@ -50,20 +50,20 @@ describe("GitHub gateway REST classification", () => {
     });
     expect(rest("POST", "/repos/acme/widgets/actions/runs/9/rerun").action).toMatchObject({
       tools: GITHUB_GATEWAY_ROUTINE_TOOLS,
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(
       rest("POST", "/repos/acme/widgets/actions/workflows/ci.yml/dispatches").action,
-    ).toMatchObject({ title: "Run workflow", alwaysAsk: false });
+    ).toMatchObject({ title: "Run workflow", sensitive: false });
     expect(rest("POST", "/repos/acme/widgets/releases").action).toMatchObject({
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(rest("POST", "/repos/acme/widgets/git/refs").action).toMatchObject({
       tools: ["ref_create"],
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(rest("POST", "/repos/acme/widgets/releases/1/assets?name=a.zip").action).toMatchObject({
-      alwaysAsk: false,
+      sensitive: false,
     });
   });
 
@@ -83,7 +83,7 @@ describe("GitHub gateway REST classification", () => {
       ["DELETE", "/orgs/acme/members/bob", null],
       ["POST", "/repos/acme/widgets/something-new", {}],
     ] as const) {
-      expect(rest(method, path, body).action).toMatchObject({ kind: "write", alwaysAsk: true });
+      expect(rest(method, path, body).action).toMatchObject({ kind: "write", sensitive: true });
     }
   });
 
@@ -91,7 +91,7 @@ describe("GitHub gateway REST classification", () => {
     expect(
       rest("PATCH", "/repos/acme/widgets/git/refs/heads/feature", { sha: "a", force: false })
         .action,
-    ).toMatchObject({ alwaysAsk: false });
+    ).toMatchObject({ sensitive: false });
   });
 });
 
@@ -117,7 +117,7 @@ describe("GitHub gateway GraphQL classification", () => {
     expect(result.action).toMatchObject({
       kind: "write",
       tools: ["pull_request_create"],
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(result.nodeIds).toEqual(["R_kgDOAbCdEf"]);
     expect(result.mutations).toEqual(["createPullRequest"]);
@@ -129,18 +129,18 @@ describe("GitHub gateway GraphQL classification", () => {
         query:
           'mutation { mergePullRequest(input: {pullRequestId: "PR_kwDOAbCdEf"}) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ tools: ["pull_request_merge"], alwaysAsk: false });
+    ).toMatchObject({ tools: ["pull_request_merge"], sensitive: false });
     expect(
       classifyGitHubGraphqlRequest({
         query: 'mutation { deleteRef(input: {refId: "REF_kwDOAbCdEf"}) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ alwaysAsk: true });
+    ).toMatchObject({ sensitive: true });
     expect(
       classifyGitHubGraphqlRequest({
         query:
           'mutation { updateRepository(input: {repositoryId: "R_kgDOAbCdEf", hasWikiEnabled: false}) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ alwaysAsk: true });
+    ).toMatchObject({ sensitive: true });
     expect(
       classifyGitHubGraphqlRequest({
         query: "mutation($i: UpdateRefsInput!) { updateRefs(input: $i) { clientMutationId } }",
@@ -151,19 +151,19 @@ describe("GitHub gateway GraphQL classification", () => {
           },
         },
       }).action,
-    ).toMatchObject({ alwaysAsk: true });
+    ).toMatchObject({ sensitive: true });
   });
 
   test("an unreadable or ambiguous document asks", () => {
     expect(classifyGitHubGraphqlRequest({ query: "mutation {" }).action).toMatchObject({
-      alwaysAsk: true,
+      sensitive: true,
     });
     expect(
       classifyGitHubGraphqlRequest({
         query:
           'query A { viewer { login } } mutation B { addStar(input: {starrableId: "R_kgDOAbCdEf"}) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ alwaysAsk: true });
+    ).toMatchObject({ sensitive: true });
     // The operation is chosen by name.
     expect(
       classifyGitHubGraphqlRequest({
@@ -171,8 +171,8 @@ describe("GitHub gateway GraphQL classification", () => {
           'query A { viewer { login } } mutation B { addStar(input: {starrableId: "R_kgDOAbCdEf"}) { clientMutationId } }',
         operationName: "B",
       }).action,
-    ).toMatchObject({ kind: "write", alwaysAsk: false });
-    expect(classifyGitHubGraphqlRequest("not json").action).toMatchObject({ alwaysAsk: true });
+    ).toMatchObject({ kind: "write", sensitive: false });
+    expect(classifyGitHubGraphqlRequest("not json").action).toMatchObject({ sensitive: true });
   });
 });
 
@@ -181,14 +181,14 @@ describe("GitHub gateway review fixes", () => {
     expect(
       rest("POST", "/repos/acme/widgets/actions/runs/9/rerun-failed-jobs").action,
     ).toMatchObject({
-      alwaysAsk: false,
+      sensitive: false,
     });
     expect(rest("POST", "/repos/acme/widgets/actions/runs/9/cancel").action).toMatchObject({
-      alwaysAsk: false,
+      sensitive: false,
     });
     for (const sub of ["pending_deployments", "approve", "deployment_protection_rule"]) {
       expect(rest("POST", `/repos/acme/widgets/actions/runs/9/${sub}`).action).toMatchObject({
-        alwaysAsk: true,
+        sensitive: true,
       });
     }
   });
@@ -207,9 +207,9 @@ describe("GitHub gateway review fixes", () => {
       }).action;
     expect(classify("0".repeat(40))).toMatchObject({
       title: "Delete branch or tag",
-      alwaysAsk: true,
+      sensitive: true,
     });
-    expect(classify("b".repeat(40))).toMatchObject({ title: "Update branch", alwaysAsk: false });
+    expect(classify("b".repeat(40))).toMatchObject({ title: "Update branch", sensitive: false });
   });
 
   test("repositories named in mutation input are collected", () => {
@@ -278,17 +278,17 @@ describe("GitHub gateway force updates and deletions of refs", () => {
     expect(rest("DELETE", "/repos/acme/widgets/git/refs/heads/feature/x").action).toEqual({
       kind: "write",
       tools: ["ref_create"],
-      alwaysAsk: true,
+      sensitive: true,
       title: "Delete branch or tag",
       refRewrites: {
         targets: [{ kind: "name", ref: "refs/heads/feature/x" }],
-        alwaysAskOtherwise: false,
+        sensitiveOtherwise: false,
       },
     });
     expect(
       rest("PATCH", "/repos/acme/widgets/git/refs/heads/feature", { sha: "a", force: true }).action,
     ).toMatchObject({
-      alwaysAsk: true,
+      sensitive: true,
       refRewrites: { targets: [{ kind: "name", ref: "refs/heads/feature" }] },
     });
     // No ref to confirm.
@@ -301,7 +301,49 @@ describe("GitHub gateway force updates and deletions of refs", () => {
     expect(
       rest("PATCH", "/repos/acme/widgets/git/refs/heads/feature", { sha: "a", force: "true" })
         .action,
-    ).toMatchObject({ alwaysAsk: true, title: "Force-update branch" });
+    ).toMatchObject({ sensitive: true, title: "Force-update branch" });
+  });
+
+  test("a ref whose slashes gh encodes still names its branch", () => {
+    // `gh pr merge --delete-branch` and `gh api` send `heads%2Fem%2Fx`.
+    expect(
+      rest("DELETE", "/repos/acme/widgets/git/refs/heads%2Fem%2Fstaging-live-binary-readiness")
+        .action,
+    ).toEqual({
+      kind: "write",
+      tools: ["ref_create"],
+      sensitive: true,
+      title: "Delete branch or tag",
+      refRewrites: {
+        targets: [{ kind: "name", ref: "refs/heads/em/staging-live-binary-readiness" }],
+        sensitiveOtherwise: false,
+      },
+    });
+    expect(
+      rest("PATCH", "/repos/acme/widgets/git/refs/heads%2Ffeature", { sha: "a", force: true })
+        .action,
+    ).toMatchObject({ refRewrites: { targets: [{ kind: "name", ref: "refs/heads/feature" }] } });
+    expect(rest("DELETE", "/repos/acme/widgets/git/refs/tags%2Fv1").action).toEqual({
+      kind: "write",
+      tools: ["ref_create"],
+      sensitive: true,
+      title: "Delete branch or tag",
+    });
+  });
+
+  test("environment secrets and other settings are sensitive, with no policy action of their own", () => {
+    expect(
+      rest(
+        "PUT",
+        "/repos/acme/widgets/environments/staging/secrets/OPENGENI_OBSERVABILITY_CREDITS_PROBE_API_KEY",
+        { encrypted_value: "x", key_id: "1" },
+      ).action,
+    ).toEqual({
+      kind: "write",
+      tools: [],
+      sensitive: true,
+      title: "Change repository environments",
+    });
   });
 
   test("GraphQL variable defaults count, as GitHub applies them", () => {
@@ -311,7 +353,7 @@ describe("GitHub gateway force updates and deletions of refs", () => {
     }).action;
     expect(forcedByDefault).toMatchObject({
       title: "Force-update branch",
-      alwaysAsk: true,
+      sensitive: true,
       refRewrites: { targets: [{ kind: "node", refNodeId: "REF_kwDOAbCdEf" }] },
     });
     expect(
@@ -319,7 +361,7 @@ describe("GitHub gateway force updates and deletions of refs", () => {
         query:
           'mutation($i: UpdateRefInput! = {refId: "REF_kwDOAbCdEf", oid: "abc", force: true}) { updateRef(input: $i) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ title: "Force-update branch", alwaysAsk: true });
+    ).toMatchObject({ title: "Force-update branch", sensitive: true });
     // A variable the request sets wins over its default.
     expect(
       classifyGitHubGraphqlRequest({
@@ -327,12 +369,12 @@ describe("GitHub gateway force updates and deletions of refs", () => {
           'mutation($f: Boolean = true) { updateRef(input: {refId: "REF_kwDOAbCdEf", oid: "abc", force: $f}) { clientMutationId } }',
         variables: { f: false },
       }).action,
-    ).toMatchObject({ title: "Update branch", alwaysAsk: false });
+    ).toMatchObject({ title: "Update branch", sensitive: false });
     // An input the gateway can't read asks, and names no ref.
     const unreadable = classifyGitHubGraphqlRequest({
       query: "mutation($i: UpdateRefInput!) { updateRef(input: $i) { clientMutationId } }",
     }).action;
-    expect(unreadable).toMatchObject({ title: "Force-update branch", alwaysAsk: true });
+    expect(unreadable).toMatchObject({ title: "Force-update branch", sensitive: true });
     expect(unreadable).not.toHaveProperty("refRewrites");
   });
 
@@ -343,7 +385,7 @@ describe("GitHub gateway force updates and deletions of refs", () => {
       }).action,
     ).toMatchObject({
       tools: ["ref_create"],
-      alwaysAsk: true,
+      sensitive: true,
       refRewrites: { targets: [{ kind: "node", refNodeId: "REF_kwDOAbCdEf" }] },
     });
     expect(
@@ -351,7 +393,7 @@ describe("GitHub gateway force updates and deletions of refs", () => {
         query:
           'mutation { updateRef(input: {refId: "REF_kwDOAbCdEf", oid: "abc"}) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ alwaysAsk: false, title: "Update branch" });
+    ).toMatchObject({ sensitive: false, title: "Update branch" });
     const refs = classifyGitHubGraphqlRequest({
       query: "mutation($i: UpdateRefsInput!) { updateRefs(input: $i) { clientMutationId } }",
       variables: {
@@ -367,13 +409,13 @@ describe("GitHub gateway force updates and deletions of refs", () => {
     }).action;
     expect(refs).toMatchObject({
       title: "Delete branch or tag",
-      alwaysAsk: true,
+      sensitive: true,
       refRewrites: {
         targets: [
           { kind: "name", ref: "refs/heads/x", repositoryNodeId: "R_kgDOAbCdEf" },
           { kind: "name", ref: "refs/heads/y", repositoryNodeId: "R_kgDOAbCdEf" },
         ],
-        alwaysAskOtherwise: false,
+        sensitiveOtherwise: false,
       },
     });
     // With another mutation that always asks, confirming the refs is not enough.
@@ -382,7 +424,7 @@ describe("GitHub gateway force updates and deletions of refs", () => {
         query:
           'mutation { deleteRef(input: {refId: "REF_kwDOAbCdEf"}) { clientMutationId } deleteIssue(input: {issueId: "I_kwDOAbCdEf"}) { clientMutationId } }',
       }).action,
-    ).toMatchObject({ alwaysAsk: true, refRewrites: { alwaysAskOtherwise: true } });
+    ).toMatchObject({ sensitive: true, refRewrites: { sensitiveOtherwise: true } });
     // A ref it cannot name always asks.
     expect(
       classifyGitHubGraphqlRequest({

@@ -6,7 +6,9 @@
  * Reads pass. Ordinary writes follow the policy of the matching action
  * (`issue_create`, `pull_request_merge`, ...), or the strictest policy of the
  * routine group when no single action matches. Destructive or hard-to-undo
- * requests, and writes this module does not recognise, always ask.
+ * requests, and writes this module does not recognise, are `sensitive`: they
+ * also follow the person's Settings and deletions policy, which asks unless
+ * the person chose otherwise.
  * Force-updating or deleting a branch other than the repository's default
  * branch follows the `ref_create` policy once the gateway has confirmed the
  * branch (see `refRewrites`).
@@ -42,15 +44,18 @@ export type GitHubGatewayAction =
       kind: "write";
       /** Policy actions whose strictest decision applies. */
       tools: readonly string[];
-      /** Ask even when the policy allows (Block still wins). */
-      alwaysAsk: boolean;
+      /**
+       * Also apply the person's Settings and deletions policy (Ask unless
+       * they chose otherwise); the strictest decision wins.
+       */
+      sensitive: boolean;
       title: string;
       /**
-       * Force updates and deletions of these refs. They set `alwaysAsk`; the
-       * gateway lowers it to `alwaysAskOtherwise` only after confirming that
+       * Force updates and deletions of these refs. They set `sensitive`; the
+       * gateway lowers it to `sensitiveOtherwise` only after confirming that
        * every ref is a branch other than the repository's default branch.
        */
-      refRewrites?: { targets: GitHubGatewayRefTarget[]; alwaysAskOtherwise: boolean };
+      refRewrites?: { targets: GitHubGatewayRefTarget[]; sensitiveOtherwise: boolean };
     };
 
 export type GitHubRestClassification = {
@@ -60,8 +65,8 @@ export type GitHubRestClassification = {
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
-function write(tools: readonly string[], title: string, alwaysAsk = false): GitHubGatewayAction {
-  return { kind: "write", tools, alwaysAsk, title };
+function write(tools: readonly string[], title: string, sensitive = false): GitHubGatewayAction {
+  return { kind: "write", tools, sensitive, title };
 }
 
 function routine(title: string): GitHubGatewayAction {
@@ -91,20 +96,22 @@ export function refRewriteFollowsPolicy(ref: string, defaultBranch: string | nul
 
 /**
  * A force update or deletion of the ref at `refs/{refPath}`. Only a path
- * under `heads/` can follow the person's policy; any other path asks.
+ * under `heads/` can follow the person's branch policy; any other path is
+ * sensitive. `gh` encodes the slashes of a ref (`heads%2Fmy%2Fbranch`), so
+ * one segment can hold the whole path.
  */
 function refRewrite(title: string, refPath: string[]): GitHubGatewayAction {
   const path = refPath.join("/");
   const action: Extract<GitHubGatewayAction, { kind: "write" }> = {
     kind: "write",
     tools: ["ref_create"],
-    alwaysAsk: true,
+    sensitive: true,
     title,
   };
-  if (refPath[0] === "heads") {
+  if (path.startsWith("heads/")) {
     action.refRewrites = {
       targets: [{ kind: "name", ref: `refs/${path}` }],
-      alwaysAskOtherwise: false,
+      sensitiveOtherwise: false,
     };
   }
   return action;
@@ -390,7 +397,7 @@ export function classifyGitHubRestRequest(
 /** GraphQL mutations mapped to policy actions. Anything not listed always asks. */
 const GRAPHQL_MUTATIONS: Record<
   string,
-  { tools: readonly string[]; title: string; alwaysAsk?: true }
+  { tools: readonly string[]; title: string; sensitive?: true }
 > = {
   createPullRequest: { tools: ["pull_request_create"], title: "Open pull request" },
   updatePullRequest: { tools: ["pull_request_update"], title: "Update pull request" },
@@ -414,7 +421,7 @@ const GRAPHQL_MUTATIONS: Record<
   dismissPullRequestReview: {
     tools: ["pull_request_review_submit"],
     title: "Dismiss review",
-    alwaysAsk: true,
+    sensitive: true,
   },
   addPullRequestReviewComment: { tools: ["pull_request_comment"], title: "Comment on code" },
   addPullRequestReviewThread: { tools: ["pull_request_comment"], title: "Comment on code" },
@@ -464,14 +471,14 @@ const GRAPHQL_MUTATIONS: Record<
   unmarkFileAsViewed: { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Mark file as viewed" },
   addStar: { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Star repository" },
   removeStar: { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Unstar repository" },
-  deleteIssue: { tools: ["issue_update"], title: "Delete issue", alwaysAsk: true },
-  deleteIssueComment: { tools: ["issue_comment"], title: "Delete comment", alwaysAsk: true },
+  deleteIssue: { tools: ["issue_update"], title: "Delete issue", sensitive: true },
+  deleteIssueComment: { tools: ["issue_comment"], title: "Delete comment", sensitive: true },
   deletePullRequestReviewComment: {
     tools: ["pull_request_comment"],
     title: "Delete review comment",
-    alwaysAsk: true,
+    sensitive: true,
   },
-  transferIssue: { tools: ["issue_update"], title: "Transfer issue", alwaysAsk: true },
+  transferIssue: { tools: ["issue_update"], title: "Transfer issue", sensitive: true },
 };
 
 export type GraphqlValue =
@@ -1041,7 +1048,7 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
   if (mutations.length === 0) return unknown("Unrecognised GitHub GraphQL request");
 
   const tools = new Set<string>();
-  let alwaysAsk = false;
+  let anySensitive = false;
   const titles: string[] = [];
   const nodeIds = new Set<string>();
   const named = new Map<string, { owner: string; name: string }>();
@@ -1107,25 +1114,25 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
           : { tools: GITHUB_GATEWAY_ROUTINE_TOOLS, title: "Update branch" };
     }
     if (!mapped) {
-      alwaysAsk = true;
+      anySensitive = true;
       titles.push(`GitHub ${field.name}`);
       continue;
     }
     for (const tool of mapped.tools) tools.add(tool);
-    if (mapped.alwaysAsk) alwaysAsk = true;
+    if (mapped.sensitive) anySensitive = true;
     titles.push(mapped.title);
   }
   // Too many named repositories to check: ask.
-  if (named.size > GRAPHQL_NODE_IDS_MAX) alwaysAsk = true;
+  if (named.size > GRAPHQL_NODE_IDS_MAX) anySensitive = true;
   const action = write(
     [...tools],
     [...new Set(titles)].join(", ").slice(0, 200),
-    alwaysAsk || unknownRewrite || rewriteTargets.length > 0,
+    anySensitive || unknownRewrite || rewriteTargets.length > 0,
   );
   return {
     action:
       rewriteTargets.length > 0 && !unknownRewrite && action.kind === "write"
-        ? { ...action, refRewrites: { targets: rewriteTargets, alwaysAskOtherwise: alwaysAsk } }
+        ? { ...action, refRewrites: { targets: rewriteTargets, sensitiveOtherwise: anySensitive } }
         : action,
     repositories,
     mutationRepositories: [...named.values()],

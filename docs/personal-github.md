@@ -429,21 +429,30 @@ tools use, so one setting covers both:
   group when no single action matches. Reviews and merges follow their own
   groups.
 - Deleting or force-updating a branch other than the repository's default
-  branch (REST `git/refs`, GraphQL `deleteRef`, `updateRef` and `updateRefs`)
-  follows the person's `Create and update work` policy, so agents can rebase
-  their own pull request branches and delete merged ones. The gateway reads
+  branch (REST `git/refs`, also with the ref's slashes encoded as `gh` sends
+  them, e.g. `git/refs/heads%2Fmy%2Fbranch`; GraphQL `deleteRef`, `updateRef`
+  and `updateRefs`) follows the person's `Create and update work` policy, so
+  agents can rebase their own pull request branches and delete merged ones
+  (`gh pr merge --delete-branch`). The gateway reads
   the default branch with the person's token (REST `default_branch`, kept for
   a minute per connection and repository, so a just-changed default branch
   can take that long to apply; or the GraphQL Ref and Repository nodes, which
   must belong to a repository the request was checked against); when it
-  can't confirm every ref is such a branch, the request asks.
-- Destructive or hard-to-undo requests always ask: deleting or force-updating
-  the default branch, deleting or force-moving tags, deleting repositories,
+  can't confirm every ref is such a branch, the request is treated as a
+  settings-and-deletions request (below).
+- Destructive or hard-to-undo requests follow the person's `Settings and
+  deletions` policy (`sensitive` in the API; policy action
+  `github_sensitive_request`), together with the policy of any matching
+  action, and the strictest decision applies: deleting or force-updating the
+  default branch, deleting or force-moving tags, deleting repositories,
   releases, comments or other data; repository settings, collaborators and
-  teams, secrets and variables, webhooks and deploy keys, branch protection,
-  transfer, archive and visibility, approving deployments or fork workflow
-  runs. So do REST writes and GraphQL mutations the gateway doesn't
-  recognise.
+  teams, secrets, variables and environments, webhooks and deploy keys,
+  branch protection, transfer, archive and visibility, approving deployments
+  or fork workflow runs. So do REST writes and GraphQL mutations the gateway
+  doesn't recognise. The policy asks until the person chooses otherwise; a
+  connection-wide Allow for every GitHub tool does not cover it (a
+  connection-wide Block does). Only Your GitHub has it: the workspace app has
+  no `gh` gateway.
 - Block always wins. Unattended sessions refuse instead of asking.
 
 A request that needs approval is not sent. `gh` prints `Waiting for approval:
@@ -465,7 +474,9 @@ when every such ref is a branch other than the repository's default branch
 (the `default_branch` of the live repository check the broker makes on every
 request), it follows the person's `Create and update work` policy; when one
 is the default branch, a tag or another ref, or the default branch is
-unknown, it asks the person. An approval is bound to the exact ref updates.
+unknown, it also follows their `Settings and deletions` policy (Ask unless
+they chose otherwise), as does a push the gateway can't read. An approval is
+bound to the exact ref updates.
 Git reports a waiting push as a rejected ref with the same message. Pushes
 from shallow clones (how managed sandboxes clone) are read like any other.
 When the gateway can't tell whether an update is a fast-forward, it treats it

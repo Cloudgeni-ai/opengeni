@@ -148,17 +148,19 @@ function appContext(permissions: string[], update: ReturnType<typeof mock>) {
     personalGitHubSelection: null,
     personalGitHubBusy: false,
     client: {
-      getGitHubActionPolicies: mock(async () => ({
-        enabled: true,
-        actors: [
-          {
-            kind: "workspace_app" as const,
-            installationId: 71,
-            label: "Opengeni bot on Cloudgeni-ai",
-            groups: { routine: "ask" as const, review: "ask" as const, merge: "ask" as const },
-          },
-        ],
-      })),
+      getGitHubActionPolicies: mock(
+        async (): Promise<GitHubActionPoliciesResponse> => ({
+          enabled: true,
+          actors: [
+            {
+              kind: "workspace_app" as const,
+              installationId: 71,
+              label: "Opengeni bot on Cloudgeni-ai",
+              groups: { routine: "ask" as const, review: "ask" as const, merge: "ask" as const },
+            },
+          ],
+        }),
+      ),
       updateGitHubActionPolicy: update,
     },
     disconnectGitHubInstallation: async () => true,
@@ -283,6 +285,54 @@ describe("GitHub action approval controls", () => {
       expect(choice(rendered.model(), "-routine").disabled).toBe(true);
       expect(choice(rendered.model(), "-review").disabled).toBe(true);
       expect(choice(rendered.model(), "-merge").disabled).toBe(true);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("offers Settings and deletions for Your GitHub only", async () => {
+    const personal = {
+      kind: "personal" as const,
+      connectionId: "personal-1",
+      label: "@benyhh",
+      groups: {
+        routine: "allow" as const,
+        review: "allow" as const,
+        merge: "allow" as const,
+        sensitive: "ask" as const,
+      },
+    };
+    const update = mock(async () => ({
+      ...personal,
+      groups: { ...personal.groups, sensitive: "allow" as const },
+    }));
+    const context = appContext(["github:manage", "connections:write"], update);
+    const workspaceApp = (await context.client.getGitHubActionPolicies()).actors[0]!;
+    context.client.getGitHubActionPolicies = mock(async () => ({
+      enabled: true,
+      actors: [workspaceApp, personal],
+    }));
+    const rendered = await renderAdapter(context);
+    try {
+      const sensitive = rendered
+        .model()
+        .options.filter((option) => option.kind === "choice" && option.id.endsWith("-sensitive"));
+      expect(sensitive.map((option) => option.id)).toEqual([
+        "github-action-policy-personal-personal-1-sensitive",
+      ]);
+      const option = choice(rendered.model(), "-personal-1-sensitive");
+      expect(option.label).toBe("@benyhh · Settings and deletions");
+      expect(option.value).toBe("ask");
+      await act(async () => {
+        option.onChange("allow");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(update).toHaveBeenCalledWith(WORKSPACE_ID, {
+        actor: { kind: "personal", connectionId: "personal-1" },
+        group: "sensitive",
+        decision: "allow",
+      });
+      expect(choice(rendered.model(), "-personal-1-sensitive").value).toBe("allow");
     } finally {
       await rendered.unmount();
     }

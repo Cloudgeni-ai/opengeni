@@ -7,8 +7,11 @@ import {
   githubGatewayApprovalIdForRequest,
   resolveAttemptConnectorToolDecision,
   type Database,
+  type ResolvedConnectorActionPolicy,
 } from "@opengeni/db";
+import { githubSensitiveRequestDecision } from "@opengeni/core";
 import type { PersonalGitHubGitBrokerClaims } from "@opengeni/github";
+import { GITHUB_SENSITIVE_REQUEST_POLICY_NAME } from "@opengeni/runtime/github-rest-mcp";
 import { createHash } from "node:crypto";
 import {
   ZERO_OID,
@@ -79,30 +82,60 @@ export function waitingForApprovalMessage(title: string): string {
   return `Waiting for approval: ${title}. End your turn now; after the person approves, run the same command again.`;
 }
 
+/** How one policy action of a gateway request resolves against the person's policies. */
+export type GatewayPolicyLookup = (input: {
+  toolName: string;
+  defaultDecision: "allow" | "ask";
+  decide?: (resolved: ResolvedConnectorActionPolicy) => "allow" | "ask" | "block";
+}) => Promise<"allow" | "ask" | "block">;
+
 /**
- * Decide one write: Block wins, Ask (from the person's policy, or always for
- * destructive and unrecognised requests) opens the normal approval card,
+ * The strictest decision of a write's policy actions, and the action that
+ * gave it. A sensitive write adds the Settings and deletions action, which
+ * asks without an explicit choice for it.
+ */
+export async function strictestGatewayPolicy(
+  action: GatewayDecisionInput["action"],
+  lookup: GatewayPolicyLookup,
+): Promise<{ decision: "allow" | "ask" | "block"; toolName: string }> {
+  const tools = [
+    ...(action.tools.length > 0 ? action.tools : [UNMAPPED_REQUEST_TOOL]),
+    ...(action.sensitive ? [GITHUB_SENSITIVE_REQUEST_POLICY_NAME] : []),
+  ];
+  let strictest: "allow" | "ask" | "block" = "allow";
+  let decidingTool = tools[0]!;
+  for (const toolName of tools) {
+    const decision =
+      toolName === GITHUB_SENSITIVE_REQUEST_POLICY_NAME
+        ? await lookup({ toolName, defaultDecision: "ask", decide: githubSensitiveRequestDecision })
+        : await lookup({ toolName, defaultDecision: "allow" });
+    if (DECISION_RANK[decision] > DECISION_RANK[strictest]) {
+      strictest = decision;
+      decidingTool = toolName;
+    }
+  }
+  return { decision: strictest, toolName: decidingTool };
+}
+
+/**
+ * Decide one write from the strictest of its actions' policies, plus the
+ * person's Settings and deletions policy (Ask without a choice) for a
+ * sensitive request: Block wins, Ask opens the normal approval card,
  * otherwise it runs. An approved request runs once when the same request is
  * sent again in the turn.
  */
 export function databaseGatewayDecider(db: Database): GatewayDecider {
   return async (identity, input) => {
     const ledgerIdentity = connectorIdentity(identity);
-    const tools = input.action.tools.length > 0 ? input.action.tools : [UNMAPPED_REQUEST_TOOL];
-    let strictest: "allow" | "ask" | "block" = "allow";
-    let decidingTool = tools[0]!;
-    for (const toolName of tools) {
-      const decision = await resolveAttemptConnectorToolDecision(db, ledgerIdentity, {
-        connectionId: identity.claims.connectionId,
-        serverId: PERSONAL_GITHUB_POLICY_SERVER_ID,
-        toolName,
-        defaultDecision: "allow",
-      });
-      if (DECISION_RANK[decision] > DECISION_RANK[strictest]) {
-        strictest = decision;
-        decidingTool = toolName;
-      }
-    }
+    const { decision: strictest, toolName: decidingTool } = await strictestGatewayPolicy(
+      input.action,
+      (lookup) =>
+        resolveAttemptConnectorToolDecision(db, ledgerIdentity, {
+          connectionId: identity.claims.connectionId,
+          serverId: PERSONAL_GITHUB_POLICY_SERVER_ID,
+          ...lookup,
+        }),
+    );
     if (strictest === "block") {
       return {
         kind: "refuse",
@@ -111,7 +144,7 @@ export function databaseGatewayDecider(db: Database): GatewayDecider {
         message: `Blocked by the person's GitHub action settings: ${input.title}.`,
       };
     }
-    if (strictest === "allow" && !input.action.alwaysAsk) return { kind: "allow" };
+    if (strictest === "allow") return { kind: "allow" };
     const approvalId = await githubGatewayApprovalIdForRequest(db, ledgerIdentity, input.digest);
     const reviewContext: ToolReviewContext = {
       kind: "api",
@@ -263,15 +296,16 @@ function refLabel(ref: string): string {
 /**
  * Inspect a `git-receive-pack` request. Deleting or force-pushing a branch
  * other than the default branch follows the person's `ref_create` policy;
- * the default branch, a tag or any other ref asks, as does a push this
- * reader cannot read. Any other push is unchanged. A refused push gets Git's
- * own per-ref rejection with Opengeni's reason.
+ * the default branch, a tag or any other ref also follows their Settings and
+ * deletions policy, as does a push this reader cannot read. Any other push is
+ * unchanged. A refused push gets Git's own per-ref rejection with Opengeni's
+ * reason.
  */
 export async function inspectPersonalGitHubPush(input: {
   body: ReadableStream<Uint8Array> | null;
   gzip: boolean;
   repositoryFullName: string;
-  /** The repository's default branch; null (or absent) when unknown, so every rewrite asks. */
+  /** The repository's default branch; null (or absent) when unknown, so every rewrite is sensitive. */
   defaultBranch?: string | null;
   isAncestor: GitHubAncestryCheck;
   identity: GatewayDecisionIdentity;
@@ -300,7 +334,7 @@ export async function inspectPersonalGitHubPush(input: {
     }
     const title = `Push to ${input.repositoryFullName}`.slice(0, 240);
     const decision = await input.decide(input.identity, {
-      action: { kind: "write", tools: ["ref_create"], alwaysAsk: true, title },
+      action: { kind: "write", tools: ["ref_create"], sensitive: true, title },
       digest: requestDigest(["git-push-raw", input.repositoryFullName.toLowerCase(), prefix.bytes]),
       reviewArguments: { repository: input.repositoryFullName, bytes: prefix.bytes.byteLength },
       title,
@@ -370,11 +404,11 @@ export async function inspectPersonalGitHubPush(input: {
     ...forced.map((command) => `force-push ${refLabel(command.ref)}`),
   ];
   const title = `${capitalize(parts.join(", "))} on ${input.repositoryFullName}`.slice(0, 240);
-  const alwaysAsk = [...deletions, ...forced].some(
+  const sensitive = [...deletions, ...forced].some(
     (command) => !refRewriteFollowsPolicy(command.ref, input.defaultBranch ?? null),
   );
   const decision = await input.decide(input.identity, {
-    action: { kind: "write", tools: ["ref_create"], alwaysAsk, title },
+    action: { kind: "write", tools: ["ref_create"], sensitive, title },
     digest: requestDigest([
       "git-push",
       input.repositoryFullName.toLowerCase(),

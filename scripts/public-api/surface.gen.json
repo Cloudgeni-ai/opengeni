@@ -19084,6 +19084,7 @@
         "$|kind=personal.groups.merge": "ref(GitHubActionPolicyEffectiveDecision)!",
         "$|kind=personal.groups.review": "ref(GitHubActionPolicyEffectiveDecision)!",
         "$|kind=personal.groups.routine": "ref(GitHubActionPolicyEffectiveDecision)!",
+        "$|kind=personal.groups.sensitive": "ref(GitHubActionPolicyEffectiveDecision)!",
         "$|kind=personal.kind": "const!=[\"\\\"personal\\\"\"]",
         "$|kind=personal.label": "string!"
       }
@@ -19101,7 +19102,7 @@
         "input"
       ],
       "shape": {
-        "$": "enum=[\"\\\"merge\\\"\",\"\\\"review\\\"\",\"\\\"routine\\\"\"]"
+        "$": "enum=[\"\\\"merge\\\"\",\"\\\"review\\\"\",\"\\\"routine\\\"\",\"\\\"sensitive\\\"\"]"
       }
     },
     "GitHubAppInfo": {
