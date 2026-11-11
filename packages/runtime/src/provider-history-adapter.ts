@@ -1,6 +1,7 @@
 import { collapseRepeatedSessionGoalContexts } from "@opengeni/contracts";
 import { isAnthropicWebSearchItem } from "./anthropic-web-search";
 import { chatReasoning, chatReasoningDetails, chatReasoningDetailsText } from "./chat-reasoning";
+import { claudeSignedThinkingBlock, claudeThinkingSecret } from "./opaque-reasoning-replay";
 import {
   projectHostedSearchEvidence,
   withSearchRecordForm,
@@ -33,15 +34,18 @@ export type ProviderHistoryOptions = {
    */
   searchRecordForm?: SearchRecordForm;
   /**
-   * The provider that receives this Responses request. Opaque reasoning (its
-   * `encrypted_content`, or raw reasoning `content`) that another provider
-   * issued, or that `isRejectedArtifact` reports, reaches it only as readable
-   * historical text: only the issuing provider accepts it. The origin record
+   * The provider that receives this Responses request (see
+   * opaque-reasoning-replay). Opaque reasoning (its `encrypted_content`, or
+   * raw reasoning `content`) that another provider issued, or that
+   * `isRejectedArtifact` reports, reaches it only as readable historical text:
+   * only the issuing provider accepts it. The origin record
    * ({@link ARTIFACT_ORIGIN_KEY}) is removed from every item, so the issuing
-   * provider receives exactly the item it returned.
+   * provider receives exactly the item it returned. Claude checks its finer
+   * binding on the wire, where it knows Claude's turn boundaries
+   * (`buildAnthropicRequest`).
    */
   artifactScope?: string;
-  /** True for an opaque item this provider already refused to decrypt. */
+  /** True for an opaque item (ciphertext or a Claude signature) this provider refused. */
   isRejectedArtifact?: (item: Record<string, unknown>) => boolean;
 };
 
@@ -52,8 +56,9 @@ const HISTORICAL_FACT_MAX_CHARS = 32_000;
 /** Marks a request-local item that declares tools newly available to the model. */
 export const TOOL_DISCLOSURE_KEY = "opengeni.tool_disclosure.v1";
 /**
- * Records, on an opaque reasoning item, the provider that issued it. It is
- * stored with the item and never sent to a provider.
+ * Records, on an opaque reasoning item, the binding it was issued under (the
+ * provider, and for Claude its account, model and prefix). It is stored with
+ * the item and never sent to a provider.
  */
 export const ARTIFACT_ORIGIN_KEY = "opengeni.artifact_origin.v1";
 const TOOL_DISCLOSURE_TEXT_WITH_INVOKE =
@@ -192,8 +197,14 @@ function chatReasoningText(item: Record<string, unknown>): string {
     .join("");
 }
 
-function historicalReasoningContent(text: string) {
-  return { type: "output_text", text: `[Historical reasoning from another model]\n${text}` };
+/**
+ * The readable form of reasoning a provider cannot accept natively: its text
+ * marked as historical, or an explicit unavailable marker when it has none.
+ */
+export function historicalReasoningText(text: string): string {
+  return text
+    ? `[Historical reasoning from another model]\n${text}`
+    : "[Historical reasoning from another model is unavailable.]";
 }
 
 function historicalReasoningMessage(text: string): Record<string, unknown> {
@@ -201,14 +212,7 @@ function historicalReasoningMessage(text: string): Record<string, unknown> {
     type: "message",
     role: "assistant",
     status: "completed",
-    content: [
-      text
-        ? historicalReasoningContent(text)
-        : {
-            type: "output_text",
-            text: "[Historical reasoning from another model is unavailable.]",
-          },
-    ],
+    content: [{ type: "output_text", text: historicalReasoningText(text) }],
   };
 }
 
@@ -254,9 +258,15 @@ function reasoningSummaryText(item: Record<string, unknown>): string {
     : `${raw.slice(0, HISTORICAL_FACT_MAX_CHARS)}…`;
 }
 
-/** The provider-issued ciphertext of a Responses reasoning item, if any. */
+/**
+ * The provider-issued state of a reasoning item that only its issuer can
+ * verify, if any: Responses ciphertext, or Claude's thinking signature (or
+ * redacted thinking data).
+ */
 function opaqueReasoningCiphertext(item: Record<string, unknown>): string | undefined {
   if (item.type !== "reasoning") return undefined;
+  const block = claudeSignedThinkingBlock(item);
+  if (block) return claudeThinkingSecret(block);
   const metadata = providerDataOf(item);
   for (const value of [
     item.encrypted_content,
@@ -318,35 +328,38 @@ function withoutArtifactOrigin(item: Record<string, unknown>): Record<string, un
 }
 
 /**
- * Opaque reasoning goes back natively only to the provider that issued it.
- * Another provider cannot decrypt it and rejects the whole request, so it gets
- * the readable summary instead, exactly as Claude and Chat routes already do.
- * Untagged items (stored before origins were recorded) stay native until the
- * provider refuses them. Raw reasoning `content` follows the same rule, except
- * that an untagged item carrying it is always readable text, with or without
- * ciphertext: no refusal names it (providers reject its shape, not a
- * ciphertext), so it could otherwise fail every retry on a provider that did
- * not issue it.
+ * Opaque reasoning goes back natively only under the binding that issued it.
+ * Any other request cannot verify it and the provider rejects the whole
+ * request, so it gets the readable summary instead, exactly as Chat routes
+ * already do. Untagged items (stored before origins were recorded) stay
+ * native until the provider refuses them. Raw reasoning `content` follows the
+ * same rule, except that an untagged item carrying it is always readable text
+ * on a scoped route, with or without ciphertext: no refusal names it
+ * (providers reject its shape, not a ciphertext), so it could otherwise fail
+ * every retry on a provider that did not issue it.
  */
 function scopedOpaqueArtifact(
   item: Record<string, unknown>,
   options: ProviderHistoryOptions,
 ): Record<string, unknown> | undefined {
   const scope = options.artifactScope;
-  if (scope === undefined || item.type !== "reasoning") return undefined;
+  if (item.type !== "reasoning" || (scope === undefined && !options.isRejectedArtifact))
+    return undefined;
   const origin = artifactOrigin(item);
   const ciphertext = opaqueReasoningCiphertext(item);
   const raw = rawResponsesReasoning(item) !== undefined;
   if (
     (ciphertext || raw) &&
-    ((origin !== undefined && origin !== scope) ||
-      (origin === undefined && raw) ||
+    ((scope !== undefined && origin !== undefined && origin !== scope) ||
+      (scope !== undefined && origin === undefined && raw) ||
       options.isRejectedArtifact?.(item) === true)
   )
     return memoized(foreignArtifactProjections, item, () =>
       historicalReasoningMessage(reasoningSummaryText(item)),
     );
-  if (origin === undefined) return undefined;
+  // Without a scope the item keeps its own projection (for Claude, the
+  // native block; for another provider's reasoning, its readable text).
+  if (origin === undefined || scope === undefined) return undefined;
   return memoized(nativeArtifactProjections, item, () => withoutArtifactOrigin(item));
 }
 
@@ -415,7 +428,13 @@ function portableChatMetadata(
   return changed
     ? {
         ...item,
-        content: [...Array.from(legacyReasons, historicalReasoningContent), ...content],
+        content: [
+          ...Array.from(legacyReasons, (reason) => ({
+            type: "output_text",
+            text: historicalReasoningText(reason),
+          })),
+          ...content,
+        ],
       }
     : item;
 }
@@ -595,7 +614,8 @@ function projectWireHistory(
         ? { type: "message", role: "system", content: item.content }
         : item.type === "message" && item.role === "developer"
           ? { ...item, role: "system" }
-          : (foreignReasoningFact(item, providerApi) ??
+          : (scopedOpaqueArtifact(item, options) ??
+            foreignReasoningFact(item, providerApi) ??
             portableChatMetadata(item, items[index - 1]));
       changed ||= next !== item;
       return next;
