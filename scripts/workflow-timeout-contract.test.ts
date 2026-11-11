@@ -6,6 +6,10 @@ import { join, resolve } from "node:path";
 const root = resolve(import.meta.dir, "..");
 const workflowDir = resolve(root, ".github/workflows");
 const playwrightActionPath = resolve(root, ".github/actions/playwright-browsers/action.yml");
+const playwrightInstallScript = resolve(
+  root,
+  ".github/actions/playwright-browsers/install-browsers.sh",
+);
 const PLAYWRIGHT_ACTION = "./.github/actions/playwright-browsers";
 const MAX_JOB_TIMEOUT_MINUTES = 120;
 
@@ -337,15 +341,22 @@ describe("workflow timeout contract", () => {
     expect(install?.env).toMatchObject({
       ATTEMPT_TIMEOUT_SECONDS: "${{ inputs.attempt-timeout-seconds }}",
       ATTEMPTS: "${{ inputs.attempts }}",
+      SYSTEM_DEPS_BUDGET_SECONDS: "${{ inputs.system-deps-budget-seconds }}",
       KILL_AFTER_SECONDS: "15",
     });
-    const command = String(install?.run ?? "").replace(/\\\r?\n\s*/gu, " ");
-    expect(command).toContain(
-      'timeout --kill-after="${KILL_AFTER_SECONDS}s" "${ATTEMPT_TIMEOUT_SECONDS}s"',
+    expect(install?.run).toBe(
+      'PLAYWRIGHT_DEB_DIR="${HOME}/.cache/playwright-debs" bash "${PLAYWRIGHT_ACTION_PATH}/install-browsers.sh"',
     );
+    const script = (await readFile(playwrightInstallScript, "utf8")).replace(/\\\r?\n\s*/gu, " ");
+    expect(script).toContain('timeout --kill-after="${KILL_AFTER_SECONDS}s" "${attempt_timeout}s"');
+    // The system packages phase is carved out of the first attempt, as
+    // `--with-deps` was, so the worst case below still holds.
+    expect(script).toContain("attempt_timeout=$((ATTEMPT_TIMEOUT_SECONDS - (SECONDS - started)))");
     const duration = Number(action.inputs["attempt-timeout-seconds"]?.default);
     const attempts = Number(action.inputs.attempts?.default);
+    const systemDepsBudget = Number(action.inputs["system-deps-budget-seconds"]?.default);
     expect(((duration + 15) * attempts) / 60).toBeLessThanOrEqual(17);
+    expect(systemDepsBudget).toBeLessThan(duration / 2);
   });
 
   test("Playwright retry, cache, and dirlock cleanup behavior stays intact", async () => {
@@ -355,7 +366,6 @@ describe("workflow timeout contract", () => {
       );
     }
     const actionSource = await readFile(playwrightActionPath, "utf8");
-    expect(actionSource).toContain("playwright install --with-deps");
     expect(actionSource).toContain("actions/cache/restore@");
     expect(actionSource).toContain("actions/cache/save@");
     expect(actionSource).toContain("rm -rf ~/.cache/ms-playwright/__dirlock");
@@ -363,72 +373,332 @@ describe("workflow timeout contract", () => {
     expect(actionSource).toContain(". /etc/os-release");
     expect(actionSource).toContain('echo "key=playwright-${platform}-${version}-${slug}"');
 
-    const action = Bun.YAML.parse(actionSource) as {
-      runs: { steps: Array<{ name?: string; run?: string }> };
+    // Every browser attempt failing (killed at its timeout) fails the step
+    // after exactly ATTEMPTS attempts.
+    const killed = await runPlaywrightInstall({ dryRun: ["-"], install: [124, 124] });
+    expect(killed.exitCode).toBe(1);
+    expect(killed.calls.filter((call) => call.includes("bun install chromium"))).toHaveLength(2);
+    expect(killed.stdout).toContain("attempt 1/2");
+    expect(killed.stdout).toContain("attempt 2/2");
+    expect(killed.stdout).toContain("exceeded 360s and was killed");
+    expect(killed.sourcesList).toStartWith("# Disabled for Playwright");
+  });
+
+  test("Playwright system packages come from a shared deb cache, not the Ubuntu archive", async () => {
+    const action = Bun.YAML.parse(await readFile(playwrightActionPath, "utf8")) as {
+      runs: {
+        steps: Array<{ id?: string; if?: string; uses?: string; with?: Record<string, string> }>;
+      };
     };
-    const script = action.runs.steps.find(
-      (step) => step.name === "Install pinned Playwright browsers",
-    )?.run;
-    expect(typeof script).toBe("string");
-    const dir = await mkdtemp(join(tmpdir(), "playwright-install-contract-"));
-    try {
-      const scriptPath = join(dir, "install.sh");
-      const binDir = join(dir, "bin");
-      await mkdir(binDir);
-      await writeFile(scriptPath, script as string);
-      await writeFile(
-        join(binDir, "timeout"),
-        ["#!/bin/bash", 'while [[ "$1" == --* ]]; do shift; done', "shift", '"$@"', ""].join("\n"),
-      );
-      const counter = join(dir, "n");
-      await writeFile(
-        join(binDir, "bun"),
-        [
-          "#!/bin/bash",
-          `n=$(cat ${counter} 2>/dev/null || echo 0)`,
-          "n=$((n+1))",
-          `echo "$n" > ${counter}`,
-          "exit 124",
-          "",
-        ].join("\n"),
-      );
-      const aptRoot = join(dir, "apt");
-      await mkdir(aptRoot);
-      await writeFile(
-        join(aptRoot, "sources.list"),
-        "deb https://dl.google.com/linux/chrome-stable/deb stable main\n",
-      );
-      await writeFile(join(binDir, "sudo"), '#!/bin/bash\nexec "$@" "$TEST_APT_ROOT"\n');
-      await chmod(join(binDir, "sudo"), 0o755);
-      await chmod(join(binDir, "timeout"), 0o755);
-      await chmod(join(binDir, "bun"), 0o755);
-      const proc = Bun.spawn(["bash", "--noprofile", "--norc", "-eo", "pipefail", scriptPath], {
+    const restore = action.runs.steps.find((step) => step.id === "restore-debs");
+    expect(restore?.uses).toStartWith("actions/cache/restore@");
+    expect(restore?.with).toMatchObject({
+      path: "~/.cache/playwright-debs",
+      key: "${{ steps.pinned.outputs.debs-key }}",
+      "restore-keys": "${{ steps.pinned.outputs.debs-restore-key }}",
+    });
+    const save = action.runs.steps.find(
+      (step) =>
+        step.uses?.startsWith("actions/cache/save@") && step.with?.path === restore?.with?.path,
+    );
+    expect(save?.with?.key).toBe("${{ steps.pinned.outputs.debs-key }}");
+    // Only a cache that serves every browser is saved.
+    expect(save?.if).toContain("steps.install.outputs.debs-complete == 'true'");
+    expect(save?.if).toContain("steps.restore-debs.outputs.cache-hit != 'true'");
+
+    // Nothing missing: no apt and no cache at all.
+    const present = await runPlaywrightInstall({ dryRun: ["-"], install: [0] });
+    expect(present.exitCode).toBe(0);
+    expect(present.calls).toEqual([
+      "sudo python3",
+      "bun install-deps --dry-run chromium",
+      expect.stringMatching(/^timeout \d+s bun install chromium$/u),
+    ]);
+    expect(present.stdout).toContain("already installed; skipping apt");
+
+    // Restored cache: installs offline, never touches the network.
+    const hit = await runPlaywrightInstall({
+      dryRun: ["fonts-a libb", "fonts-a libb libc", "-"],
+      debs: ["fonts-a", "libb", "libc"],
+      install: [0],
+    });
+    expect(hit.exitCode).toBe(0);
+    expect(hit.calls).toEqual([
+      "sudo python3",
+      "bun install-deps --dry-run chromium",
+      "bun install-deps --dry-run chromium chromium-headless-shell firefox webkit",
+      "apt no-download fonts-a libb",
+      "bun install-deps --dry-run chromium",
+      expect.stringMatching(/^timeout \d+s bun install chromium$/u),
+    ]);
+    expect(hit.outputs).toContain("debs-complete=true");
+    expect(hit.stdout).toContain("from the deb cache");
+
+    // The image's package lists moved on: dpkg installs the cached debs.
+    const moved = await runPlaywrightInstall({
+      dryRun: ["libb", "libb", "-"],
+      debs: ["libb"],
+      apt: [100],
+      install: [0],
+    });
+    expect(moved.exitCode).toBe(0);
+    expect(moved.calls).toContain("apt no-download libb");
+    expect(moved.calls).toContainEqual(
+      expect.stringMatching(/^sudo dpkg -i --refuse-downgrade \S+\/libb_1_amd64\.deb$/u),
+    );
+    expect(moved.calls.some((call) => call.startsWith("bun install-deps chromium"))).toBe(false);
+
+    // Cold cache: downloads every browser's debs once, then installs offline.
+    const cold = await runPlaywrightInstall({
+      dryRun: ["libb", "libb libc", "-"],
+      apt: [0, 0],
+      install: [0],
+    });
+    expect(cold.exitCode).toBe(0);
+    expect(cold.calls.slice(3, 5)).toEqual(["apt download libb libc", "apt no-download libb"]);
+    expect(cold.debs).toEqual(["libb_1_amd64.deb", "libc_1_amd64.deb"]);
+    expect(cold.outputs).toContain("debs-complete=true");
+    expect(cold.aptConf).toContain('Acquire::Retries "5";');
+    expect(cold.mirrors).toBe(
+      "https://archive.ubuntu.com/ubuntu/\tpriority:1\n" +
+        "https://mirrors.edge.kernel.org/ubuntu/\tpriority:10\n",
+    );
+  });
+
+  test("Playwright system packages fall back to apt with backoff, then to the browsers' own libraries", async () => {
+    // Archive unreachable and nothing cached: bounded download attempts with
+    // backoff, bounded apt attempts, then the browsers still install and only
+    // fonts are missing, so the step continues.
+    const down = await runPlaywrightInstall({
+      dryRun: ["fonts-a", "fonts-a libb"],
+      apt: [100, 100, 100, 100, 100, 100, 100],
+      deps: [100, 100, 100, 100],
+      install: [0],
+    });
+    expect(down.exitCode).toBe(0);
+    expect(down.calls.filter((call) => call === "apt download fonts-a libb")).toHaveLength(4);
+    expect(down.calls.filter((call) => call === "apt update")).toHaveLength(3);
+    expect(down.calls.filter((call) => call.includes("bun install-deps chromium"))).toHaveLength(4);
+    expect(down.calls.filter((call) => call.startsWith("sleep"))).toEqual([
+      "sleep 10",
+      "sleep 20",
+      "sleep 40",
+      "sleep 10",
+      "sleep 20",
+      "sleep 40",
+    ]);
+    expect(down.outputs).not.toContain("debs-complete=true");
+    expect(down.stdout).toContain("every library the browsers link resolves; continuing");
+
+    // A missing shared library still fails the step.
+    const broken = await runPlaywrightInstall({
+      dryRun: ["libb", "libb"],
+      apt: [100, 100, 100, 100, 100, 100, 100],
+      deps: [100, 100, 100, 100],
+      install: [0],
+      ldd: "\tlibb.so.1 => not found",
+    });
+    expect(broken.exitCode).toBe(1);
+    expect(broken.stdout).toContain("libb.so.1 => not found");
+
+    // Without a deb cache apt recovers after one failure.
+    const recovered = await runPlaywrightInstall({
+      dryRun: ["libb"],
+      deps: [100, 0],
+      install: [0],
+      noDebCache: true,
+    });
+    expect(recovered.exitCode).toBe(0);
+    expect(recovered.calls).toEqual([
+      "sudo python3",
+      "bun install-deps --dry-run chromium",
+      expect.stringMatching(/^timeout (300|299)s bun install-deps chromium$/u),
+      "sudo dpkg --configure -a",
+      "sleep 10",
+      expect.stringMatching(/^timeout \d+s bun install-deps chromium$/u),
+      expect.stringMatching(/^timeout \d+s bun install chromium$/u),
+    ]);
+
+    // The headless shell checks its own dependency set; the mirror is added once.
+    const shell = await runPlaywrightInstall({
+      dryRun: ["-"],
+      install: [0],
+      onlyShell: true,
+      mirrorPresent: true,
+    });
+    expect(shell.calls).toContain("bun install-deps --dry-run chromium-headless-shell");
+    expect(shell.calls.at(-1)).toMatch(/^timeout \d+s bun install --only-shell chromium$/u);
+
+    // Other runners keep Playwright's own `--with-deps` and never touch apt.
+    const mac = await runPlaywrightInstall({ dryRun: [], install: [0], os: "macOS" });
+    expect(mac.exitCode).toBe(0);
+    expect(mac.calls).toEqual([
+      expect.stringMatching(/^timeout 360s bun install --with-deps chromium$/u),
+    ]);
+    expect(mac.aptConf).toBe("");
+  });
+});
+
+/**
+ * Runs install-browsers.sh as the runner does, with `bun`, `timeout`, `sudo`,
+ * `apt-get`, `dpkg`, `ldd` and `sleep` replaced by recorders. Each dry run
+ * reports the next missing-package list ("-" for none); every other command
+ * exits with the next code from its list.
+ */
+async function runPlaywrightInstall(options: {
+  dryRun: string[];
+  deps?: number[];
+  install: number[];
+  apt?: number[];
+  debs?: string[];
+  ldd?: string;
+  noDebCache?: boolean;
+  onlyShell?: boolean;
+  mirrorPresent?: boolean;
+  os?: string;
+}) {
+  const dir = await mkdtemp(join(tmpdir(), "playwright-install-contract-"));
+  try {
+    const binDir = join(dir, "bin");
+    const aptRoot = join(dir, "apt");
+    const confDir = join(aptRoot, "apt.conf.d");
+    // The install step keeps its debs under ~/.cache; HOME is `dir` here.
+    const debDir = join(dir, ".cache", "playwright-debs");
+    await mkdir(binDir);
+    await mkdir(confDir, { recursive: true });
+    await mkdir(debDir, { recursive: true });
+    for (const deb of options.debs ?? []) {
+      await writeFile(join(debDir, `${deb}_1_amd64.deb`), "");
+    }
+    const log = join(dir, "calls");
+    await writeFile(log, "");
+    const outputs = join(dir, "outputs");
+    await writeFile(outputs, "");
+    await writeFile(join(dir, "ldd-output"), `${options.ldd ?? "\tlibc.so.6 => /lib/libc.so.6"}\n`);
+    await mkdir(join(dir, "browsers", "chromium-1"), { recursive: true });
+    await writeFile(join(dir, "browsers", "chromium-1", "chrome"), "", { mode: 0o755 });
+    await writeFile(
+      join(aptRoot, "sources.list"),
+      "deb https://dl.google.com/linux/chrome-stable/deb stable main\n",
+    );
+    const mirrors = join(aptRoot, "apt-mirrors.txt");
+    await writeFile(
+      mirrors,
+      "https://archive.ubuntu.com/ubuntu/\tpriority:1\n" +
+        (options.mirrorPresent ? "https://mirrors.edge.kernel.org/ubuntu/\tpriority:10\n" : ""),
+    );
+    for (const [name, values] of [
+      ["dry-run", options.dryRun],
+      ["deps", options.deps ?? []],
+      ["install", options.install],
+      ["apt", options.apt ?? [0]],
+    ] as const) {
+      await writeFile(join(dir, `codes-${name}`), values.map((value) => `${value}\n`).join(""));
+    }
+    const pop = (name: string) =>
+      `code=$(head -n 1 ${dir}/codes-${name}); sed -i 1d ${dir}/codes-${name}`;
+    const scripts: Record<string, string[]> = {
+      // `timeout [--kill-after=N] DURATION command...`: record the duration.
+      timeout: [
+        'while [[ "$1" == --* ]]; do shift; done',
+        'duration="$1"; shift',
+        `case " $* " in *" --dry-run "*|*" apt-get "*) ;; *) printf 'timeout %s ' "$duration" >> ${log} ;; esac`,
+        '"$@"',
+      ],
+      bun: [
+        "shift 2 # x playwright",
+        `echo "bun $*" >> ${log}`,
+        'if [ "$1" = install-deps ] && [ "$2" = --dry-run ]; then',
+        `  ${pop("dry-run")}`,
+        '  [ "$code" = "-" ] && { echo "All system dependencies are installed."; exit 0; }',
+        '  echo "Missing system dependencies (n):"; for p in $code; do echo "  $p"; done; exit 1',
+        "fi",
+        `kind=install; [ "$1" = install-deps ] && kind=deps; ${pop("$kind")}`,
+        'exit "${code:-99}"',
+      ],
+      "apt-get": [
+        'mode=install; archives=""; packages=()',
+        'for arg in "$@"; do case "$arg" in',
+        "  update) mode=update ;; --download-only) mode=download ;; --no-download) mode=no-download ;;",
+        '  Dir::Cache::archives=*) archives=${arg#*=} ;; -*|install) ;; *) packages+=("$arg") ;;',
+        "esac; done",
+        `echo "apt $mode \${packages[*]}" | sed 's/ *$//' >> ${log}`,
+        pop("apt"),
+        'if [ "${code:-99}" = 0 ] && [ "$mode" = download ]; then for p in "${packages[@]}"; do : > "$archives/${p}_1_amd64.deb"; done; fi',
+        'exit "${code:-99}"',
+      ],
+      // The Chrome source filter takes the apt root; everything else runs as is.
+      sudo: [
+        `if [ "$1" = python3 ]; then echo "sudo python3" >> ${log}; exec "$@" ${aptRoot}; fi`,
+        `if [ "$1" = dpkg ]; then echo "sudo $*" >> ${log}; exit 0; fi`,
+        'exec "$@"',
+      ],
+      dpkg: ['[ "$1" = --print-architecture ] && echo amd64'],
+      ldd: [`cat ${dir}/ldd-output`],
+      sleep: [`echo "sleep $*" >> ${log}`],
+    };
+    for (const [name, body] of Object.entries(scripts)) {
+      await writeFile(join(binDir, name), ["#!/bin/bash", ...body, ""].join("\n"));
+      await chmod(join(binDir, name), 0o755);
+    }
+    // Run the step's command exactly as the runner does.
+    const action = Bun.YAML.parse(await readFile(playwrightActionPath, "utf8")) as {
+      runs: { steps: Array<{ id?: string; run?: string }> };
+    };
+    const stepRun = String(action.runs.steps.find((step) => step.id === "install")?.run);
+    const proc = Bun.spawn(
+      [
+        "bash",
+        "--noprofile",
+        "--norc",
+        "-eo",
+        "pipefail",
+        "-c",
+        options.noDebCache ? 'bash "${PLAYWRIGHT_ACTION_PATH}/install-browsers.sh"' : stepRun,
+      ],
+      {
         env: {
           ...process.env,
           PATH: `${binDir}:${process.env.PATH ?? ""}`,
+          HOME: dir,
+          GITHUB_OUTPUT: outputs,
           PLAYWRIGHT_BROWSERS: "chromium",
-          PLAYWRIGHT_ONLY_SHELL: "false",
+          PLAYWRIGHT_ONLY_SHELL: options.onlyShell ? "true" : "false",
           ATTEMPT_TIMEOUT_SECONDS: "360",
-          ATTEMPTS: "2",
+          ATTEMPTS: String(Math.max(1, options.install.length)),
+          SYSTEM_DEPS_BUDGET_SECONDS: "300",
           KILL_AFTER_SECONDS: "15",
-          PLAYWRIGHT_RUNNER_OS: "Linux",
+          PLAYWRIGHT_RUNNER_OS: options.os ?? "Linux",
           PLAYWRIGHT_ACTION_PATH: resolve(root, ".github/actions/playwright-browsers"),
-          TEST_APT_ROOT: aptRoot,
+          PLAYWRIGHT_APT_CONF_DIR: confDir,
+          PLAYWRIGHT_APT_MIRRORS: mirrors,
+          PLAYWRIGHT_BROWSERS_PATH: join(dir, "browsers"),
         },
         stdout: "pipe",
         stderr: "pipe",
-      });
-      const stdout = await new Response(proc.stdout).text();
-      expect(await proc.exited).toBe(1);
-      expect(await readFile(counter, "utf8")).toBe("2\n");
-      expect(await readFile(join(aptRoot, "sources.list"), "utf8")).toStartWith(
-        "# Disabled for Playwright",
-      );
-      expect(stdout).toContain("attempt 1/2");
-      expect(stdout).toContain("attempt 2/2");
-      expect(stdout).toContain("exceeded 360s and was killed");
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-});
+      },
+    );
+    const stdout = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    const calls = (await readFile(log, "utf8"))
+      .replace(/(timeout \S+) \n?bun/gu, "$1 bun")
+      .split("\n")
+      .filter(Boolean)
+      .map((call) => call.replace(/ +/gu, " ").trim());
+    const aptConf = await readFile(join(confDir, "99playwright-browsers-network"), "utf8").catch(
+      () => "",
+    );
+    return {
+      exitCode,
+      stdout,
+      calls,
+      aptConf,
+      outputs: await readFile(outputs, "utf8"),
+      debs: (await readdir(debDir).catch(() => [] as string[])).sort(),
+      mirrors: await readFile(mirrors, "utf8"),
+      sourcesList: await readFile(join(aptRoot, "sources.list"), "utf8"),
+    };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
