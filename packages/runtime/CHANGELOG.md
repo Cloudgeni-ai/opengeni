@@ -1,5 +1,67 @@
 # @opengeni/runtime
 
+## 6.15.0
+
+### Patch Changes
+
+- 708848c: New optional `agent.titleInstructions`: host-provided text that tells the automatic title request how to write a chat's titles, for example "If the messages have no clear language, write the title in Norwegian bokmål." The title request appends it after its unchanged fixed rules. It is stored in the chat's agent configuration only when set, children inherit it, a running session can change it, and `null` clears it. Chats without it are unchanged.
+- a5e190e: Agents can change who can see an existing Site, for the person they act for, with the same rules as the Site page: `sandbox_file_publish` with the Site's `artifactId` and `visibility` shares it with the workspace or makes it Only me at the same link, instead of publishing a copy. Only the Site's owner (or their agent) can change it, sharing needs permission to publish Sites, and Only me must be allowed for the owner. The result says who can now open the Site.
+- 5164413: `browser_open` no longer offers `storageMode: "ephemeral_context"` to agents on a deployment that has ephemeral browser contexts turned off. The server refused it there, so an agent that tried it lost a call. The option and its guidance now appear only when `OPENGENI_EXPERIMENTAL_BROWSER_CONTEXT_POOL_ENABLED` is on. Hosts that build the interaction tools themselves pass `ephemeralBrowserContexts: true` to offer it.
+- e5c3dcd: Switching a chat from an OpenAI Responses model to a Chat Completions provider (for example an OpenAI-compatible connection whose gateway forwards to Claude) no longer fails with "unexpected tool_use_id found in tool_result blocks" when an earlier step ran tool search, computer, shell, patch, hosted or namespaced tools in the same parallel batch as ordinary function calls. Their readable historical facts, and runtime notices that fell inside the step, now come after the step's last tool result instead of between the calls and their results, in the same order on every request. Native Claude also accepts such a fact or notice that fell between two results of one step: it moves to just before the step's first result.
+- bf236a6: Replayed Claude thinking no longer breaks a chat. Claude's signed thinking now follows the same replay policy as OpenAI encrypted reasoning: each block records the binding it was issued under (platform, account, model and, for prefix-bound models such as Opus 5.5, the system prompt), and a request under any other binding replays it as readable historical reasoning instead of a signature Claude would refuse. This covers system prompt changes between turns (for example a repository Skill added mid-chat), model, account and transport switches, and works on every Claude transport. History stored before this change stays native until Claude refuses it. A refused replay never fails the turn: the request is sent once more with the refused blocks as readable text (remembered for the provider), and if Claude refuses that too, once more with plain history that carries no opaque provider state. Each fallback is recorded for operators as a thinking-blocks-dropped reason and is never shown to the person.
+- c867798: Explain stale turn-attempt tool access with a safe recovery step, and clarify that delayed Codemode scripts cannot reuse an earlier attempt's credentials after the turn ends. Authorization and retry behavior are unchanged.
+- a8137d2: Teach integration Skills to read full operator configuration explicitly instead
+  of expecting instructions or the tool catalog on ordinary chat responses.
+- 98fb3c7: Distinguish an enabled connector left out of a chat's tools from a missing account during integration discovery. Such a connector no longer produces a misleading "Not connected yet" notice or an unnecessary Connect card through tool search. The response explains the chat selection instead; execution permissions and account selection are unchanged.
+- 1a1de47: A box that could not receive a private Git broker credential no longer fails every turn with a bare "Sandbox could not receive the Git broker credential". The error now names the underlying failure, with the credential redacted, and keeps the redacted original as its cause. A full disk, or a blocked or unwritable path the machine agent reports, now lets the turn start with a setup notice, so the agent can fix its box. An unanswered machine agent now reaches the worker's existing retry and box replacement. A failed credential write that may succeed when sent again (a lost response, or an error the machine agent marks retryable) is retried in place up to two more times.
+- dfeab20: Browser operation metrics now tell a website that failed apart from a failure of the browser or its controller. When a page's server does not answer, its name does not resolve, the connection or TLS handshake fails, or it sends an unusable response, browserd sends an operator-only failure reason (`destination_not_answered`, `destination_name_not_resolved`, `destination_connection_failed`, `destination_tls_failed`, `destination_response_invalid`) beside the receipt or error, never inside it, so what callers and models are shown does not change. A generic `outcome_unknown` after input was sent now carries the specific failure behind it (such as `timeout`), and `outcome_unknown` operations are counted with their reason instead of `none`. `OpenGeniInteractionOperationFailureRatio` leaves website failures out of its ratio, so an agent retrying a site that is down no longer pages while browser, controller and authorization failures still do. New contracts exports: `INTERACTION_DESTINATION_FAILURE_REASONS`, `InteractionFailureReason`, `parseInteractionFailureReason` and `BROWSER_ACTION_RECEIPT_FAILURE_REASON_PARAMETER`; driver errors in `@opengeni/interaction` gain an optional `failureReason`.
+- e3df016: Publishing a sandbox file larger than about 25 MB works on Modal sandboxes again, as does the same private staging on any SDK sandbox without a native private-file write (local, Docker, E2B and others). Such a file is uploaded from the box, and the upload's signed URL is first staged there as a private file. Without a native private-file write, the staging streams the file over the command's input, but that transfer did not opt into the provider's native output collection. Its exit could never be proved, so every large publish failed in under a second as "completion is pending or unknown" before the upload began. The transfer now collects its output like every other internal command, also when it is the first command on a session. This fixes the same staging for workspace file imports. An unexpected Channel-A failure now logs the class of the sandbox error underneath it (for example `SynchronousCommandOutcomeUnknownError`) as `causeName`.
+- dea4920: Chats no longer get stuck after their history picks up provider-specific reasoning that the next request can't use.
+
+  - Claude models with prefix-bound thinking, such as Opus 5.5 and Sonnet 5.5, now always let Claude drop thinking blocks whose earlier prefix changed, instead of rejecting the whole request with "Invalid signature in thinking block". The system prompt can change between turns, for example when a repository Skill appears after a branch checkout. Signed blocks are still sent unchanged, and an unchanged prefix drops nothing.
+  - Raw reasoning text that a Responses-compatible provider returns in a reasoning item's `content` (for example an open-weight model behind a custom endpoint) now goes back natively only to that provider. Other providers, such as Azure OpenAI, receive it as readable historical text instead of rejecting the request. Items stored before this change carry no origin, so they are always sent as readable text, including to the provider that produced them.
+
+- b0fce89: `createSessionProxyHandler`'s `afterForward` option now accepts a record-only hook declared on its own (`async function record(route, response) { ... }`, typed `Promise<void>`) without an explicit `return undefined`. Web fetches through TinyFish now accept only a cached copy younger than ten minutes instead of one of any age.
+- 9885d37: Keep large browser download exports running across bounded request windows and join the same transfer on retry. The SDK polls the same save operation until the file reaches its workspace destination; existing final-only HTTP callers remain compatible.
+- f22647a: The system prompt no longer changes when repository Skills are added or removed, the workspace becomes unreachable or degraded, or a turn switches between deferred and indexed Skill discovery. It keeps one stable "Repository skills" notice, and the live index reaches the model as a durable "Repository skills" developer history item, written only when it changes, frozen per turn and placed before the turn that first sees it. The current run sees the item at the same position later turns load it from, so earlier signed Claude thinking and cached prefixes stay valid. The one-shot request for a missing session title is now part of the turn's operational notice instead of being appended to the first request's system prompt. New exports: `ensureSessionRepositorySkills` (`@opengeni/db`), `repositorySkillsContextItem`, `readRepositorySkillsContext` and `latestRepositorySkillsIndex` (`@opengeni/contracts`), and the `publishRepositorySkills` agent option (`@opengeni/runtime`).
+- 8e15b0b: Return one `artifact:<id>` Markdown link form in new native-artifact, Site, file-publication, and report-delivery tool receipts, and teach the same form in artifact Skills. Static prompts, existing stored messages and tool receipts are not rewritten; older console-path links remain readable by the renderers.
+- Updated dependencies [708848c]
+- Updated dependencies [b110015]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [db28286]
+- Updated dependencies [19ab8c3]
+- Updated dependencies [cd033ae]
+- Updated dependencies [3bab763]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [bf804ef]
+- Updated dependencies [dfeab20]
+- Updated dependencies [6a5023d]
+- Updated dependencies [e3df016]
+- Updated dependencies [02ac654]
+- Updated dependencies [b0fce89]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [7a83f9b]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+  - @opengeni/sdk@6.15.0
+  - @opengeni/config@6.15.0
+  - @opengeni/jev@6.15.0
+  - @opengeni/codex@6.15.0
+  - @opengeni/interaction@6.15.0
+  - @opengeni/observability@6.15.0
+  - @opengeni/capabilities@6.15.0
+  - @opengeni/codemode@6.15.0
+  - @opengeni/decisions@6.15.0
+  - @opengeni/tool-gateway@6.15.0
+  - @opengeni/vaults@6.15.0
+  - @opengeni/agent-proto@6.15.0
+  - @opengeni/network@6.15.0
+  - @opengeni/xai-subscription@6.15.0
+
 ## 6.14.0
 
 ### Minor Changes

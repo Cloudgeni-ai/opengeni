@@ -1,5 +1,25 @@
 # @opengeni/browserd
 
+## 0.4.27
+
+### Patch Changes
+
+- 07c5521: A computer session on macOS, Windows or Linux whose CUA worker process stopped (it crashed, was killed, or the machine reclaimed it) now starts a fresh worker on its next call, so the session keeps working. Before, every call to that session failed with an internal error until a new ComputerSession was opened. Reads and pre-action checks are answered by the fresh worker. An action that was not sent fails plainly and retryably, saying nothing was done and to observe the screen again. An action already in progress when the worker stopped stays outcome-unknown and is never repeated. Closing a session whose worker is already gone no longer fails.
+- ac7ee5c: A macOS menu-bar item ("File", "View") is no longer pressed open by a computer action. A menu opened that way in an app in the background stayed open out of sight and held every click and key in that app until it closed. set_value on the menu-bar item with an item's name ("Zoom In", or "Submenu > Item") now chooses the item straight from the menu bar without opening a menu; invoke and show_menu on it open nothing and say how to choose an item.
+- 9885d37: Keep large browser download exports running across bounded request windows and join the same transfer on retry. The SDK polls the same save operation until the file reaches its workspace destination; existing final-only HTTP callers remain compatible.
+- Updated dependencies [708848c]
+- Updated dependencies [5525e63]
+- Updated dependencies [60d067d]
+- Updated dependencies [da60317]
+- Updated dependencies [f92ff08]
+- Updated dependencies [060c983]
+- Updated dependencies [dfeab20]
+- Updated dependencies [9885d37]
+- Updated dependencies [f22647a]
+- Updated dependencies [850b4d5]
+  - @opengeni/contracts@6.15.0
+  - @opengeni/interaction@6.15.0
+
 ## 0.4.26
 
 ### Patch Changes
