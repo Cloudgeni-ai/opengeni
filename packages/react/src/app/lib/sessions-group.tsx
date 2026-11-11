@@ -3,6 +3,7 @@
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
 import { t } from "./console-text";
+import { creatorIdentityKey, creatorType, machineCreatorLabel } from "./creator-initials";
 import { formatWaitingSince } from "./format";
 import { awaitsPerson } from "./needs-you";
 import { failureHandledByAgent, needsFailureReview } from "./session-failure";
@@ -562,10 +563,13 @@ export type SessionBrowseDateField = "activity" | "created";
 export type SessionBrowseDateRange = "any" | "today" | "week" | "month";
 
 export function sessionCreatorKey(session: Session): string {
-  return `${session.createdBy.kind}:${session.createdBy.subjectId}`;
+  return creatorIdentityKey(session.createdBy);
 }
 
 export function sessionCreatorLabel(session: Session): string {
+  // API keys and services: a friendly name and kind, never a raw id.
+  const machine = machineCreatorLabel(session.createdBy);
+  if (machine) return machine;
   const explicit = session.createdBy.label?.trim();
   if (explicit) return explicit;
   if (session.createdBy.subjectId === "unattributed-legacy") return "Unattributed";
@@ -582,7 +586,8 @@ export type SessionCreatorOption = {
 
 /**
  * Loaded creator choices with identity-specific labels only when frozen display
- * labels collide. The subject ID remains opaque; it is displayed, not parsed.
+ * labels collide. A person's subject ID remains opaque; it is displayed, not
+ * parsed. API keys and services are told apart by number, never by a raw id.
  */
 export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string, string> {
   const byKey = new Map<
@@ -590,27 +595,41 @@ export function sessionCreatorLabelMap(sessions: Session[]): ReadonlyMap<string,
     { label: string; kind: Session["createdBy"]["kind"]; subjectId: string }
   >();
   for (const session of sessions) {
-    byKey.set(sessionCreatorKey(session), {
+    const key = sessionCreatorKey(session);
+    // One API key's older subject-frozen and newer service-frozen sessions are
+    // one creator; prefer a session that carries the key's name.
+    if (
+      byKey.has(key) &&
+      creatorType(session.createdBy) === "api_key" &&
+      !session.createdBy.label?.trim()
+    ) {
+      continue;
+    }
+    byKey.set(key, {
       label: sessionCreatorLabel(session),
       kind: session.createdBy.kind,
       subjectId: session.createdBy.subjectId,
     });
   }
 
-  const labelCounts = new Map<string, number>();
-  for (const creator of byKey.values()) {
-    labelCounts.set(creator.label, (labelCounts.get(creator.label) ?? 0) + 1);
+  const sharedLabels = new Map<string, string[]>();
+  for (const [key, creator] of [...byKey].sort(([left], [right]) => left.localeCompare(right))) {
+    sharedLabels.set(creator.label, [...(sharedLabels.get(creator.label) ?? []), key]);
   }
 
   return new Map(
     [...byKey.entries()]
-      .map(([value, creator]) => ({
-        value,
-        label:
-          labelCounts.get(creator.label) === 1
-            ? creator.label
+      .map(([value, creator]) => {
+        const shared = sharedLabels.get(creator.label) ?? [value];
+        if (shared.length === 1) return { value, label: creator.label };
+        const machine = machineCreatorLabel({ kind: creator.kind, subjectId: creator.subjectId });
+        return {
+          value,
+          label: machine
+            ? `${creator.label} (${shared.indexOf(value) + 1})`
             : `${creator.label} · ${creator.kind === "service" ? "Service" : "Subject"} · ${creator.subjectId}`,
-      }))
+        };
+      })
       .sort(
         (left, right) =>
           left.label.localeCompare(right.label) || left.value.localeCompare(right.value),

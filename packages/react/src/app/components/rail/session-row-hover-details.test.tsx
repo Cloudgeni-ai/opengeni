@@ -252,6 +252,21 @@ describe("SessionRowHoverDetails", () => {
     expect(text).not.toContain("Maja Berg");
   });
 
+  test("an API key is named with its kind, never its id, whichever kind it was frozen as", () => {
+    const subjectId = "api_key:7dbccefa-3591-437a-81d2-6319352f124d";
+    for (const kind of ["subject", "service"] as const) {
+      const host = render(
+        entry({ createdBy: { kind, subjectId, label: "Codex operator 2026-09-11" } }),
+      );
+      const footer = host.querySelector("[data-session-hover-footer]")!;
+      expect(footer.textContent).toContain("Codex operator 2026-09-11 · API key");
+      expect(footer.textContent).not.toContain("api_key:");
+      // The bot mark stands in for a person's chip.
+      expect(footer.querySelector("[data-creator-monogram]")).toBeNull();
+      expect(footer.querySelector("svg")).not.toBeNull();
+    }
+  });
+
   test("automation and Site origins appear when relevant", () => {
     expect(render(entry({ scheduledTaskId: "task-1" })).textContent).toContain(
       "Started by an automation",

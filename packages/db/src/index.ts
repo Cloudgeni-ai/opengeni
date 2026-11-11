@@ -35363,8 +35363,8 @@ export type SessionListFilterOptions = {
   siteConversations?: "include" | "group";
   /** Exact workspace project; null selects unfiled sessions. */
   channelId?: string | null;
-  /** Exact frozen creator identity. */
-  createdBy?: { kind: "subject" | "service"; subjectId: string };
+  /** Exact frozen creator identity; without a kind, every session the subject created. */
+  createdBy?: { kind?: "subject" | "service"; subjectId: string };
   /** Inclusive activity lower bound. */
   updatedFrom?: Date;
   /** Exclusive activity upper bound. */
@@ -37217,7 +37217,11 @@ function sessionFilters(
   }
   if (options.createdBy) {
     filters.push(
-      eq(schema.sessions.createdByKind, options.createdBy.kind),
+      // Without a kind, keep both kinds explicit so the creator index's
+      // leading kind column still bounds the scan.
+      options.createdBy.kind
+        ? eq(schema.sessions.createdByKind, options.createdBy.kind)
+        : inArray(schema.sessions.createdByKind, ["subject", "service"]),
       eq(schema.sessions.createdBySubjectId, options.createdBy.subjectId),
     );
   }
@@ -37437,7 +37441,9 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     // `group` returns the same rows as the default; only `include` changes them.
     ...(options.siteConversations === "include" ? [["siteConversations", "include"]] : []),
     hasChannel ? ["channel", options.channelId] : null,
-    options.createdBy ? ["creator", options.createdBy.kind, options.createdBy.subjectId] : null,
+    options.createdBy
+      ? ["creator", options.createdBy.kind ?? null, options.createdBy.subjectId]
+      : null,
     options.updatedFrom ? ["updatedFrom", options.updatedFrom.toISOString()] : null,
     options.updatedBefore ? ["updatedBefore", options.updatedBefore.toISOString()] : null,
     options.createdFrom ? ["createdFrom", options.createdFrom.toISOString()] : null,
