@@ -431,7 +431,9 @@ describe("the rendered timeline (web and the desktop app)", () => {
     );
     await flush();
     const text = rendered.container.textContent ?? "";
-    expect(text).toContain("Failed");
+    expect(rendered.container.querySelector("[data-og-work-header]")?.textContent).toContain(
+      "Failed",
+    );
     expect(text).toContain("Attempt failed · retried");
     expect(text).not.toContain("work resumed");
     expect(text).not.toMatch(/failed · \d/);

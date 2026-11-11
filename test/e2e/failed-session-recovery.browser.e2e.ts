@@ -141,8 +141,8 @@ for (const unsupported of [true, false]) {
       }
       expect(await banner.getByRole("button", { name: /Choose/ }).count()).toBe(0);
       if (unsupported) {
-        expect(await banner.locator("span").first().textContent()).toBe(
-          "This model isn’t available. Choose another below.",
+        expect(await banner.textContent()).toBe(
+          "This model isn’t available. Choose another below.DetailsThe model `example` is not supported with this account.",
         );
         expect(await banner.getByRole("button").count()).toBe(0);
       } else {
@@ -388,11 +388,9 @@ for (const [size, viewport] of [
       expect(
         await main.locator(`[title=${JSON.stringify(SANDBOX_START_DIAGNOSTIC)}]`).count(),
       ).toBe(0);
-      await main
-        .getByText(/^(\s·\s)?Failed$/)
-        .filter({ visible: true })
-        .first()
-        .waitFor();
+      const workHeader = main.locator('[data-og-work-header="outer"]').first();
+      expect(await workHeader.innerText()).toMatch(/^Worked for \S+ · Failed$/);
+      expect((await main.innerText()).split("The sandbox didn’t start.").length - 1).toBe(1);
       expect(await main.innerText()).not.toContain("capabilities.op_release");
       await banner.getByRole("button", { name: "Retry", exact: true }).waitFor();
       expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
@@ -431,10 +429,12 @@ test("permission-disabled model picker never receives recovery guidance", async 
     const picker = page.getByRole("button", { name: "Model and effort", exact: true });
     await picker.waitFor();
     expect(await picker.isDisabled()).toBe(true);
-    expect(await banner.locator("span").first().textContent()).toBe("This model isn’t available.");
-    expect(await banner.locator("details p").textContent()).toBe(
-      "The model `example` is not supported with this account.",
+    expect(await banner.textContent()).toBe(
+      "This model isn’t available.DetailsThe model `example` is not supported with this account.",
     );
+    expect(
+      await banner.locator("details").evaluate((node) => (node as HTMLDetailsElement).open),
+    ).toBe(false);
     expect(await banner.getByRole("alert").count()).toBe(0);
     expect(await banner.getByRole("button").count()).toBe(0);
     if (evidenceDir)
