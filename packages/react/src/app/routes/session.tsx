@@ -145,6 +145,7 @@ import {
   approvalsDecidable,
   projectPendingApprovals,
   useComposer,
+  uploadScopeForSession,
   useFileAttachments,
   useGoal,
   useHumanInputRequests,
@@ -2609,12 +2610,7 @@ function SessionChatPane(props: {
   );
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
-  const attachments = useFileAttachments({
-    scope:
-      props.session.tenancy?.visibility === "private" || props.session.memoryScope === "user"
-        ? "personal"
-        : "workspace",
-  });
+  const attachments = useFileAttachments({ scope: uploadScopeForSession(props.session) });
   const repositories = useFollowUpRepositories(props.session, props.onConnectGitHubApp);
   const firstPartyToolOptions = firstPartySessionToolOptionsFor(
     clientFirstPartyMcpToolPolicy(context.clientConfig).allowed,
