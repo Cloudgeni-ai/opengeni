@@ -63,7 +63,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * names-only member list (1211), the Slack agent update sweeper's
  * ids-only inventory of installations that send updates (1153) and the
  * recording compaction sweep's inventory of meeting tracks not yet kept
- * compact (1240). Each is
+ * compact (1240), and the session storage pass's inventory of sessions with
+ * content to collect and its collector of unreferenced content blobs (1359).
+ * Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -96,6 +98,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_organization_compute_v1(uuid, uuid, text)",
   "list_uncompacted_recording_tracks_v1(integer, text)",
   "end_agent_call_rings_v1(uuid)",
+  "session_content_garbage_candidates_v1(integer)",
+  "collect_session_content_garbage_v1(uuid, uuid, integer)",
 ] as const;
 
 /**
@@ -133,6 +137,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * only new transcripts keep it compact.
  * 1344 withholds the end of a call's ring on the other phones; until it is
  * granted, settling a call sends no ended push and those phones ring out.
+ * 1359 withholds the session content collector and its inventory; until they
+ * are granted, unreferenced content blobs stay until the session is archived.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
@@ -142,6 +148,8 @@ export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "list_due_slack_agent_update_installations_v1(integer)",
   "list_uncompacted_recording_tracks_v1(integer, text)",
   "end_agent_call_rings_v1(uuid)",
+  "session_content_garbage_candidates_v1(integer)",
+  "collect_session_content_garbage_v1(uuid, uuid, integer)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -245,6 +253,18 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "agent_calls",
     "opengeni_private.native_push_deliveries",
     "opengeni_private.native_push_devices",
+  ],
+  "session_content_garbage_candidates_v1(integer)": [
+    "session_attempt_model_context_snapshots",
+    "sessions",
+    "opengeni_private.session_content_collections",
+  ],
+  "collect_session_content_garbage_v1(uuid, uuid, integer)": [
+    "sessions",
+    "session_attempt_model_context_snapshots",
+    "session_attempt_tool_catalogs",
+    "session_content_blobs",
+    "opengeni_private.session_content_collections",
   ],
 };
 
