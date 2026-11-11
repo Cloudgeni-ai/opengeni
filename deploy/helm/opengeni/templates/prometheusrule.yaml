@@ -1646,10 +1646,10 @@ spec:
         # layer: the model (TTFT), the durable write path (append), or delivery
         # (publish). Thresholds are starters — tune per deployment.
         # Provider time-to-first-token (literal dispatch -> first streamed
-        # reasoning or answer delta) judged against each provider's OWN
-        # trailing baseline. A provider that is simply slower (reasoning
-        # models, subscription routes) never alerts; a real regression does.
-        # The absolute view stays on the Streaming Health dashboard.
+        # reasoning or answer delta) against each provider's OWN trailing
+        # baseline. On reasoning models it follows context size and reasoning
+        # length, so for providers that report response start (below) it is a
+        # dashboard view, not the regression signal.
         - record: opengeni:model_provider_ttft_seconds:p90_30m
           expr: |
             histogram_quantile(0.9, sum by (le, provider) (rate(opengeni_model_provider_ttft_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},content="any"}[30m])))
@@ -1662,16 +1662,57 @@ spec:
         - record: opengeni:model_provider_ttft_requests:24h_baseline
           expr: |
             sum by (provider) (increase(opengeni_model_provider_ttft_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},content="any"}[24h] offset 30m))
+        # Provider response start: dispatch -> response headers, or the first
+        # provider event on a persistent socket. The provider has accepted the
+        # request but not yet read or reasoned over it, so request shape barely
+        # moves it. Only providers with native request events report it.
+        - record: opengeni:model_provider_headers_seconds:p90_30m
+          expr: |
+            histogram_quantile(0.9, sum by (le, provider) (rate(opengeni_model_request_phase_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="headers"}[30m])))
+        - record: opengeni:model_provider_headers_seconds:p90_24h_baseline
+          expr: |
+            histogram_quantile(0.9, sum by (le, provider) (rate(opengeni_model_request_phase_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="headers"}[24h] offset 30m)))
+        - record: opengeni:model_provider_headers_requests:30m
+          expr: |
+            sum by (provider) (increase(opengeni_model_request_phase_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="headers"}[30m]))
+        - record: opengeni:model_provider_headers_requests:24h_baseline
+          expr: |
+            sum by (provider) (increase(opengeni_model_request_phase_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},phase="headers"}[24h] offset 30m))
+        # The regression signal per provider, labelled `signal`: response start
+        # (`headers`) where the provider reported it in the baseline window,
+        # otherwise first streamed content (`first_content`). All four series
+        # make the same choice, so a window is never judged against a baseline
+        # of the other signal.
+        - record: opengeni:model_provider_regression_signal_seconds:p90_30m
+          expr: |
+            label_replace(opengeni:model_provider_headers_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} and on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "headers", "", "")
+            or
+            label_replace(opengeni:model_provider_ttft_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} unless on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "first_content", "", "")
+        - record: opengeni:model_provider_regression_signal_seconds:p90_24h_baseline
+          expr: |
+            label_replace(opengeni:model_provider_headers_seconds:p90_24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} and on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "headers", "", "")
+            or
+            label_replace(opengeni:model_provider_ttft_seconds:p90_24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} unless on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "first_content", "", "")
+        - record: opengeni:model_provider_regression_signal_requests:30m
+          expr: |
+            label_replace(opengeni:model_provider_headers_requests:30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} and on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "headers", "", "")
+            or
+            label_replace(opengeni:model_provider_ttft_requests:30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} unless on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "first_content", "", "")
+        - record: opengeni:model_provider_regression_signal_requests:24h_baseline
+          expr: |
+            label_replace(opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0, "signal", "headers", "", "")
+            or
+            label_replace(opengeni:model_provider_ttft_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} unless on(provider) (opengeni:model_provider_headers_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0), "signal", "first_content", "", "")
         - alert: OpenGeniModelProviderTtftRegression
           expr: |
-            opengeni:model_provider_ttft_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
-              > {{ $providerTtftRegressionRatio }} * opengeni:model_provider_ttft_seconds:p90_24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+            opengeni:model_provider_regression_signal_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+              > {{ $providerTtftRegressionRatio }} * opengeni:model_provider_regression_signal_seconds:p90_24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
             and
-            opengeni:model_provider_ttft_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > {{ $providerTtftRegressionFloorSeconds }}
+            opengeni:model_provider_regression_signal_seconds:p90_30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > {{ $providerTtftRegressionFloorSeconds }}
             and
-            opengeni:model_provider_ttft_requests:30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} >= {{ $providerTtftRecentMinSamples }}
+            opengeni:model_provider_regression_signal_requests:30m{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} >= {{ $providerTtftRecentMinSamples }}
             and
-            opengeni:model_provider_ttft_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} >= {{ $providerTtftBaselineMinSamples }}
+            opengeni:model_provider_regression_signal_requests:24h_baseline{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} >= {{ $providerTtftBaselineMinSamples }}
             unless on()
             (
               histogram_quantile(
@@ -1686,13 +1727,13 @@ spec:
             severity: warning
             notification_policy: investigate
           annotations:
-            summary: '{{ "{{ $labels.provider }}" }} takes more than {{ $providerTtftRegressionRatio }}x its usual time to start streaming replies.'
-            headline: '{{ "{{ $labels.provider }}" }}: slower than usual to reply'
-            value: 'p90 first token {{ "{{ $value | humanizeDuration }}" }}'
+            summary: '{{ "{{ $labels.provider }}" }} takes more than {{ $providerTtftRegressionRatio }}x its usual time to start responding.'
+            headline: '{{ "{{ $labels.provider }}" }}: slower than usual to respond'
+            value: 'p90 {{ "{{ $labels.signal }}" }} latency {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Users on this model wait noticeably longer before replies start.'
-            next_step: 'Check the provider''s status; usually recovers on its own; if it persists, steer users to another model.'
-            description: Measured from the literal provider dispatch, so Opengeni pre-dispatch work is excluded; a regression here is the provider (network, queueing, prefill or reasoning before the first streamed token). Suppressed while Opengeni's own pre-dispatch latency alert condition holds (including its {{ $modelRequestMinSamples }}-request minimum), so platform saturation is attributed to us first. A provider without a {{ $providerTtftBaselineMinSamples }}-request baseline does not alert.
-            action: Compare the provider's p90 against its baseline on Streaming Health, check provider status and the request phase (headers/first byte) panels, and consider steering traffic to another route if the regression persists.
+            next_step: 'Check the provider''s status and error rates. On the first_content signal, first rule out a change in request mix (larger contexts, longer reasoning) on Streaming Health; steer users away only if the provider itself stays slow.'
+            description: Each provider is judged against its own 24h baseline. Where its transport reports response start (signal `headers`, dispatch to response headers or to the first provider event on a persistent socket), that is the signal; request shape barely moves it, so a regression there is the provider accepting requests slowly. Other providers use `first_content`, dispatch to the first streamed reasoning or answer delta, which also grows with context size and reasoning length, so a few long sessions can raise it without any provider change. Opengeni pre-dispatch work is excluded, and the alert is suppressed while Opengeni's own pre-dispatch latency alert condition holds (including its {{ $modelRequestMinSamples }}-request minimum), so platform saturation is attributed to us first. A provider without a {{ $providerTtftBaselineMinSamples }}-request baseline does not alert.
+            action: Compare the provider's signal against its baseline on Streaming Health and check provider status. On first_content, check whether a few long sessions with large contexts dominate the window before steering traffic to another route.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         # A p99 means something only with at least 100 observations: below
         # that, the 99th-percentile rank lies above every observation but the
