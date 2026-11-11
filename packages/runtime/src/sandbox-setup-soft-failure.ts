@@ -19,6 +19,7 @@
 import type { SandboxLifecycleHook } from "./index";
 import { isSandboxLifecycleCommandExitError } from "./sandbox/lifecycle-command-error";
 import { isMachineProcessStartFailureMessage } from "./sandbox/selfhosted/process-start-failure";
+import { ErrorCode } from "@opengeni/agent-proto";
 
 /** One platform setup step that failed softly this turn. */
 export type SoftSetupFailure = {
@@ -185,6 +186,14 @@ const BOX_PATH = /^\/(?:workspace|tmp)(?:\/|$)/;
  */
 function isFileOperationError(node: Error): boolean {
   if (/Filesystem|FileSystem/.test(node.name)) return true;
+  // The machine agent's own answer that a filesystem operation failed at the
+  // OS layer in the box (agent-proto ERROR_CODE_OS).
+  if (
+    node.name === "SelfhostedControlError" &&
+    (node as Error & { code?: unknown }).code === ErrorCode.ERROR_CODE_OS
+  ) {
+    return true;
+  }
   const errno = node as Error & { code?: unknown; syscall?: unknown; path?: unknown };
   return (
     typeof errno.code === "string" &&
@@ -246,6 +255,45 @@ export function softSetupFailureCause(
   const exit = nodes.find(isSandboxLifecycleCommandExitError);
   if (exit) return { kind: "command_failed", exitCode: exit.exitCode };
   return null;
+}
+
+/** Errors that report a capability the box or its route lacks: an answer, not
+ * a blip, so trying the same write again cannot help. */
+const UNSUPPORTED_ERROR_NAMES = new Set([
+  "RoutingUnsupportedError",
+  "SandboxUnsupportedFeatureError",
+]);
+
+/**
+ * Whether a failed platform file write into the box may succeed if tried again
+ * in place. Not when the attempt stopped, the machine agent did not answer or
+ * was replaced (the worker recovers or replaces the box), the box's own disk or
+ * path caused it (setup fails softly with a notice instead), or the box
+ * answered. A machine-agent error is retried only when it says so (retryable)
+ * or never reached the agent; any other answer from the agent would repeat.
+ * Everything else, such as a lost routed write response, is worth a bounded
+ * retry.
+ */
+export function isRetryableSetupFileWriteFailure(error: unknown): boolean {
+  const nodes = errorGraph(error);
+  if (nodes.length === 0 || isHardSetupFailure(nodes)) return false;
+  if (softSetupFailureCause(error) !== null) return false;
+  for (const node of nodes) {
+    if (UNSUPPORTED_ERROR_NAMES.has(node.name)) return false;
+    if (node.name === "SelfhostedControlError") {
+      const control = node as Error & Record<string, unknown>;
+      if (
+        control.payloadTooLarge === true ||
+        control.osNotFound === true ||
+        control.reason === "consent_required" ||
+        control.code === ErrorCode.ERROR_CODE_UNSUPPORTED ||
+        (control.retryable !== true && control.neverSent !== true)
+      ) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 /** What to try when a hook's own command failed, by hook. */

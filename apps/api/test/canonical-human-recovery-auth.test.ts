@@ -171,5 +171,13 @@ describe("canonical human recovery through managed Better Auth", () => {
         })
       ).status,
     ).toBe(200);
+
+    // CASA 6.6.1: signing out tells the browser to drop its HTTP cache.
+    const signOut = await app.request("/v1/auth/sign-out", {
+      method: "POST",
+      headers: { cookie: activeCookie, origin: "http://opengeni.test" },
+    });
+    expect(signOut.status, await signOut.clone().text()).toBe(200);
+    expect(signOut.headers.get("clear-site-data")).toBe('"cache"');
   }, 60_000);
 });

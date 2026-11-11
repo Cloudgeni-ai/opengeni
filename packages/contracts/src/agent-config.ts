@@ -114,6 +114,15 @@ export const AgentIdentity = /* @__PURE__ */ defineSchema(() =>
   primitives.string.trim().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS),
 );
 
+/**
+ * How the host wants this chat's automatic titles written, for example "If the
+ * messages have no clear language, write the title in Norwegian bokmål." The
+ * title request appends it after its fixed rules. Same bound as an identity.
+ */
+export const AgentTitleInstructions = /* @__PURE__ */ defineSchema(() =>
+  primitives.string.trim().min(1).max(AGENT_IDENTITY_MAX_CHARACTERS),
+);
+
 /** The request-side agent object. Every field is optional. */
 export const AgentConfigRequest = /* @__PURE__ */ defineSchema(() =>
   z
@@ -128,6 +137,8 @@ export const AgentConfigRequest = /* @__PURE__ */ defineSchema(() =>
         .max(AGENT_INSTRUCTIONS_MAX_CHARACTERS)
         .optional(),
       renderer: AgentRenderer.optional(),
+      /** Added after the automatic title request's fixed rules; null clears it. */
+      titleInstructions: AgentTitleInstructions.nullable().optional(),
       /**
        * Vaults this session may use (input only, Q-08). Intersected with the
        * parent's policy and any session-level `vaultPolicy`.
@@ -234,6 +245,8 @@ export const ResolvedAgentConfig = /* @__PURE__ */ defineSchema(() =>
         identity: AgentIdentity.nullable(),
         renderer: AgentRenderer,
         source: ResolvedAgentConfigSource,
+        /** Absent when the host set none. */
+        titleInstructions: AgentTitleInstructions.optional(),
       })
       .strict(),
   ),
@@ -1177,6 +1190,7 @@ function agentConfigFromCapabilities(input: {
   identity: string | null;
   renderer: AgentRenderer;
   source: ResolvedAgentConfigSource;
+  titleInstructions?: string | null | undefined;
   inheritedUnavailable?: readonly AgentCapabilityId[] | undefined;
   inheritedUnavailableReasons?: Partial<Record<AgentCapabilityId, string>> | undefined;
 }): ResolvedAgentConfig {
@@ -1214,6 +1228,7 @@ function agentConfigFromCapabilities(input: {
     identity: input.identity,
     renderer: input.renderer,
     source: input.source,
+    ...(input.titleInstructions ? { titleInstructions: input.titleInstructions } : {}),
   };
 }
 
@@ -1261,7 +1276,8 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
     (request.capabilities !== undefined ||
       request.identity !== undefined ||
       request.renderer !== undefined ||
-      request.instructions !== undefined);
+      request.instructions !== undefined ||
+      request.titleInstructions !== undefined);
 
   const parent = input.parent;
   const workspaceDefaults = input.workspace.defaults;
@@ -1301,6 +1317,7 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
       ...((request.renderer ?? workspaceDefaults?.renderer)
         ? { renderer: request.renderer ?? workspaceDefaults?.renderer }
         : {}),
+      ...(request.titleInstructions ? { titleInstructions: request.titleInstructions } : {}),
     };
     return {
       config: resolveTopLevel(input, merged, "request", request.capabilities === undefined),
@@ -1336,6 +1353,10 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
     identity: request.identity !== undefined ? request.identity : (parentConfig?.identity ?? null),
     renderer: request.renderer ?? parentConfig?.renderer ?? defaultRenderer(input.creator),
     source: "request",
+    titleInstructions:
+      request.titleInstructions !== undefined
+        ? request.titleInstructions
+        : parentConfig?.titleInstructions,
     inheritedUnavailable: parentConfig?.unavailable,
     inheritedUnavailableReasons: parentConfig?.unavailableReasons,
   });
@@ -1347,7 +1368,7 @@ export function resolveAgentConfig(input: ResolveAgentConfigInput): ResolveAgent
 
 function resolveTopLevel(
   input: ResolveAgentConfigInput,
-  source: WorkspaceAgentDefaults,
+  source: WorkspaceAgentDefaults & { titleInstructions?: string | null | undefined },
   sourceKind: ResolvedAgentConfigSource,
   capabilitiesFromWorkspace = false,
 ): ResolvedAgentConfig {
@@ -1392,6 +1413,7 @@ function resolveTopLevel(
     identity: source.identity ?? null,
     renderer: source.renderer ?? defaultRenderer(input.creator),
     source: sourceKind,
+    titleInstructions: source.titleInstructions,
   });
   return withGoalImplication(config, input.goal, explicitGoalsOff, allAgentCapabilities());
 }
@@ -1488,6 +1510,10 @@ export function resolveAgentConfigUpdate(input: {
     identity: input.request.identity !== undefined ? input.request.identity : current.identity,
     renderer: input.request.renderer ?? current.renderer,
     source: input.current ? "request" : "legacy_conversion",
+    titleInstructions:
+      input.request.titleInstructions !== undefined
+        ? input.request.titleInstructions
+        : current.titleInstructions,
     // Capabilities a human re-enables are re-checked against the deployment.
     inheritedUnavailable: current.unavailable.filter(
       (id) => input.deployment.unavailable[id] !== undefined,

@@ -1348,6 +1348,7 @@ export type {
   GitHubAppSetupMode,
   GitHubBindingStatus,
   GitHubInstallationBinding,
+  GitHubInstallationIssue,
   GitHubInstallationLifecycle,
   GitHubRepositoryBranch,
   GitHubRepositoryBranchesResponse,

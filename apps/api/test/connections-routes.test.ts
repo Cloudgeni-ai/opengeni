@@ -58,11 +58,13 @@ import {
   OFFICIAL_GMAIL_MCP_URL,
   assertGoogleAuthorizationServer,
   assertSlackAuthorizationServer,
+  authorizeParamsFor,
   buildAuthorizationUrl,
   chooseMcpAuthorizeScopes,
   preferredOAuthSelfRegistration,
 } from "../src/integrations/oauth-client";
 import {
+  DEFAULT_OAUTH_PROFILE,
   OFFICIAL_GMAIL_MCP_BASE_SCOPES,
   builtInOAuthProfileByKey,
 } from "../src/integrations/oauth-profiles";
@@ -507,13 +509,41 @@ describe("official Gmail MCP OAuth compatibility", () => {
 
     expect(authorizationUrl.searchParams.get("resource")).toBeNull();
     expect(authorizationUrl.searchParams.get("access_type")).toBe("offline");
-    expect(authorizationUrl.searchParams.get("include_granted_scopes")).toBe("true");
-    expect(authorizationUrl.searchParams.get("prompt")).toBe("consent");
+    // Gmail, Drive and Calendar share one Google client: folding in earlier
+    // grants would show, and grant to the Gmail token, Drive and Calendar.
+    expect(authorizationUrl.searchParams.has("include_granted_scopes")).toBe(false);
+    // A person with several Google accounts chooses which one to connect.
+    expect(authorizationUrl.searchParams.get("prompt")).toBe("consent select_account");
     expect(authorizationUrl.searchParams.get("scope")?.split(" ")).toEqual([
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/gmail.compose",
       "https://www.googleapis.com/auth/gmail.modify",
     ]);
+  });
+
+  test("reconnecting a Google account signs in that account, not the browser's last one", () => {
+    for (const [key, metadataKey] of [
+      ["official-gmail", "gmailEmail"],
+      ["official-drive", "googleDriveEmail"],
+      ["official-google-calendar", "googleCalendarEmail"],
+    ] as const) {
+      const profile = builtInOAuthProfileByKey(key);
+      expect(authorizeParamsFor(profile, { [metadataKey]: "me@example.test" })).toEqual({
+        access_type: "offline",
+        prompt: "consent",
+        login_hint: "me@example.test",
+      });
+      // A first connection, or an account without a verified email, picks.
+      for (const reconnecting of [undefined, {}, { [metadataKey]: "not an email" }]) {
+        expect(authorizeParamsFor(profile, reconnecting)).toEqual({
+          access_type: "offline",
+          prompt: "consent select_account",
+        });
+      }
+    }
+    expect(authorizeParamsFor(DEFAULT_OAUTH_PROFILE, { gmailEmail: "me@example.test" })).toBe(
+      DEFAULT_OAUTH_PROFILE.extraAuthorizeParams,
+    );
   });
 
   test("cannot be widened beyond the reviewed Gmail scopes by an OAuth start caller", () => {

@@ -2527,6 +2527,9 @@
 :where(.og-root).basis-72,:where(.og-root) .basis-72 {
     flex-basis: calc(var(--spacing) * 72);
   }
+:where(.og-root).basis-\[min\(100\%\,14rem\)\],:where(.og-root) .basis-\[min\(100\%\,14rem\)\] {
+    flex-basis: min(100%, 14rem);
+  }
 :where(.og-root).basis-full,:where(.og-root) .basis-full {
     flex-basis: 100%;
   }

@@ -10515,12 +10515,25 @@ export type GitHubAppSetupMode = "platform" | "operator";
 
 export type GitHubInstallationLifecycle = "active" | "suspended" | "deleted" | "unverified";
 
+/**
+ * Why an installation is not active, in terms of the fix. Null while active;
+ * servers before this field omit it.
+ */
+export type GitHubInstallationIssue =
+  | "uninstalled"
+  | "suspended"
+  | "no_repositories"
+  | "owner_unconfirmed"
+  | "github_unreachable"
+  | "account_changed";
+
 export type GitHubInstallationBinding = {
   installationId: number;
   githubAccountId: number | null;
   accountLogin: string | null;
   accountType: string | null;
   lifecycle: GitHubInstallationLifecycle;
+  issue?: GitHubInstallationIssue | null | undefined;
   repositoryScope: GitHubRepositoryScope;
   repositoryCount: number;
   /** Opengeni-owned entry point for changing the installation's repository allowlist. */
@@ -11858,6 +11871,12 @@ export type AgentConfigRequest = {
   /** Alias of the session `instructions` field. */
   instructions?: string | undefined;
   renderer?: AgentRenderer | undefined;
+  /**
+   * How automatic chat titles are written, added after the title request's
+   * fixed rules (max 8,000 chars), for example "If the messages have no clear
+   * language, write the title in Norwegian bokmål."; null clears it.
+   */
+  titleInstructions?: string | null | undefined;
   /** Vaults this session may use (input only); intersected with the parent's policy. */
   vaultPolicy?: VaultPolicy | undefined;
 };
@@ -11906,6 +11925,8 @@ export type ResolvedAgentConfig = {
     | "deployment_default"
     | "inherited"
     | "legacy_conversion";
+  /** The host's title instructions; absent when none are set. */
+  titleInstructions?: string | undefined;
 };
 
 export type AgentEffectiveTools = {

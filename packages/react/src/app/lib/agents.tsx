@@ -21,6 +21,7 @@ import {
 
 import { apiErrorFacts } from "../../ui/api-error";
 import { useAppContext } from "../app-context";
+import { saveBlob } from "./save-blob";
 
 export type AgentsState = {
   /** Undefined until the first read settles. */
@@ -309,14 +310,7 @@ export function downloadAgentFile(agent: Agent): void {
   const blob = new Blob([`${JSON.stringify(agentFile(agent), null, 2)}\n`], {
     type: "application/json",
   });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = agentFileName(agent);
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+  saveBlob(blob, agentFileName(agent));
 }
 
 const NOT_AN_AGENT = "This file isn't an agent. Choose an .agent.json or .bot.json file.";
