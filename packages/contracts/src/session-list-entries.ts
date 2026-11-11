@@ -91,6 +91,7 @@ export function sessionListEntry(session: SessionListEntryInput): SessionListEnt
     pinnedAt: session.pinnedAt ?? null,
     pinVersion: session.pinVersion ?? 0,
     unread: session.unread ?? false,
+    ...(session.failureHandled ? { failureHandled: true } : {}),
     activelyWorking: session.activelyWorking ?? false,
     attentionVersion: session.attentionVersion ?? 0,
     archived: session.archived ?? false,

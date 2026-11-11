@@ -5,6 +5,7 @@
 import { t } from "./console-text";
 import { formatWaitingSince } from "./format";
 import { awaitsPerson } from "./needs-you";
+import { failureHandledByAgent, needsFailureReview } from "./session-failure";
 import { sessionInputWait } from "./session-rail";
 import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
 import type { SessionListTotals, SiteConversationGroup } from "@opengeni/sdk";
@@ -24,6 +25,8 @@ import {
   sessionActivityTime,
   type SessionRecencyGroup,
 } from "../../session-list-model";
+
+export { failureHandledByAgent, needsFailureReview };
 
 export {
   compareSessionActivity,
@@ -164,9 +167,10 @@ function ownRailStatusCounts(
     attention: awaitsPerson(session) ? 1 : 0,
     attentionSince: awaitsPerson(session) ? (session.requiresActionSince ?? null) : null,
     // Failed is a review signal in the rail, not a permanent copy of the
-    // lifecycle badge. Opening the session (or a parent agent consuming its
-    // result) acknowledges the failure together with the unread frontier.
-    failed: session.status === "failed" && session.unread ? 1 : 0,
+    // lifecycle badge. Opening the session acknowledges the failure together
+    // with the unread frontier; a failure its parent agent consumed is that
+    // agent's to handle and never asks the person (`failureHandled`).
+    failed: needsFailureReview(session) ? 1 : 0,
     active:
       hasActiveEffectiveControl(session) &&
       (session.status === "running" || session.status === "recovering")
@@ -289,7 +293,9 @@ function railStatusCounts(
     }
   } else {
     for (const child of node.children) {
-      addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+      const childCounts = railStatusCounts(child, localDeliveryAttention);
+      if (failureHandledByAgent(child.session) && child.session.unread) childCounts.unread -= 1;
+      addRailStatusCounts(counts, childCounts);
     }
   }
   return counts;
@@ -1221,8 +1227,8 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
     pausedWork: hasPausedWork(node.session) ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
-    unreadFailed: status === "failed" && node.session.unread ? 1 : 0,
-    unread: node.session.unread ? 1 : 0,
+    unreadFailed: needsFailureReview(node.session) ? 1 : 0,
+    unread: node.session.unread && !failureHandledByAgent(node.session) ? 1 : 0,
     activeWork: node.session.activelyWorking ? 1 : 0,
   };
   const stats = node.session.treeStats;
