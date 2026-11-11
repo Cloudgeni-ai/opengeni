@@ -7,6 +7,7 @@ import {
   WORKSPACE_SETTINGS_REFUSAL,
   workspaceSettingsAuthorized,
 } from "@opengeni/core";
+import { storedConnectionIntegrationKey } from "../integrations/stored-connection-integration-key";
 import { withDesktopAppReturnPath } from "../desktop-app-return";
 import {
   assertClaudeWorkspaceCredential,
@@ -44,6 +45,7 @@ import {
   opperCredentialProblem,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  parseConnectResultPageTextJson,
 } from "@opengeni/config";
 import {
   ATLASSIAN_PROVIDER_DOMAIN,
@@ -483,7 +485,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
           })
         : persist(database);
     // Only the canonical workspace model-key lane is outside integration policy.
-    // Generic credentials have no validated protocol/curated target in this contract.
+    // Other credentials count as the integration their own data names (an MCP
+    // server's OAuth credential), else as unclassified, which a restricted
+    // policy refuses.
     const modelKey = workspaceProviderApiKeyConnectionKind({
       subjectId: createConnectionSubjectId(payload, grant.subjectId),
       providerDomain: canonicalProviderDomain(payload.providerDomain),
@@ -495,7 +499,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       : withOrganizationIntegrationAcquisition(
           db,
           { accountId: grant.accountId, workspaceId },
-          [null],
+          [storedConnectionIntegrationKey({ kind: payload.kind, metadata: payload.metadata })],
           commit,
         );
   });
@@ -1193,7 +1197,14 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                   Date.parse(payload.expiresAt) > Date.parse(existing.expiresAt))) ||
               (payload.status === "active" && existing.status !== "active"))
           ) {
-            assertOrganizationIntegrationAllowed(policy, null);
+            // Judged by what the connection is after this update.
+            assertOrganizationIntegrationAllowed(
+              policy,
+              storedConnectionIntegrationKey({
+                kind: payload.kind ?? existing.kind,
+                metadata: payload.metadata ?? existing.metadata,
+              }),
+            );
           }
           if (changesCredentialDestination && existing.subjectId === null) {
             // A shared credential stays bound to the destination it was issued
@@ -1405,10 +1416,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // An administrator returning from an approval link derived from a
     // Microsoft sign-in that uses this callback, not a connect attempt.
     if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
-      return microsoftAdminConsentResultPage({
-        adminConsent: c.req.query("admin_consent"),
-        error: c.req.query("error"),
-      });
+      return microsoftAdminConsentResultPage(
+        {
+          adminConsent: c.req.query("admin_consent"),
+          error: c.req.query("error"),
+        },
+        parseConnectResultPageTextJson(settings.connectResultPageTextJson),
+      );
     const input = {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
@@ -1436,10 +1450,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertIntegrationsEnabled();
     // An administrator returning from the Microsoft approval link, not a connect attempt.
     if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
-      return microsoftAdminConsentResultPage({
-        adminConsent: c.req.query("admin_consent"),
-        error: c.req.query("error"),
-      });
+      return microsoftAdminConsentResultPage(
+        {
+          adminConsent: c.req.query("admin_consent"),
+          error: c.req.query("error"),
+        },
+        parseConnectResultPageTextJson(settings.connectResultPageTextJson),
+      );
     const result = await completeApiIntegrationProviderOAuth(deps, {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),

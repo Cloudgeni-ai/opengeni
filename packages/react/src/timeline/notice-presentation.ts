@@ -3,6 +3,7 @@ import { formatElapsed } from "./turn-summary-model";
 import type { NoticeItem } from "./types";
 import { durationBetween } from "./work-presentation";
 import { type OpenGeniText } from "../messages/runtime";
+import { toolActionTitle } from "../tool-action-wording";
 
 /** An approval notice the person has since answered. */
 export function noticeIsResolvedApproval(
@@ -66,11 +67,13 @@ export function noticeDisplayText(
   const decided = actions.filter((action) => action.decision !== undefined);
   // Without any answer (an older replay), say only that it was answered.
   if (decided.length === 0) return t("timeline.noticePresentation.youRespondedToThisApproval");
-  // Each answered action, by what it asked.
-  if (decided.every((action) => action.title)) {
+  // Each answered action, by what it asked, in the host's words when it named the action.
+  const titleOf = (action: ApprovalAction) =>
+    toolActionTitle(t, action.toolName) ?? action.title ?? undefined;
+  if (decided.every((action) => titleOf(action))) {
     const titled = decided.map((action) => ({
       action,
-      title: approvalHistoryTitle(action.title!),
+      title: approvalHistoryTitle(titleOf(action)!),
     }));
     return titled
       .map(({ action, title }) => {

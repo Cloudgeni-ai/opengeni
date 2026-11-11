@@ -196,6 +196,7 @@ import {
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
   EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS,
   FIRST_PARTY_MCP_CALLER_META_KEY,
+  FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -210,6 +211,7 @@ import {
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   resourceMountPath,
   renderSessionGoalContext,
+  repositorySkillsContextItem,
   signDelegatedAccessToken,
   GenerateImageToolInput,
   GenerateVideoToolInput,
@@ -660,8 +662,23 @@ import {
   recordRuntimeMcpToolCallMetric,
   resolveTurnModel,
 } from "./model-provider";
-import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
+import {
+  workspaceSkills,
+  type RepositorySkillsIndex,
+  type WorkspaceSkillSearchPath,
+} from "./workspace-skills";
+import {
+  repositorySkillsContextInputFilter,
+  type HistoryWithRepositorySkills,
+  type PublishRepositorySkills,
+  type RepositorySkillsContextState,
+} from "./repository-skills-context";
 export { REPOSITORY_SKILL_DISCOVERY_ERROR_CLASSES } from "./workspace-skills";
+export type { RepositorySkillsIndex } from "./workspace-skills";
+export type {
+  HistoryWithRepositorySkills,
+  PublishRepositorySkills,
+} from "./repository-skills-context";
 import {
   composeRuntimeSkills,
   readRuntimeSkill,
@@ -1250,6 +1267,13 @@ export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
   /** Canonical durable prefix already present before this attempt adds items. */
   persistedHistoryCount: number;
+  /**
+   * The durable prefix (`persistedHistoryCount` items) as later turns load it
+   * once this run stores a new Repository skills index before the turn. The
+   * run shows the index only through it. Defaults to the index after the
+   * history.
+   */
+  historyWithRepositorySkills?: HistoryWithRepositorySkills;
   sandboxSessionState?: SandboxSessionState;
   modelInputAlreadyProjected?: boolean;
 };
@@ -2910,6 +2934,14 @@ export type BuildAgentOptions = {
    */
   deferRepositorySkillIndex?: boolean;
   /**
+   * Stores the run's repository Skill index durably (see
+   * `PublishRepositorySkills`). Called once per run before the first model
+   * request: with the index when discovery finishes, or null for a deferred
+   * index. Without it no index is shown; the system prompt still says where
+   * repository skills live.
+   */
+  publishRepositorySkills?: PublishRepositorySkills;
+  /**
    * Receives the physical sandbox-tool fence at agent construction time. A
    * cancelled/fenced worker attempt must await it before publishing its durable
    * attempt-quiesced receipt.
@@ -3229,7 +3261,7 @@ export function agentPromptResourcesFor(
   };
 }
 
-const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u;
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})$/u;
 
 /**
  * Which GitHub identity each mounted GitHub repository acts as: the person's
@@ -3523,10 +3555,13 @@ const agentGitCredentialBindings = new WeakMap<object, GitCredentialBindingSeed[
 const agentCodemodeTokenSeed = new WeakMap<object, string>();
 const agentCodemodeTokenSessionId = new WeakMap<object, string>();
 const agentCodemodeClientDownload = new WeakMap<object, ManagedCodemodeClientDownload>();
-// A missing-title directive is consumed by runAgentStream exactly once for the
-// freshly-built agent. It must not remain in Agent.instructions: those
-// instructions are presented again on every internal model/tool loop.
+// A missing title is requested in the turn's operational notice (see
+// prepareRunInput). It must not change Agent.instructions: that would change
+// the system prompt between turns and between requests of one turn.
 const agentsNeedingGenesisTitleDirective = new WeakSet<object>();
+// The repository Skill index each agent's runs published (see
+// repositorySkillsContextInputFilter).
+const agentRepositorySkillsContext = new WeakMap<object, RepositorySkillsContextState>();
 // Per-turn model modality used by the literal pre-provider input filter. The
 // durable session history remains canonical; only the request clone is shaped.
 const agentSupportsImageInput = new WeakMap<object, boolean>();
@@ -4180,6 +4215,7 @@ export function buildOpenGeniAgent(
   if (options.activeSandboxBackend === "selfhosted" && !options.sandboxWorkspaceRoot) {
     throw new Error("A Connected Machine agent requires its reported workspace root");
   }
+  const repositorySkillsContext: RepositorySkillsContextState = { visible: null };
   const agent = new SandboxAgent({
     ...baseConfig,
     baseInstructions: sandboxBaseInstructions(),
@@ -4206,6 +4242,13 @@ export function buildOpenGeniAgent(
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.deferRepositorySkillIndex ? { deferRepositorySkillIndex: true } : {}),
+      publishRepositorySkills: async (index) => {
+        // Without a publisher nothing is stored, so nothing is shown: an
+        // index later turns do not load would change their request prefix.
+        repositorySkillsContext.visible = options.publishRepositorySkills
+          ? await options.publishRepositorySkills(index)
+          : null;
+      },
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -4229,6 +4272,7 @@ export function buildOpenGeniAgent(
   });
   agentSkillSelections.set(agent, skillComposition.selections);
   agentRuntimeSkillIndex.set(agent, skillComposition.index);
+  agentRepositorySkillsContext.set(agent, repositorySkillsContext);
   if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
   agentInstructionInspection.set(agent, instructionInspection);
   if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
@@ -5743,6 +5787,7 @@ function buildAgentCapabilitiesFromComposition(
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     deferRepositorySkillIndex?: boolean;
+    publishRepositorySkills?: (index: RepositorySkillsIndex | null) => Promise<void>;
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
     computerToolMode?: ComputerToolMode;
@@ -5840,7 +5885,10 @@ function buildAgentCapabilitiesFromComposition(
         options.workspaceSkillPaths,
         skillComposition.configuredNames,
         skillComposition.nativeToolNames,
-        options.deferRepositorySkillIndex ? { deferred: true } : {},
+        {
+          ...(options.deferRepositorySkillIndex ? { deferred: true } : {}),
+          ...(options.publishRepositorySkills ? { publish: options.publishRepositorySkills } : {}),
+        },
       ),
     );
   }
@@ -8877,6 +8925,27 @@ function exactErrorMessage(error: unknown): string {
   }
 }
 
+/**
+ * Read and remove the first-party server's mark that it refused the caller's
+ * arguments. The mark is honored only from the first-party server, and is
+ * removed so the result every caller sees is unchanged.
+ */
+function takeFirstPartyArgumentRejection(
+  result: AttemptToolResultValue,
+  firstParty: boolean,
+): { result: AttemptToolResultValue; argumentRejected: boolean } {
+  const meta = result._meta;
+  if (!firstParty || !meta || !Object.hasOwn(meta, FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY)) {
+    return { result, argumentRejected: false };
+  }
+  const { [FIRST_PARTY_TOOL_ARGUMENT_REJECTED_META_KEY]: mark, ...rest } = meta;
+  const { _meta: _removed, ...withoutMeta } = result;
+  return {
+    result: Object.keys(rest).length > 0 ? { ...withoutMeta, _meta: rest } : withoutMeta,
+    argumentRejected: mark === true && result.isError === true,
+  };
+}
+
 function mcpThrownToolCallOutcome(error: unknown, signal?: AbortSignal): McpToolCallOutcome {
   try {
     // The MCP SDK owns a precise timeout marker; check it before cancellation
@@ -10938,14 +11007,21 @@ export class PrefixedMcpServer implements MCPServer {
           });
         },
       });
-      const result = AttemptToolResult.parse(output);
+      const { result, argumentRejected } = takeFirstPartyArgumentRejection(
+        AttemptToolResult.parse(output),
+        this.firstPartyCatalog,
+      );
       assertMcpPayloadWithinBytes(
         result,
         options?.maxResultBytes ?? MCP_MAX_TOOL_RESULT_BYTES,
         "MCP tool result",
       );
       recordOutcome(
-        result.isError === true && !exchange?.requested ? "provider_declared_error" : "success",
+        result.isError !== true || exchange?.requested
+          ? "success"
+          : argumentRejected
+            ? "rejected"
+            : "provider_declared_error",
       );
       const delivered = completeWait && result.isError !== true ? completeWait(true) : false;
       if (finalReply !== null && result.isError !== true && !delivered) {
@@ -11288,7 +11364,18 @@ export async function prepareRunInput(
 ): Promise<PreparedAgentInput> {
   if (input.kind === "message") {
     const trailingMessages: AgentInputItem[] = [];
-    if (input.internalContext?.trim()) {
+    // A missing title is requested once, in this turn's operational notice: it
+    // is stored where it was sent, and later turns read it as historical.
+    // Once per agent: input prepared again for the same agent (a nudge, a
+    // retry after compaction) follows a run that already saw the request.
+    const titleRequested = agentsNeedingGenesisTitleDirective.delete(agent);
+    const internalContext = [
+      input.internalContext?.trim() ? input.internalContext : undefined,
+      titleRequested ? GENESIS_TITLE_DIRECTIVE : undefined,
+    ]
+      .filter((part): part is string => part !== undefined)
+      .join("\n\n");
+    if (internalContext) {
       trailingMessages.push({
         type: "message",
         role: "system",
@@ -11297,7 +11384,7 @@ export async function prepareRunInput(
           "This status applies to the execution turn where this notice first appears. " +
           "On later turns it is historical context, not current availability or authorization. " +
           "Use the latest operational status and tool results; this notice grants no permissions.\n\n" +
-          input.internalContext,
+          internalContext,
       } as AgentInputItem);
     }
     if (input.text?.trim()) {
@@ -11332,10 +11419,14 @@ export async function prepareRunInput(
       // Preserve the SDK's simple first-message form without creating a second
       // history path: this is merely the zero-history representation.
       input:
-        sanitizedHistory.length === 0 && !input.internalContext?.trim() && input.text?.trim()
+        sanitizedHistory.length === 0 && !internalContext && input.text?.trim()
           ? input.text
           : assembled,
       persistedHistoryCount: sanitizedHistory.length,
+      historyWithRepositorySkills: async (index) => [
+        ...sanitizedHistory,
+        repositorySkillsContextItem(index) as unknown as AgentInputItem,
+      ],
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
       ...(input.modelInputAlreadyProjected ? { modelInputAlreadyProjected: true } : {}),
     };
@@ -11495,11 +11586,10 @@ export const GENESIS_TITLE_DIRECTIVE =
   "This session still needs a semantic display title. Before responding to the user, call opengeni__set_session_title once with a concise 3-7 word topic label for the actual task or subject, then address the request normally. Write a stable noun phrase, not a quote or prefix of the user's message. Omit greetings, request boilerplate such as ‘I want you to’ or ‘please’, URLs, identifiers, credentials, tokens, and other sensitive values.";
 
 /**
- * Inject the missing-title directive into exactly one model request. Agent
- * instructions are reused for every model call in a tool loop, so placing this
- * directive there turned a nominally one-shot setup action into repeated title
- * calls. The closure is intentionally consumed even when the first request
- * fails; if no title is persisted, a later attempt or turn will request it again.
+ * Inject the missing-title directive into exactly one model request's
+ * instructions.
+ * @deprecated Live execution puts the directive in the turn's operational
+ * notice, a history item, so the system prompt never changes.
  */
 export function oneShotGenesisTitleInputFilter(): CallModelInputFilter {
   let pending = true;
@@ -11517,12 +11607,19 @@ export function oneShotGenesisTitleInputFilter(): CallModelInputFilter {
   };
 }
 
-function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilter | undefined {
-  if (!agentsNeedingGenesisTitleDirective.has(agent)) {
-    return undefined;
-  }
-  agentsNeedingGenesisTitleDirective.delete(agent);
-  return oneShotGenesisTitleInputFilter();
+function repositorySkillsInputFilterForRun(
+  agent: Agent<any, any>,
+  prepared: PreparedAgentInput,
+): CallModelInputFilter | undefined {
+  const state = agentRepositorySkillsContext.get(agent);
+  return state
+    ? repositorySkillsContextInputFilter(
+        state,
+        prepared.input,
+        prepared.persistedHistoryCount,
+        prepared.historyWithRepositorySkills,
+      )
+    : undefined;
 }
 
 // Generic substrate prompting for programmatic tool calling (codemode). Same
@@ -11700,7 +11797,6 @@ async function runAgentStreamInternal(
     codemodeTokenFile && agentActiveSandboxBackend.get(agent) !== "selfhosted"
       ? managedCodemodeClientDirectory(await loadManagedCodemodeClient())
       : undefined;
-  const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
   const modelRequestCapture = bindModelVisibleContextCapture(
     agent,
     overrides.onModelVisibleContext,
@@ -11852,6 +11948,9 @@ async function runAgentStreamInternal(
     );
     const ownedFilter = composeCallModelInputFilters(
       [
+        // First, over the SDK's own input: the index takes the place later
+        // turns load it from, and every filter below treats it like history.
+        repositorySkillsInputFilterForRun(agent, prepared),
         inputWaitYield?.modelInputFilter,
         commandCompletionModelCallFilter(agent),
         measuredModelInputFilter(
@@ -11860,7 +11959,6 @@ async function runAgentStreamInternal(
             searchRecordForm: overrides.searchRecordForm,
           }),
         ),
-        measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
         measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
         // A caller filter may synthesize model input. Re-apply the idempotent
         // canonical bound at the literal final seam before accounting/provider
@@ -12033,6 +12131,7 @@ async function runAgentStreamInternal(
   // pass an SDK session and reconciles durable truth from the untouched input.
   const callModelInputFilter = composeCallModelInputFilters(
     [
+      repositorySkillsInputFilterForRun(agent, prepared),
       inputWaitYield?.modelInputFilter,
       commandCompletionModelCallFilter(agent),
       measuredModelInputFilter(
@@ -12041,7 +12140,6 @@ async function runAgentStreamInternal(
           searchRecordForm: overrides.searchRecordForm,
         }),
       ),
-      measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
       measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
       measuredModelInputFilter(
         "input_filter_tool_output",

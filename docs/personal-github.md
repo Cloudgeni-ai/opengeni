@@ -302,6 +302,23 @@ Your GitHub access is refused with a message naming the cause. The child then
 inherits the connection use through durable propagation; it never receives
 another person's connection or more than the parent turn holds.
 
+No Your GitHub use is limited to one message or one chat. A turn's personal
+repositories always come from the person's lasting choice on the connection,
+their chosen list or All my repositories (Your GitHub is not turned on per
+workspace; D-54 covers other logins), and a chat's attachments only narrow
+which of them it holds. So a schedule an agent saves can name only repositories
+the creating turn held, and those were already usable as the person beyond that
+turn. Each run re-resolves the owner's connection, chosen list and All my
+repositories: disconnecting, removing the repository from the list or turning
+All my repositories off stops later runs, and a run never falls back to the
+workspace's GitHub app.
+
+Repository owners follow GitHub's login rules, including enterprise managed
+users, whose logins carry an underscore suffix (`octocat_acme`): 1 to 39
+letters, digits, `-` or `_`, starting with a letter or digit
+(`GITHUB_OWNER_LOGIN_PATTERN` in `packages/contracts/src/personal-github.ts`;
+migration 1370 widens the stored selection check the same way).
+
 Managed sandboxes consume this authority through Opengeni's dedicated personal
 GitHub smart-HTTP broker. The worker mints a five-minute encrypted bearer bound
 to the exact account, workspace, session/root, turn, active attempt and
@@ -471,7 +488,13 @@ A request that needs approval is not sent. `gh` prints `Waiting for approval:
 the response carries `x-opengeni-approval: pending`, and the turn ends with
 the normal approval card. The approval is
 bound to a digest of the exact request (method, path, query and body bytes); after
-approval, running the same command again sends it once. A declined request
+approval, running the same command again sends it once. A secret write
+(`PUT …/secrets/{name}`, as `gh secret set` sends) is bound to everything but
+`encrypted_value` and `key_id`: `gh` seals the value with fresh randomness on
+every run, so the retry differs only in ciphertext. The repository,
+environment, secret name and any other fields (such as an organization
+secret's visibility) still have to match, and the approval card shows the
+value as `[sealed]`. A declined request
 answers `Declined by the person`. Outcomes are recorded in the same connector
 action ledger as tool calls: a 5xx or transport failure is outcome-unknown and
 is not replayed.

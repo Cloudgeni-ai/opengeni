@@ -30,7 +30,7 @@ ADD --checksum=sha256:8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb
 
 FROM scratch AS chrome-assets
 
-ADD --checksum=sha256:6c92cd22e90c6e3e255d782991543fa2091db8614e8536a971a7433a5c4d7ac8 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_156.0.8078.47-1_amd64.deb /google-chrome-stable.deb
+ADD --checksum=sha256:92148bd14dc05823a64061c2fafcf20d4d82b3fc56f5831206f16d2ac9ee3f79 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_157.0.8103.50-1_amd64.deb /google-chrome-stable.deb
 
 # The pinned rg builds the agent embeds and appends to every command's PATH,
 # with the static musl jq committed under agent/vendor/jq/. Pins equal
@@ -286,6 +286,13 @@ COPY --from=node-target /usr/local/bin/node /out/node
 RUN --mount=type=bind,source=docker,target=/opt/opengeni-docker \
   bun /opt/opengeni-docker/distrust-embedded-roots.ts /opt/opengeni-docker/distrusted-roots.pem /out/node
 
+# CI passes the verified runtime inputs as this named build context
+# (--build-context artifact-runtime-inputs=<dir>), outside the main context,
+# so every `COPY . .` layer is the same with or without them and CI can build
+# them before the inputs exist. Without it the stage is empty and the inputs
+# come from the main context at OPENGENI_ARTIFACT_RUNTIME_BUNDLE, as before.
+FROM scratch AS artifact-runtime-inputs
+
 FROM oven/bun:${BUN_VERSION} AS artifact-runtime-builder
 COPY --from=bun-runtime /out/bun /usr/local/bin/bun
 
@@ -314,6 +321,7 @@ ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
 WORKDIR /src
 COPY . .
 COPY --from=node-runtime /out/node /usr/local/bin/node
+COPY --from=artifact-runtime-inputs / /src/${OPENGENI_ARTIFACT_RUNTIME_BUNDLE}/
 RUN --mount=type=cache,id=opengeni-sandbox-bun-artifact-runtime-${TARGETARCH},target=/root/.bun/install/cache,sharing=locked \
     set -eux; \
     case "$TARGETARCH" in \
@@ -355,8 +363,8 @@ ARG WEBSOCKIFY_REF=v0.12.0
 ARG TTYD_VERSION=1.7.7
 ARG NODE_MAJOR=20
 ARG TARGETARCH
-ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.47-1~deb13u1
-ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261022T170820Z
+ARG OPENGENI_CHROMIUM_VERSION=156.0.8078.79-1~deb13u1
+ARG OPENGENI_DEBIAN_SECURITY_SNAPSHOT=20261103T013555Z
 
 # noninteractive + a fixed TZ on EVERY apt layer (mandatory — see header).
 ENV DEBIAN_FRONTEND=noninteractive

@@ -7,6 +7,7 @@ import type {
 } from "@opengeni/contracts";
 import { randomUUID } from "node:crypto";
 import {
+  GITHUB_OWNER_LOGIN_PATTERN,
   PERSONAL_GITHUB_PROVIDER_DOMAIN,
   type PersonalGitHubRepositoryAccess,
 } from "@opengeni/contracts/personal-github";
@@ -59,7 +60,7 @@ export function personalGitHubRepositoryFullNameFromUri(uri: string): string | n
   const ssh = /^(?:ssh:\/\/)?git@github\.com[:/](.+)$/iu.exec(value);
   if (ssh) {
     path = ssh[1]!;
-  } else if (/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/u.test(value)) {
+  } else if (/^[A-Za-z0-9][A-Za-z0-9_-]*\/[A-Za-z0-9_.-]+$/u.test(value)) {
     path = value;
   } else {
     let url: URL;
@@ -91,7 +92,7 @@ export function personalGitHubRepositoryFullNameFromUri(uri: string): string | n
     !owner ||
     !name ||
     rest.length > 0 ||
-    !/^[A-Za-z0-9-]{1,39}$/u.test(owner) ||
+    !GITHUB_OWNER_LOGIN_PATTERN.test(owner) ||
     !/^[A-Za-z0-9_.-]{1,100}$/u.test(name)
   ) {
     return null;

@@ -34,9 +34,65 @@ describe("native call config plugin", () => {
     expect(source).toContain("struct OpenGeniCallShortcuts: AppShortcutsProvider");
   });
 
+  test("only an unlocked phone runs the call intent", () => {
+    const source = intentsSource(resolveOptions().call);
+    expect(source).toContain(
+      "static let authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication",
+    );
+    expect(source).toContain("static let openAppWhenRun: Bool = true");
+  });
+
+  test("voice commands: an optional chat parameter, parameterized phrases and a refresh hook", () => {
+    const { call } = resolveOptions({
+      call: { chatPhrases: ["Call {chat} in {app}", "{app}, ring {chat}"] },
+    });
+    const source = intentsSource(call);
+    expect(source).toContain("struct OpenGeniCallChatEntity: AppEntity");
+    expect(source).toContain("struct OpenGeniCallChatQuery: EntityStringQuery");
+    expect(source).toContain("var chat: OpenGeniCallChatEntity?");
+    expect(source).toContain('"Call \\(\\.$chat) in \\(.applicationName)"');
+    expect(source).toContain('"\\(.applicationName), ring \\(\\.$chat)"');
+    expect(source).toContain('Summary("Call \\(\\.$chat)")');
+    // Only the commands the app stored are offered; a missing one is an error, not another call.
+    expect(source).toContain(
+      "func suggestedEntities() async throws -> [OpenGeniCallChatEntity] {\n    OpenGeniCallLauncher.commands().map(OpenGeniCallChatEntity.init)",
+    );
+    expect(source).toContain("guard let command = OpenGeniCallLauncher.command(id: chat.id)");
+    expect(source).toContain("throw OpenGeniCallChatMissing()");
+    expect(source).toContain(
+      "OpenGeniCallLauncher.requestStart(target: command.sessionId, workspaceId: command.workspaceId)",
+    );
+    // Both shortcuts run the one intent; the plain phrases still start the default call.
+    expect(source.match(/AppShortcut\(\n\s+intent: OpenGeniStartCallIntent\(\)/g)?.length).toBe(2);
+    expect(source).toContain('"Talk to \\(.applicationName)"');
+    expect(source).toContain("@objc(OpenGeniCallShortcutsRefresher)");
+    expect(source).toContain("OpenGeniCallShortcuts.updateAppShortcutParameters()");
+  });
+
+  test("leaves out the voice-command shortcut when there are no chat phrases", () => {
+    const source = intentsSource(resolveOptions({ call: { chatPhrases: [] } }).call);
+    expect(source.match(/AppShortcut\(/g)?.length).toBe(1);
+    // The intent keeps its chat parameter for the Shortcuts app.
+    expect(source).toContain("var chat: OpenGeniCallChatEntity?");
+  });
+
+  test("rejects chat phrases without exactly one chat and one app name", () => {
+    expect(() => resolveOptions({ call: { chatPhrases: ["Call {chat}"] } })).toThrow("{chat}");
+    expect(() => resolveOptions({ call: { chatPhrases: ["Call {app}"] } })).toThrow("{chat}");
+    expect(() => resolveOptions({ call: { chatPhrases: ["{chat} {chat} in {app}"] } })).toThrow(
+      "{chat}",
+    );
+    expect(() => resolveOptions({ call: { phrases: ["Call {chat} in {app}"] } })).toThrow("{chat}");
+    expect(() => resolveOptions({ call: { chatPhrases: "Call {chat} in {app}" } })).toThrow(
+      "chatPhrases",
+    );
+    expect(() => resolveOptions({ call: { chatSummary: "Call" } })).toThrow("chatSummary");
+  });
+
   test("defaults apply without options", () => {
     const options = resolveOptions();
     expect(options.call.phrases.length).toBeGreaterThan(0);
+    expect(options.call.chatPhrases).toEqual(["Call {chat} in {app}", "Talk to {chat} in {app}"]);
     expect(options.alternativeAppNames).toEqual([]);
     expect(options.appIntents).toBe(true);
     // The call audio device is opt-in: WebRTC keeps its own device by default.
@@ -132,6 +188,10 @@ describe("call control extension", () => {
     const source = control.controlSource(call, options, "com.example.app.call-control");
     expect(source).toContain("struct OpenGeniStartCallIntent: AppIntent");
     expect(source).toContain("static let openAppWhenRun: Bool = true");
+    expect(source).toContain(".requiresAuthentication");
+    // The same chat parameter as the app's intent, with nothing to offer here.
+    expect(source).toContain("var chat: OpenGeniCallChatEntity?");
+    expect(source).toContain("[OpenGeniCallChatEntity]()");
     expect(source).toContain('StaticControlConfiguration(kind: "com.example.app.call-control")');
     expect(source).toContain("ControlWidgetButton(action: OpenGeniStartCallIntent())");
     expect(source).toContain('Label("Ring Agent", systemImage: "phone.fill")');

@@ -874,7 +874,7 @@ function resolveValue(value: GraphqlValue, variables: Record<string, unknown>): 
 }
 
 const GITHUB_REPOSITORY_URL =
-  /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9-]{1,100})\/([A-Za-z0-9._-]{1,100})(?:[/?#]|$)/iu;
+  /^https?:\/\/(?:www\.)?github\.com\/([A-Za-z0-9_-]{1,100})\/([A-Za-z0-9._-]{1,100})(?:[/?#]|$)/iu;
 
 /** First path segments of github.com URLs that are not repository owners. */
 const GITHUB_RESERVED_OWNERS = new Set([

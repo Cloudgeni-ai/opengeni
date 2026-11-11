@@ -726,10 +726,36 @@ fn bring(seen: &mut GroupView, host: &GroupHost, policy: &ScalePolicy) {
 
 /// The group size that gives `seen` the `usable` hosts the policy asks
 /// for: the group holds its draining and stalled places besides, so it
-/// grows from its present size by as many as are short, up to `max_hosts`.
-fn grown_size(target_size: u32, seen: &GroupView, usable: u32, max_hosts: u32) -> u32 {
+/// grows from its present size by as many as are short, up to `max_hosts`
+/// and the `draining` members it lists on top. The maximum bounds the
+/// hosts that take sandboxes: a draining host takes none, and may hold its
+/// place long while its sandboxes are handed off, so it must not keep the
+/// group from growing (#6976). A stalled place still counts, so that
+/// members that never register cannot grow the group without bound.
+fn grown_size(
+    target_size: u32,
+    seen: &GroupView,
+    usable: u32,
+    max_hosts: u32,
+    draining: u32,
+) -> u32 {
     let short = usable.saturating_sub(seen.hosts + seen.booting);
-    target_size.saturating_add(short).min(max_hosts)
+    target_size
+        .saturating_add(short)
+        .min(max_hosts.saturating_add(draining))
+}
+
+/// How many of the group's `members`, not on their way out, have a
+/// registered host among `hosts` that is draining. A draining host the
+/// listing does not name (one the group has let go) holds no member's
+/// place, so it lifts no maximum.
+fn draining_members(members: &[Member], hosts: &HashMap<String, GroupHost>) -> u32 {
+    let draining = members
+        .iter()
+        .filter(|member| !member.leaving)
+        .filter(|member| hosts.get(&member.name).is_some_and(|host| host.draining))
+        .count();
+    u32::try_from(draining).unwrap_or(u32::MAX)
 }
 
 /// Grows the group if its spare memory would run short, and starts its
@@ -758,12 +784,20 @@ async fn scale(
     );
     match scaling.policy.decide(&seen) {
         ScaleDecision::Grow { to } => {
-            let to = grown_size(described.target_size, &seen, to, scaling.policy.max_hosts);
+            let draining = draining_members(&members, &hosts);
+            let to = grown_size(
+                described.target_size,
+                &seen,
+                to,
+                scaling.policy.max_hosts,
+                draining,
+            );
             if to > described.target_size {
                 tracing::info!(
                     from = described.target_size,
                     to,
                     draining = seen.draining,
+                    draining_allowance = draining,
                     stalled = seen.stalled,
                     free_mib = seen.free_memory_mib,
                     "growing the host group"
@@ -1010,7 +1044,7 @@ mod tests {
         let seen =
             Boots::default().count(1, &[], &hosts(&[("hosts-a", live(1))]), BOOTING, &POLICY);
         assert_eq!((seen.hosts, seen.booting), (1, 0), "{seen:?}");
-        assert_eq!(grown_size(1, &seen, 2, 10), 2);
+        assert_eq!(grown_size(1, &seen, 2, 10, 0), 2);
         // Two places asked for: the other is booting.
         let seen =
             Boots::default().count(2, &[], &hosts(&[("hosts-a", live(1))]), BOOTING, &POLICY);
@@ -1029,7 +1063,7 @@ mod tests {
             (1, 0, GIB),
             "{seen:?}"
         );
-        assert_eq!(grown_size(1, &seen, 2, 10), 2);
+        assert_eq!(grown_size(1, &seen, 2, 10, 0), 2);
         // With one place not listed, only the host with least spare takes it.
         let registered = hosts(&[
             ("hosts-a", live(1)),
@@ -1058,11 +1092,65 @@ mod tests {
         );
         // Two usable hosts wanted, one live: one more on top of the three
         // places.
-        assert_eq!(grown_size(3, &seen, 2, 10), 4);
-        assert_eq!(grown_size(3, &seen, 2, 3), 3, "never past the maximum");
+        assert_eq!(grown_size(3, &seen, 2, 10, 1), 4);
+        // The draining place does not count against the maximum; the
+        // stalled one does.
+        assert_eq!(draining_members(&members, &registered), 1);
+        assert_eq!(grown_size(3, &seen, 2, 3, 1), 4, "draining comes on top");
+        assert_eq!(grown_size(3, &seen, 2, 2, 1), 3, "never past the maximum");
         // Within the allowance the third member is coming.
         let seen = Boots::default().count(3, &members, &registered, BOOTING, &POLICY);
         assert_eq!((seen.booting, seen.stalled), (1, 0), "{seen:?}");
+    }
+
+    /// A group at its maximum with one host draining, the others full:
+    /// the draining host takes no sandboxes, so the group still grows by
+    /// one (#6976).
+    #[tokio::test]
+    async fn a_draining_host_does_not_hold_a_full_group_at_its_maximum() {
+        let policy = ScalePolicy {
+            max_hosts: 4,
+            ..POLICY
+        };
+        let mut draining = live(64);
+        draining.draining = true;
+        let members = [
+            member("hosts-a"),
+            member("hosts-b"),
+            member("hosts-c"),
+            member("hosts-d"),
+        ];
+        let registered = hosts(&[
+            ("hosts-a", live(1)),
+            ("hosts-b", live(1)),
+            ("hosts-c", live(1)),
+            ("hosts-d", draining),
+        ]);
+        let seen = Boots::default().count(4, &members, &registered, BOOTING, &policy);
+        assert_eq!((seen.hosts, seen.draining), (3, 1), "{seen:?}");
+        let ScaleDecision::Grow { to } = policy.decide(&seen) else {
+            panic!("three full hosts should grow the group: {seen:?}");
+        };
+        let draining = draining_members(&members, &registered);
+        assert_eq!(grown_size(4, &seen, to, policy.max_hosts, draining), 5);
+    }
+
+    /// A draining host the group no longer lists, or one it is removing,
+    /// holds no member's place, so it lifts no maximum.
+    #[test]
+    fn only_listed_draining_members_lift_the_maximum() {
+        let mut draining = live(64);
+        draining.draining = true;
+        let mut leaving = member("hosts-c");
+        leaving.leaving = true;
+        let members = [member("hosts-a"), member("hosts-b"), leaving];
+        let registered = hosts(&[
+            ("hosts-a", live(1)),
+            ("hosts-b", draining),
+            ("hosts-c", draining),
+            ("hosts-gone", draining),
+        ]);
+        assert_eq!(draining_members(&members, &registered), 1);
     }
 
     #[tokio::test]

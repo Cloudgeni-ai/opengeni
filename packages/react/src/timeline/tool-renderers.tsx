@@ -88,6 +88,7 @@ import {
 } from "./tool-presentation";
 import { isPatchFilename, PatchApplyCommand } from "./patch-apply-command";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
+import { toolActionTitle } from "../tool-action-wording";
 import { useOpenGeniLinkResolver } from "../components/open-geni-links";
 import { clickDownloadLink, saveBlob } from "../app/lib/save-blob";
 import { LazyPart } from "../components/lazy-part";
@@ -2014,7 +2015,7 @@ function ReviewedGenericRenderer(props: ToolRendererProps) {
     <ActivityDisclosure
       icon={icon}
       iconTone={chip?.tone === "bad" ? "failed" : waiting ? "accent" : "muted"}
-      title={review.title}
+      title={toolActionTitle(msg, review.toolName) ?? review.title}
       running={running}
       chip={chip}
       preview={

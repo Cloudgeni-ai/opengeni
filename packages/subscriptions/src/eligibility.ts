@@ -98,6 +98,20 @@ export function connectionUsesExtraCredits(
   );
 }
 
+/**
+ * Whether the connection serves at reduced service now (a provider's slow
+ * tier or grace zone past a plan limit, `SubscriptionQuota.constrainedUntil`).
+ * It can still serve, so this never makes it ineligible; placement prefers
+ * a connection with plain capacity.
+ */
+export function connectionConstrained(
+  input: Pick<PlacementInput, "now">,
+  connection: SubscriptionConnection,
+): boolean {
+  const until = connection.quota?.constrainedUntil;
+  return typeof until === "number" && until > input.now;
+}
+
 function findModel(input: PlacementInput, modelId: ModelId): ModelDescriptor | undefined {
   return input.models.find((model) => model.id === modelId);
 }

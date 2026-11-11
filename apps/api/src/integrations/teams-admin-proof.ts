@@ -3,17 +3,24 @@ import { createLocalJWKSet, jwtVerify, type JSONWebKeySet } from "jose";
 import { z } from "zod";
 
 /**
- * Self-serve Teams setup proves that the person connecting a Microsoft tenant
- * administers it. They sign in with Microsoft through the bot's own
- * multi-tenant Entra app (authorization code + PKCE, tenant-specific
- * authority), and the verified ID token must name the exact Teams tenant and
- * Teams user from the signed setup proof and carry a tenant administrator role
- * in `wids` (the app's `groupMembershipClaims` must include `DirectoryRole`).
+ * Proves with a Microsoft sign-in that the person in the browser is the Teams
+ * user a signed setup or account-link proof names. They sign in through the
+ * bot's own multi-tenant Entra app (authorization code + PKCE, tenant-specific
+ * authority, delegated `openid profile` only), and the verified ID token must
+ * name the exact Teams tenant (`tid`) and Teams user (`oid`) from the proof.
+ * Self-serve setup also requires a tenant administrator role in `wids` (the
+ * app's `groupMembershipClaims` must include `DirectoryRole`); setup by an
+ * operator-approved installer and account linking require only the identity.
  *
- * The OAuth state is HMAC-signed and binds the setup proof nonce, tenant,
- * actor, Opengeni subject and workspace. The PKCE verifier and OIDC nonce are
- * derived from the state's random value with the server secret, so they are
- * never sent through the browser and nothing is stored between the two steps.
+ * A guest signs in to the Teams tenant itself (the authority names it), so the
+ * token carries that tenant's `tid` and the guest's object ID there, which is
+ * the `aadObjectId` Teams sends for them.
+ *
+ * The OAuth state is HMAC-signed and binds its purpose, the proof nonce,
+ * tenant, actor, Opengeni subject and workspace. The PKCE verifier and OIDC
+ * nonce are derived from the state's random value with the server secret, so
+ * they are never sent through the browser and nothing is stored between the
+ * two steps.
  */
 
 export const TEAMS_ADMIN_ROLE_IDS = {
@@ -34,7 +41,11 @@ const uuid = z.string().uuid();
 const State = z
   .object({
     version: z.literal(1),
-    purpose: z.literal("teams-admin-setup"),
+    /**
+     * Self-serve setup requires a tenant administrator; setup by an
+     * operator-approved installer and an account link only the identity.
+     */
+    purpose: z.enum(["teams-admin-setup", "teams-installer-setup", "teams-account-link"]),
     proofNonce: uuid,
     tenantId: uuid,
     actorId: uuid,
@@ -58,6 +69,12 @@ export class TeamsAdminProofError extends Error {
       | "tenant_mismatch"
       | "user_mismatch"
       | "not_tenant_admin",
+    /**
+     * For a tenant or user mismatch, how the Microsoft account that did sign
+     * in names itself (`preferred_username`, else `name`), so the refusal can
+     * say which account was used.
+     */
+    readonly signedInAs: string | null = null,
   ) {
     super(`teams_admin_proof_${code}`);
   }
@@ -82,13 +99,15 @@ export function teamsSelfServeTenantAllowed(tenantId: string): boolean {
 
 export function mintTeamsAdminState(
   secret: string,
-  input: Omit<TeamsAdminState, "version" | "purpose" | "nonce" | "expiresAt">,
+  input: Omit<TeamsAdminState, "version" | "purpose" | "nonce" | "expiresAt"> & {
+    purpose?: TeamsAdminState["purpose"];
+  },
   now = Date.now(),
 ): { token: string; state: TeamsAdminState } {
   const state = State.parse({
     ...input,
     version: 1,
-    purpose: "teams-admin-setup",
+    purpose: input.purpose ?? "teams-admin-setup",
     nonce: randomUUID(),
     expiresAt: now + STATE_TTL_MS,
   });
@@ -174,8 +193,9 @@ export type TeamsAdminIdentity = {
 
 /**
  * Exchanges the code and verifies the ID token: signature from Microsoft's
- * published keys, issuer for exactly this tenant, audience, expiry, nonce,
- * `tid`/`oid` equal to the Teams tenant and user, and an administrator role.
+ * published keys, issuer for exactly this tenant, audience, expiry, nonce, and
+ * `tid`/`oid` equal to the Teams tenant and user. For self-serve setup (the
+ * state's signed purpose) it also requires an administrator role.
  */
 export async function verifyTeamsAdminSignIn(
   config: TeamsAdminSignInConfig,
@@ -236,14 +256,28 @@ export async function verifyTeamsAdminSignIn(
   }
   if (claims.nonce !== teamsAdminOidcNonce(config.stateSecret, state))
     throw new TeamsAdminProofError("id_token_invalid");
+  const signedInAs = signedInName(claims);
   if (typeof claims.tid !== "string" || claims.tid.toLowerCase() !== tenantId)
-    throw new TeamsAdminProofError("tenant_mismatch");
+    throw new TeamsAdminProofError("tenant_mismatch", signedInAs);
   if (typeof claims.oid !== "string" || claims.oid.toLowerCase() !== state.actorId.toLowerCase())
-    throw new TeamsAdminProofError("user_mismatch");
+    throw new TeamsAdminProofError("user_mismatch", signedInAs);
   const roles = Array.isArray(claims.wids)
     ? claims.wids.filter((value): value is string => typeof value === "string")
     : [];
-  if (!roles.some((role) => ADMIN_ROLES.has(role.toLowerCase())))
+  if (
+    state.purpose === "teams-admin-setup" &&
+    !roles.some((role) => ADMIN_ROLES.has(role.toLowerCase()))
+  )
     throw new TeamsAdminProofError("not_tenant_admin");
   return { tenantId, actorId: state.actorId.toLowerCase(), roles };
+}
+
+/** The signed-in account's own name for itself, single-line and bounded. */
+function signedInName(claims: Record<string, unknown>): string | null {
+  for (const value of [claims.preferred_username, claims.name]) {
+    if (typeof value !== "string") continue;
+    const name = value.replace(/\s+/g, " ").trim().slice(0, 256);
+    if (name) return name;
+  }
+  return null;
 }

@@ -1907,6 +1907,24 @@ describe("API Integration provider OAuth", () => {
       code: "provider_denied",
     },
     {
+      // "Approval required" / "Need admin approval", then Cancel or "Return to
+      // the application without granting consent".
+      name: "cancelled on the admin approval page (error_subcode=cancel)",
+      error: "access_denied",
+      subcode: "cancel",
+      description: "AADSTS65004: User declined to consent to access the app.",
+      state: "cancelled",
+      code: "provider_denied",
+    },
+    {
+      name: "cancelled without a description (error_subcode=cancel)",
+      error: "access_denied",
+      subcode: "cancel",
+      description: undefined,
+      state: "cancelled",
+      code: "provider_denied",
+    },
+    {
       name: "access_denied without a description",
       error: "access_denied",
       description: undefined,
@@ -1960,6 +1978,7 @@ describe("API Integration provider OAuth", () => {
           state: signIn.searchParams.get("state")!,
         });
         if (returned.description) query.set("error_description", returned.description);
+        if ("subcode" in returned) query.set("error_subcode", returned.subcode);
         const response = await app.request(`/v1/integrations/provider-oauth/callback?${query}`);
         expect(response.status, returned.name).toBe(302);
         expect(response.headers.get("location"), returned.name).toBe(
@@ -2016,6 +2035,138 @@ describe("API Integration provider OAuth", () => {
       ).toEqual([]);
     }, 60_000);
   }
+
+  // The organization's integration policy decides which services the
+  // workspace offers; the approval link asks IT only for those.
+  for (const offer of [
+    {
+      name: "only Outlook Mail and Calendar",
+      services: [
+        MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+        MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+      ],
+    },
+    {
+      name: "Outlook Mail and Calendar, OneDrive and SharePoint",
+      services: [
+        MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+        MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+        MICROSOFT_ONEDRIVE_INTEGRATION_DEFINITION,
+        MICROSOFT_SHAREPOINT_INTEGRATION_DEFINITION,
+      ],
+    },
+  ]) {
+    test(`a workspace offering ${offer.name} gets an approval link for exactly those services`, async () => {
+      if (!available) return;
+      const workspace = await freshWorkspace();
+      await shared!
+        .admin`insert into organization_integration_policies (account_id, mode, allowed_integration_keys, revision)
+        values (${workspace.accountId}, 'restricted', ${shared!.admin.json(offer.services.map((service) => service.id))}, 1)`;
+      const app = testApp(providerFixture());
+      const headers = {
+        authorization: await bearer(workspace),
+        "content-type": "application/json",
+        "x-opengeni-access-key": EDGE_ACCESS_KEY,
+        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      };
+      const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+      const expected = [
+        ...new Set(
+          offer.services
+            .flatMap((service) => service.authentication.scopes)
+            .filter((scope) => scope !== "offline_access")
+            .map((scope) => `https://graph.microsoft.com/${scope}`),
+        ),
+      ].sort();
+      for (const requested of [
+        MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION,
+        MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION,
+      ]) {
+        const begun = await app.request(base, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            providerId: requested.id,
+            ownership: "personal",
+            returnUrl: "https://host.example/capabilities",
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        });
+        expect(begun.status, await begun.clone().text()).toBe(200);
+        const attempt = await begun.json();
+        const offered = new URL(attempt.nextAction.organizationApprovalUrl);
+        expect(offered.searchParams.get("scope")!.split(" ").sort(), requested.id).toEqual(
+          expected,
+        );
+        // The help shown after Microsoft's "Need admin approval" page is the same link.
+        const signIn = new URL(attempt.nextAction.url);
+        const query = new URLSearchParams({
+          error: "access_denied",
+          error_subcode: "cancel",
+          error_description: "AADSTS65004: User declined to consent to access the app.",
+          state: signIn.searchParams.get("state")!,
+        });
+        const response = await app.request(`/v1/integrations/provider-oauth/callback?${query}`);
+        expect(response.status).toBe(302);
+        const current = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
+        const link = /https:\/\/login\.microsoftonline\.com\/\S+?(?=\s|$)/.exec(
+          current.error.message,
+        );
+        expect(new URL(link![0]).toString(), requested.id).toBe(offered.toString());
+      }
+    }, 60_000);
+  }
+
+  test("a sign-in popup left on Microsoft's approval page ends on the closing page with the approval link", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const app = testApp(providerFixture());
+    const headers = {
+      authorization: await bearer(workspace),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const begun = await app.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.id,
+        ownership: "personal",
+        returnUrl: "https://host.example/capabilities",
+        finishInPopup: true,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(begun.status).toBe(200);
+    const attempt = await begun.json();
+    const signIn = new URL(attempt.nextAction.url);
+    const query = new URLSearchParams({
+      error: "access_denied",
+      error_subcode: "cancel",
+      error_description: "AADSTS65004: User declined to consent to access the app.",
+      state: signIn.searchParams.get("state")!,
+    });
+    const response = await app.request(`/v1/integrations/provider-oauth/callback?${query}`);
+    // The popup never loads a second copy of the host page.
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(
+      "http://127.0.0.1:8000/v1/integrations/connect/finished",
+    );
+    // The panel that started it reads the outcome: cancelled, with the
+    // organization's approval link to show instead of closing quietly.
+    const current = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
+    expect(current).toMatchObject({
+      state: "cancelled",
+      nextAction: { type: "none" },
+      error: { code: "provider_denied", retryable: true },
+    });
+    const link = /https:\/\/login\.microsoftonline\.com\/\S+?(?=\s|$)/.exec(current.error.message);
+    expect(new URL(link![0]).toString()).toBe(
+      new URL(attempt.nextAction.organizationApprovalUrl).toString(),
+    );
+  }, 60_000);
 
   test("an administrator returning from the approval link sees whether it was approved", async () => {
     if (!available) return;

@@ -17,6 +17,12 @@ export const PERSONAL_GITHUB_API_ORIGIN = "https://api.github.com" as const;
 export const PERSONAL_GITHUB_REPOSITORY_CATALOG_MAX = 100 as const;
 
 /**
+ * A GitHub user or organization login, as a repository owner. Enterprise
+ * managed users' logins carry an underscore suffix (`handle_shortcode`).
+ */
+export const GITHUB_OWNER_LOGIN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,38}$/u;
+
+/**
  * The in-chat setup card for the person's own GitHub identity ("Your GitHub").
  * Distinct from the workspace GitHub App card (`api:github-app`): this one
  * connects the signed-in person's account, which only they can do.
@@ -110,7 +116,7 @@ const PersonalGitHubRepositoryFullName = /* @__PURE__ */ defineSchema(() =>
     .string()
     .min(3)
     .max(140)
-    .regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u),
+    .regex(/^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u),
 );
 
 export function canonicalPersonalGitHubRepositoryUrl(fullName: string): string {

@@ -14,7 +14,11 @@ import { AppState, Linking, Platform } from "react-native";
 import { useAccount } from "@/account";
 import { appSessionPath } from "@/app-links";
 import type { SettingsSection } from "@/settings-model";
-import { useNativeVoipToken } from "@opengeni/react-native";
+import {
+  useFullScreenRings,
+  useNativeVoipToken,
+  type FullScreenRings,
+} from "@opengeni/react-native";
 import { sharedCallAdapter } from "@/call";
 
 /** The rules a person can turn on, in the order Settings shows them. */
@@ -217,6 +221,7 @@ export function useNotificationSettingsSections(inbox: InboxSettingsState): {
 } {
   const { account, client, status } = useAccount();
   const voipToken = useNativeVoipToken(sharedCallAdapter());
+  const fullScreenRings = useFullScreenRings(sharedCallAdapter());
   const [device, setDevice] = useState<NativePushDevice | null | undefined>(undefined);
   const [permission, setPermission] = useState<Notifications.PermissionStatus | null>(null);
   // Android 13+ reports "denied" before the first prompt; only a refusal the
@@ -294,6 +299,7 @@ export function useNotificationSettingsSections(inbox: InboxSettingsState): {
     rules,
     voipToken,
     problem,
+    fullScreenRings,
     save: (next) => void save(next),
   });
   if (permission === "denied" && !canAskAgain) {
@@ -374,30 +380,37 @@ export function useNotificationSettingsSections(inbox: InboxSettingsState): {
 
 /**
  * Calls from agents: whether agents may ring this phone with the system's
- * incoming-call screen. Off unless the person turns it on, per phone.
+ * incoming-call screen. Off unless the person turns it on, per phone. On
+ * Android 14 and later the ring shows full screen only once the person allows
+ * it in system settings: turning calls on asks for that, and while it is
+ * missing the section says so and links to the setting.
  */
 function agentCallSection(input: {
   rules: NativePushRule[];
   voipToken: string | null;
   problem: string | null;
+  fullScreenRings: FullScreenRings;
   save: (rules: NativePushRule[]) => void;
 }): SettingsSection | null {
   if (!agentCallsSupported()) return null;
-  const { rules, voipToken, save } = input;
+  const { rules, voipToken, save, fullScreenRings } = input;
   const own = rules.includes("call");
   const members = rules.includes("call_members");
   const without = rules.filter((rule) => !isCallRule(rule));
   // Android rings through the ordinary push token.
   const notReady = Platform.OS === "ios" && !voipToken;
   const phone = Platform.OS === "ios" ? "iPhone" : "phone";
+  const notFullScreen = own && !fullScreenRings.allowed;
   return {
     id: "agent-calls",
     title: "Calls from agents",
     footer: notReady
       ? "This iPhone isn't ready to take calls yet. Open the app again in a moment."
-      : own
-        ? "Agents call only when something can't wait: it rings like a phone call, follows Focus, and answering opens a voice call in that chat. If you miss it, you get a notification."
-        : "Let an agent phone you when something can't wait, such as an outage or a decision blocking urgent work. Off until you turn it on.",
+      : notFullScreen
+        ? fullScreenRings.messages.message
+        : own
+          ? "Agents call only when something can't wait: it rings like a phone call, follows Focus, and answering opens a voice call in that chat. If you miss it, you get a notification."
+          : "Let an agent phone you when something can't wait, such as an outage or a decision blocking urgent work. Off until you turn it on.",
     rows: [
       {
         kind: "toggle",
@@ -406,8 +419,23 @@ function agentCallSection(input: {
         subtitle: "Agents working for you",
         value: own,
         disabled: notReady && !own,
-        onChange: (on: boolean) => save(on ? [...without, "call"] : without),
+        onChange: (on: boolean) => {
+          save(on ? [...without, "call"] : without);
+          if (on) fullScreenRings.ask();
+        },
       },
+      ...(notFullScreen
+        ? [
+            {
+              kind: "action" as const,
+              id: "agent-calls-full-screen",
+              title: fullScreenRings.messages.title,
+              subtitle: "Opens system settings",
+              symbol: "gear" as const,
+              onPress: () => void fullScreenRings.openSettings(),
+            },
+          ]
+        : []),
       ...(own
         ? [
             {

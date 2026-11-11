@@ -6541,7 +6541,7 @@ export const McpPersonalConnectionDelegation = /* @__PURE__ */ defineSchema(() =
       repositories.forEach((repository, index) => {
         const canonicalUrl = repository.canonicalUrl.toLowerCase();
         if (
-          !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(
+          !/^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(
             repository.fullName,
           ) ||
           repository.canonicalUrl !== `https://github.com/${repository.fullName}`
@@ -23988,6 +23988,7 @@ export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./workspace-governance-context";
 export * from "./agent-instructions-context";
+export * from "./repository-skills-context";
 export * from "./prompt-cache-diagnostics";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";

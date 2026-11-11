@@ -372,6 +372,19 @@ describe("GitHub gateway review fixes", () => {
     expect(result.accountLevel).toBe(false);
   });
 
+  test("repository links may name an enterprise managed user's owner", () => {
+    const result = classifyGitHubGraphqlRequest({
+      query: "mutation($b: AddSubIssueInput!) { addSubIssue(input: $b) { clientMutationId } }",
+      variables: {
+        b: {
+          issueId: "I_kwDOAbcdefgh",
+          subIssueUrl: "https://github.com/octocat_acme/tools/issues/3",
+        },
+      },
+    });
+    expect(result.mutationRepositories).toEqual([{ owner: "octocat_acme", name: "tools" }]);
+  });
+
   test("links in free text are not repository targets", () => {
     const result = classifyGitHubGraphqlRequest({
       query:

@@ -64,6 +64,7 @@ import {
 } from "./credential-resolver";
 import type {
   SubscriptionCoreConnectionToken,
+  SubscriptionCoreConnectionReadRun,
   SubscriptionCoreUsageProbe,
 } from "./operation-connections";
 import {
@@ -575,6 +576,87 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
     ): Promise<SubscriptionCoreUsageProbe> {
       const { fetchUsage, decodeQuota } = provider.adapter;
       if (!fetchUsage || !decodeQuota) return { kind: "unsupported" };
+      const prepared = await administeredRead(db, settings, scope, connectionId, deps);
+      if (prepared.kind !== "ready") return prepared;
+      const { read, scoped } = prepared;
+      let response: unknown;
+      try {
+        response = await fetchUsage.call(provider.adapter, read);
+      } catch (error) {
+        return { kind: "fetch_error", error };
+      }
+      const quota = decodeQuota.call(provider.adapter, {
+        response,
+        observedAt: Date.now(),
+        refreshGeneration: prepared.current().credentialVersion,
+        ...(deps.modelIds ? { modelIds: deps.modelIds } : {}),
+      });
+      if (!quota) return { kind: "read", response, quota: null, applied: false, recovered: false };
+      const options = subscriptionCoreUsageMergeOptions(provider.adapter, response);
+      const recorded = await scoped
+        .scoped(db, async (tx) => {
+          await recordSubscriptionUsageReading(
+            tx,
+            scope.accountId,
+            connectionId,
+            providerId,
+            quota,
+          );
+          return await scoped.record(tx, quota, options);
+        })
+        .catch(() => null);
+      return {
+        kind: "read",
+        response,
+        quota,
+        applied: recorded?.value.applied === true,
+        recovered: recorded?.value.recovered === true,
+      };
+    }
+
+    /**
+     * One provider call of the adapter's own (a limit reset claim, for
+     * example) made with a connection's read in an administered scope:
+     * the same staleness refresh and request custody as a usage read, under
+     * the scope's own authority. Records nothing; failures are reported,
+     * never thrown.
+     */
+    async function runSubscriptionCoreAdministeredConnectionRead<T>(
+      db: Database,
+      settings: Settings,
+      scope: SubscriptionCoreAdministeredScope,
+      connectionId: string,
+      run: (read: SubscriptionCoreConnectionRead<unknown>) => Promise<T>,
+      deps: SubscriptionCoreAdministeredProbeDeps = {},
+    ): Promise<SubscriptionCoreConnectionReadRun<T>> {
+      const prepared = await administeredRead(db, settings, scope, connectionId, deps);
+      if (prepared.kind !== "ready") return prepared;
+      try {
+        return { kind: "read", value: await run(prepared.read) };
+      } catch (error) {
+        return { kind: "fetch_error", error };
+      }
+    }
+
+    /** A connection read in an administered scope; the first bearer is resolved before any call. */
+    async function administeredRead(
+      db: Database,
+      settings: Settings,
+      scope: SubscriptionCoreAdministeredScope,
+      connectionId: string,
+      deps: SubscriptionCoreAdministeredProbeDeps,
+    ): Promise<
+      | {
+          kind: "ready";
+          read: SubscriptionCoreConnectionRead<unknown>;
+          current: () => SubscriptionCoreConnectionToken;
+          scoped: Access;
+        }
+      | { kind: "not_visible" }
+      | { kind: "relogin" }
+      | { kind: "token_error"; error: unknown }
+      | { kind: "fetch_error"; error: unknown }
+    > {
       const fetchImpl = deps.fetchImpl ?? nativeFetch;
       let abortAndJoin: ((signal: AbortSignal) => Promise<void>) | null;
       try {
@@ -659,41 +741,12 @@ export const subscriptionCoreAdministeredConnections = memoByProvider(
           SUBSCRIPTION_CORE_ADMINISTERED_READ_TIMEOUT_MS[scope.kind],
         ),
       };
-      let response: unknown;
-      try {
-        response = await fetchUsage.call(provider.adapter, read);
-      } catch (error) {
-        return { kind: "fetch_error", error };
-      }
-      const quota = decodeQuota.call(provider.adapter, {
-        response,
-        observedAt: Date.now(),
-        refreshGeneration: token.credentialVersion,
-        ...(deps.modelIds ? { modelIds: deps.modelIds } : {}),
-      });
-      if (!quota) return { kind: "read", response, quota: null, applied: false, recovered: false };
-      const options = subscriptionCoreUsageMergeOptions(provider.adapter, response);
-      const recorded = await scoped
-        .scoped(db, async (tx) => {
-          await recordSubscriptionUsageReading(
-            tx,
-            scope.accountId,
-            connectionId,
-            providerId,
-            quota,
-          );
-          return await scoped.record(tx, quota, options);
-        })
-        .catch(() => null);
-      return {
-        kind: "read",
-        response,
-        quota,
-        applied: recorded?.value.applied === true,
-        recovered: recorded?.value.recovered === true,
-      };
+      return { kind: "ready", read, current: () => token, scoped };
     }
 
-    return { probeSubscriptionCoreAdministeredConnectionUsage };
+    return {
+      probeSubscriptionCoreAdministeredConnectionUsage,
+      runSubscriptionCoreAdministeredConnectionRead,
+    };
   },
 );

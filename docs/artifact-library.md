@@ -260,12 +260,18 @@ same sandbox path/content publication reuses its identity; changed bytes produce
 a distinct immutable output.
 
 `sandbox_file_publish` reads from the active session filesystem, not a fixed
-managed-sandbox alias. Pass a workspace-relative file path or an absolute path
-inside the resolved root: `/workspace` on managed sandboxes, or the actual
-host-native root on a Connected Machine (including Windows drive/UNC roots).
-The receipt preserves that canonical source path. Publication does not expand
-filesystem authority; traversal and paths outside the active root are rejected.
-Existing managed-sandbox publication identities remain unchanged. Older clients
+managed-sandbox alias. The session's own agent, and any caller allowed the
+session's terminal (`terminal:attach`), publishes any file that session's shell
+can read: an absolute path as given (for example scratch output in `/tmp`), or a
+relative path from the resolved root (`/workspace` on managed sandboxes, or the
+actual host-native root on a Connected Machine, including Windows drive/UNC
+roots). The file is read through the box's own shell on a managed sandbox and
+at its host path on a Connected Machine, so publication never reaches more than
+that shell already can. Other callers, who cannot run the shell, keep the
+workspace scope of their file reads: traversal and paths outside the active
+root are rejected. The receipt preserves the canonical source path. A file
+inside the root keeps its root-relative identity whichever way it is named, so
+existing publication identities remain unchanged. Older clients
 whose receipt validator assumes `/workspace` need the matching contract update
 to recognize native-path receipts.
 
