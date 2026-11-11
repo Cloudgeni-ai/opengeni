@@ -19,6 +19,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { sharedCallAdapter } from "@/call";
 import { AppThemeProvider } from "@/theme";
 import {
@@ -59,6 +60,10 @@ type Params = {
 function VoiceCommandSheet() {
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  // iOS shows this as a page sheet below the status bar; Android shows it
+  // full screen, edge to edge, so its header clears the status bar itself.
+  const insets = useSafeAreaInsets();
+  const statusBar = Platform.OS === "android" ? insets.top : 0;
   const params = useLocalSearchParams<Params>();
   const commands = useVoiceCommands();
   const appName = callAssistantName();
@@ -199,7 +204,7 @@ function VoiceCommandSheet() {
           alignItems: "center",
           justifyContent: "space-between",
           paddingHorizontal: 16,
-          paddingTop: 14,
+          paddingTop: 14 + statusBar,
           paddingBottom: 10,
         }}
       >
