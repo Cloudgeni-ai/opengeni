@@ -48,7 +48,7 @@ const SANDBOX_READ: &str = "id, team, spec, metadata, owner, epoch, taken, \
      class, created_ms, version, whole_epoch, lost";
 
 const HOST_COLUMNS: &str =
-    "id, info, epoch, state, renewals, seq, capacity, serving, restarts, changed";
+    "id, info, epoch, state, renewals, seq, capacity, run, restarts, changed";
 
 /// Whether the owner a sandbox write names, its parameter `param`, is
 /// lost: given up on, or not a host the store has (one given up on and
@@ -109,6 +109,12 @@ fn corrupt(error: impl std::fmt::Display) -> StoreError {
 /// A `u64` as Postgres's `bigint`.
 fn big(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(corrupt)
+}
+
+/// The run of its agent a host told of in `capacity` ([`Capacity::run`]),
+/// as a parameter: `null` if it told none.
+fn run_of(capacity: Option<&Capacity>) -> Result<Option<i64>> {
+    capacity.and_then(|capacity| capacity.run).map(big).transpose()
 }
 
 /// A `bigint` back as a `u64`.
@@ -182,7 +188,7 @@ fn host_row(row: &Row) -> Result<HostRow> {
         renewals: small(row.try_get("renewals").map_err(corrupt)?)?,
         seq: small(row.try_get("seq").map_err(corrupt)?)?,
         capacity,
-        serving: row.try_get("serving").map_err(corrupt)?,
+        run: optional(row, "run")?,
         restarts: small(row.try_get("restarts").map_err(corrupt)?)?,
         changed: small(row.try_get("changed").map_err(corrupt)?)?,
     })
@@ -519,12 +525,16 @@ impl PostgresStore {
         }
         tx.execute(
             "insert into compute_hosts \
-             (id, name, info, epoch, state, renewals, seq, attempt, answer, capacity, changed) \
-             values ($1, $2, $3, $4, 'live', 1, 0, $5, $6, $7, nextval('compute_changes')) \
+             (id, name, info, epoch, state, renewals, seq, attempt, answer, capacity, run, \
+             changed) \
+             values ($1, $2, $3, $4, 'live', 1, 0, $5, $6, $7, $8, nextval('compute_changes')) \
              on conflict (id) do update set info = excluded.info, epoch = excluded.epoch, \
              state = case when compute_hosts.drained then 'draining' else 'live' end, \
              renewals = compute_hosts.renewals + 1, seq = 0, \
-             serving = true, attempt = excluded.attempt, answer = excluded.answer, \
+             restarts = compute_hosts.restarts \
+             + case when compute_hosts.run < excluded.run then 1 else 0 end, \
+             run = greatest(compute_hosts.run, excluded.run), \
+             attempt = excluded.attempt, answer = excluded.answer, \
              capacity = excluded.capacity, changed = excluded.changed, gone_ms = null",
             &[
                 &id,
@@ -534,6 +544,9 @@ impl PostgresStore {
                 &nonce(register.attempt),
                 &Json(&rulings),
                 &Json(&register.capacity.split().0),
+                // A host registering afresh after a reboot runs its agent
+                // again.
+                &run_of(Some(&register.capacity))?,
             ],
         )
         .await

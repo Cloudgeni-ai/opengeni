@@ -207,11 +207,11 @@ alter table compute_sandboxes add column if not exists lost jsonb;
 alter table compute_pointers add column if not exists saved_ms bigint;
 ";
 
-/// Version 10: whether each host's agent serves, and how many times it
-/// stopped serving while the host held a registration
-/// (`HostRow::restarts`).
+/// Version 10: the latest run of each host's agent it told of, and how
+/// many later runs it told of than the one before (`HostRow::run`,
+/// `HostRow::restarts`).
 const MIGRATION_10: &str = "
-alter table compute_hosts add column if not exists serving boolean not null default true;
+alter table compute_hosts add column if not exists run bigint;
 alter table compute_hosts add column if not exists restarts bigint not null default 0;
 ";
 

@@ -648,6 +648,17 @@ fn ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// When this run of the agent started, in milliseconds since the Unix
+/// epoch: read once, the first time the agent says what it can take on.
+fn run() -> u64 {
+    static STARTED: OnceLock<u64> = OnceLock::new();
+    *STARTED.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, ms)
+    })
+}
+
 /// What the host can take on, from its status and configured image and
 /// guest programs. The host description is refreshed when the agent starts.
 fn capacity(status: &HostStatus, info: &HostInfo, image: &str, guest: Option<&str>) -> Capacity {
@@ -684,6 +695,9 @@ fn capacity(status: &HostStatus, info: &HostInfo, image: &str, guest: Option<&st
         // And it sets aside a copy the service will not let it keep but
         // that may be newer than any other.
         sets_aside: true,
+        // Which run of the agent this is: the service counts a later one
+        // as the agent starting again.
+        run: Some(run()),
         // What it is configured with now, which a restart in place may
         // have changed under the registration it kept.
         info: Some(info.clone()),
@@ -764,6 +778,11 @@ mod tests {
             assert_eq!(capacity.disk_free_mib, 1);
             assert_eq!(capacity.disk_reclaimable_mib, 2000);
         }
+        // Every reading names the same run of the agent, so the service
+        // counts this run once.
+        let run = capacity(&status, &info, "image", None).run;
+        assert!(run.is_some_and(|started| started > 0));
+        assert_eq!(capacity(&status, &info, "image", None).run, run);
     }
 
     #[test]

@@ -1025,11 +1025,13 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     **Opengeni · Compute** dashboard shows them.
 - **What the control service counts of each host.** The leader reports,
   from the fleet's store, each host's agent restarts
-  (`compute_fleet_host_agent_restarts`): the times its agent stopped
-  serving while the host held its lease, which its renewals say by
-  carrying no capacity (an agent stopping, stopped by its watchdog when
-  stuck, crashed or upgraded, or one started again that takes back what
-  the previous run left). A restarted agent keeps the lease it held, so
+  (`compute_fleet_host_agent_restarts`). Each run of a host's agent tells
+  when it started (`run`, with what it can take on), and the store counts
+  every later run it hears of once, whichever replica hears it and in
+  whatever order renewals arrive: its agent stopped by its watchdog when
+  stuck, crashed, upgraded or the host rebooted. A run that stops before
+  it first says what it can take on is not counted, and hosts of an
+  earlier release tell none. A restarted agent keeps the lease it held, so
   its epoch (`compute_fleet_host_epoch`) moves only when the host
   registers afresh: after a reboot, or once it was given up on. Every
   replica also reports, for each host it holds, those fresh
@@ -1057,7 +1059,9 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     give-up time (`give_up_after`, 120 seconds by default); a silent host
     with no sandboxes is usually given up before this fires and raises
     `OpenGeniComputeHostGivenUp`, but fires this too if fencing it is
-    slow or keeps failing (`OpenGeniComputeHostGiveUpFailing`).
+    slow or keeps failing (`OpenGeniComputeHostGiveUpFailing`). A
+    planned reboot that keeps a host holding sandboxes away for over about
+    80 seconds fires it too; silence it for planned maintenance.
   - `OpenGeniComputeFleetFull`: the host group is at its maximum size
     (`compute_fleet_group_size` against `compute_fleet_group_max_size`)
     and no live host can promise `computeControl.alerts.spareMemoryMib`

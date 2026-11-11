@@ -1644,7 +1644,7 @@ computeControl:
     # with at least two failures.
     createFailureRatio: 0.1
     createMinimum: 5
-    # OpenGeniComputeHostAgentRestarting: a host's agent stops or restarts
+    # OpenGeniComputeHostAgentRestarting: a host's agent starts again
     # this many times in six hours. Raise it where hosts' agents are upgraded
     # in place more often.
     agentRestarts: 2

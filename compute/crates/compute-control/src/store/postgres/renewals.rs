@@ -5,7 +5,7 @@
 use compute_protocol::fleet::{Capacity, Renew, Report};
 use tokio_postgres::types::Json;
 
-use super::{PostgresStore, big, database, pointers};
+use super::{PostgresStore, big, database, pointers, run_of};
 use crate::store::Result;
 
 /// A host row's description once the host told it is parameter `param`
@@ -44,8 +44,8 @@ impl PostgresStore {
                 &format!(
                     "update compute_hosts set renewals = renewals + 1, \
                      seq = greatest(seq, $3), capacity = coalesce($4, capacity), \
-                     restarts = restarts + case when serving and not $7 then 1 else 0 end, \
-                     serving = $7, \
+                     restarts = restarts + case when run < $7 then 1 else 0 end, \
+                     run = greatest(run, $7), \
                      info = {}, changed = nextval('compute_changes') \
                      where id = $1 and epoch = $2 and state <> 'lost' and name = any($5)",
                     told(6)
@@ -57,9 +57,10 @@ impl PostgresStore {
                     &capacity.as_ref().map(Json),
                     &names,
                     &described.as_ref().map(Json),
-                    // An agent that served and renews without a capacity
-                    // stopped or started again.
-                    &renew.capacity.is_some(),
+                    // A later run of its agent than the latest is its
+                    // agent starting again; an earlier one heard late
+                    // changes nothing.
+                    &run_of(renew.capacity.as_ref())?,
                 ],
             )
             .await
@@ -79,7 +80,8 @@ impl PostgresStore {
             .execute(
                 &format!(
                     "update compute_hosts set capacity = $3, info = {}, \
-                     changed = nextval('compute_changes') \
+                     restarts = restarts + case when run < $6 then 1 else 0 end, \
+                     run = greatest(run, $6), changed = nextval('compute_changes') \
                      where id = $1 and epoch = $2 and state <> 'lost' and name = any($4)",
                     told(5)
                 ),
@@ -89,6 +91,7 @@ impl PostgresStore {
                     &Json(&capacity),
                     &names,
                     &described.as_ref().map(Json),
+                    &run_of(Some(&report.capacity))?,
                 ],
             )
             .await

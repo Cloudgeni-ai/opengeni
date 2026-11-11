@@ -246,6 +246,14 @@ pub struct Capacity {
     /// which is told to drop such a copy instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sets_aside: bool,
+    /// When the agent process telling this started, in milliseconds since
+    /// the Unix epoch: one number for each run of the agent, later for a
+    /// later run. The service counts each later run it hears of as the
+    /// host's agent starting again, which keeping its registration across
+    /// a restart in place would otherwise hide. `None` from a host of an
+    /// earlier release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<u64>,
     /// What the host is now, as it would register: told here for the same
     /// reason as [`Capacity::guest`], so that a host whose configuration
     /// changed under a kept registration is placed on what it is. The

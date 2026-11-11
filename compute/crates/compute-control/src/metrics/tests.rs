@@ -42,6 +42,7 @@ fn host(id: u64, name: &str, state: HostState) -> Known {
             pointers_in_service: true,
             reads_packs: true,
             sets_aside: true,
+            run: None,
             info: None,
         },
         restarts: 3,

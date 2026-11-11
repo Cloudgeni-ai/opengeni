@@ -40,7 +40,7 @@
 //!
 //! The view also tallies, for each host it holds, what its metrics report
 //! ([`Tally`]): how often the host registered afresh while this replica
-//! held it, which is its agent starting again or its lease lapsing, and
+//! held it, which is a reboot or its lease lapsing, and
 //! how often it refused a wake or a placement as full.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -121,8 +121,8 @@ pub struct Known {
     pub info: Described,
     pub state: HostState,
     pub capacity: Reported,
-    /// Times its agent stopped serving while it held a registration, as
-    /// the store counts them ([`HostRow::restarts`]).
+    /// Times its agent started again, as the store counts the runs it
+    /// told of ([`HostRow::restarts`]).
     pub restarts: u64,
     /// What this replica counted of it while it held it.
     pub tally: Tally,
@@ -787,7 +787,7 @@ mod tests {
                 disk_free_mib: 100 * 1024,
                 ..Reported::default()
             },
-            serving: true,
+            run: None,
             restarts: 0,
             changed: renewals,
         }
@@ -1038,7 +1038,7 @@ mod tests {
             .unwrap()
     }
 
-    /// A host's fresh registrations, which a restarted agent makes, are
+    /// A host's fresh registrations, which a rebooted host makes, are
     /// counted as the view reads them under a later epoch, renewals and
     /// reports under the same one are not, and neither is the first
     /// read; each refusal as full is counted by its kind.
@@ -1059,7 +1059,7 @@ mod tests {
         }
         assert_eq!(tally(&view).registrations, 0);
 
-        // The agent starts again: a new epoch, twice.
+        // The host registers afresh: a new epoch, twice.
         let mut again = host(5);
         again.epoch = HostEpoch(9);
         view.apply(&[again.clone()]);

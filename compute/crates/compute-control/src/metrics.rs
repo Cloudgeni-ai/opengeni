@@ -5,8 +5,8 @@
 //! and outcome, with their latency; the hosts' metrics it passed on
 //! ([`crate::hostapi`], `--host-metrics-to`); whether it leads; and what
 //! it counted of each host it holds ([`crate::view::Tally`]): the host's
-//! fresh registrations, each its agent starting again or its lease
-//! lapsing, and the wakes and placements it refused as full. Only
+//! fresh registrations, each a reboot or its lease lapsing, and
+//! the wakes and placements it refused as full. Only
 //! the replica that leads reports the fleet, so a Prometheus that scrapes
 //! every replica stores each fleet series once: each host as the
 //! replica's view last read it (its state, what it has for sandboxes and
@@ -458,7 +458,7 @@ fn host_gauges() -> [HostGauge; 13] {
         ),
         (
             "compute_fleet_host_agent_restarts",
-            "Times a host's agent stopped serving while the host held a registration: each stop or restart of its agent (by its watchdog, a crash, an upgrade or a reboot), counted once, as the fleet's store keeps it. Its changes count restarts whichever replica leads, across restarts of the service.",
+            "Times a host's agent started again: each later run of its agent it told of (after its watchdog stopped it, a crash, an upgrade or a reboot), counted once, as the fleet's store keeps it. Its changes count restarts whichever replica leads, across restarts of the service. Hosts of an earlier release tell no runs.",
             |host| Num::Whole(host.restarts),
         ),
         (
