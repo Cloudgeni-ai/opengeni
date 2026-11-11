@@ -460,19 +460,6 @@ function fingerprint(value: unknown): string {
 }
 
 /**
- * Item types whose replay drops the provider's item id and a completed status.
- * A client-executed `tool_search_call` is one: the Codex request normalizer
- * strips both before every request, and the backend correlates the call with
- * its output by `call_id`.
- */
-const ROUND_TRIP_ITEM_TYPES: ReadonlySet<unknown> = new Set([
-  "message",
-  "function_call",
-  "reasoning",
-  "tool_search_call",
-]);
-
-/**
  * Recognize only demonstrated SDK round-trip equivalences. Unknown item types
  * and fields compare exactly; a missed optimization is preferable to changing
  * model context. In particular phase and hosted-call status remain significant.
@@ -480,7 +467,8 @@ const ROUND_TRIP_ITEM_TYPES: ReadonlySet<unknown> = new Set([
 function modelVisibleItem(item: unknown): string {
   if (!item || typeof item !== "object" || Array.isArray(item)) return fingerprint(item);
   const type = (item as Record<string, unknown>).type;
-  if (!ROUND_TRIP_ITEM_TYPES.has(type)) return fingerprint(item);
+  if (type !== "message" && type !== "function_call" && type !== "reasoning")
+    return fingerprint(item);
   const visible: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(item as Record<string, unknown>)) {
     if (key === "id") continue;
