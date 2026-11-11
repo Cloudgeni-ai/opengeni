@@ -168,6 +168,8 @@ bun scripts/operator/promotion-decisions.ts --network-velocity-set --exact-thres
   --operator <operator-id> --reason 'Reset thresholds to defaults'
 # Review pending detector holds of this rule, per account and per network group
 bun scripts/operator/promotion-decisions.ts --network-holds --limit 200
+# Capture denied and held owners' sign-in networks again (safe to repeat)
+bun scripts/operator/promotion-decisions.ts --network-capture-flagged
 # Release or deny one account (existing revision-fenced decision path)
 bun scripts/operator/promotion-decisions.ts --account <uuid> --decision eligible \
   --revision <current-revision> --operator <operator-id> --reason 'Normal app use'
@@ -219,6 +221,9 @@ Free credit of a new self-serve owner whose exact network (IPv4 address or IPv6
 a `denied` decision or a currently `held` account, even when it is the only
 signup from that network in the window. Real shared addresses (offices, carrier
 NAT) exist, so it holds for review rather than denying.
+Holds placed by this rule do not count as matches themselves, so a hold never
+spreads from one shared network to the next; once an operator denies such an
+account, its networks count.
 
 **Networks compared.** Two sources, each exact network only; /24 and /48
 prefixes never take part:
@@ -229,18 +234,29 @@ prefixes never take part:
   of denied or held accounts. Better Auth already stores session addresses
   (`auth_sessions.ip_address`); the database reduces each to its exact network and
   keeps only an HMAC-SHA256 under a random per-schema key
-  (`opengeni_private.signup_network_session_keys`) that never leaves the database
-  and that runtime roles cannot read. Rows live in
+  (`opengeni_private.signup_network_session_keys`) that runtime roles cannot read.
+  The key is in the same database, so anyone with the database owner's access or
+  a full dump could recover IPv4 addresses by trying every address; the hashes
+  protect against runtime roles, logs and exports, not against the owner. Rows
+  live in
   `opengeni_private.signup_network_owner_addresses` (account, keyed hash, first
-  and last use); they hold no address or email.
+  and last sign-in); they hold no address or email. A session's use is its
+  creation (sign-in) time; refreshes do not extend it, since the stored address
+  is the sign-in address.
 
-The new owner's session networks are recorded at organization setup. The session
-networks of every denied or held account's owner (newest 2000 sessions in the
-last 90 days) are captured at every new setup, so they outlast the sessions; the
-migration captures them once for accounts already denied or held, including those
-decided before 1354. Only account owners are recorded: invited members are never
-recorded, counted or held. Released (`eligible`) accounts stop counting. Rows not
-used for 97 days are removed a few at a time.
+The new owner's session networks are recorded at organization setup. When an
+account becomes `denied` or `held`, a trigger captures its owner's session
+networks (newest 200 sessions in the last 90 days) and remembers the owner
+(`opengeni_private.signup_network_flagged_owners`); each later sign-in of that
+owner is recorded as it happens, so the networks outlast the sessions. Setup
+itself only writes the new account's own rows. The migration captures every
+account already denied or held, account by account, including those decided
+before 1354; a failure is a migration warning with counts, and
+`--network-holds` reports `deniedNetworkCoverage` (denied or held accounts and
+how many owners are captured). Re-run the capture at any time with
+`--network-capture-flagged`. Only account owners are recorded: invited members
+are never recorded, counted or held. Released (`eligible`) accounts stop
+counting. Rows not used for 97 days are removed a few at a time.
 
 **Setting.** `deniedNetworkMode` in the 1354 settings (same owner-only,
 revision-fenced writes), default `off`, independent of the velocity `mode`:

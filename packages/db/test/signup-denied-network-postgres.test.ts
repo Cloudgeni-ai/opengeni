@@ -6,6 +6,7 @@ import {
 import { sql } from "drizzle-orm";
 import {
   acceptOrganizationInvitation,
+  captureFlaggedSignupNetworkOwners,
   completeSelfServiceOrganizationSetupWithSignupNetwork,
   createDb,
   createOrganizationInvitation,
@@ -21,7 +22,6 @@ import {
   type SignupNetworkSource,
   type SignupNetworkVelocityChanges,
 } from "../src";
-import { rawRows } from "../src/database";
 import {
   ensureCanonicalHumanIdentityForAuthUser,
   getCanonicalHumanExactLoginBindingForAuthUser,
@@ -348,35 +348,141 @@ test("currently held accounts count, released and eligible accounts do not, and 
   }
 }, 180_000);
 
-test("captured networks outlive the denied account's sessions", async () => {
+test("decisions and later sign-ins capture networks that outlive the sessions; the backfill covers old denials", async () => {
   if (!shared || !client) return;
   await enforce();
   try {
     const ip = address();
     const farm = await owner([ip]);
+    // The denial itself captures the owner's networks.
     await decide(farm.accountId, "denied");
-    // Any setup captures the denied owners' session networks.
-    await owner([address()]);
     await shared.admin`delete from auth_sessions where user_id = ${farm.userId}`;
     const later = await owner([ip]);
     expect(await decision(later.accountId)).toMatchObject(HELD);
 
-    // The capture also covers a denied owner with no setup record at all.
+    // A later sign-in of a denied owner is recorded at sign-in.
+    const comeback = address();
+    const projection = await getCanonicalHumanIdentityProjection(client.db, farm.userId);
+    const binding = await getCanonicalHumanExactLoginBindingForAuthUser(client.db, {
+      authUserId: farm.userId,
+      providerId: "credential",
+    });
+    await session(farm.userId, comeback, projection, binding);
+    await shared.admin`delete from auth_sessions where user_id = ${farm.userId}`;
+    const afterComeback = await owner([comeback]);
+    expect(await decision(afterComeback.accountId)).toMatchObject(HELD);
+    // Sign-ins of everyone else record nothing.
+    const [others] = await shared.admin`select count(*)::int as count
+      from opengeni_private.signup_network_owner_addresses
+      where data_schema = ${shared.schema} and account_id = ${afterComeback.accountId}`;
+    expect(others!.count).toBe(1);
+
+    // The backfill covers a denied owner with no setup record and nothing
+    // captured at decision time, like the accounts denied before 1361.
     const legacyIp = address();
     const legacy = await owner([legacyIp], { source: null });
+    await decide(legacy.accountId, "denied");
     await shared.admin`delete from opengeni_private.signup_network_owner_addresses
       where data_schema = ${shared.schema} and account_id = ${legacy.accountId}`;
-    await decide(legacy.accountId, "denied");
-    // As the migration backfill runs it: the schema owner, outside any request.
-    const [captured] = await rawRows<{ count: number }>(
-      ownerClient!.db,
-      sql`select opengeni_private.capture_flagged_owner_session_networks(${shared.schema}, 5000) as count`,
+    await shared.admin`delete from opengeni_private.signup_network_flagged_owners
+      where data_schema = ${shared.schema} and account_id = ${legacy.accountId}`;
+    const before = await listSignupNetworkHolds(ownerClient!.db);
+    expect(before.deniedNetworkCoverage!.capturedOwners).toBeLessThan(
+      before.deniedNetworkCoverage!.flaggedAccounts,
     );
-    expect(Number(captured!.count)).toBeGreaterThanOrEqual(1);
+    // As the migration backfill runs it: the schema owner, outside any request.
+    const captured = await captureFlaggedSignupNetworkOwners(ownerClient!.db);
+    expect(captured.failed).toBe(0);
+    expect(captured.capturedOwners).toBe(captured.flaggedAccounts);
+    const after = await listSignupNetworkHolds(ownerClient!.db);
+    expect(after.deniedNetworkCoverage!.capturedOwners).toBe(
+      after.deniedNetworkCoverage!.flaggedAccounts,
+    );
     const afterLegacy = await owner([legacyIp]);
     expect(await decision(afterLegacy.accountId)).toMatchObject(HELD);
   } finally {
     await configure({ deniedNetworkMode: "off" });
+    await shared.admin`update promotion_enforcement set enabled=false`;
+  }
+}, 180_000);
+
+test("holds placed by this rule never spread to further accounts", async () => {
+  if (!shared || !client) return;
+  await enforce();
+  try {
+    const farmIp = address();
+    const homeIp = address();
+    const farm = await owner([farmIp]);
+    await decide(farm.accountId, "denied");
+    // B signed up from the farm's network, then also used a home network.
+    const b = await owner([farmIp, homeIp]);
+    expect(await decision(b.accountId)).toMatchObject(HELD);
+    // C only shares B's home network: not held, because B's hold came from
+    // this rule.
+    const c = await owner([homeIp]);
+    expect(await decision(c.accountId)).toBeNull();
+    expect(await observation(c.accountId)).toBeNull();
+    // Once an operator confirms B (denied), its networks count.
+    await decide(b.accountId, "denied");
+    const d = await owner([homeIp]);
+    expect(await decision(d.accountId)).toMatchObject(HELD);
+  } finally {
+    await configure({ deniedNetworkMode: "off" });
+    await shared.admin`update promotion_enforcement set enabled=false`;
+  }
+}, 180_000);
+
+test("IPv6 and IPv4-mapped sign-ins match end to end without storing the address; concurrent setups do not block", async () => {
+  if (!shared || !client) return;
+  await enforce();
+  try {
+    const v6 = "2001:db8:77:5::abcd";
+    const farm = await owner([v6]);
+    await decide(farm.accountId, "denied");
+    const v6Later = await owner(["2001:db8:77:5:1234::1"]);
+    expect(await decision(v6Later.accountId)).toMatchObject(HELD);
+
+    const v4 = address();
+    const mappedFarm = await owner([`::ffff:${v4}`]);
+    await decide(mappedFarm.accountId, "denied");
+    const [a, b] = await Promise.all([owner([v4]), owner([v4])]);
+    expect(await decision(a!.accountId)).toMatchObject(HELD);
+    expect(await decision(b!.accountId)).toMatchObject(HELD);
+
+    const dumps = await shared.admin`select
+      (select coalesce(string_agg(t::text, ' '), '') from opengeni_private.signup_network_owner_addresses t) as owners,
+      (select coalesce(string_agg(t::text, ' '), '') from opengeni_private.signup_network_flagged_owners t) as flagged,
+      (select coalesce(string_agg(t::text, ' '), '') from opengeni_private.promotion_detector_observations t
+        where policy_version = 'denied-network-v1') as observations,
+      (select coalesce(string_agg(t::text, ' '), '') from opengeni_private.promotion_decision_history t
+        where policy_version = 'denied-network-v1') as history`;
+    const text = JSON.stringify(dumps[0]);
+    for (const raw of [v4, "2001:db8:77:5", "2001:db8:77:5::"]) expect(text).not.toContain(raw);
+  } finally {
+    await configure({ deniedNetworkMode: "off" });
+    await shared.admin`update promotion_enforcement set enabled=false`;
+  }
+}, 180_000);
+
+test("with both network rules enforcing, the velocity hold is kept and denied network is observed", async () => {
+  if (!shared || !client) return;
+  await enforce();
+  await configure({ mode: "enforce", exactHoldThreshold: 2 });
+  try {
+    const ip = address();
+    const source = signupNetwork(`both-${ip}`);
+    const farm = await owner([ip], { source });
+    await decide(farm.accountId, "denied");
+    const next = await owner([ip], { source });
+    expect(await decision(next.accountId)).toMatchObject(HELD);
+    // Velocity is evaluated first and holds; the denied network rule keeps it.
+    expect(await lastHistory(next.accountId)).toMatchObject({ policy_version: "ip-velocity-v1" });
+    expect(await observation(next.accountId)).toMatchObject({
+      deniedAccounts: 1,
+      matchedVia: ["sign-in", "signup"],
+    });
+  } finally {
+    await configure({ mode: "off", exactHoldThreshold: 3, deniedNetworkMode: "off" });
     await shared.admin`update promotion_enforcement set enabled=false`;
   }
 }, 180_000);
@@ -457,11 +563,14 @@ test("an unexpected failure never blocks setup, Free eligibility or admission", 
   if (!shared || !client) return;
   await enforce();
   const evaluateName = "opengeni_private.evaluate_signup_denied_network(uuid)";
-  const captureName = "opengeni_private.capture_flagged_owner_session_networks(text,integer)";
+  const captureName = "opengeni_private.capture_flagged_owner_session_networks(text,uuid)";
+  const hashName = "opengeni_private.signup_network_session_hash(text,text)";
   const [evaluateBody] =
     await shared.admin`select pg_get_functiondef(${evaluateName}::regprocedure) as body`;
   const [captureBody] =
     await shared.admin`select pg_get_functiondef(${captureName}::regprocedure) as body`;
+  const [hashBody] =
+    await shared.admin`select pg_get_functiondef(${hashName}::regprocedure) as body`;
   const ip = address();
   const farm = await owner([ip]);
   await decide(farm.accountId, "denied");
@@ -470,17 +579,30 @@ test("an unexpected failure never blocks setup, Free eligibility or admission", 
     RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog AS $$
     BEGIN RAISE EXCEPTION 'detector broken' USING ERRCODE = 'XX000'; END $$`);
   await shared.admin
-    .unsafe(`CREATE OR REPLACE FUNCTION opengeni_private.capture_flagged_owner_session_networks(p_data_schema text, p_limit integer)
-    RETURNS integer LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+    .unsafe(`CREATE OR REPLACE FUNCTION opengeni_private.capture_flagged_owner_session_networks(p_data_schema text, p_account_id uuid)
+    RETURNS boolean LANGUAGE plpgsql SET search_path = pg_catalog AS $$
     BEGIN RAISE EXCEPTION 'capture broken' USING ERRCODE = 'XX000'; END $$`);
+  await shared.admin
+    .unsafe(`CREATE OR REPLACE FUNCTION opengeni_private.signup_network_session_hash(p_data_schema text, p_address text)
+    RETURNS text LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+    BEGIN RAISE EXCEPTION 'hash broken' USING ERRCODE = 'XX000'; END $$`);
   try {
     const created = await owner([ip]);
     expect(await decision(created.accountId)).toBeNull();
     expect(await freePlanCreditEligible(client.db, created.accountId)).toBe(true);
     await getSpendableCreditBalance(client.db, created.accountId);
+    // Decisions and a flagged owner's sign-in still succeed.
+    await decide(created.accountId, "denied");
+    const projection = await getCanonicalHumanIdentityProjection(client.db, farm.userId);
+    const binding = await getCanonicalHumanExactLoginBindingForAuthUser(client.db, {
+      authUserId: farm.userId,
+      providerId: "credential",
+    });
+    await session(farm.userId, address(), projection, binding);
   } finally {
     await shared.admin.unsafe(evaluateBody!.body as string);
     await shared.admin.unsafe(captureBody!.body as string);
+    await shared.admin.unsafe(hashBody!.body as string);
     await configure({ deniedNetworkMode: "off" });
     await shared.admin`update promotion_enforcement set enabled=false`;
   }
@@ -562,10 +684,13 @@ test("settings are owner-only and validated; runtime roles cannot read keys, has
   for (const statement of [
     sql`select * from opengeni_private.signup_network_session_keys`,
     sql`select * from opengeni_private.signup_network_owner_addresses`,
+    sql`select * from opengeni_private.signup_network_flagged_owners`,
+    sql`select * from opengeni_private.signup_network_owner_setups`,
     sql`select opengeni_private.signup_network_session_hash('x', '198.51.100.1')`,
     sql`select opengeni_private.signup_network_exact_unit('198.51.100.1')`,
     sql`select opengeni_private.evaluate_signup_denied_network(gen_random_uuid())`,
-    sql`select opengeni_private.capture_flagged_owner_session_networks('x', 1)`,
+    sql`select opengeni_private.capture_flagged_owner_session_networks('x', gen_random_uuid())`,
+    sql`select opengeni_private.capture_all_flagged_owner_session_networks('x')`,
     sql`select opengeni_private.record_signup_owner_session_networks('x', gen_random_uuid(), 'x')`,
   ]) {
     expect(await sqlState(() => Promise.resolve(client!.db.execute(statement)))).toBe("42501");

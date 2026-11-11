@@ -186,6 +186,8 @@ export type SignupNetworkHolds = {
   schemaVersion: 2;
   policyVersions: readonly SignupNetworkHoldPolicyVersion[];
   settings: SignupNetworkVelocitySettings;
+  /** Denied or held accounts whose owner's sign-in networks the denied network rule has captured. */
+  deniedNetworkCoverage: { flaggedAccounts: number; capturedOwners: number } | null;
   holdCount: number;
   truncated: boolean;
   accounts: SignupNetworkHoldAccount[];
@@ -253,10 +255,29 @@ export async function listSignupNetworkHolds(
         ),
       ];
       for (const addressHash of addressHashes) groups.push(await readHoldGroup(txDb, addressHash));
+      let deniedNetworkCoverage: SignupNetworkHolds["deniedNetworkCoverage"] = null;
+      try {
+        const [coverage] = await rawRows<{ flagged: number; captured: number }>(
+          txDb,
+          sql`select count(*)::int as flagged, count(f.account_id)::int as captured
+            from promotion_decisions d
+            left join opengeni_private.signup_network_flagged_owners f
+              on f.data_schema = session_tenancy_fence_target_schema()::regnamespace::text
+              and f.account_id = d.account_id
+            where d.decision in ('denied', 'held')`,
+        );
+        deniedNetworkCoverage = {
+          flaggedAccounts: Number(coverage!.flagged),
+          capturedOwners: Number(coverage!.captured),
+        };
+      } catch {
+        deniedNetworkCoverage = null;
+      }
       throw new RolledBackRead<SignupNetworkHolds>({
         schemaVersion: 2,
         policyVersions: SIGNUP_NETWORK_HOLD_POLICY_VERSIONS,
         settings,
+        deniedNetworkCoverage,
         holdCount: accounts.length,
         truncated: holds.length > limit,
         accounts,
@@ -437,6 +458,26 @@ async function readHoldGroup(tx: Database, addressHash: string): Promise<SignupN
       revision: Number(member.revision),
       actor: (member.actor as string | null) ?? null,
     })),
+  };
+}
+
+/**
+ * Captures again, account by account, the owners' sign-in networks of every
+ * account that is denied or held now (the migration 1361 backfill). Safe to
+ * repeat; unchanged rows are not rewritten. Owner connection only.
+ */
+export async function captureFlaggedSignupNetworkOwners(
+  ownerDb: Database,
+): Promise<{ flaggedAccounts: number; capturedOwners: number; failed: number }> {
+  const [row] = await rawRows<{ outcome: Record<string, unknown> }>(
+    ownerDb,
+    sql`select opengeni_private.capture_all_flagged_owner_session_networks(
+      session_tenancy_fence_target_schema()::regnamespace::text) as outcome`,
+  );
+  return {
+    flaggedAccounts: Number(row!.outcome.flaggedAccounts),
+    capturedOwners: Number(row!.outcome.capturedOwners),
+    failed: Number(row!.outcome.failed),
   };
 }
 

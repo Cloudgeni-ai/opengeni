@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { dbSearchPath, getSettings } from "@opengeni/config";
 import {
+  captureFlaggedSignupNetworkOwners,
   createDb,
   getBillingBalance,
   listSignupNetworkHolds,
@@ -44,6 +45,7 @@ const { values } = parseArgs({
     "denied-network-mode": { type: "string" },
     rule: { type: "string" },
     "network-holds": { type: "boolean" },
+    "network-capture-flagged": { type: "boolean" },
     "network-release-holds": { type: "boolean" },
     "dry-run": { type: "boolean" },
     limit: { type: "string" },
@@ -61,11 +63,12 @@ const modes = [
   values["network-velocity"],
   values["network-velocity-set"],
   values["network-holds"],
+  values["network-capture-flagged"],
   values["network-release-holds"],
 ].filter(Boolean);
 if (modes.length !== 1)
   throw new Error(
-    "Choose --show, --list, --observations, --detector-mode off|observe|enforce, --enforcement on|off, --free-credit-cutoff <timestamp|none>, --free-credit-cutoff-history, --network-velocity, --network-velocity-set, --network-holds, --network-release-holds, or --decision eligible|verification_required|held|denied",
+    "Choose --show, --list, --observations, --detector-mode off|observe|enforce, --enforcement on|off, --free-credit-cutoff <timestamp|none>, --free-credit-cutoff-history, --network-velocity, --network-velocity-set, --network-holds, --network-capture-flagged, --network-release-holds, or --decision eligible|verification_required|held|denied",
   );
 if (
   (values.show || values.decision) &&
@@ -150,6 +153,10 @@ try {
       ...(limit ? { limit } : {}),
     });
     console.log(JSON.stringify(result, null, 2));
+  } else if (values["network-capture-flagged"]) {
+    // Re-runs the 1361 backfill: captures the owners' sign-in networks of
+    // every denied or held account (keyed hashes only). Safe to repeat.
+    console.log(JSON.stringify(await captureFlaggedSignupNetworkOwners(client.db), null, 2));
   } else if (values["network-release-holds"]) {
     // Rollback: releases current detector holds of the network rules (both,
     // or one with --rule ip-velocity-v1|denied-network-v1).

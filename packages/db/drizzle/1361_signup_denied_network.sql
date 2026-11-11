@@ -1,32 +1,37 @@
 -- deployment-mode: rolling
+-- online-safety-exception: constraint-validation: signup_network_velocity_revisions holds a handful of append-only operator settings rows and the new column is null on all of them, so validating its check here is instant.
 -- Denied network: hold the Free credit of a new self-serve owner whose exact
 -- network (IPv4 address or IPv6 /64) was used, within the last 90 days, by an
--- account with a denied decision or a currently held account, however few
--- signups came from it in the velocity window (rule denied-network-v1).
+-- account with a denied decision or a currently held account (except holds
+-- placed by this rule, so holds never cascade), however few signups came
+-- from it in the velocity window (rule denied-network-v1).
 -- Additive and inert by default: its own setting, deniedNetworkMode, is off.
 --
 -- 1. Session networks. Sign-in addresses are already stored by Better Auth
 --    (auth_sessions.ip_address). The database reduces them to the exact
 --    network and keeps only an HMAC-SHA256 under a random per-schema key
---    that never leaves the database. Recorded for each new self-serve owner
---    at setup and, bounded, for the owners of denied and held accounts
---    (captured again at every new setup, so sign-ins of later denials are
---    kept after their sessions end). Invited members are never recorded.
+--    stored in an owner-only table. Recorded for each new self-serve owner
+--    at setup; for the owner of an account when it becomes denied or held;
+--    and at every later sign-in of such an owner, so the networks are kept
+--    after their sessions end. Invited members are never recorded. Session
+--    use is the session's creation (sign-in) time.
 -- 2. Signup networks. The API-keyed address hash of 1354
 --    (signup_network_sources) of denied and held accounts is matched too.
 -- 3. Detect and hold. free_plan_credit_eligible evaluates the current account
 --    only. /24 and /48 prefixes never take part. Manual decisions and
 --    operator releases are never overwritten. Failures fail open.
+-- 4. Backfill. Every account denied or held now (including the accounts
+--    denied before 1354) is captured account by account.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
 ALTER TABLE opengeni_private.signup_network_velocity_revisions
-  ADD COLUMN IF NOT EXISTS denied_network_mode text
+  ADD COLUMN denied_network_mode text
     CHECK (denied_network_mode IN ('off','observe','enforce'));
 
 -- One random HMAC key per data schema, stored as its SHA-256 block pads.
 -- Owner-only; runtime roles can neither read it nor compute hashes with it.
-CREATE TABLE IF NOT EXISTS opengeni_private.signup_network_session_keys (
+CREATE TABLE opengeni_private.signup_network_session_keys (
   data_schema text PRIMARY KEY,
   inner_pad bytea NOT NULL CHECK (octet_length(inner_pad) = 64),
   outer_pad bytea NOT NULL CHECK (octet_length(outer_pad) = 64),
@@ -35,9 +40,8 @@ CREATE TABLE IF NOT EXISTS opengeni_private.signup_network_session_keys (
 REVOKE ALL ON opengeni_private.signup_network_session_keys FROM PUBLIC;
 
 -- Keyed hashes of the exact networks account owners signed in from. One row
--- per account and network: the first and last session use, and when the row
--- was first recorded (for a new owner, the organization setup).
-CREATE TABLE IF NOT EXISTS opengeni_private.signup_network_owner_addresses (
+-- per account and network: the first and last sign-in from it.
+CREATE TABLE opengeni_private.signup_network_owner_addresses (
   data_schema text NOT NULL,
   account_id uuid NOT NULL,
   address_hash text NOT NULL CHECK (address_hash ~ '^[0-9a-f]{64}$'),
@@ -46,11 +50,36 @@ CREATE TABLE IF NOT EXISTS opengeni_private.signup_network_owner_addresses (
   recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (data_schema, account_id, address_hash)
 );
-CREATE INDEX IF NOT EXISTS signup_network_owner_addresses_address
+CREATE INDEX signup_network_owner_addresses_address
   ON opengeni_private.signup_network_owner_addresses (data_schema, address_hash, last_seen_at);
-CREATE INDEX IF NOT EXISTS signup_network_owner_addresses_last_seen
+CREATE INDEX signup_network_owner_addresses_last_seen
   ON opengeni_private.signup_network_owner_addresses (data_schema, last_seen_at);
 REVOKE ALL ON opengeni_private.signup_network_owner_addresses FROM PUBLIC;
+
+-- Owners of accounts that were denied or held, so their later sign-ins are
+-- recorded too. Written when the decision is made; never invited members.
+CREATE TABLE opengeni_private.signup_network_flagged_owners (
+  data_schema text NOT NULL,
+  account_id uuid NOT NULL,
+  auth_user_id text NOT NULL CHECK (octet_length(auth_user_id) BETWEEN 1 AND 1019),
+  captured_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (data_schema, account_id)
+);
+CREATE INDEX signup_network_flagged_owners_user
+  ON opengeni_private.signup_network_flagged_owners (data_schema, auth_user_id);
+REVOKE ALL ON opengeni_private.signup_network_flagged_owners FROM PUBLIC;
+
+-- When each new self-serve organization was set up, also without the API's
+-- signup network record. Only the last few days are kept.
+CREATE TABLE opengeni_private.signup_network_owner_setups (
+  data_schema text NOT NULL,
+  account_id uuid NOT NULL,
+  set_up_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (data_schema, account_id)
+);
+CREATE INDEX signup_network_owner_setups_set_up
+  ON opengeni_private.signup_network_owner_setups (data_schema, set_up_at);
+REVOKE ALL ON opengeni_private.signup_network_owner_setups FROM PUBLIC;
 
 DO $key$
 DECLARE secret bytea; inner_value bytea; outer_value bytea; position integer;
@@ -100,8 +129,9 @@ RETURNS text LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
 $$;
 REVOKE ALL ON FUNCTION opengeni_private.signup_network_session_hash(text,text) FROM PUBLIC;
 
--- A new self-serve owner's own session networks (normally the signup
--- session), recorded at organization setup. Owner context only.
+-- One user's session networks in the last 90 days (newest 200 sessions) for
+-- one account, by sign-in time. Rows of that account only are written, and
+-- unchanged rows are filtered out before they are touched. Owner context.
 CREATE OR REPLACE FUNCTION opengeni_private.record_signup_owner_session_networks(
   p_data_schema text, p_account_id uuid, p_auth_user_id text
 ) RETURNS integer LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
@@ -109,62 +139,136 @@ DECLARE recorded integer;
 BEGIN
   INSERT INTO opengeni_private.signup_network_owner_addresses AS existing(data_schema, account_id,
     address_hash, first_seen_at, last_seen_at)
-  SELECT p_data_schema, p_account_id, used.address_hash, min(used.created_at), max(used.updated_at)
+  SELECT p_data_schema, p_account_id, grouped.address_hash, grouped.first_seen, grouped.last_seen
   FROM (
-    SELECT opengeni_private.signup_network_session_hash(p_data_schema, s.ip_address) AS address_hash,
-      s.created_at, s.updated_at
-    FROM auth_sessions s
-    WHERE s.user_id = p_auth_user_id AND s.ip_address IS NOT NULL
-      AND s.updated_at >= clock_timestamp() - interval '90 days'
-    ORDER BY s.updated_at DESC LIMIT 50
-  ) used
-  WHERE used.address_hash IS NOT NULL
-  GROUP BY used.address_hash
+    SELECT used.address_hash, min(used.created_at) AS first_seen, max(used.created_at) AS last_seen
+    FROM (
+      SELECT opengeni_private.signup_network_session_hash(p_data_schema, s.ip_address) AS address_hash,
+        s.created_at
+      FROM auth_sessions s
+      WHERE s.user_id = p_auth_user_id AND s.ip_address IS NOT NULL
+        AND s.created_at >= clock_timestamp() - interval '90 days'
+      ORDER BY s.created_at DESC LIMIT 200
+    ) used
+    WHERE used.address_hash IS NOT NULL
+    GROUP BY used.address_hash
+  ) grouped
+  WHERE NOT EXISTS (SELECT 1 FROM opengeni_private.signup_network_owner_addresses known
+    WHERE known.data_schema = p_data_schema AND known.account_id = p_account_id
+      AND known.address_hash = grouped.address_hash
+      AND known.first_seen_at <= grouped.first_seen AND known.last_seen_at >= grouped.last_seen)
   ON CONFLICT (data_schema, account_id, address_hash) DO UPDATE
     SET first_seen_at = least(existing.first_seen_at, excluded.first_seen_at),
-      last_seen_at = greatest(existing.last_seen_at, excluded.last_seen_at)
-    WHERE existing.first_seen_at > excluded.first_seen_at OR existing.last_seen_at < excluded.last_seen_at;
+      last_seen_at = greatest(existing.last_seen_at, excluded.last_seen_at);
   GET DIAGNOSTICS recorded = ROW_COUNT;
   RETURN recorded;
 END $$;
 REVOKE ALL ON FUNCTION opengeni_private.record_signup_owner_session_networks(text,uuid,text) FROM PUBLIC;
 
--- Session networks of the owners of denied and held accounts (never invited
--- members), newest sessions first, bounded. Owner context only. Unchanged
--- rows are not rewritten.
+-- Captures the owner (never invited members) of one denied or held account:
+-- remembers the owner so later sign-ins are recorded, and records their
+-- current session networks. Returns false when the account has no
+-- self-serve owner. Owner context only.
 CREATE OR REPLACE FUNCTION opengeni_private.capture_flagged_owner_session_networks(
-  p_data_schema text, p_limit integer
-) RETURNS integer LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
-DECLARE inventory uuid; captured integer;
+  p_data_schema text, p_account_id uuid
+) RETURNS boolean LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+DECLARE inventory uuid; owner_user text;
 BEGIN
   inventory := opengeni_private.open_session_tenancy_fence_inventory(p_data_schema::regnamespace::oid);
-  INSERT INTO opengeni_private.signup_network_owner_addresses AS existing(data_schema, account_id,
-    address_hash, first_seen_at, last_seen_at)
-  SELECT p_data_schema, used.account_id, used.address_hash, min(used.created_at), max(used.updated_at)
-  FROM (
-    SELECT d.account_id, opengeni_private.signup_network_session_hash(p_data_schema, s.ip_address) AS address_hash,
-      s.created_at, s.updated_at
-    FROM promotion_decisions d
-    JOIN managed_accounts a ON a.id = d.account_id AND a.external_source = 'better-auth:user'
-    JOIN auth_sessions s ON s.user_id = a.external_id
-    WHERE d.decision IN ('denied', 'held') AND s.ip_address IS NOT NULL
-      AND s.updated_at >= clock_timestamp() - interval '90 days'
-    ORDER BY s.updated_at DESC LIMIT greatest(1, least(coalesce(p_limit, 2000), 5000))
-  ) used
-  WHERE used.address_hash IS NOT NULL
-  GROUP BY used.account_id, used.address_hash
-  ON CONFLICT (data_schema, account_id, address_hash) DO UPDATE
-    SET first_seen_at = least(existing.first_seen_at, excluded.first_seen_at),
-      last_seen_at = greatest(existing.last_seen_at, excluded.last_seen_at)
-    WHERE existing.first_seen_at > excluded.first_seen_at OR existing.last_seen_at < excluded.last_seen_at;
-  GET DIAGNOSTICS captured = ROW_COUNT;
+  SELECT a.external_id INTO owner_user FROM managed_accounts a
+    WHERE a.id = p_account_id AND a.external_source = 'better-auth:user';
   PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory);
-  RETURN captured;
+  inventory := NULL;
+  IF owner_user IS NULL THEN RETURN false; END IF;
+  INSERT INTO opengeni_private.signup_network_flagged_owners(data_schema, account_id, auth_user_id)
+    VALUES (p_data_schema, p_account_id, owner_user)
+    ON CONFLICT (data_schema, account_id) DO NOTHING;
+  PERFORM opengeni_private.record_signup_owner_session_networks(p_data_schema, p_account_id, owner_user);
+  RETURN true;
 EXCEPTION WHEN OTHERS THEN
-  PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory);
+  IF inventory IS NOT NULL THEN
+    PERFORM opengeni_private.close_session_tenancy_fence_inventory(inventory);
+  END IF;
   RAISE;
 END $$;
-REVOKE ALL ON FUNCTION opengeni_private.capture_flagged_owner_session_networks(text,integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.capture_flagged_owner_session_networks(text,uuid) FROM PUBLIC;
+
+-- Captures every account that is denied or held now, one account at a time,
+-- each in its own subtransaction. Used by the backfill below; operators can
+-- run it again at any time. Owner context only.
+CREATE OR REPLACE FUNCTION opengeni_private.capture_all_flagged_owner_session_networks(p_data_schema text)
+RETURNS jsonb LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+DECLARE flagged record; accounts integer := 0; captured integer := 0; failed integer := 0;
+BEGIN
+  FOR flagged IN SELECT d.account_id FROM promotion_decisions d
+    WHERE d.decision IN ('denied', 'held') ORDER BY d.account_id
+  LOOP
+    accounts := accounts + 1;
+    BEGIN
+      IF opengeni_private.capture_flagged_owner_session_networks(p_data_schema, flagged.account_id) THEN
+        captured := captured + 1;
+      END IF;
+    EXCEPTION WHEN OTHERS THEN
+      failed := failed + 1;
+      RAISE WARNING 'denied network capture failed for one account (%)', SQLSTATE;
+    END;
+  END LOOP;
+  RETURN jsonb_build_object('flaggedAccounts', accounts, 'capturedOwners', captured, 'failed', failed);
+END $$;
+REVOKE ALL ON FUNCTION opengeni_private.capture_all_flagged_owner_session_networks(text) FROM PUBLIC;
+
+-- A decision becoming denied or held captures that account's owner.
+-- Best-effort: a capture failure never blocks the decision.
+CREATE OR REPLACE FUNCTION opengeni_private.capture_flagged_owner_on_decision() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+BEGIN
+  BEGIN
+    PERFORM opengeni_private.capture_flagged_owner_session_networks(TG_TABLE_SCHEMA, NEW.account_id);
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'denied network capture skipped (%)', SQLSTATE;
+  END;
+  RETURN NULL;
+END $$;
+REVOKE ALL ON FUNCTION opengeni_private.capture_flagged_owner_on_decision() FROM PUBLIC;
+
+-- A sign-in of a captured owner whose account is still denied or held
+-- records its network. One indexed lookup for everyone else. Best-effort: a
+-- failure never blocks the sign-in.
+CREATE OR REPLACE FUNCTION opengeni_private.record_flagged_owner_sign_in() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+DECLARE flagged record; address_hash_value text;
+BEGIN
+  BEGIN
+    FOR flagged IN SELECT f.account_id FROM opengeni_private.signup_network_flagged_owners f
+      JOIN promotion_decisions d ON d.account_id = f.account_id AND d.decision IN ('denied', 'held')
+      WHERE f.data_schema = TG_TABLE_SCHEMA AND f.auth_user_id = NEW.user_id
+    LOOP
+      address_hash_value := coalesce(address_hash_value,
+        opengeni_private.signup_network_session_hash(TG_TABLE_SCHEMA, NEW.ip_address));
+      EXIT WHEN address_hash_value IS NULL;
+      INSERT INTO opengeni_private.signup_network_owner_addresses AS existing(data_schema, account_id,
+        address_hash, first_seen_at, last_seen_at)
+      VALUES (TG_TABLE_SCHEMA, flagged.account_id, address_hash_value,
+        coalesce(NEW.created_at, clock_timestamp()), coalesce(NEW.created_at, clock_timestamp()))
+      ON CONFLICT (data_schema, account_id, address_hash) DO UPDATE
+        SET first_seen_at = least(existing.first_seen_at, excluded.first_seen_at),
+          last_seen_at = greatest(existing.last_seen_at, excluded.last_seen_at);
+    END LOOP;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'denied network sign-in record skipped (%)', SQLSTATE;
+  END;
+  RETURN NULL;
+END $$;
+REVOKE ALL ON FUNCTION opengeni_private.record_flagged_owner_sign_in() FROM PUBLIC;
+
+CREATE TRIGGER signup_network_capture_flagged_owner
+  AFTER INSERT OR UPDATE OF decision ON promotion_decisions
+  FOR EACH ROW WHEN (NEW.decision IN ('denied', 'held'))
+  EXECUTE FUNCTION opengeni_private.capture_flagged_owner_on_decision();
+CREATE TRIGGER signup_network_flagged_owner_sign_in
+  AFTER INSERT ON auth_sessions
+  FOR EACH ROW WHEN (NEW.ip_address IS NOT NULL)
+  EXECUTE FUNCTION opengeni_private.record_flagged_owner_sign_in();
 
 -- 1354 settings plus deniedNetworkMode (off unless set).
 CREATE OR REPLACE FUNCTION opengeni_private.signup_network_velocity_settings(p_data_schema text)
@@ -232,7 +336,8 @@ REVOKE ALL ON FUNCTION opengeni_private.set_signup_network_velocity(jsonb,text,t
 -- an organization set up within the last seven days, finds denied or
 -- currently held accounts that used the same exact network in the 90 days up
 -- to the setup: through their signup (1354 address hash) or their owner's
--- sessions (session network hash). Exact networks only; never prefixes.
+-- sign-ins (session network hash). Exact networks only; never prefixes.
+-- Holds placed by this rule do not count, so a hold never spreads further.
 CREATE OR REPLACE FUNCTION opengeni_private.evaluate_signup_denied_network(p_account_id uuid)
 RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE
@@ -251,8 +356,8 @@ BEGIN
     WHERE data_schema = target AND account_id = p_account_id;
   setup_time := source.set_up_at;
   IF setup_time IS NULL THEN
-    SELECT min(own.recorded_at) INTO setup_time FROM opengeni_private.signup_network_owner_addresses own
-      WHERE own.data_schema = target AND own.account_id = p_account_id;
+    SELECT setup.set_up_at INTO setup_time FROM opengeni_private.signup_network_owner_setups setup
+      WHERE setup.data_schema = target AND setup.account_id = p_account_id;
   END IF;
   IF setup_time IS NULL OR setup_time < statement_timestamp() - interval '7 days' THEN RETURN; END IF;
   WITH used AS (
@@ -272,6 +377,9 @@ BEGIN
   ), flagged AS (
     SELECT used.account_id, d.decision, array_agg(DISTINCT used.via) AS vias, max(used.used_at) AS last_used_at
     FROM used JOIN promotion_decisions d ON d.account_id = used.account_id AND d.decision IN ('denied', 'held')
+    WHERE d.decision = 'denied' OR NOT EXISTS (SELECT 1 FROM opengeni_private.promotion_decision_history h
+      WHERE h.data_schema = target AND h.account_id = d.account_id AND h.revision = d.revision
+        AND h.policy_version = 'denied-network-v1')
     GROUP BY used.account_id, d.decision
     ORDER BY max(used.used_at) DESC, used.account_id LIMIT 501
   )
@@ -312,10 +420,10 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION opengeni_private.evaluate_signup_denied_network(uuid) FROM PUBLIC;
 
--- The 1354 setup-receipt trigger (body unchanged first), plus the owner's
--- session networks, the capture of denied and held owners' session networks,
--- and evaluation after commit when only the denied network rule is on. The
--- 1354 steps still need the API's address hash; the new steps do not.
+-- The 1354 setup-receipt trigger (body unchanged first), plus the setup time
+-- and the owner's own session networks, and evaluation after commit when
+-- only the denied network rule is on. The 1354 steps still need the API's
+-- address hash; the new steps do not. Only this account's rows are written.
 CREATE OR REPLACE FUNCTION opengeni_private.grant_verified_signup_trial_credit() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE verified_owner boolean; account_owner boolean; inserted_count integer; model_ids jsonb;
@@ -413,17 +521,14 @@ BEGIN
       RAISE WARNING 'signup network source was not recorded (%)', SQLSTATE;
     END;
   END IF;
-  -- Session networks of this owner and of denied or held accounts' owners,
-  -- recorded in every mode so evidence exists before the rule is switched on.
+  -- This owner's setup time and session networks, recorded in every mode so
+  -- evidence exists before the rule is switched on.
   BEGIN
+    INSERT INTO opengeni_private.signup_network_owner_setups(data_schema, account_id)
+      VALUES (target, NEW.account_id) ON CONFLICT (data_schema, account_id) DO NOTHING;
     PERFORM opengeni_private.record_signup_owner_session_networks(target, NEW.account_id, NEW.auth_user_id);
   EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'signup owner session networks were not recorded (%)', SQLSTATE;
-  END;
-  BEGIN
-    PERFORM opengeni_private.capture_flagged_owner_session_networks(target, 2000);
-  EXCEPTION WHEN OTHERS THEN
-    RAISE WARNING 'denied network session capture skipped (%)', SQLSTATE;
   END;
   IF coalesce(evaluate_ids, '') = '' AND settings->>'deniedNetworkMode' IN ('observe', 'enforce') THEN
     evaluate_ids := NEW.account_id::text;
@@ -451,6 +556,12 @@ BEGIN
         SELECT o.data_schema, o.account_id, o.address_hash FROM opengeni_private.signup_network_owner_addresses o
         WHERE o.data_schema = target AND o.last_seen_at < clock_timestamp() - interval '97 days'
         ORDER BY o.last_seen_at LIMIT 50 FOR UPDATE OF o SKIP LOCKED);
+    -- Setup times are only needed while the setup can still be evaluated.
+    DELETE FROM opengeni_private.signup_network_owner_setups expired
+      WHERE (expired.data_schema, expired.account_id) IN (
+        SELECT o.data_schema, o.account_id FROM opengeni_private.signup_network_owner_setups o
+        WHERE o.data_schema = target AND o.set_up_at < clock_timestamp() - interval '8 days'
+        ORDER BY o.set_up_at LIMIT 50 FOR UPDATE OF o SKIP LOCKED);
   EXCEPTION WHEN OTHERS THEN
     RAISE WARNING 'signup network retention skipped (%)', SQLSTATE;
   END;
@@ -500,7 +611,9 @@ BEGIN
     WHERE (n.nspname = data_schema AND p.proname = 'free_plan_credit_eligible')
       OR (n.nspname = 'opengeni_private' AND p.proname IN ('grant_verified_signup_trial_credit',
         'set_signup_network_velocity', 'evaluate_signup_denied_network',
-        'record_signup_owner_session_networks', 'capture_flagged_owner_session_networks'))
+        'record_signup_owner_session_networks', 'capture_flagged_owner_session_networks',
+        'capture_all_flagged_owner_session_networks', 'capture_flagged_owner_on_decision',
+        'record_flagged_owner_sign_in'))
   LOOP
     EXECUTE format('ALTER FUNCTION %s SET search_path = pg_catalog, %I, opengeni_private, pg_temp', routine, data_schema);
   END LOOP;
@@ -508,28 +621,34 @@ BEGIN
     WHERE n.nspname = 'opengeni_private' AND p.proname IN ('set_signup_network_velocity',
       'signup_network_velocity_settings', 'evaluate_signup_denied_network', 'signup_network_exact_unit',
       'signup_network_session_hash', 'record_signup_owner_session_networks',
-      'capture_flagged_owner_session_networks')
+      'capture_flagged_owner_session_networks', 'capture_all_flagged_owner_session_networks',
+      'capture_flagged_owner_on_decision', 'record_flagged_owner_sign_in')
   LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', routine);
   END LOOP;
 END $install$;
 
--- Backfill, best-effort: session networks of the owners of accounts denied
--- or held now (including those decided before 1354), and of owners of
--- organizations set up in the last seven days, which can still be evaluated.
+-- Backfill: the owners of every account denied or held now (including those
+-- decided before 1354), account by account, and the setups of the last
+-- seven days, which can still be evaluated. A failure is reported as a
+-- warning with counts; capture_all_flagged_owner_session_networks can be run
+-- again by an operator.
 DO $backfill$
-DECLARE target_schema text := current_schema(); recent record;
+DECLARE target_schema text := current_schema(); recent record; outcome jsonb;
 BEGIN
-  BEGIN
-    PERFORM opengeni_private.capture_flagged_owner_session_networks(target_schema, 5000);
-  EXCEPTION WHEN OTHERS THEN
-    RAISE WARNING 'denied network session backfill skipped (%)', SQLSTATE;
-  END;
-  FOR recent IN SELECT s.account_id, s.owner_auth_user_id FROM opengeni_private.signup_network_sources s
+  outcome := opengeni_private.capture_all_flagged_owner_session_networks(target_schema);
+  IF (outcome->>'failed')::integer > 0 THEN
+    RAISE WARNING 'denied network backfill incomplete: %', outcome;
+  ELSE
+    RAISE NOTICE 'denied network backfill: %', outcome;
+  END IF;
+  FOR recent IN SELECT s.account_id, s.owner_auth_user_id, s.set_up_at FROM opengeni_private.signup_network_sources s
     WHERE s.data_schema = target_schema AND s.set_up_at >= clock_timestamp() - interval '7 days'
     ORDER BY s.set_up_at DESC LIMIT 5000
   LOOP
     BEGIN
+      INSERT INTO opengeni_private.signup_network_owner_setups(data_schema, account_id, set_up_at)
+        VALUES (target_schema, recent.account_id, recent.set_up_at) ON CONFLICT (data_schema, account_id) DO NOTHING;
       PERFORM opengeni_private.record_signup_owner_session_networks(target_schema, recent.account_id,
         recent.owner_auth_user_id);
     EXCEPTION WHEN OTHERS THEN
