@@ -26,11 +26,11 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "330d6cd45ff660538a6249441b73d8d016739454ec4ea24ead224e4b0f5a7395"
+      "sha256": "94408ff51387126d70f920c784a7a6116c20cd461bd054e0b1ca4582c1f838d9"
     },
     {
       "path": ".github/workflows/compact-session-view.yml",
-      "sha256": "989bee8731ec356966bfc56d3471d50fe78b10063e03965e777bea79a9f56ede"
+      "sha256": "3b306613676baebd7282d7c5ece94e605e001ffbcb8289a996efb3e87c2d48af"
     },
     {
       "path": ".github/workflows/compute-ci.yml",
@@ -50,7 +50,7 @@
     },
     {
       "path": ".github/workflows/local-startup.yml",
-      "sha256": "636a25401375f62b9882524c37f55864080406d19b9c349b38de4516e9cd055b"
+      "sha256": "3f6d63079bdd3221e8359449e72961ed28b0ff144ea0bed97478a0c642980349"
     },
     {
       "path": ".github/workflows/main-approval-superseded.yml",
@@ -180,7 +180,7 @@
     },
     {
       "path": ".github/actions/playwright-browsers/action.yml",
-      "sha256": "9dba373599d4e3ef644b91e8300e3ac491fe01bf0b70ccb4876204a9aca6c57a"
+      "sha256": "ef2a39d5f201fd82e101fa3c151d004f5fe7fe20075368d60958b6b46df881ba"
     },
     {
       "path": ".github/actions/public-oci-login/action.yml",
