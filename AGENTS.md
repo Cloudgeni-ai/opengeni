@@ -840,10 +840,11 @@ bodies, headers, betas, model options, reasoning replay, signatures,
 cache-control placement), history projection and replay into model input,
 compaction requests, system prompt and context assembly, and central
 model-facing tool schema and result shaping. The exact paths are the model
-request section of [`.github/CODEOWNERS`](.github/CODEOWNERS). The required
-**Model request review** status and the merge batcher enforce it: the batcher
-holds such a PR, even with `queue-ready`, until the maintainer approves its
-head, and every new push needs a new approval.
+request section of [`.github/CODEOWNERS`](.github/CODEOWNERS). The merge
+batcher enforces it with its own check: it holds such a PR, even with
+`queue-ready`, until the maintainer approves its head, and every new push needs
+a new approval. The **Model request review** status shows the same verdict on
+the PR.
 
 - Open such a change as a **draft** PR whose description says in plain words
   what changes on the wire and the possible quality, prompt-caching, behaviour

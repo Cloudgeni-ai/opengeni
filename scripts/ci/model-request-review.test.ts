@@ -189,6 +189,10 @@ describe("the maintainer's approval", () => {
     expect(
       approvedOnHead([review("APPROVED"), review("COMMENTED", { submittedAt: 2_000 })], HEAD, "x"),
     ).toBe(true);
+    // Dismissing his later "changes requested" does not bring the approval back.
+    expect(
+      approvedOnHead([review("APPROVED"), review("DISMISSED", { submittedAt: 2_000 })], HEAD, "x"),
+    ).toBe(false);
   });
 
   test("on his own PR, a comment review that starts with the command approves", () => {

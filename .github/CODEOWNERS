@@ -33,8 +33,11 @@
 /packages/runtime/src/chat-reasoning.ts @jorgensandhaug
 /packages/runtime/src/gemini-function-response.ts @jorgensandhaug
 /packages/runtime/src/single-model-call.ts @jorgensandhaug
+/packages/runtime/src/model-image-sizing.ts @jorgensandhaug
 /packages/network/src/responses-websocket.ts @jorgensandhaug
 /packages/subscriptions/src/reasoning.ts @jorgensandhaug
+# Whether a request carries the prompt cache key.
+/apps/worker/src/activities/agent-turn/codex.ts @jorgensandhaug
 
 # Codex and SuperGrok subscription request bodies, reasoning settings and
 # model-facing tool output shaping.
@@ -71,7 +74,11 @@
 /packages/runtime/src/sandbox-base-instructions.ts @jorgensandhaug
 /packages/runtime/src/system-prompt-cache-prefix.ts @jorgensandhaug
 /packages/runtime/src/workspace-governance.ts @jorgensandhaug
+/packages/runtime/src/repository-skills-context.ts @jorgensandhaug
+/packages/contracts/src/skill-catalog-context.ts @jorgensandhaug
+/packages/contracts/src/workspace-governance-context.ts @jorgensandhaug
 /apps/worker/src/activities/agent-turn/agent-build.ts @jorgensandhaug
+/apps/worker/src/activities/run-input.ts @jorgensandhaug
 
 # Central model-facing tool schema and tool result shaping.
 /packages/runtime/src/interaction-tool-json-schema.ts @jorgensandhaug

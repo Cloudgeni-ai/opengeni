@@ -128,9 +128,10 @@ function isSelfApproval(body: string | null): boolean {
  * Whether the maintainer's latest decisive review on exactly `headSha`
  * approves it. Reviews on earlier commits, dismissed approvals, pending
  * reviews and anyone else's reviews never count; a later "changes requested"
- * revokes an approval. On his own PR, where GitHub refuses self-approval, a
- * comment review on the head whose first line is the self-approval command
- * counts as approving.
+ * revokes an approval, and so does a later dismissed one (dismissing his
+ * "changes requested" never brings an earlier approval back). On his own PR,
+ * where GitHub refuses self-approval, a comment review on the head whose
+ * first line is the self-approval command counts as approving.
  */
 export function approvedOnHead(
   reviews: Review[],
@@ -145,7 +146,7 @@ export function approvedOnHead(
   let approved = false;
   for (const { review } of own) {
     if (review.state === "APPROVED") approved = true;
-    else if (review.state === "CHANGES_REQUESTED") approved = false;
+    else if (review.state === "CHANGES_REQUESTED" || review.state === "DISMISSED") approved = false;
     else if (review.state === "COMMENTED" && isMaintainer(author) && isSelfApproval(review.body))
       approved = true;
   }

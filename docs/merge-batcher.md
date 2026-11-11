@@ -50,9 +50,13 @@ from `main` and decides, and the batcher and the status below share it.
   code through `pull_request_target`, and through `workflow_run` of the review
   signal workflow for review events) posts the **Model request review**
   status, re-requests the maintainer's review on every unapproved head and
-  keeps one comment that lists the guarded files. The protection ruleset
-  requires that status on `main`. The batcher never trusts the status: it
-  recomputes the verdict from main's code at every pass.
+  keeps one comment that lists the guarded files.
+- **The batcher is the gate; the status only reports it.** Anyone who can
+  run a workflow can post a status, and the batcher's App bypasses rulesets,
+  so the batcher never reads the status: it recomputes the verdict from
+  main's code at every pass. The protection ruleset also requires the status
+  (from the GitHub Actions app), which only matters for a merge outside the
+  batcher.
 
 To check one PR by hand:
 `GITHUB_TOKEN=$(gh auth token) bun scripts/ci/model-request-review.ts --pull <n> --dry-run`
