@@ -16,6 +16,18 @@ const terminalCases = [
   ["content_policy_violation", "safety"],
   ["ResponsibleAIPolicyViolation", "safety"],
   ["unknown_provider_code", "unknown"],
+  // Azure CamelCase service codes and bare HTTP statuses some gateways send.
+  ["ServiceUnavailable", "unavailable"],
+  ["InternalServerError", "unavailable"],
+  ["BadGateway", "unavailable"],
+  ["GatewayTimeout", "unavailable"],
+  ["500", "unavailable"],
+  ["502", "unavailable"],
+  ["503", "unavailable"],
+  ["504", "unavailable"],
+  ["TooManyRequests", "rate_limit"],
+  ["400", "unknown"],
+  ["403", "unknown"],
 ] as const;
 
 describe("ordinary Responses streamed provider terminals", () => {
@@ -282,6 +294,59 @@ describe("ordinary Responses streamed provider terminals", () => {
     }
   });
 
+  test("Azure's documented mid-stream error event classifies by its status type", async () => {
+    // Azure: the stream is an HTTP 200 whose `error` event carries a closed
+    // `type` naming the status (server_error = 500, too_many_requests = 429,
+    // forbidden = 403, user_error = 400) beside an open-ended specific `code`.
+    for (const [error, category] of [
+      [{ type: "server_error", code: "unrecognized_azure_code" }, "unavailable"],
+      [{ type: "too_many_requests", code: "no_capacity" }, "rate_limit"],
+      [{ type: "forbidden", code: "unrecognized_azure_code" }, "unknown"],
+      [{ type: "user_error", code: "unrecognized_azure_code" }, "unknown"],
+    ] as const) {
+      const event = {
+        type: "error",
+        error: { ...error, message: "Service Unavailable", param: null },
+      };
+      const client = new OpenAI({
+        apiKey: "fixture",
+        maxRetries: 2,
+        fetch: async () =>
+          new Response(`event: error\ndata: ${JSON.stringify(event)}\n\n`, {
+            headers: { "content-type": "text/event-stream" },
+          }),
+      });
+      const model = new OpenGeniResponsesModel(client, "fixture", {
+        id: "azure",
+        label: "Azure OpenAI",
+        kind: "api-key",
+        api: "responses",
+        builtin: true,
+      });
+      let observed: unknown;
+      try {
+        for await (const _event of model.getStreamedResponse({
+          input: "hello",
+          modelSettings: {},
+          tools: [],
+          handoffs: [],
+          outputType: "text",
+          tracing: false,
+        })) {
+        }
+      } catch (failure) {
+        observed = failure;
+      }
+      expect(observed).toBeInstanceOf(ResponsesStreamingTerminalError);
+      expect(observed).toMatchObject({
+        category,
+        code: error.code,
+        type: error.type,
+        detail: "Service Unavailable",
+      });
+    }
+  });
+
   test("diagnostics are exact through 4 KiB and UTF-8 bounded beyond it", () => {
     const exact = " 🧬\n".repeat(500);
     expect(new ResponsesStreamingTerminalError("response.failed", { message: exact }).detail).toBe(
@@ -316,16 +381,45 @@ describe("ordinary Responses streamed provider terminals", () => {
     }
   });
 
-  test("unknown codes are terminal even with a server type; type-only envelopes classify", () => {
+  test("unknown codes defer only to a closed status type; wording never grants recovery", () => {
     expect(
       new ResponsesStreamingTerminalError("response.failed", {
         code: "unknown_failure",
         type: "server_error",
       }).category,
+    ).toBe("unavailable");
+    expect(
+      new ResponsesStreamingTerminalError("response.failed", {
+        code: "unknown_failure",
+        type: "service_unavailable_error",
+      }).category,
+    ).toBe("unavailable");
+    expect(
+      new ResponsesStreamingTerminalError("response.failed", {
+        code: "unknown_failure",
+        type: "unknown_type",
+        message: "Service Unavailable. Please try again.",
+      }).category,
+    ).toBe("unknown");
+    expect(
+      new ResponsesStreamingTerminalError("response.error", {
+        message: "503 Service Unavailable",
+      }).category,
     ).toBe("unknown");
     expect(
       new ResponsesStreamingTerminalError("response.error", { type: "server_error" }).category,
     ).toBe("unavailable");
+    // A status type never overrides a recognized refusal or request code.
+    for (const [code, category] of [
+      ["content_filter", "safety"],
+      ["context_length_exceeded", "request"],
+    ] as const) {
+      for (const type of ["server_error", "too_many_requests"]) {
+        expect(new ResponsesStreamingTerminalError("error", { code, type }).category).toBe(
+          category,
+        );
+      }
+    }
   });
 
   test("a failed terminal cannot execute a tool call assembled in the same response", async () => {

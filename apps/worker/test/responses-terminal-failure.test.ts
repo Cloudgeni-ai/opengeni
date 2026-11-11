@@ -75,6 +75,67 @@ describe("Responses terminal failure settlement", () => {
     }
   }
 
+  test("Azure transient stream terminals enter same-turn recovery", () => {
+    for (const source of [
+      { type: "server_error", code: "unrecognized_azure_code", message: "Service Unavailable" },
+      { code: "ServiceUnavailable", message: "Service Unavailable" },
+      { code: "InternalServerError", message: "Internal Server Error" },
+      { code: "503", message: "Service Unavailable" },
+    ]) {
+      const error = new ResponsesStreamingTerminalError("response.error", source);
+      const payload = agentRunFailurePayload(error);
+      expect(payload).toMatchObject({
+        code: "provider_unavailable",
+        retryable: true,
+        detail: source.message,
+      });
+      expect(payload).not.toHaveProperty("providerErrorCode");
+      expect(isTransientProviderError(error)).toBe(true);
+      expect(providerRecoveryResult({ failureCode: payload.code, attemptNumber: 1 })).toEqual({
+        status: "recovering",
+        continueDelayMs: 2_000,
+      });
+    }
+    const capacity = agentRunFailurePayload(
+      new ResponsesStreamingTerminalError("response.error", {
+        type: "too_many_requests",
+        code: "no_capacity",
+        message: "high demand",
+      }),
+    );
+    expect(capacity).toMatchObject({ code: "provider_rate_limited", retryable: true });
+  });
+
+  test("rejected stream terminals record the bounded provider code and type, not wording", () => {
+    const detail = "Service Unavailable";
+    const payload = agentRunFailurePayload(
+      new ResponsesStreamingTerminalError("response.error", {
+        code: "unrecognized_code",
+        type: "forbidden",
+        message: detail,
+      }),
+    );
+    expect(payload).toMatchObject({
+      code: "provider_request_rejected",
+      retryable: false,
+      detail,
+      providerErrorCode: "unrecognized_code",
+      providerErrorType: "forbidden",
+    });
+    const oversized = agentRunFailurePayload(
+      new ResponsesStreamingTerminalError("response.error", { code: "c".repeat(1_000) }),
+    );
+    expect(Buffer.byteLength(oversized.providerErrorCode!)).toBeLessThanOrEqual(256);
+    expect(oversized).not.toHaveProperty("providerErrorType");
+    expect(
+      agentRunFailurePayload(
+        new ResponsesStreamingTerminalError("response.error", {
+          message: "503 Service Unavailable",
+        }),
+      ),
+    ).toMatchObject({ code: "provider_request_rejected", retryable: false });
+  });
+
   test("server terminals keep all five connectivity delays then exhaust without losing detail", () => {
     const failure = agentRunFailurePayload(
       new ResponsesStreamingTerminalError("response.failed", {
