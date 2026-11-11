@@ -5621,7 +5621,7 @@ export const sessions = pgTable(
     // NULL is a legacy chat (instructions already in `instructions`): never
     // add the agent layer to it.
     agentPromptRevision: integer("agent_prompt_revision"),
-    // Migration 1361: the agent suggestion made in this chat
+    // Migration 1363: the agent suggestion made in this chat
     // (`agent_suggest`), written once. Display state only, never model context.
     agentSuggestion: jsonb("agent_suggestion").$type<SessionAgentSuggestion>(),
     // Migration 1124: hosted web-search records reach the model as runtime
