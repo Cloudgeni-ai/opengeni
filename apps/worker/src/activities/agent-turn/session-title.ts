@@ -217,6 +217,7 @@ export function sessionTitleGenerationOptions(input: {
   resolvedModel: ReturnType<OpenGeniRuntime["resolveTurnModel"]>;
   modelName: string;
   serviceTier: GenerateSessionTitleOptions["serviceTier"] | null | undefined;
+  titleInstructions?: string | undefined;
   signal: AbortSignal;
 }): GenerateSessionTitleOptions {
   const { resolvedModel, serviceTier } = input;
@@ -232,6 +233,7 @@ export function sessionTitleGenerationOptions(input: {
     modelName: input.modelName,
     ...(serviceTier ? { serviceTier } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(input.titleInstructions ? { titleInstructions: input.titleInstructions } : {}),
     signal: input.signal,
   };
 }

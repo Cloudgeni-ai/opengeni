@@ -11630,6 +11630,7 @@
         "$.identity": "string? null",
         "$.instructions": "string?",
         "$.renderer": "ref(AgentRenderer)?",
+        "$.titleInstructions": "string? null",
         "$.vaultPolicy": "ref(VaultPolicy)?"
       }
     },
@@ -26643,6 +26644,7 @@
         "$.identity": "string! null",
         "$.renderer": "ref(AgentRenderer)!",
         "$.source": "ref(ResolvedAgentConfigSource)!",
+        "$.titleInstructions": "string?",
         "$.unavailable": "array!",
         "$.unavailable[]": "ref(AgentCapabilityId)",
         "$.unavailableReasons": "object?",
