@@ -18,7 +18,7 @@ the only place that decides what is quarantined. Each entry has:
 - `test`: the test's own title, as passed to `test()`, without `describe()`
   prefixes. For a title built from a template, list the concrete title, so
   only that case is quarantined;
-- `issue`: the Linear or GitHub issue that tracks the fix;
+- `issue`: the public GitHub issue in this repository that tracks the fix;
 - `reason`: what fails, in a sentence.
 
 `packages/testing/test/quarantine.test.ts` checks that every entry still points

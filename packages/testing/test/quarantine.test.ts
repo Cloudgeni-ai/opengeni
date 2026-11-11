@@ -34,9 +34,8 @@ describe("quarantine list", () => {
   test("every entry has a tracking issue and a reason, and none is listed twice", () => {
     const keys = new Set<string>();
     for (const entry of QUARANTINE) {
-      expect(entry.issue).toMatch(
-        /^https:\/\/(linear\.app\/[^/]+\/issue\/[A-Z]+-\d+|github\.com\/[^/]+\/[^/]+\/issues\/\d+)/,
-      );
+      // The repository is public, so the tracking issue must be one anyone can open.
+      expect(entry.issue).toMatch(/^https:\/\/github\.com\/Cloudgeni-ai\/opengeni\/issues\/\d+$/);
       expect(entry.reason.trim().length).toBeGreaterThan(0);
       const key = `${entry.file}\u0000${entry.test}`;
       expect(keys.has(key), key).toBe(false);
