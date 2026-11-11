@@ -141,7 +141,10 @@ and members of the running batch are never regenerated.
    (`impact.ts --full`, every unit, real-service, end-to-end and browser lane),
    deployment artifacts, the artifact runtime and every workload image. Images
    are built but never pushed or signed, and the API image builds beside the
-   lanes instead of waiting for the release-approval gate. A batch passes only
+   lanes (in its own `batch-api-image` job) instead of waiting for the
+   release-approval gate. The sandbox and desktop images build every layer
+   that does not need the artifact runtime while it is still being produced,
+   then add its verified inputs. A batch passes only
    when `Typecheck and unit tests`, `Deployment artifacts` and
    `Workload image builds` all passed, the same jobs canary admission requires
    on a `main` SHA. Failed jobs are retried once to absorb flaky tests. A run
@@ -156,7 +159,14 @@ and members of the running batch are never regenerated.
    that the new `main` tree is exactly the tree CI tested at that point, and
    stops with a comment on the PR if not.
 5. **Failures.** A failed batch is split in half and each half is tested in
-   turn until the failing PR is found and removed from the queue. A failed
+   turn until the failing PR is found and removed from the queue.
+   Once a PR the bisection tested alone is removed, the groups the bisection
+   still holds are tested together again as one batch (groups with a priority
+   PR first, up to `BATCHER_MAX_BATCH`, the rest next in line), without the
+   bisection's blame, instead of one group per round; a group that fails again
+   is split as any batch is. Two PRs that add the same migration number still
+   go into separate groups. A PR removed from a batch that went ahead of the
+   bisection, or a Version PR, leaves its groups as they were. A failed
    batch with both priority and other PRs is split into its priority PRs, tested
    first, and the rest, so a broken fill delays them one round. When the rest
    has at least two PRs and at least as many as the priority PRs, it is halved

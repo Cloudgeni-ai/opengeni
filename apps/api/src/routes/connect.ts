@@ -70,6 +70,7 @@ import { startPersonalGitHubOAuth } from "../integrations/personal-github";
 import { socialOAuthClientFor, startSocialOAuth } from "../integrations/social-oauth";
 import {
   githubAppConnectNavigation,
+  githubAppRepairNavigation,
   prepareGitHubAppConnectAction,
 } from "../integrations/github-app-connect";
 import { githubAppMissingSettings } from "@opengeni/github";
@@ -108,6 +109,7 @@ import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPPER_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+  parseConnectResultPageTextJson,
 } from "@opengeni/config";
 import { parseRequestJson } from "../http/request-body";
 import { connectRequestActor, assertAgentPreparedConnect } from "../prepared-mcp-actor";
@@ -1443,7 +1445,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
   // Public and content-free: the sign-in popup's last page (finishInPopup).
-  app.get(CONNECT_FINISHED_PATH, () => connectFinishedPage());
+  app.get(CONNECT_FINISHED_PATH, () =>
+    connectFinishedPage(parseConnectResultPageTextJson(deps.settings.connectResultPageTextJson)),
+  );
   app.post("/v1/workspaces/:workspaceId/connect/attempts", async (c) => {
     if (!deps.settings.integrationsEnabled)
       throw new HTTPException(403, { message: "integrations disabled" });
@@ -1719,16 +1723,18 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           });
         }
         if (input.providerId === "github-app") {
-          if (
-            input.ownership !== "workspace" ||
-            input.installationTarget ||
-            input.reconnectAccountId
-          )
+          if (input.ownership !== "workspace" || input.installationTarget)
             throw new HTTPException(422, {
               message:
                 "GitHub App setup requires workspace ownership and explicit installation selection",
             });
-          const navigation = githubAppConnectNavigation(deps, scope, id, c.req.url, "discover");
+          // Repairing a linked installation goes straight to its fix.
+          const navigation = input.reconnectAccountId
+            ? await githubAppRepairNavigation(deps, scope, id, c.req.url, input.reconnectAccountId)
+            : {
+                ...githubAppConnectNavigation(deps, scope, id, c.req.url, "discover"),
+                account: undefined,
+              };
           return beginConnectAttempt(tx, scope, {
             ...(continuation ? { externalContinuation: continuation } : {}),
             idempotencyKey: input.idempotencyKey,
@@ -1744,6 +1750,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               credentialsCommitted: false,
               integrationInstalled: false,
               completionRequirement: "provider_setup",
+              ...(navigation.account ? { account: navigation.account } : {}),
               nextAction: { type: "authorize", url: navigation.authorizationUrl },
               expiresAt: navigation.expiresAt,
             },

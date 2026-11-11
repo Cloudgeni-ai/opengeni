@@ -314,7 +314,7 @@ function stubUsage(
   ) => {
     const url = input instanceof Request ? input.url : String(input);
     if (!url.startsWith("https://api.anthropic.com/")) return await original(input, init);
-    if (url !== USAGE_URL) throw new Error(`unexpected Anthropic call ${url}`);
+    if (url.split("?")[0] !== USAGE_URL) throw new Error(`unexpected Anthropic call ${url}`);
     calls.push(url);
     authorizations.push(new Headers(init?.headers).get("authorization"));
     if (respond) return respond();

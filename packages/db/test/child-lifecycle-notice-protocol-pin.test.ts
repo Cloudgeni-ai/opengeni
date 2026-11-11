@@ -29,10 +29,20 @@ test("producer-side notice keys are pinned to the notice protocol revision", () 
       }),
       childPausedDedupeKey({ childSessionId: child, receiptId: "r" }),
       childWaitingCapacityDedupeKey({ childSessionId: child, waiterId: "w" }),
+      childWaitingCapacityDedupeKey({
+        childSessionId: child,
+        waiterId: "w",
+        restatedResetsAt: "2026-11-10T08:00:00.000Z",
+      }),
+      childWaitingCapacityDedupeKey({
+        childSessionId: child,
+        waiterId: "w",
+        restatedResetsAt: null,
+      }),
       childProgressDedupeKey({ childSessionId: child, receiptId: "r" }),
     ],
   }).toEqual({
-    revision: 3,
+    revision: 4,
     prefixes: {
       requiresAction: "child-requires-action",
       requiresActionResolved: "child-requires-action-resolved",
@@ -45,6 +55,8 @@ test("producer-side notice keys are pinned to the notice protocol revision", () 
       `child-requires-action-resolved:${child}:t:2:a`,
       `child-paused:${child}:r`,
       `child-waiting-capacity:${child}:w`,
+      `child-waiting-capacity:${child}:w:2026-11-10T08:00:00.000Z`,
+      `child-waiting-capacity:${child}:w:unknown`,
       `child-progress:${child}:r`,
     ],
   });

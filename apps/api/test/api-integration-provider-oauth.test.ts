@@ -1907,6 +1907,24 @@ describe("API Integration provider OAuth", () => {
       code: "provider_denied",
     },
     {
+      // "Approval required" / "Need admin approval", then Cancel or "Return to
+      // the application without granting consent".
+      name: "cancelled on the admin approval page (error_subcode=cancel)",
+      error: "access_denied",
+      subcode: "cancel",
+      description: "AADSTS65004: User declined to consent to access the app.",
+      state: "cancelled",
+      code: "provider_denied",
+    },
+    {
+      name: "cancelled without a description (error_subcode=cancel)",
+      error: "access_denied",
+      subcode: "cancel",
+      description: undefined,
+      state: "cancelled",
+      code: "provider_denied",
+    },
+    {
       name: "access_denied without a description",
       error: "access_denied",
       description: undefined,
@@ -1960,6 +1978,7 @@ describe("API Integration provider OAuth", () => {
           state: signIn.searchParams.get("state")!,
         });
         if (returned.description) query.set("error_description", returned.description);
+        if ("subcode" in returned) query.set("error_subcode", returned.subcode);
         const response = await app.request(`/v1/integrations/provider-oauth/callback?${query}`);
         expect(response.status, returned.name).toBe(302);
         expect(response.headers.get("location"), returned.name).toBe(
@@ -2016,6 +2035,57 @@ describe("API Integration provider OAuth", () => {
       ).toEqual([]);
     }, 60_000);
   }
+
+  test("a sign-in popup left on Microsoft's approval page ends on the closing page with the approval link", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const app = testApp(providerFixture());
+    const headers = {
+      authorization: await bearer(workspace),
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    const base = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const begun = await app.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: MICROSOFT_OUTLOOK_MAIL_INTEGRATION_DEFINITION.id,
+        ownership: "personal",
+        returnUrl: "https://host.example/capabilities",
+        finishInPopup: true,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(begun.status).toBe(200);
+    const attempt = await begun.json();
+    const signIn = new URL(attempt.nextAction.url);
+    const query = new URLSearchParams({
+      error: "access_denied",
+      error_subcode: "cancel",
+      error_description: "AADSTS65004: User declined to consent to access the app.",
+      state: signIn.searchParams.get("state")!,
+    });
+    const response = await app.request(`/v1/integrations/provider-oauth/callback?${query}`);
+    // The popup never loads a second copy of the host page.
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe(
+      "http://127.0.0.1:8000/v1/integrations/connect/finished",
+    );
+    // The panel that started it reads the outcome: cancelled, with the
+    // organization's approval link to show instead of closing quietly.
+    const current = await (await app.request(`${base}/${attempt.id}`, { headers })).json();
+    expect(current).toMatchObject({
+      state: "cancelled",
+      nextAction: { type: "none" },
+      error: { code: "provider_denied", retryable: true },
+    });
+    const link = /https:\/\/login\.microsoftonline\.com\/\S+?(?=\s|$)/.exec(current.error.message);
+    expect(new URL(link![0]).toString()).toBe(
+      new URL(attempt.nextAction.organizationApprovalUrl).toString(),
+    );
+  }, 60_000);
 
   test("an administrator returning from the approval link sees whether it was approved", async () => {
     if (!available) return;

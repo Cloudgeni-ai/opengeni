@@ -46,7 +46,11 @@ The new-chat and follow-up composers follow the web composer:
   workspace's transcription API (`POST /v1/workspaces/:id/transcriptions`); the
   text is appended to the draft. It shows only where the deployment offers
   voice input for that workspace (`voiceInput` in the client config).
-- **Attachments** from the photo library or files, through the **+** menu.
+- **Attachments** through the **+** menu: photos and videos from the library
+  or the camera, and files. Each file streams from disk to storage with
+  Expo's native upload task, showing its progress, so a long video never has
+  to fit in memory; library videos keep their original file (often HEVC in a
+  `.MOV`). The agent gets them in its sandbox like files uploaded on the web.
 - **New-chat options** in the same menu: visibility, a GitHub repository and a
   self-hosted machine when the workspace has them, with the rest on the web.
 - **Model and reasoning** from the workspace's model catalog.

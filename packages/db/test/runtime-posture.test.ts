@@ -4252,7 +4252,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272 and 1274 grant what 0937, 0946, 1103, 1060, 1107, 0988, 1218 and 1224 withheld; 0978's, 0984's, 1002's, 1091's, 1172's, 1211's and 1240's stay deferred", () => {
+describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272, 1274 and 1361 grant what 0937, 0946, 1103, 1060, 1107, 0988, 1218, 1224 and 1240/1283 withheld; 0978's, 0984's, 1002's, 1091's, 1172's and 1211's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4403,7 +4403,6 @@ describe("runtime definers: 0947, 0950, 1149, 1210, 1239, 1272 and 1274 grant wh
       "redact_session_secret_cells_v1(uuid, text, jsonb)",
       "list_organization_member_names_v1(uuid)",
       "list_due_slack_agent_update_installations_v1(integer)",
-      "list_uncompacted_recording_tracks_v1(integer, text)",
       "end_agent_call_rings_v1(uuid)",
       "session_content_garbage_candidates_v1(integer)",
       "collect_session_content_garbage_v1(uuid, uuid, integer)",

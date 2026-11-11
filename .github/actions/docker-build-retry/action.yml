@@ -25,6 +25,18 @@ inputs:
     description: Build arguments.
     required: false
     default: ""
+  build-contexts:
+    description: Additional named build contexts.
+    required: false
+    default: ""
+  outputs:
+    description: Build outputs (for example type=cacheonly for a cache-warming build).
+    required: false
+    default: ""
+  provenance:
+    description: Provenance attestation setting.
+    required: false
+    default: ""
   push:
     description: Whether to push the image.
     required: false
@@ -62,6 +74,9 @@ runs:
         target: ${{ inputs.target }}
         platforms: ${{ inputs.platforms }}
         build-args: ${{ inputs.build-args }}
+        build-contexts: ${{ inputs.build-contexts }}
+        outputs: ${{ inputs.outputs }}
+        provenance: ${{ inputs.provenance }}
         push: ${{ inputs.push }}
         tags: ${{ inputs.tags }}
         labels: ${{ inputs.labels }}
@@ -81,6 +96,9 @@ runs:
         target: ${{ inputs.target }}
         platforms: ${{ inputs.platforms }}
         build-args: ${{ inputs.build-args }}
+        build-contexts: ${{ inputs.build-contexts }}
+        outputs: ${{ inputs.outputs }}
+        provenance: ${{ inputs.provenance }}
         push: ${{ inputs.push }}
         tags: ${{ inputs.tags }}
         labels: ${{ inputs.labels }}

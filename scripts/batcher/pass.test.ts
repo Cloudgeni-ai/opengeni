@@ -813,7 +813,12 @@ describe("a batcher pass", () => {
     gh.finishCi(single.sha, "failure", 2, [UNIT, SHARD]);
     await run(gh, options());
     expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
-    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+    // With what broke the batch found, the groups it split off are retested
+    // together, without the bisection's blame.
+    const rest = gh.batch();
+    expect(rest.manifest.members.map((m) => m.number)).toEqual([2, 3, 4]);
+    expect(rest.manifest.pending).toEqual([]);
+    expect(rest.manifest.blame).toBeUndefined();
   });
 
   test("a run that failed before any job started, so GitHub will not rerun its failed jobs, runs again in full", async () => {

@@ -27,6 +27,11 @@ export type ConnectSetupProps = {
    * when the provider asks them to finish elsewhere and come back.
    */
   inChat?: boolean;
+  /**
+   * The surrounding header already says what this step fixes: drop the generic
+   * connection summary and show only the step's status and controls.
+   */
+  explained?: boolean;
   /** Begin a fresh attempt after declined or administrator-gated authorization. */
   onRetry?: (() => void | Promise<unknown>) | undefined;
   /**
@@ -59,6 +64,7 @@ function ScopedSetup({
   className,
   authorizeLabel: authorizeLabelProp,
   inChat = false,
+  explained = false,
   onRetry,
   serviceName,
 }: ConnectSetupProps) {
@@ -110,10 +116,10 @@ function ScopedSetup({
       aria-label={t("connectSetup.connectionSetup")}
       aria-busy={view.busy || navigating}
     >
-      {/* A chat card already names the service and whose account it is; a
-          sign-in step there needs only its button, and any other step only
-          its status. */}
-      {adminApproval ? null : inChat ? (
+      {/* A chat card, or a header that explains the fix, already names the
+          service and the problem; a sign-in step there needs only its button,
+          and any other step only its status. */}
+      {adminApproval ? null : inChat || explained ? (
         action.type === "authorize" ? null : (
           <p role="status" className="og-connect-setup-status">
             {flow.status}

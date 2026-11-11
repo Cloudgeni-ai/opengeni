@@ -103,6 +103,17 @@ export class ComputerBackendError extends Error {
   }
 }
 
+/** The helper process behind a backend stopped before a call reached it, so
+ * nothing of the call ran. It is not a ComputerBackendError, which describes
+ * an OS operation of a healthy helper: ComputerDriver replaces the helper
+ * instead (see ComputerDriver.readWithRecovery). */
+export class ComputerHelperStoppedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ComputerHelperStoppedError";
+  }
+}
+
 export interface ComputerBackend {
   validateNative?(request: ComputerNativeCallRequest): Promise<void>;
   callNative?(

@@ -101,4 +101,28 @@ describe("Expo call adapter on Android", () => {
     Object.assign(androidModule, { connectsBeforeAnswer: () => false });
     expect(createExpoCallAdapter()!.incoming!.connectsBeforeAnswer).toBe(false);
   });
+
+  test("a build before the full-screen check rings full screen as before", () => {
+    const incoming = createExpoCallAdapter()!.incoming!;
+    expect(incoming.canRingFullScreen).toBeUndefined();
+    expect(incoming.openFullScreenRingSettings).toBeUndefined();
+  });
+
+  test("reads full-screen rings afresh each time and opens their setting", async () => {
+    let fullScreenRing = false;
+    const opened: string[] = [];
+    Object.assign(androidModule, {
+      capabilities: () => ({ systemCall: true, incoming: true, fullScreenRing }),
+      openFullScreenRingSettings: async () => {
+        opened.push("settings");
+        return true;
+      },
+    });
+    const incoming = createExpoCallAdapter()!.incoming!;
+    expect(incoming.canRingFullScreen!()).toBe(false);
+    fullScreenRing = true;
+    expect(incoming.canRingFullScreen!()).toBe(true);
+    expect(await incoming.openFullScreenRingSettings!()).toBe(true);
+    expect(opened).toEqual(["settings"]);
+  });
 });
