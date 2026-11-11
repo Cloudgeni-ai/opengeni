@@ -1404,6 +1404,13 @@ An already expanded or actively read view is preserved through settlement.
 Routine machine inputs get one compact reason per resumed turn. Normal tip-follow
 continues through long answers, and manual scrolling never auto-repins on new work.
 
+A failure is shown once. If your host shows a session failure itself together
+with what to do about it (for example a banner with Retry), pass that failure's
+event ids as `presentedFailureEventIds`: the turn's row then says only "Failed"
+and the timeline leaves the text to you. Without it, the turn's row carries the
+failure text. An attempt that Retry replaced is always one quiet
+"Attempt failed · retried" step with its text behind the disclosure.
+
 `turnSummary.renderLiveMark` leads the live Working, Waiting or Paused row with
 the host's own mark, such as a small animated mascot. It receives the row's
 state (`{ kind: "working" | "waiting" | "paused", waitingOn?: "you" }`, where

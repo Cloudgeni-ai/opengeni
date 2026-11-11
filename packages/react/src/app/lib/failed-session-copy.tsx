@@ -279,6 +279,8 @@ export function failedSessionCopy(
       reason: recorded || MACHINE_ACCESS_REQUIRED,
       unavailableModel: false,
       machineAccess: true,
+      // The owner's Allow headline names the machine instead of this text.
+      ...(diagnostic ? { detail: diagnostic } : {}),
     };
   }
   if (code === "codex_request_rejected") {
@@ -428,7 +430,15 @@ export function failedSessionCopy(
             ? `${recorded.slice(0, 157)}…`
             : recorded
           : "This session failed.";
-  return { reason, unavailableModel };
+  // The banner is where a current failure is shown (the timeline keeps only
+  // a quiet status), so recorded text the headline shortened or replaced stays
+  // reachable behind Details. A credit stop's recorded text adds nothing.
+  const detail = creditExhausted ? undefined : diagnostic?.trim();
+  return {
+    reason,
+    unavailableModel,
+    ...(detail && detail.replace(/\s+/g, " ") !== reason ? { detail } : {}),
+  };
 }
 
 /**
@@ -457,6 +467,24 @@ export function chatComposerPlaceholder(input: {
       : "Your free credits don't cover this model — choose another model or add credits.";
   }
   return "Out of Opengeni credits — add credits to continue.";
+}
+
+/**
+ * The recorded text to keep behind Details under a failure headline, or
+ * nothing when the headline already says exactly that. The timeline leaves a
+ * presented failure's text to the banner, so text the headline replaced must
+ * stay reachable here.
+ */
+export function detailBeyondHeadline(
+  headline: unknown,
+  detail: string | null | undefined,
+): string | undefined {
+  const text = detail?.trim();
+  if (!text) return undefined;
+  return typeof headline === "string" &&
+    text.replace(/\s+/g, " ") === headline.replace(/\s+/g, " ").trim()
+    ? undefined
+    : text;
 }
 
 /**
