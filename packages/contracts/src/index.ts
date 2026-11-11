@@ -10,6 +10,7 @@ import {
 export * from "./workspace-control-event";
 export * from "./billing-auto-top-up";
 export * from "./secret-value";
+export * from "./citation-urls";
 export * from "./claude-cite-tags";
 export * from "./machine-access";
 export * from "./no-reply";
@@ -17017,6 +17018,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     pinVersion: primitives.nonnegativeInteger.default(0),
     /** Personal explicit acknowledgment state; opening the session never clears it. */
     unread: primitives.boolean.default(false),
+    /**
+     * True when this failed session's failure was consumed by its parent agent,
+     * which owns the follow-up, so the rail does not ask a person to review it.
+     * Absent when false and on older servers; treat absence as unhandled.
+     */
+    failureHandled: primitives.optionalBoolean,
     /** Personal power-user label for work the member intends to continue. */
     activelyWorking: primitives.boolean.default(false),
     /** Optimistic revision for unread/actively-working state. */
@@ -17062,7 +17069,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
         /** Historical failed lifecycle states, including already-reviewed failures. */
         failedDescendants: primitives.nonnegativeInteger,
         unreadDescendants: z.number().int().nonnegative().optional(),
-        /** Failed descendants whose latest durable event this viewer has not acknowledged. */
+        /**
+         * Failed descendants that still need a person: this viewer has not
+         * acknowledged the latest durable event and no parent agent consumed the
+         * failure (see `failureHandled`).
+         */
         unreadFailedDescendants: z.number().int().nonnegative().optional(),
         activelyWorkingDescendants: z.number().int().nonnegative().optional(),
         /**
@@ -17246,6 +17257,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     pinnedAt: true,
     pinVersion: true,
     unread: true,
+    failureHandled: true,
     activelyWorking: true,
     attentionVersion: true,
     archived: true,

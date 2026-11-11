@@ -2096,6 +2096,11 @@ export type Session = {
   pinVersion?: number;
   /** Personal explicit acknowledgment state. */
   unread?: boolean;
+  /**
+   * True when this failed session's failure was consumed by its parent agent,
+   * which owns the follow-up. Absent when false and on older servers.
+   */
+  failureHandled?: boolean | undefined;
   /** Personal actively-working label. */
   activelyWorking?: boolean;
   /** Optimistic unread/actively-working revision. */
@@ -2204,6 +2209,7 @@ export type SessionListEntry = Pick<
   | "pinnedAt"
   | "pinVersion"
   | "unread"
+  | "failureHandled"
   | "activelyWorking"
   | "attentionVersion"
   | "archived"

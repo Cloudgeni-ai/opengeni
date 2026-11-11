@@ -154,11 +154,11 @@ function NewSessionComposer({
   return (
     <LightboxProvider>
       <section className="rounded-og-lg border border-og-border bg-og-surface-1 p-6">
-        <h2 className="mb-4 font-medium">What should the agent do?</h2>
+        <h2 className="mb-4 font-medium">What can I help with?</h2>
         <ChatComposer
           composer={composer}
           attachments={attachments}
-          placeholder="Describe a task for the agent…"
+          placeholder="Ask anything, or describe what you need…"
         />
       </section>
     </LightboxProvider>

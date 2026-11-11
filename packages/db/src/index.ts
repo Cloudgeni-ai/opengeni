@@ -45,6 +45,7 @@ export * from "./active-session-history";
 import type { ActiveSessionHistoryFootprint } from "./active-session-history";
 export * from "./session-search-records";
 export * from "./model-call-timing";
+export * from "./sandbox-stop-notice";
 export * from "./turn-timing-profile";
 export * from "./turn-timing-profile-store";
 export * from "./model-provider-execution-inputs";
@@ -35616,6 +35617,8 @@ function mapSessionPin(
 type SessionRow = typeof schema.sessions.$inferSelect & {
   currentInputWait?: Session["inputWait"];
   meaningfulSequence?: number;
+  /** See sessionFailureHandledByParentSql. */
+  failureHandled?: boolean;
 };
 
 /**
@@ -35837,6 +35840,7 @@ async function canonicalSessionRowsFromEventCursors(
       ),
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
+  const handledFailures = await sessionIdsWithHandledFailure(db, workspaceId, rows);
   const canonical = (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
     const cursor = cursorBySessionId.get(row.id);
     if (
@@ -35851,6 +35855,7 @@ async function canonicalSessionRowsFromEventCursors(
       ...row,
       lastSequence: cursor.lastSequence,
       meaningfulSequence: cursor.meaningfulSequence,
+      ...(handledFailures.has(row.id) ? { failureHandled: true } : {}),
     };
   });
   return includeEffectivePolicy
@@ -35961,6 +35966,89 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   attentionSince: null,
   truncated: false,
 };
+
+/**
+ * Whether a failed session's failure already belongs to an agent rather than a
+ * person. The check is bound to the failure episode itself: the newest terminal
+ * outbox row the child wrote for its parent (committed in the same transaction
+ * as the failure) must be a failure, and the parent's copy of that exact notice
+ * (same dedupe key) must have been claimed into a parent turn (`delivered`).
+ * The parent agent then owns the follow-up (retry, restart or replace), so the
+ * rail does not ask a person to review it.
+ *
+ * Everything else stays unhandled, so a failure nobody took on keeps its red
+ * marker: a root session; a notice not yet delivered, still pending (parent
+ * paused or not yet run), dropped because the parent was cancelled or archived,
+ * or settled without the parent seeing it (`superseded`, `cancelled`,
+ * `failed`); and a child that finished another turn after that notice (for
+ * example one retired without a new notice), whose newer failure is not the
+ * one the parent saw. Viewer-independent by design.
+ */
+function sessionFailureHandledByParentSql(
+  workspaceId: string,
+  sessionId: SQL,
+  parentSessionId: SQL,
+): SQL {
+  return sql`(${parentSessionId} is not null and coalesce((
+    select episode.classification = 'failure'
+      and exists (
+        select 1
+        from ${schema.sessionSystemUpdates} notice
+        where notice.workspace_id = ${workspaceId}
+          and notice.session_id = ${parentSessionId}
+          and notice.dedupe_key = episode.dedupe_key
+          and notice.state = 'delivered'
+      )
+      and not exists (
+        select 1
+        from ${schema.sessionTurns} later
+        where later.workspace_id = ${workspaceId}
+          and later.session_id = ${sessionId}
+          and later.finished_at is not null
+          and later.finished_at > episode.created_at
+          -- The failed turn's own notice is keyed by that turn; any other
+          -- turn is newer work.
+          and episode.dedupe_key <> ${childFailedTurnDedupeKeySql(sessionId, sql`later.id`)}
+      )
+    from ${schema.sessionSystemUpdateOutbox} episode
+    where episode.workspace_id = ${workspaceId}
+      and episode.source_session_id = ${sessionId}
+      and episode.target_session_id = ${parentSessionId}
+      and episode.kind = 'child_terminal_result'
+    order by episode.created_at desc, episode.id desc
+    limit 1
+  ), false))`;
+}
+
+/** Failed sessions among `rows` whose failure their parent agent consumed. */
+async function sessionIdsWithHandledFailure(
+  db: Database,
+  workspaceId: string,
+  rows: readonly Pick<SessionRow, "id" | "status" | "parentSessionId">[],
+): Promise<Set<string>> {
+  const failedChildIds = [
+    ...new Set(
+      rows.filter((row) => row.status === "failed" && row.parentSessionId).map((row) => row.id),
+    ),
+  ];
+  if (failedChildIds.length === 0) return new Set();
+  const handled = await rawRows<{ id: string }>(
+    db,
+    sql`
+      select child.id
+      from ${schema.sessions} child
+      where child.workspace_id = ${workspaceId}
+        and ${anyOf(sql`child.id`, failedChildIds, "uuid")}
+        and child.status = 'failed'
+        and ${sessionFailureHandledByParentSql(
+          workspaceId,
+          sql`child.id`,
+          sql`child.parent_session_id`,
+        )}
+    `,
+  );
+  return new Set(handled.map((row) => row.id));
+}
 
 /**
  * Remove control metadata derived from sessions other than the exact target.
@@ -36144,6 +36232,7 @@ export async function sessionTreeStatsForSessions(
         -- without carrying a path, and the depth bound caps the work.
         with recursive descendants(
           id,
+          parent_session_id,
           status,
           active_turn_id,
           input_wait_until,
@@ -36154,6 +36243,7 @@ export async function sessionTreeStatsForSessions(
         ) as (
           select
             root.id,
+            root.parent_session_id,
             root.status,
             root.active_turn_id,
             root.input_wait_until,
@@ -36182,6 +36272,7 @@ export async function sessionTreeStatsForSessions(
 
           select
             child.id,
+            child.parent_session_id,
             child.status,
             child.active_turn_id,
             child.input_wait_until,
@@ -36219,8 +36310,8 @@ export async function sessionTreeStatsForSessions(
         ), bounded as materialized (
           -- PostgreSQL evaluates the recursive producer only as far as this
           -- unsorted LIMIT is consumed. One extra descendant is lookahead.
-          select id, status, active_turn_id, input_wait_until, input_wait_turn_id,
-            last_sequence, effective_pause_revision, depth
+          select id, parent_session_id, status, active_turn_id, input_wait_until,
+            input_wait_turn_id, last_sequence, effective_pause_revision, depth
           from descendants
           limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
         ), numbered as (
@@ -36239,7 +36330,21 @@ export async function sessionTreeStatsForSessions(
                 else personal.acknowledged_sequence
               end,
               0
-            ) as unread
+            ) as unread,
+            -- Probed only for unread failed descendants, the only ones a
+            -- handled verdict changes; see sessionFailureHandledByParentSql.
+            case when numbered.status = 'failed' and ${subjectId ?? null}::text is not null
+              and numbered.last_sequence > coalesce(
+                case
+                  when personal.manually_unread_through is not null then -1
+                  else personal.acknowledged_sequence
+                end,
+                0
+              ) then ${sessionFailureHandledByParentSql(
+                workspaceId,
+                sql`numbered.id`,
+                sql`numbered.parent_session_id`,
+              )} else false end as failure_handled
           from numbered
           left join ${schema.sessionPins} personal
             on ${subjectId ?? null}::text is not null
@@ -36293,8 +36398,13 @@ export async function sessionTreeStatsForSessions(
               )
           )::int as "pausedWorkDescendants",
           count(*) filter (where status = 'failed')::int as "failedDescendants",
-          count(*) filter (where status = 'failed' and unread)::int as "unreadFailedDescendants",
-          count(*) filter (where unread)::int as "unreadDescendants",
+          -- A failure its parent agent already consumed is that agent's to handle,
+          -- including anything the failed session logs after it (for example a
+          -- late workspace capture): neither asks the person through an ancestor.
+          count(*) filter (
+            where status = 'failed' and unread and not failure_handled
+          )::int as "unreadFailedDescendants",
+          count(*) filter (where unread and not failure_handled)::int as "unreadDescendants",
           count(*) filter (where actively_working)::int as "activelyWorkingDescendants",
           -- Oldest still-open requires_action turn among the counted attention
           -- descendants. The correlated lookup runs only for rows passing the
@@ -36664,10 +36774,10 @@ async function sessionListTotalsInScope(
       ) personal on true
       where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
         and exists (select 1 from roots root where root.related and root.id = child.root_session_id)
-    ), nodes(root_id, channel_id, id, account_id, status, active_turn_id,
+    ), nodes(root_id, channel_id, id, parent_session_id, account_id, status, active_turn_id,
         input_wait_until, input_wait_turn_id, pause_revision, pinned_path, related,
         acknowledged_sequence, actively_working) as (
-      select root.id, root.channel_id, root.id, root.account_id, root.status,
+      select root.id, root.channel_id, root.id, null::uuid, root.account_id, root.status,
         root.active_turn_id, root.input_wait_until, root.input_wait_turn_id,
         greatest(
           case when control.workspace_state = 'paused' and
@@ -36680,7 +36790,8 @@ async function sessionListTotalsInScope(
       from roots root join ${schema.workspaceInferenceControls} control
         on control.workspace_id = ${workspaceId}
       union all
-      select parent.root_id, parent.channel_id, child.id, child.account_id, child.status,
+      select parent.root_id, parent.channel_id, child.id, child.parent_session_id,
+        child.account_id, child.status,
         child.active_turn_id, child.input_wait_until, child.input_wait_turn_id,
         greatest(
           case when child.subtree_run_override_revision is null or
@@ -36707,6 +36818,14 @@ async function sessionListTotalsInScope(
         root.updated_at as root_updated_at, root.created_at as root_created_at,
         root.origin_title as root_origin_title,
         cursor.last_meaningful_sequence > nodes.acknowledged_sequence as unread,
+        -- Probed only for unread failures, the only ones it changes.
+        case when nodes.status = 'failed'
+          and cursor.last_meaningful_sequence > nodes.acknowledged_sequence
+        then ${sessionFailureHandledByParentSql(
+          workspaceId,
+          sql`nodes.id`,
+          sql`nodes.parent_session_id`,
+        )} else false end as failure_handled,
         nodes.actively_working as active_work,
         case when nodes.status = 'requires_action' then (
           select min(turn.updated_at) from ${schema.sessionTurns} turn
@@ -36753,13 +36872,13 @@ async function sessionListTotalsInScope(
       select channel_id as "channelId", count(*)::int as total,
         count(*) filter (where status = 'requires_action')::int as attention,
         min(attention_since) as "attentionSince",
-        count(*) filter (where status = 'failed' and unread)::int as failed,
+        count(*) filter (where status = 'failed' and unread and not failure_handled)::int as failed,
         count(*) filter (where pause_revision is null and
           (status in ('running', 'recovering') or input_wait))::int as active,
         count(*) filter (where pause_revision is null and
           status in ('queued', 'waiting_capacity'))::int as queued,
         count(*) filter (where pause_revision is null and input_wait)::int as waiting,
-        count(*) filter (where unread)::int as unread,
+        count(*) filter (where unread and not failure_handled)::int as unread,
         count(*) filter (where active_work)::int as "activeWork"
       from measured group by channel_id
     ), site_conv as (
@@ -36887,13 +37006,14 @@ async function sessionListTotalsInScope(
       select conv.site_id, conv.row_channel_id, count(*)::int as total,
         count(*) filter (where node.status = 'requires_action')::int as attention,
         min(node.attention_since) as "attentionSince",
-        count(*) filter (where node.status = 'failed' and node.unread)::int as failed,
+        count(*) filter (where node.status = 'failed' and node.unread
+          and not node.failure_handled)::int as failed,
         count(*) filter (where node.pause_revision is null and
           (node.status in ('running', 'recovering') or node.input_wait))::int as active,
         count(*) filter (where node.pause_revision is null and
           node.status in ('queued', 'waiting_capacity'))::int as queued,
         count(*) filter (where node.pause_revision is null and node.input_wait)::int as waiting,
-        count(*) filter (where node.unread)::int as unread,
+        count(*) filter (where node.unread and not node.failure_handled)::int as unread,
         count(*) filter (where node.active_work)::int as "activeWork"
       from measured node join site_conv conv on conv.id = node.root_id
       group by conv.site_id, conv.row_channel_id
@@ -38504,11 +38624,15 @@ export async function getSessionForSubject(
       throw new Error(`Session event cursor invariant failed for session ${sessionId}`);
     }
     // mapSessionWithControl projects the effective policy below, once.
+    const handledFailure = (
+      await sessionIdsWithHandledFailure(scopedDb, workspaceId, [row.session])
+    ).has(sessionId);
     const [session] = await withCurrentSessionInputWait(scopedDb, workspaceId, [
       {
         ...row.session,
         lastSequence: row.cursor.lastSequence,
         meaningfulSequence: row.cursor.lastMeaningfulSequence,
+        ...(handledFailure ? { failureHandled: true } : {}),
       },
     ]);
     if (!session) throw new Error(`Session event cursor missing for session ${sessionId}`);
@@ -91136,8 +91260,22 @@ async function enqueueFailedChildOutboxForTurnTx(
   }
   await enqueueFailedChildOutboxTx(tx, workspaceId, session, {
     turnId: turn.id,
-    dedupeKey: `child-completion:${turn.sessionId}:turn:${turn.id}`,
+    dedupeKey: childFailedTurnDedupeKey(turn.sessionId, turn.id),
   });
+}
+
+/**
+ * Dedupe key of the notice a child's failed turn sends its parent. The SQL twin
+ * below must build the same string: sessionFailureHandledByParentSql relies on
+ * it to tell the failed turn itself from later work.
+ */
+export function childFailedTurnDedupeKey(childSessionId: string, turnId: string): string {
+  return `child-completion:${childSessionId}:turn:${turnId}`;
+}
+
+/** SQL form of childFailedTurnDedupeKey; keep the two in step. */
+function childFailedTurnDedupeKeySql(childSessionId: SQL, turnId: SQL): SQL {
+  return sql`('child-completion:' || (${childSessionId})::text || ':turn:' || (${turnId})::text)`;
 }
 
 async function enqueueFailedChildOutboxWithoutTurnTx(
@@ -96671,6 +96809,7 @@ function mapSession(
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
     rootSessionId: row.rootSessionId,
+    ...(row.failureHandled ? { failureHandled: true } : {}),
     nestedAgentDepth: row.nestedAgentDepth,
     maxNestedAgentDepthOverride: row.maxNestedAgentDepthOverride ?? null,
     effectiveMaxNestedAgentDepth: row.effectiveMaxNestedAgentDepth,
@@ -97820,6 +97959,7 @@ export * from "./attempt-tool-catalogs";
 export * from "./model-context-snapshots";
 export * from "./session-content-blobs";
 export * from "./session-content-compaction";
+export * from "./session-content-garbage";
 export * from "./session-secret-redaction";
 export * from "./session-archive";
 export * from "./session-unattended";
