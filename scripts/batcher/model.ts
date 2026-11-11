@@ -150,6 +150,13 @@ export interface QueuedPull {
   /** A Version PR's head commit time (epoch ms): its notices are looked up from then. */
   headAt?: number;
   controlPlane: boolean;
+  /**
+   * It changes what Opengeni sends to model providers and the maintainer has
+   * not approved its current head (scripts/ci/model-request-review.ts). It is
+   * then never ready (`greenAt` is null), and a running batch that holds it
+   * is abandoned before it can land.
+   */
+  awaitingModelReview?: true;
 }
 
 export interface Member {
@@ -585,6 +592,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     const left = manifest.members.find(
       (m) => byNumber.get(m.number)?.headSha !== (batch.sameTree?.[m.number] ?? m.head),
     );
+    // A member whose model request approval is gone (dismissed, or revoked by
+    // a later review) must not land with the batch.
+    const unapproved = manifest.members.find((m) => byNumber.get(m.number)?.awaitingModelReview);
     // A priority PR goes into the next batch; it never cancels a running one.
     let reason: string | null = null;
     let changed: number | undefined;
@@ -594,6 +604,9 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
       reason = byNumber.has(left.number)
         ? `#${left.number} has a new head`
         : `#${left.number} left the queue`;
+    } else if (unapproved) {
+      changed = unapproved.number;
+      reason = `#${unapproved.number} needs the maintainer's approval of its model request changes on its head`;
     }
     if (reason)
       actions.push({

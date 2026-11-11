@@ -7,6 +7,7 @@ import {
   type PullFile,
 } from "./github";
 import { MIGRATIONS_DIR } from "../migration-ordinals";
+import { MAINTAINER, evaluate, loadGuardedPatterns } from "../ci/model-request-review";
 import {
   REGENERATION_ARTIFACT,
   REGENERATION_FILE,
@@ -93,6 +94,12 @@ export interface PassOptions {
   now?: () => number;
   log?: (line: string) => void;
   randomId?: () => string;
+  /**
+   * Guarded model request path patterns; by default the model request section
+   * of main's `.github/CODEOWNERS`, read once per pass. A missing or malformed
+   * section stops the pass rather than landing anything unchecked.
+   */
+  modelRequestPatterns?: string[];
 }
 
 interface Context {
@@ -101,6 +108,7 @@ interface Context {
   now: () => number;
   log: (line: string) => void;
   randomId: () => string;
+  modelRequestPatterns: string[];
   /** GraphQL node IDs of queued PRs with auto-merge on, for ejection. */
   autoMerge: Map<number, string>;
   /** Head, branch and changed files of each queued PR whose migration the pass moves. */
@@ -124,6 +132,7 @@ function context(gh: GitHub, options: PassOptions & { dryRun?: boolean }): Conte
     now: options.now ?? Date.now,
     log: options.log ?? ((line) => console.log(line)),
     randomId: options.randomId ?? (() => crypto.randomUUID().replaceAll("-", "").slice(0, 12)),
+    modelRequestPatterns: options.modelRequestPatterns ?? loadGuardedPatterns(),
     autoMerge: new Map(),
     renumbering: new Map(),
     regenerating: new Map(),
@@ -163,6 +172,23 @@ async function observe(ctx: Context): Promise<Observation> {
     const version = pull.headRef === VERSION_BRANCH;
     const changed = green ? await gh.pullFiles(pull.number) : [];
     const files = changed?.flatMap((f) => (f.previous ? [f.path, f.previous] : [f.path])) ?? null;
+    // A PR that changes what Opengeni sends to model providers waits, like a PR
+    // whose CI has not passed, until the maintainer approves its current head.
+    // Too many files to list needs that approval too.
+    const modelReview = green
+      ? await evaluate({
+          patterns: ctx.modelRequestPatterns,
+          files,
+          headSha: pull.headSha,
+          author: pull.author,
+          reviews: () => gh.reviews(pull.number),
+        })
+      : null;
+    const awaitingModelReview = modelReview !== null && !modelReview.pass;
+    if (awaitingModelReview)
+      ctx.log(
+        `Holding #${pull.number}: it changes model request files and ${MAINTAINER} has not approved ${pull.headSha.slice(0, 10)}`,
+      );
     const added = numberedFiles(
       (changed ?? []).filter((f) => ADDED.has(f.status)).map((f) => f.path),
     );
@@ -236,7 +262,7 @@ async function observe(ctx: Context): Promise<Observation> {
       title: pull.title,
       headSha: pull.headSha,
       queuedAt,
-      greenAt: green ? (check?.completedAt ?? now) : null,
+      greenAt: green && !awaitingModelReview ? (check?.completedAt ?? now) : null,
       conflict,
       renumber: conflict === null ? renumber : [],
       regenerate,
@@ -247,6 +273,7 @@ async function observe(ctx: Context): Promise<Observation> {
       ...(headAt === undefined ? {} : { headAt }),
       // Too many files to list is treated like a CI change: it runs alone.
       controlPlane: files === null || isControlPlane(files),
+      ...(awaitingModelReview ? { awaitingModelReview: true as const } : {}),
     });
     ctx.queuedSlots.set(
       pull.number,

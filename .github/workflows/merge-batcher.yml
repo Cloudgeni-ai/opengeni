@@ -50,7 +50,8 @@ jobs:
     # whose job is skipped never replaces a pending pass. A pass never runs PR
     # code: it checks out only scripts/batcher and the modules it imports (the
     # migration ordinals it plans renumbering with and the registry of
-    # generated files it regenerates), from main, and talks to the GitHub API.
+    # generated files it regenerates, and the model request review gate with
+    # the CODEOWNERS section it reads), from main, and talks to the GitHub API.
     concurrency:
       group: merge-batcher
       cancel-in-progress: false
@@ -77,6 +78,8 @@ jobs:
             /scripts/batcher/
             /scripts/migration-ordinals.ts
             /scripts/ci/check-generated-artifacts.ts
+            /scripts/ci/model-request-review.ts
+            /.github/CODEOWNERS
           sparse-checkout-cone-mode: false
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2

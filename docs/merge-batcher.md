@@ -22,6 +22,40 @@ split, the fill leaves out the PRs its halves hold, and priority batches and
 those halves take turns: after a priority batch goes ahead of a half, that half
 goes next, so priority PRs that keep arriving cannot stall a bisection.
 
+## Model request review
+
+A PR that changes what Opengeni sends to model providers is batched only once
+the maintainer (`jorgensandhaug`) has approved its exact current head. The
+guarded paths are the model request section at the end of
+`.github/CODEOWNERS`; `scripts/ci/model-request-review.ts` reads that section
+from `main` and decides, and the batcher and the status below share it.
+
+- **Which files:** the PR's changed files, including the old path of each
+  rename. A PR with more files than GitHub lists (3,000) needs the approval
+  too.
+- **Which approval:** the maintainer's latest decisive review submitted on the
+  PR's current head commit. An approval of an earlier head, a dismissed
+  approval, or anyone else's review does not count, and a later "changes
+  requested" revokes it. GitHub refuses self-approval, so on a PR he authored a
+  review he submits on the head whose first line is `/approve-model-request`
+  counts instead.
+- **The batcher** holds such a PR, queued and without a comment, as it holds a
+  PR whose PR CI has not passed. If a member of the running batch loses its
+  approval, the batch is cancelled and rebuilt without it, so it cannot land.
+  Any new head, including one the batcher writes itself to renumber a
+  migration or regenerate files, needs a new approval.
+- **On the PR**, `.github/workflows/model-request-review.yml` (running main's
+  code through `pull_request_target`, and through `workflow_run` of the review
+  signal workflow for review events) posts the **Model request review**
+  status, re-requests the maintainer's review on every unapproved head and
+  keeps one comment that lists the guarded files. The protection ruleset
+  requires that status on `main`. The batcher never trusts the status: it
+  recomputes the verdict from main's code at every pass.
+
+To check one PR by hand:
+`GITHUB_TOKEN=$(gh auth token) bun scripts/ci/model-request-review.ts --pull <n> --dry-run`
+prints the verdict and exits 1 when the gate blocks.
+
 ## Releasing: a Version PR holds main
 
 A queued Version PR (the `changeset-release/main` branch that the Open Version
