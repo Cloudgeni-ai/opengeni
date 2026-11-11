@@ -16,6 +16,7 @@ const MIB: u64 = 1 << 20;
 const SAVE_SOON: SleepConfig = SleepConfig {
     pause_after_ms: Some(1_000),
     save_after_ms: Some(4_000),
+    keep_memory: true,
     archive_after_ms: None,
     drop_after_ms: None,
     evict_after_ms: None,

@@ -16,6 +16,11 @@ fn secs(s: u64) -> Duration {
 }
 
 fn recommended() -> SleepPolicy {
+    SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap()
+}
+
+/// The recommended rules as they are: memory stays in host RAM alone.
+fn unsaved() -> SleepPolicy {
     SleepPolicy::new(SleepRules::RECOMMENDED).unwrap()
 }
 
@@ -23,8 +28,9 @@ fn state(level: Level, durability: Durability, memory_saved: bool) -> State {
     State::new(level, durability, memory_saved)
 }
 
+/// Paused, with a copy that holds its memory unless it has none.
 fn paused(durability: Durability) -> State {
-    state(Level::Paused, durability, false)
+    state(Level::Paused, durability, true)
 }
 
 fn saved() -> State {
@@ -189,6 +195,98 @@ fn an_idle_sandbox_pauses_gets_protected_in_memory_and_leaves_disk_after_days() 
     assert_eq!(step, Step::Fetch);
     let (step, _) = only_start(&rig.finish(1, op, Outcome::Done));
     assert_eq!(step, Step::Boot);
+}
+
+#[test]
+fn an_idle_sandbox_whose_memory_is_not_kept_has_its_files_copied_and_stays_in_memory() {
+    let mut rig = Rig::new(&HostPolicy::default());
+    rig.add(1, State::RUNNING, unsaved());
+    let copied = state(Level::Paused, Durability::Remote, false);
+    let expected = [
+        (Step::Pause, 10, paused(Durability::Volatile)),
+        // Nothing is saved at 30 seconds: its files are copied at two
+        // minutes, and it stays paused in memory with its programs.
+        (Step::Archive, 120, copied),
+        // On the third day its process ends and the local copy goes.
+        (
+            Step::End,
+            3 * DAY,
+            state(Level::Archived, Durability::Remote, false),
+        ),
+        (
+            Step::Evict,
+            3 * DAY,
+            state(Level::Remote, Durability::Remote, false),
+        ),
+    ];
+    let mut actions = Vec::new();
+    for (step, at, after) in expected {
+        if started(&actions).is_empty() {
+            actions = rig.tick_at_deadline();
+        }
+        assert_eq!(rig.now, At::from_duration(secs(at)), "{step:?}");
+        let (started_step, op) = only_start(&actions);
+        assert_eq!(started_step, step);
+        actions = rig.finish(1, op, Outcome::Done);
+        // Its programs ended as its rules say: nothing was lost.
+        assert_eq!(notices(&actions, 1), [Notice::State(after)]);
+    }
+    assert_nothing_started(&actions);
+    assert_eq!(rig.host.next_deadline(), None);
+    let (step, op) = only_start(&rig.touch(1));
+    assert_eq!(step, Step::Fetch);
+    let (step, _) = only_start(&rig.finish(1, op, Outcome::Done));
+    assert_eq!(step, Step::Boot);
+}
+
+#[test]
+fn a_use_resumes_a_paused_sandbox_whose_files_are_copied_and_stops_a_copy_under_way() {
+    let mut rig = Rig::new(&HostPolicy::default());
+    rig.add(1, paused(Durability::Volatile), unsaved());
+    let (step, op) = only_start(&rig.at(secs(120)).send(Input::Tick));
+    assert_eq!(step, Step::Archive);
+    // A use meanwhile stops the copy and resumes the VM, programs and all.
+    let actions = rig.touch(1);
+    assert!(
+        actions.contains(&Action::Cancel {
+            sandbox: SandboxId(1),
+            op
+        }),
+        "{actions:?}"
+    );
+    let (step, op) = only_start(&rig.finish(1, op, Outcome::Cancelled));
+    assert_eq!(step, Step::Resume);
+    rig.finish(1, op, Outcome::Done);
+    assert_eq!(rig.state(1), State::RUNNING);
+
+    rig.add(
+        2,
+        state(Level::Paused, Durability::Remote, false),
+        unsaved(),
+    );
+    let (step, op) = only_start(&rig.touch(2));
+    assert_eq!(step, Step::Resume);
+    rig.finish(2, op, Outcome::Done);
+    assert_eq!(rig.state(2), State::RUNNING);
+}
+
+#[test]
+fn a_lost_process_whose_memory_is_not_kept_leaves_its_files() {
+    let mut rig = Rig::new(&HostPolicy::default());
+    rig.add(
+        1,
+        state(Level::Paused, Durability::Remote, false),
+        unsaved(),
+    );
+    let actions = rig.send(Input::Lost {
+        sandbox: SandboxId(1),
+    });
+    let archived = state(Level::Archived, Durability::Remote, false);
+    assert_eq!(
+        notices(&actions, 1),
+        [Notice::MemoryLost, Notice::State(archived)]
+    );
+    assert_eq!(only_start(&rig.touch(1)).0, Step::Boot);
 }
 
 #[test]
@@ -766,7 +864,7 @@ fn memory_pressure_saves_an_unprotected_sandbox_before_ending_its_process() {
     let mut rig = pressured_rig();
     let rules = SleepRules {
         compress_under_pressure: false,
-        ..SleepRules::RECOMMENDED
+        ..SleepRules::RECOMMENDED.keeping_memory()
     };
     rig.add(
         1,
@@ -787,6 +885,135 @@ fn memory_pressure_saves_an_unprotected_sandbox_before_ending_its_process() {
         rig.host.sandbox(SandboxId(1)).unwrap().floor,
         Level::Running
     );
+}
+
+#[test]
+fn memory_pressure_ends_a_sandbox_whose_memory_is_not_kept_with_nothing_saved() {
+    let mut rig = pressured_rig();
+    let rules = SleepRules {
+        compress_under_pressure: false,
+        ..SleepRules::RECOMMENDED
+    };
+    let policy = SleepPolicy::new(rules).unwrap();
+    rig.add(1, paused(Durability::Volatile), policy);
+    rig.add(2, state(Level::Paused, Durability::Remote, false), policy);
+    for id in 1..=2 {
+        rig.send(Input::Resident {
+            sandbox: SandboxId(id),
+            bytes: GIB,
+        });
+    }
+    let actions = rig.send(Input::Memory { available: 7 * GIB });
+    let starts = started(&actions);
+    assert_eq!(
+        starts
+            .iter()
+            .map(|start| (start.0, start.1))
+            .collect::<Vec<_>>(),
+        vec![(1, Step::End), (2, Step::End)]
+    );
+    for (id, _, op) in starts {
+        rig.finish(id, op, Outcome::Done);
+    }
+    // Its files are where they were: on local disk, and in object storage
+    // if they were copied there.
+    assert_eq!(rig.state(1), state(Level::Saved, Durability::Local, false));
+    assert_eq!(
+        rig.state(2),
+        state(Level::Archived, Durability::Remote, false)
+    );
+    assert_eq!(
+        rig.host.sandbox(SandboxId(1)).unwrap().floor,
+        Level::Running
+    );
+    assert_eq!(only_start(&rig.touch(1)).0, Step::Boot);
+}
+
+#[test]
+fn a_sleep_asked_with_its_programs_saves_a_sandbox_whose_memory_is_not_kept() {
+    let mut rig = Rig::new(&HostPolicy::default());
+    // Asked without its programs, as an idle one handed off, it goes as
+    // its rules say: its VM ends and its files alone are archived.
+    rig.add(1, paused(Durability::Volatile), unsaved());
+    let mut actions = rig.send(Input::Sleep {
+        sandbox: SandboxId(1),
+        level: Level::Archived,
+        keep: false,
+    });
+    let mut steps = Vec::new();
+    while let [(_, step, op)] = started(&actions)[..] {
+        steps.push(step);
+        actions = rig.finish(1, op, Outcome::Done);
+    }
+    assert_eq!(steps, [Step::End, Step::Archive]);
+    assert_eq!(
+        rig.state(1),
+        state(Level::Archived, Durability::Remote, false)
+    );
+
+    // Asked with them, as one handed off while in use, it is saved first.
+    rig.add(2, State::RUNNING, unsaved());
+    let mut actions = rig.send(Input::Sleep {
+        sandbox: SandboxId(2),
+        level: Level::Archived,
+        keep: true,
+    });
+    let mut steps = Vec::new();
+    while let [(_, step, op)] = started(&actions)[..] {
+        steps.push(step);
+        actions = rig.finish(2, op, Outcome::Done);
+    }
+    assert_eq!(steps, [Step::Pause, Step::Save, Step::Drop, Step::Archive]);
+    assert_eq!(
+        rig.state(2),
+        state(Level::Archived, Durability::Remote, true)
+    );
+    assert_eq!(only_start(&rig.touch(2)).0, Step::Restore);
+}
+
+#[test]
+fn reclaimable_memory_counts_idle_paused_sandboxes_that_end_at_once() {
+    let mut rig = Rig::new(&HostPolicy {
+        admission: Some(Admission {
+            budget: 64 * GIB,
+            buffer: 0,
+            busy_grace: Duration::ZERO,
+        }),
+        ..HostPolicy::default()
+    });
+    // One whose memory is not kept ends at once whether its files are
+    // copied or not; one that only pauses never ends.
+    let pauses_only = SleepPolicy::new(SleepRules {
+        pause_after: Some(secs(10)),
+        ..SleepRules::NEVER
+    })
+    .unwrap();
+    rig.add(1, paused(Durability::Volatile), unsaved());
+    rig.add(
+        2,
+        state(Level::Paused, Durability::Remote, false),
+        unsaved(),
+    );
+    rig.add(3, paused(Durability::Volatile), pauses_only);
+    rig.add(4, State::RUNNING, unsaved());
+    for id in 1..=4 {
+        rig.send(Input::Resident {
+            sandbox: SandboxId(id),
+            bytes: GIB << id,
+        });
+    }
+    assert_eq!(
+        rig.host.reclaimable_memory(rig.now),
+        (GIB << 1) + (GIB << 2)
+    );
+    // Asked to sleep with its programs, it is saved first, which is not
+    // instant.
+    rig.send(Input::Sleep {
+        sandbox: SandboxId(2),
+        level: Level::Archived,
+        keep: true,
+    });
+    assert_eq!(rig.host.reclaimable_memory(rig.now), GIB << 1);
 }
 
 #[test]
@@ -944,6 +1171,7 @@ fn a_sleep_request_drains_a_sandbox_to_object_storage_and_it_still_wakes() {
     let mut actions = rig.send(Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Remote,
+        keep: true,
     });
     let mut steps = Vec::new();
     while let [(_, step, op)] = started(&actions)[..] {
@@ -977,6 +1205,7 @@ fn a_sandbox_that_cannot_be_saved_still_wakes_and_runs() {
     let (step, op) = only_start(&rig.send(Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Remote,
+        keep: true,
     }));
     assert_eq!(step, Step::Save);
     let actions = rig.finish(1, op, Outcome::Failed(Failure::Unsavable));
@@ -1032,6 +1261,7 @@ fn a_running_vm_found_unsavable_is_never_saved() {
     let (step, _) = only_start(&rig.send(Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Saved,
+        keep: true,
     }));
     assert_eq!(step, Step::Compress);
     // A sandbox without a process has nothing to distrust.
@@ -1056,6 +1286,7 @@ fn a_sleep_request_waits_for_holds_and_a_touch_cancels_it() {
     let sleep = Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Saved,
+        keep: true,
     };
     assert_eq!(rig.send(sleep), [], "held: nothing yet");
     let (step, op) = only_start(&rig.send(Input::Release {
@@ -1096,6 +1327,7 @@ fn letting_go_ends_every_hold_so_a_sleep_request_goes_ahead_at_once() {
     let sleep = Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Archived,
+        keep: true,
     };
     assert_eq!(rig.send(sleep), [], "held: nothing yet");
     let (step, op) = only_start(&rig.send(Input::LetGo {
@@ -1134,6 +1366,7 @@ fn letting_go_ends_a_wake_still_retrying_so_a_sleep_request_goes_ahead() {
     rig.send(Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Archived,
+        keep: true,
     });
     rig.send(Input::LetGo {
         sandbox: SandboxId(1),
@@ -1183,6 +1416,7 @@ fn work_inside_a_running_sandbox_keeps_it_awake_but_never_wakes_it() {
     let decided = rig.send(Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Saved,
+        keep: true,
     });
     assert_eq!(only_start(&decided).0, Step::Pause, "{decided:?}");
     assert_eq!(rig.send(busy), []);
@@ -1315,6 +1549,7 @@ fn a_sleep_request_made_during_a_wake_applies_after_it() {
     assert_nothing_started(&rig.send(Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Saved,
+        keep: true,
     }));
     assert_eq!(
         rig.host.sandbox(SandboxId(1)).unwrap().requested,
@@ -1359,6 +1594,7 @@ fn a_sleep_request_made_while_a_wake_passes_a_deeper_level_survives_it() {
     assert_nothing_started(&rig.send(Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Saved,
+        keep: true,
     }));
     // The fetch lands on Archived, deeper than Saved, but only on the way up.
     let (step, restore) = only_start(&rig.finish(1, fetch, Outcome::Done));
@@ -1398,6 +1634,7 @@ fn a_sleep_request_made_while_a_sleep_step_gives_way_to_a_wake_applies_after_it(
     let request = Input::Sleep {
         sandbox: SandboxId(1),
         level: Level::Saved,
+        keep: true,
     };
     let (step, drop) = only_start(&rig.send(request));
     assert_eq!(step, Step::Drop);
@@ -1540,7 +1777,7 @@ fn memory_pressure_cancels_an_archive_that_would_hold_it_up() {
     let mut rig = pressured_rig();
     let rules = SleepRules {
         compress_under_pressure: false,
-        ..SleepRules::RECOMMENDED
+        ..SleepRules::RECOMMENDED.keeping_memory()
     };
     rig.add(
         1,

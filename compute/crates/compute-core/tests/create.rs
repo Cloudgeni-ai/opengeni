@@ -44,7 +44,7 @@ fn size(millis: u64) -> Size {
 
 /// How the sandboxes in these tests sleep: the host may save them.
 fn rules() -> SleepPolicy {
-    SleepPolicy::new(SleepRules::RECOMMENDED).unwrap()
+    SleepPolicy::new(SleepRules::RECOMMENDED.keeping_memory()).unwrap()
 }
 
 struct Rig {

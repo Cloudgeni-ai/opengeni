@@ -79,7 +79,9 @@ pub struct State {
     pub durability: Durability,
     /// Whether the kept copy includes memory, so waking continues running
     /// programs instead of booting fresh from the files. At a level with a
-    /// VM process this is true exactly when a copy exists.
+    /// VM process a copy on local disk always does; one in object storage
+    /// holds the files alone when the sandbox's memory is never saved
+    /// ([`crate::SleepRules::keep_memory`]).
     pub memory_saved: bool,
 }
 
@@ -95,8 +97,8 @@ impl State {
     ///
     /// A running VM is always [`Durability::Volatile`]. Saved state lives on
     /// local disk, archived and remote state also in object storage. At a
-    /// level with a VM process, a copy always includes memory, and without a
-    /// copy there is no saved memory.
+    /// level with a VM process, a copy on local disk always includes
+    /// memory, and without a copy there is no saved memory.
     #[must_use]
     pub const fn new(level: Level, durability: Durability, memory_saved: bool) -> Self {
         let durability = match level {
@@ -105,10 +107,10 @@ impl State {
             Level::Saved => Durability::Local,
             Level::Archived | Level::Remote => Durability::Remote,
         };
-        let memory_saved = if level.has_process() {
-            !matches!(durability, Durability::Volatile)
-        } else {
-            memory_saved
+        let memory_saved = match (level.has_process(), durability) {
+            (true, Durability::Volatile) => false,
+            (true, Durability::Local) => true,
+            (true, Durability::Remote) | (false, _) => memory_saved,
         };
         Self {
             level,
@@ -131,8 +133,9 @@ impl State {
     }
 
     /// The state after the VM process ends unexpectedly. A current saved
-    /// copy takes over; without one only the files on local disk remain.
-    /// Returns the new state and whether running programs were lost.
+    /// copy takes over; without one, or with one of the files alone, only
+    /// the files remain. Returns the new state and whether running programs
+    /// were lost.
     #[must_use]
     pub const fn without_process(self) -> (Self, bool) {
         if !self.level.has_process() {
@@ -141,7 +144,10 @@ impl State {
         match self.durability {
             Durability::Volatile => (Self::new(Level::Saved, Durability::Local, false), true),
             Durability::Local => (Self::new(Level::Saved, Durability::Local, true), false),
-            Durability::Remote => (Self::new(Level::Archived, Durability::Remote, true), false),
+            Durability::Remote => (
+                Self::new(Level::Archived, Durability::Remote, self.memory_saved),
+                !self.memory_saved,
+            ),
         }
     }
 
@@ -194,7 +200,12 @@ impl State {
         match self.level {
             Level::Running | Level::Remote => self,
             Level::Paused | Level::Compressed => match self.durability {
-                Durability::Remote => Self::new(self.level, Durability::Local, true),
+                Durability::Remote if self.memory_saved => {
+                    Self::new(self.level, Durability::Local, true)
+                }
+                // A copy of the files alone has no local counterpart but
+                // the disk itself.
+                Durability::Remote => Self::new(self.level, Durability::Volatile, false),
                 Durability::Volatile | Durability::Local => self,
             },
             Level::Saved | Level::Archived => {
@@ -226,16 +237,27 @@ pub enum Step {
     /// Stop the processors: Running to Paused.
     Pause,
     /// End the VM process, which frees all its memory at once. Needs a
-    /// current saved copy, which takes its place: Paused or Compressed to
-    /// Saved, or to Archived when the copy is also in object storage.
+    /// current saved copy with its memory, which takes its place: Paused or
+    /// Compressed to Saved, or to Archived when the copy is also in object
+    /// storage.
     Drop,
+    /// End the VM process with no memory of it saved, which frees all its
+    /// memory at once and writes nothing: Paused or Compressed to Saved
+    /// without a memory image, or to Archived when its files are in object
+    /// storage. Its files stay, written out when it paused; its running
+    /// programs end, and the next wake boots fresh. Unasked, only for a
+    /// sandbox whose memory is never saved
+    /// ([`crate::SleepRules::keep_memory`]).
+    End,
     /// Move memory into compressed host RAM: Paused to Compressed.
     Compress,
     /// Write memory and device state to local disk while the VM stays
     /// paused, so it can still resume instantly: Volatile to Local.
     Save,
     /// Copy the current saved state to object storage: Local to Remote, and
-    /// Saved to Archived. A paused VM is left as it is.
+    /// Saved to Archived. A paused VM is left as it is; one with no memory
+    /// image has its files copied alone, Volatile to Remote, so losing the
+    /// host then costs it only its programs.
     Archive,
     /// Copy a running VM's disk to object storage as it was at one moment,
     /// without its memory and without pausing it. The VM goes on running,
@@ -253,7 +275,7 @@ pub enum Step {
 
 impl Step {
     /// Number of steps.
-    pub const COUNT: usize = 12;
+    pub const COUNT: usize = 13;
 
     /// Every step in admission order: wake steps first.
     pub const ALL: [Self; Self::COUNT] = [
@@ -263,6 +285,7 @@ impl Step {
         Self::Fetch,
         Self::Pause,
         Self::Drop,
+        Self::End,
         Self::Compress,
         Self::Save,
         Self::Archive,
@@ -297,18 +320,14 @@ impl Step {
             Self::Fetch => matches!(level, Level::Remote),
             // A checkpoint copies a running VM and leaves it running.
             Self::Pause | Self::Checkpoint => matches!(level, Level::Running),
-            Self::Drop => {
-                matches!(level, Level::Paused | Level::Compressed)
-                    && !matches!(state.durability, Durability::Volatile)
+            Self::Drop => matches!(level, Level::Paused | Level::Compressed) && state.memory_saved,
+            Self::End | Self::Save => {
+                matches!(level, Level::Paused | Level::Compressed) && !state.memory_saved
             }
             Self::Compress => matches!(level, Level::Paused),
-            Self::Save => {
-                matches!(level, Level::Paused | Level::Compressed)
-                    && matches!(state.durability, Durability::Volatile)
-            }
             Self::Archive => match level {
                 Level::Paused | Level::Compressed => {
-                    matches!(state.durability, Durability::Local)
+                    !matches!(state.durability, Durability::Remote)
                 }
                 Level::Saved => true,
                 Level::Running | Level::Archived | Level::Remote => false,
@@ -336,6 +355,12 @@ impl Step {
                 Durability::Remote => State::new(Level::Archived, Durability::Remote, true),
                 Durability::Volatile | Durability::Local => {
                     State::new(Level::Saved, Durability::Local, true)
+                }
+            },
+            Self::End => match durability {
+                Durability::Remote => State::new(Level::Archived, Durability::Remote, false),
+                Durability::Volatile | Durability::Local => {
+                    State::new(Level::Saved, Durability::Local, false)
                 }
             },
             Self::Compress => State::new(Level::Compressed, durability, memory_saved),
@@ -383,10 +408,11 @@ mod tests {
     }
 
     #[test]
-    fn there_are_exactly_twelve_consistent_states() {
-        // Running; Paused and Compressed at three durabilities; Saved,
-        // Archived and Remote with and without memory.
-        assert_eq!(every_state().len(), 1 + 2 * 3 + 3 * 2);
+    fn there_are_exactly_fifteen_consistent_states() {
+        // Running; Paused and Compressed with no copy, a local one, and a
+        // remote one with and without memory; Saved, Archived and Remote
+        // with and without memory.
+        assert_eq!(every_state().len(), 1 + 2 * 4 + 3 * 2);
         assert!(every_state().into_iter().all(State::is_consistent));
     }
 
@@ -436,10 +462,17 @@ mod tests {
     fn sleep_steps_never_lose_programs_or_protection() {
         for state in every_state() {
             for step in Step::ALL {
-                if step.can_start(state) && !step.wakes() && step != Step::Forget {
+                // Forgetting a memory image and ending a VM whose memory
+                // is not saved give up the programs on purpose.
+                let gives_up = matches!(step, Step::Forget | Step::End);
+                if step.can_start(state) && !step.wakes() && !gives_up {
                     let after = step.apply(state);
                     assert!(after.keeps_programs() || !state.keeps_programs());
-                    assert!(after.durability >= state.durability);
+                    // A save of a paused VM whose files alone are in
+                    // object storage starts a copy with its memory, which
+                    // is local until it is archived in turn.
+                    let restarts = step == Step::Save && state.durability == Durability::Remote;
+                    assert!(after.durability >= state.durability || restarts);
                 }
             }
         }
@@ -447,10 +480,15 @@ mod tests {
 
     #[test]
     fn a_lost_process_falls_back_to_a_current_copy() {
-        let paused = |durability| State::new(Level::Paused, durability, false);
+        let paused = |durability| State::new(Level::Paused, durability, true);
         assert_eq!(
             paused(Durability::Volatile).without_process(),
             (State::new(Level::Saved, Durability::Local, false), true)
+        );
+        // A copy of the files alone keeps the files, not the programs.
+        assert_eq!(
+            State::new(Level::Paused, Durability::Remote, false).without_process(),
+            (State::new(Level::Archived, Durability::Remote, false), true)
         );
         assert_eq!(
             paused(Durability::Local).without_process(),

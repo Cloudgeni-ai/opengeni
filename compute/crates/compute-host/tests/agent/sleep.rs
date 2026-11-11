@@ -14,7 +14,9 @@ use compute_host::protocol::{
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Instant, sleep, sleep_until};
 
-use super::{Delays, Lab, NEVER, PAUSE_SOON, SAVE_IN_PLACE, SAVE_QUICKLY, id, thaw, vm_name};
+use super::{
+    Delays, END_QUICKLY, Lab, NEVER, PAUSE_SOON, SAVE_IN_PLACE, SAVE_QUICKLY, id, thaw, vm_name,
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sleeping_through_save_keeps_memory_and_disk() {
@@ -891,6 +893,65 @@ async fn forgetting_memory_keeps_the_files() {
     assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["", "kept"]);
     assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
     assert_eq!(lab.world.restores.load(Ordering::Relaxed), 0);
+    lab.assert_clean();
+}
+
+/// A sandbox whose memory is not kept has its VM process ended with
+/// nothing written: no snapshot is taken and no memory image is left. Its
+/// guest wrote its disk out as it paused, so its next wake boots with its
+/// files and without its programs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_whose_memory_is_not_kept_ends_unsaved_and_boots_with_its_files() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(31);
+    lab.create(sandbox, END_QUICKLY).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    lab.wait_until("its VM process to end", |status| {
+        let view = Lab::sandbox(status, sandbox);
+        view.level == LevelName::Saved && view.step.is_none()
+    })
+    .await;
+    let view = lab.current(sandbox).await;
+    assert!(!view.memory_saved, "no copy holds its memory");
+    assert_eq!(view.durability, DurabilityName::Local);
+    assert!(!lab.image(sandbox));
+    assert!(
+        lab.world.live.lock().unwrap().is_empty(),
+        "an ended sandbox has no VM"
+    );
+    let [full, diff] = &lab.world.snapshots;
+    assert_eq!(
+        (full.load(Ordering::Relaxed), diff.load(Ordering::Relaxed)),
+        (0, 0),
+        "nothing of its memory was written"
+    );
+
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["", "kept"]);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 2);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 0);
+    lab.assert_clean();
+}
+
+/// Asked to sleep with its programs, a sandbox whose memory is not kept
+/// is saved all the same: the request outranks its rules until it wakes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sleep_request_keeps_the_programs_of_a_sandbox_whose_memory_is_not_kept() {
+    let lab = Lab::new(Delays::default(), HostPolicy::default()).await;
+    let sandbox = id(32);
+    let ends = SleepConfig {
+        pause_after_ms: Some(3_600_000),
+        save_after_ms: Some(3_600_000),
+        drop_after_ms: Some(3_600_000),
+        ..END_QUICKLY
+    };
+    lab.create(sandbox, ends).await;
+    lab.run(sandbox, &["set hello", "write kept"]).await;
+    assert_eq!(lab.sleep_to(sandbox, LevelName::Saved).await, Reply::Done);
+    lab.wait_level(sandbox, LevelName::Saved).await;
+    assert!(lab.image(sandbox));
+    assert_eq!(lab.run(sandbox, &["get", "disk"]).await, ["hello", "kept"]);
+    assert_eq!(lab.world.boots.load(Ordering::Relaxed), 1);
+    assert_eq!(lab.world.restores.load(Ordering::Relaxed), 1);
     lab.assert_clean();
 }
 

@@ -672,6 +672,7 @@ impl<E: Engine, S: Store> HostAgent<E, S> {
                 | Step::Compress
                 | Step::Save
                 | Step::Drop
+                | Step::End
                 | Step::Archive
                 | Step::Checkpoint
         );

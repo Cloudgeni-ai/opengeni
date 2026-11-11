@@ -16,7 +16,7 @@ const SPARE: SandboxId = SandboxId(900);
 fn no_compress() -> SleepPolicy {
     SleepPolicy::new(SleepRules {
         compress_under_pressure: false,
-        ..SleepRules::RECOMMENDED
+        ..SleepRules::RECOMMENDED.keeping_memory()
     })
     .unwrap()
 }

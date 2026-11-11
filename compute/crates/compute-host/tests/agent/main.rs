@@ -1569,6 +1569,7 @@ fn vm_name(id: Id) -> String {
 const NEVER: SleepConfig = SleepConfig {
     pause_after_ms: None,
     save_after_ms: None,
+    keep_memory: false,
     archive_after_ms: None,
     drop_after_ms: None,
     evict_after_ms: None,
@@ -1581,6 +1582,7 @@ const NEVER: SleepConfig = SleepConfig {
 const SAVE_IN_PLACE: SleepConfig = SleepConfig {
     pause_after_ms: Some(30),
     save_after_ms: Some(60),
+    keep_memory: true,
     ..NEVER
 };
 
@@ -1588,6 +1590,15 @@ const SAVE_IN_PLACE: SleepConfig = SleepConfig {
 const SAVE_QUICKLY: SleepConfig = SleepConfig {
     drop_after_ms: Some(90),
     ..SAVE_IN_PLACE
+};
+
+/// Pauses quickly and, as the rules of a sandbox whose memory is not kept
+/// do, ends its VM process soon after with no memory of it saved.
+const END_QUICKLY: SleepConfig = SleepConfig {
+    pause_after_ms: Some(30),
+    save_after_ms: Some(60),
+    drop_after_ms: Some(90),
+    ..NEVER
 };
 
 /// Pauses soon after the last activity.

@@ -51,13 +51,14 @@ pub const BOUNDS: [f64; 16] = [
 
 /// Steps, as [`crate::host::step_name`] names them, in
 /// [`compute_core::Step::ALL`] order.
-pub const STEPS: [&str; 12] = [
+pub const STEPS: [&str; 13] = [
     "resume",
     "restore",
     "boot",
     "fetch",
     "pause",
     "drop",
+    "end",
     "compress",
     "save",
     "archive",

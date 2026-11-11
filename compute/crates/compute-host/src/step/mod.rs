@@ -364,6 +364,7 @@ impl<E: Engine, S: Store> Job<E, S> {
             | Step::Compress
             | Step::Save
             | Step::Drop
+            | Step::End
             | Step::Checkpoint => {
                 let Some(live) = self.live.take() else {
                     // The VM vanished between the decision and the step; the
@@ -376,6 +377,7 @@ impl<E: Engine, S: Store> Job<E, S> {
                     Step::Compress => self.compress(live).await,
                     Step::Save => self.save(live).await,
                     Step::Checkpoint => self.checkpoint(live).await,
+                    Step::End => self.end_unsaved(live).await,
                     _ => self.end_process(live).await,
                 }
             }
@@ -674,6 +676,43 @@ impl<E: Engine, S: Store> Job<E, S> {
         let outcome = self
             .end_with_memory(live.vm, live.memory, Outcome::Done)
             .await;
+        (outcome, After::NoVm)
+    }
+
+    /// Ends the VM process of a paused VM with no memory of it saved, which
+    /// frees all of its memory at once and writes nothing: its sandbox's
+    /// memory is not kept, so its programs end here and its next wake boots
+    /// from its disk, which its guest wrote out as it paused. A copy of
+    /// that disk in the store stays the sandbox's copy, since the disk has
+    /// not changed since. Memory images an earlier save left on the host
+    /// go, as nothing wakes from them again.
+    async fn end_unsaved(&mut self, live: Live<E::Vm>) -> (Outcome, After<E::Vm>) {
+        // The core ends a VM so only when no copy holds its memory; this
+        // is a guard, and keeps the record from vouching for an image
+        // about to go.
+        if self.record.image
+            && let Err(error) = self.commit(Change::new().image(false)).await
+        {
+            return (state_failure(&error), After::Kept(live));
+        }
+        live.stopping.store(true, Ordering::Release);
+        let outcome = self
+            .end_with_memory(live.vm, live.memory, Outcome::Done)
+            .await;
+        if outcome == Outcome::Done {
+            let paths = self.paths.clone();
+            let cleared = blocking(move || {
+                withdraw_base(&paths)?;
+                remove_if_present(&paths.snapshot.state)?;
+                remove_if_present(&paths.snapshot.memory)?;
+                images_of(&paths).clear()
+            })
+            .await
+            .and_then(|cleared| cleared);
+            if let Err(error) = cleared {
+                tracing::warn!(id = %self.id, %error, "memory images of an ended VM not removed; its next boot removes them");
+            }
+        }
         (outcome, After::NoVm)
     }
 
