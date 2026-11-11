@@ -572,8 +572,14 @@ describe("compute alerts", () => {
       values,
     });
     const fleetSeries = (free: number, size: number, max: number, state = "live") => [
-      { series: `compute_fleet_host_info{${own},pod="a",host_name="h1",state="${state}"}`, values: "1x60" },
-      { series: `compute_fleet_host_info{${own},pod="a",host_name="h2",state="draining"}`, values: "1x60" },
+      {
+        series: `compute_fleet_host_info{${own},pod="a",host_name="h1",state="${state}"}`,
+        values: "1x60",
+      },
+      {
+        series: `compute_fleet_host_info{${own},pod="a",host_name="h2",state="draining"}`,
+        values: "1x60",
+      },
       {
         series: `compute_fleet_host_memory_free_bytes{${own},pod="a",host_name="h1"}`,
         values: `${free}x60`,

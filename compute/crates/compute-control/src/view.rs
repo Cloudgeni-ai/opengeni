@@ -406,13 +406,16 @@ impl View {
             inner.fleet.upsert(row.id, info, row.state, capacity);
             // A later epoch is a fresh registration: its agent started
             // again, or its lease lapsed. The first read is not one.
-            let tally = inner.hosts.get(&row.id).map_or_else(Tally::default, |known| {
-                let mut tally = known.tally;
-                if row.epoch > known.target.epoch {
-                    tally.registrations += 1;
-                }
-                tally
-            });
+            let tally = inner
+                .hosts
+                .get(&row.id)
+                .map_or_else(Tally::default, |known| {
+                    let mut tally = known.tally;
+                    if row.epoch > known.target.epoch {
+                        tally.registrations += 1;
+                    }
+                    tally
+                });
             inner.hosts.insert(
                 row.id,
                 Known {
