@@ -18,7 +18,12 @@ const Activity = z.object({
   timestamp: z.string().datetime({ offset: true }),
   channelId: z.literal("msteams"),
   serviceUrl: z.string().url(),
-  from: z.object({ id: opaque, aadObjectId: uuid, role: z.string().optional() }),
+  from: z.object({
+    id: opaque,
+    aadObjectId: uuid,
+    name: z.string().max(512).optional(),
+    role: z.string().optional(),
+  }),
   recipient: z.object({ id: opaque }),
   conversation: z.object({
     id: opaque,
@@ -48,6 +53,8 @@ const Activity = z.object({
 export type TeamsMessage = {
   tenantId: string;
   actorId: string;
+  /** The sender's Teams display name, when Teams sends one. */
+  actorName?: string | null;
   channelId: string | null;
   conversationId: string;
   threadId: string | null;
@@ -95,6 +102,10 @@ export function teamsTenantEnabled(s: Settings, tenantId: string): boolean {
     (s.teamsBotEnabled ||
       s.teamsBotAllowedTenantIds.some((id) => id.toLowerCase() === tenantId.toLowerCase()))
   );
+}
+/** A Teams display name on one line, at most 256 characters; null when empty. */
+export function teamsDisplayName(value: string | undefined): string | null {
+  return value?.replace(/\s+/g, " ").trim().slice(0, 256) || null;
 }
 /** Accept public-cloud Teams connector URLs only, even after SDK signature validation. */
 export function teamsServiceUrl(value: string): string {
@@ -200,6 +211,7 @@ export function normalizeTeamsMessage(
   return {
     tenantId,
     actorId: a.from.aadObjectId.toLowerCase(),
+    actorName: teamsDisplayName(a.from.name),
     channelId: personal || groupChat ? null : a.channelData.channel!.id,
     conversationId: a.conversation.id,
     threadId,
@@ -391,7 +403,7 @@ export function teamsContextMessage(raw: unknown): TeamsContextMessage | null {
     threadId: groupChat ? null : teamsChannelThreadId(a),
     messageId: a.id,
     actorId: a.from.aadObjectId.toLowerCase(),
-    actorName: a.from.name?.replace(/\s+/g, " ").trim().slice(0, 256) || null,
+    actorName: teamsDisplayName(a.from.name),
     text: text.slice(0, TEAMS_CONTEXT_MESSAGE_MAX_CHARS),
     hasAttachments,
     mentioned: (a.entities ?? []).some(
@@ -627,6 +639,12 @@ const Proof = z
     actorId: uuid,
     workspaceId: uuid.nullable(),
     generation: uuid.nullable(),
+    /**
+     * The Teams display name of the person an account link is for, so a
+     * refused link can say whose it is. Display only: the Microsoft sign-in
+     * proves `actorId`.
+     */
+    actorName: z.string().min(1).max(256).optional(),
     /** The 1:1 chat the setup link was sent to, so setup can confirm there. */
     conversation: z
       .object({ id: opaque, serviceUrl: z.string().url().max(512) })

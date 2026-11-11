@@ -375,17 +375,26 @@ test("after Microsoft sign-in, replacing an existing link signs in again and ask
   }
 });
 
-test("bot link requires confirmation and default-off unconfigured bot stays hidden", async () => {
+/** An OAuth state as the API signs it; the page reads only its purpose. */
+function signedState(purpose: "teams-admin-setup" | "teams-account-link") {
+  return `${btoa(JSON.stringify({ version: 1, purpose })).replace(/=+$/, "")}.signature`;
+}
+
+test("bot link requires confirmation, then a Microsoft sign-in that finishes the link", async () => {
   window.history.replaceState(null, "", `/workspaces/${ws}/plugins`);
   const requests: any[][] = [];
-  let linked = false;
+  const authorizationUrl = "https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize?x=1";
   prepare(async (...args) => {
     requests.push(args);
-    if (args[0] === "POST") {
-      linked = true;
-      return { ok: true };
-    }
-    return { enabled: false, configured: false, setupAvailable: false, installation: null, linked };
+    if (String(args[1]).endsWith("/link/microsoft-sign-in")) return { authorizationUrl };
+    if (args[0] === "POST") return { ok: true };
+    return {
+      enabled: false,
+      configured: false,
+      setupAvailable: false,
+      installation: null,
+      linked: false,
+    };
   });
   let visible = false;
   function Harness() {
@@ -393,6 +402,12 @@ test("bot link requires confirmation and default-off unconfigured bot stays hidd
     visible = adapter.visible;
     return adapter.dialogs;
   }
+  const assigned: string[] = [];
+  const assign = window.location.assign;
+  Object.defineProperty(window.location, "assign", {
+    configurable: true,
+    value: (url: string) => assigned.push(url),
+  });
   const view = await render(<Harness />);
   try {
     expect(visible).toBe(false);
@@ -402,20 +417,87 @@ test("bot link requires confirmation and default-off unconfigured bot stays hidd
     });
     expect(requests.filter((r) => r[0] === "POST")).toHaveLength(0);
     expect(view.container.textContent).toContain("Link your Teams account?");
+    expect(view.container.textContent).toContain(
+      "sign in to Microsoft with the account you use in Teams",
+    );
     await act(async () =>
       [...view.container.querySelectorAll("button")]
-        .find((b) => b.textContent === "Link my account")!
+        .find((b) => b.textContent === "Sign in with Microsoft")!
         .click(),
     );
-    expect(requests.find((r) => r[0] === "POST")?.slice(0, 3)).toEqual([
-      "POST",
-      `/v1/workspaces/${ws}/integrations/teams/link`,
-      { token: "link-proof" },
+    // Confirming only starts the Microsoft sign-in; nothing is linked yet.
+    expect(requests.filter((r) => r[0] === "POST").map((r) => r.slice(0, 3))).toEqual([
+      [
+        "POST",
+        `/v1/workspaces/${ws}/integrations/teams/link/microsoft-sign-in`,
+        { token: "link-proof" },
+      ],
     ]);
-    expect(window.location.hash).toBe("");
-    expect(visible).toBe(false);
+    expect(assigned).toEqual([authorizationUrl]);
   } finally {
     await view.cleanup();
+    Object.defineProperty(window.location, "assign", { configurable: true, value: assign });
+  }
+  // Microsoft returns to the setup page, which finishes the link.
+  requests.length = 0;
+  const state = signedState("teams-account-link");
+  window.history.replaceState(
+    null,
+    "",
+    `/teams/connect?code=microsoft-code&state=${encodeURIComponent(state)}`,
+  );
+  const returned = await render(<TeamsConnectRoute />);
+  try {
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(requests.map((r) => r.slice(0, 3))).toEqual([
+      [
+        "POST",
+        `/v1/workspaces/${ws}/integrations/teams/link`,
+        { token: "link-proof", microsoft: { code: "microsoft-code", state } },
+      ],
+    ]);
+    expect(returned.container.textContent).toContain("Teams account linked");
+    expect(window.location.search).toBe("");
+  } finally {
+    await returned.cleanup();
+    window.history.replaceState(null, "", "/teams/connect");
+  }
+});
+
+test("a link opened by a different Microsoft account says whose it is and offers a retry", async () => {
+  const mismatch =
+    "This link is for the Teams account “Mallory Guest”, but you signed in to Microsoft as member@contoso.test. If that Teams account is yours, open the link again and sign in to Microsoft with it. Otherwise, message Opengeni in Teams to get a link for your own account.";
+  prepare(async () => {
+    throw setupRefusal(403, "link_identity_mismatch", mismatch);
+  });
+  const { savePendingTeamsLink } = await import("@/lib/teams-connect");
+  savePendingTeamsLink({ linkToken: "link-proof", workspaceId: ws });
+  window.history.replaceState(
+    null,
+    "",
+    `/teams/connect?code=microsoft-code&state=${encodeURIComponent(signedState("teams-account-link"))}`,
+  );
+  const assigned: string[] = [];
+  const assign = window.location.assign;
+  Object.defineProperty(window.location, "assign", {
+    configurable: true,
+    value: (url: string) => assigned.push(url),
+  });
+  const view = await render(<TeamsConnectRoute />);
+  try {
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(view.container.textContent).toContain("Couldn't link your Teams account");
+    expect(view.container.textContent).toContain(mismatch);
+    await act(async () =>
+      [...view.container.querySelectorAll("button")]
+        .find((b) => b.textContent === "Try again")!
+        .click(),
+    );
+    expect(assigned).toEqual([`/workspaces/${ws}/plugins#teams_link=link-proof`]);
+  } finally {
+    await view.cleanup();
+    Object.defineProperty(window.location, "assign", { configurable: true, value: assign });
+    window.history.replaceState(null, "", "/teams/connect");
   }
 });
 
@@ -446,7 +528,7 @@ test("a refused account link says which account is already linked and what to do
     });
     await act(async () => {
       [...view.container.querySelectorAll("button")]
-        .find((b) => b.textContent === "Link my account")!
+        .find((b) => b.textContent === "Sign in with Microsoft")!
         .click();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });

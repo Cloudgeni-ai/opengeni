@@ -20,6 +20,7 @@ import {
   completeTeamsSetup,
   linkTeamsAccount,
   startTeamsSetupSignIn,
+  startTeamsLinkSignIn,
 } from "../src/integrations/teams-bot";
 import { mintTeamsProof } from "../src/integrations/teams-protocol";
 import { TEAMS_ADMIN_ROLE_IDS } from "../src/integrations/teams-admin-proof";
@@ -154,6 +155,20 @@ async function adminSignIn(
   const { authorizationUrl } = await startTeamsSetupSignIn(d, who.grant, setupToken);
   const url = new URL(authorizationUrl!);
   provider.signInAs({ nonce: url.searchParams.get("nonce"), ...claims }, issuer);
+  return { code: "microsoft-code", state: url.searchParams.get("state")! };
+}
+
+/** The Microsoft sign-in an account link starts, completed with chosen claims. */
+async function linkSignIn(
+  provider: ReturnType<typeof microsoft>,
+  d: ApiRouteDeps,
+  grant: AccessGrant,
+  token: string,
+  claims: Record<string, unknown>,
+) {
+  const { authorizationUrl } = await startTeamsLinkSignIn(d, grant, token);
+  const url = new URL(authorizationUrl);
+  provider.signInAs({ nonce: url.searchParams.get("nonce"), ...claims });
   return { code: "microsoft-code", state: url.searchParams.get("state")! };
 }
 
@@ -793,7 +808,8 @@ describe("Teams self-serve setup", () => {
   }, 60_000);
 
   test("linking an account says which rule refused it, never to whom", async () => {
-    const d = deps(microsoft());
+    const provider = microsoft();
+    const d = deps(provider);
     const owner = await person();
     const tenantId = crypto.randomUUID();
     const ownerActor = crypto.randomUUID();
@@ -814,27 +830,33 @@ describe("Teams self-serve setup", () => {
         generation: installation.generation,
       });
     const as = (subjectId: string) => ({ ...owner.grant, subjectId });
+    // Each link is opened by the Teams user it names.
+    const link = async (grant: AccessGrant, token: string, actorId: string) =>
+      await linkTeamsAccount(d, grant, {
+        token,
+        microsoft: await linkSignIn(provider, d, grant, token, { oid: actorId }),
+      });
 
-    expect(await refusal(linkTeamsAccount(d, owner.grant, linkProof(crypto.randomUUID())))).toEqual(
-      {
-        status: 409,
-        reason: "link_opengeni_account_linked",
-        message:
-          "Your Opengeni account is already linked to a different Teams account in this workspace. Unlink it in the Teams integration, then message Opengeni in Teams to get a new link.",
-      },
-    );
+    const ownerOther = crypto.randomUUID();
+    expect(await refusal(link(owner.grant, linkProof(ownerOther), ownerOther))).toEqual({
+      status: 409,
+      reason: "link_opengeni_account_linked",
+      message:
+        "Your Opengeni account is already linked to a different Teams account in this workspace. Unlink it in the Teams integration, then message Opengeni in Teams to get a new link.",
+    });
     const colleague = `user:teams-setup:${crypto.randomUUID()}`;
-    expect(await refusal(linkTeamsAccount(d, as(colleague), linkProof(ownerActor)))).toEqual({
+    expect(await refusal(link(as(colleague), linkProof(ownerActor), ownerActor))).toEqual({
       status: 409,
       reason: "teams_account_linked",
       message:
         "Your Teams account is already linked to a different Opengeni account in this workspace. Sign in to Opengeni with that account and try again.",
     });
-    const colleagueProof = linkProof(crypto.randomUUID());
-    await linkTeamsAccount(d, as(colleague), colleagueProof);
+    const colleagueActor = crypto.randomUUID();
+    const colleagueProof = linkProof(colleagueActor);
+    await link(as(colleague), colleagueProof, colleagueActor);
     expect(
       await refusal(
-        linkTeamsAccount(d, as(`user:teams-setup:${crypto.randomUUID()}`), colleagueProof),
+        link(as(`user:teams-setup:${crypto.randomUUID()}`), colleagueProof, colleagueActor),
       ),
     ).toEqual({
       status: 409,
@@ -845,12 +867,125 @@ describe("Teams self-serve setup", () => {
     await disconnectTeamsBot(client.db, installation);
     expect(
       await refusal(
-        linkTeamsAccount(
-          d,
-          as(`user:teams-setup:${crypto.randomUUID()}`),
-          linkProof(crypto.randomUUID()),
-        ),
+        linkTeamsAccount(d, as(`user:teams-setup:${crypto.randomUUID()}`), {
+          token: linkProof(crypto.randomUUID()),
+          microsoft: { code: "microsoft-code", state: "unused" },
+        }),
       ),
     ).toMatchObject({ status: 403 });
+  }, 60_000);
+
+  test("an account link needs the Microsoft sign-in of the Teams user it names", async () => {
+    const provider = microsoft();
+    const d = deps(provider);
+    const owner = await person();
+    const tenantId = crypto.randomUUID();
+    const installation = await installTeamsBot(client.db, {
+      accountId: owner.grant.accountId,
+      workspaceId: owner.grant.workspaceId,
+      tenantId,
+      actorId: crypto.randomUUID(),
+      subjectId: owner.subject,
+      nonce: crypto.randomUUID(),
+    });
+    // A guest or other person in the connected organization asks for a link,
+    // then forwards it to a workspace member.
+    const attacker = crypto.randomUUID();
+    const proofFor = (actorId: string, actorName?: string) =>
+      mintTeamsProof(STATE_SECRET, {
+        purpose: "link",
+        tenantId,
+        actorId,
+        workspaceId: owner.grant.workspaceId,
+        generation: installation.generation,
+        ...(actorName ? { actorName } : {}),
+      });
+    const forwarded = proofFor(attacker, "Mallory Guest");
+    const member = { ...owner.grant, subjectId: `user:teams-setup:${crypto.randomUUID()}` };
+    const memberActor = crypto.randomUUID();
+    const notLinked = async () => {
+      expect(await getTeamsActor(client.db, installation, attacker)).toBeNull();
+    };
+
+    // The link proof alone is no longer enough.
+    expect(await refusal(linkTeamsAccount(d, member, { token: forwarded }))).toEqual({
+      status: 400,
+      reason: "link_sign_in_required",
+      message:
+        "Sign in to Microsoft with the account you use in Teams to link it. Open the link from Teams again.",
+    });
+    // The member signs in to Microsoft as themselves: another oid is refused
+    // and the refusal names whose link it is.
+    expect(
+      await refusal(
+        linkTeamsAccount(d, member, {
+          token: forwarded,
+          microsoft: await linkSignIn(provider, d, member, forwarded, {
+            oid: memberActor,
+            preferred_username: "member@contoso.test",
+          }),
+        }),
+      ),
+    ).toEqual({
+      status: 403,
+      reason: "link_identity_mismatch",
+      message:
+        "This link is for the Teams account “Mallory Guest”, but you signed in to Microsoft as member@contoso.test. If that Teams account is yours, open the link again and sign in to Microsoft with it. Otherwise, message Opengeni in Teams to get a link for your own account.",
+    });
+    await notLinked();
+    // The same Microsoft user in another tenant (a different tid) is refused too.
+    expect(
+      await refusal(
+        linkTeamsAccount(d, member, {
+          token: forwarded,
+          microsoft: await linkSignIn(provider, d, member, forwarded, {
+            oid: attacker,
+            tid: crypto.randomUUID(),
+          }),
+        }),
+      ),
+    ).toMatchObject({ status: 403, reason: "link_identity_mismatch" });
+    await notLinked();
+    // Without a name in the link, the refusal still says it's someone else's.
+    const unnamed = proofFor(crypto.randomUUID());
+    expect(
+      await refusal(
+        linkTeamsAccount(d, member, {
+          token: unnamed,
+          microsoft: await linkSignIn(provider, d, member, unnamed, { oid: memberActor }),
+        }),
+      ),
+    ).toEqual({
+      status: 403,
+      reason: "link_identity_mismatch",
+      message:
+        "This link is for a different Teams account than the Microsoft account you signed in with. If the link is yours, open it again and sign in to Microsoft with the account you use in Teams. Otherwise, message Opengeni in Teams to get a link for your own account.",
+    });
+
+    // A sign-in started by the attacker can't be completed by the member, and a
+    // setup sign-in never completes a link.
+    const attackerSignIn = await linkSignIn(
+      provider,
+      d,
+      { ...owner.grant, subjectId: `user:teams-setup:${crypto.randomUUID()}` },
+      forwarded,
+      { oid: attacker },
+    );
+    expect(
+      await refusal(linkTeamsAccount(d, member, { token: forwarded, microsoft: attackerSignIn })),
+    ).toMatchObject({ status: 400, reason: "link_sign_in_expired" });
+    await notLinked();
+
+    // The person the link names links it, with no administrator role. A guest
+    // signs in to this tenant and gets its tid and their guest object ID.
+    const memberProof = proofFor(memberActor, "Member");
+    await linkTeamsAccount(d, member, {
+      token: memberProof,
+      microsoft: await linkSignIn(provider, d, member, memberProof, {
+        oid: memberActor,
+        wids: [],
+      }),
+    });
+    expect(await getTeamsActor(client.db, installation, memberActor)).toBe(member.subjectId);
   }, 60_000);
 });

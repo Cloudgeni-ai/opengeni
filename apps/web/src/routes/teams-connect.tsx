@@ -15,25 +15,157 @@ import {
   clearTeamsFragment,
   clearPendingTeamsSetup,
   clearTeamsMicrosoftReturn,
+  clearPendingTeamsLink,
+  readPendingTeamsLink,
   readPendingTeamsSetup,
   savePendingTeamsSetup,
+  teamsMicrosoftSignInPurpose,
   teamsMicrosoftFailureText,
   teamsErrorText,
   teamsMicrosoftReturn,
   teamsOwnAccountLinkedElsewhere,
   teamsRouteMissing,
   type TeamsMicrosoftReturn,
+  type TeamsPendingLink,
   type TeamsPendingSetup,
 } from "@/lib/teams-connect";
 
-type Arrival = { pending: TeamsPendingSetup | null; microsoft: TeamsMicrosoftReturn | null };
+type Arrival =
+  | { kind: "setup"; pending: TeamsPendingSetup | null; microsoft: TeamsMicrosoftReturn | null }
+  | { kind: "link"; pending: TeamsPendingLink | null; microsoft: TeamsMicrosoftReturn };
 
-/** A return from Microsoft sign-in restores this tab's pending setup. Reads only. */
+/**
+ * A return from Microsoft sign-in restores this tab's pending setup, or its
+ * pending account link when the sign-in was for one. Reads only.
+ */
 function readArrival(): Arrival {
   const microsoft = teamsMicrosoftReturn(window.location.search);
-  return microsoft
-    ? { pending: readPendingTeamsSetup(), microsoft }
-    : { pending: null, microsoft: null };
+  if (!microsoft) return { kind: "setup", pending: null, microsoft: null };
+  const purpose = teamsMicrosoftSignInPurpose(microsoft.state);
+  const setup = purpose === "link" ? null : readPendingTeamsSetup();
+  const link = purpose === "setup" ? null : readPendingTeamsLink();
+  return purpose === "link" || (link && !setup)
+    ? { kind: "link", pending: link, microsoft }
+    : { kind: "setup", pending: setup, microsoft };
+}
+
+export function TeamsConnectRoute() {
+  const [arrival] = useState(readArrival);
+  return arrival.kind === "link" ? (
+    <TeamsLinkReturn pending={arrival.pending} microsoft={arrival.microsoft} />
+  ) : (
+    <TeamsSetupPage arrival={arrival} />
+  );
+}
+
+/**
+ * Finishes an account link after the Microsoft sign-in that proves the person
+ * is the Teams user the link names. The API refuses a different account.
+ */
+function TeamsLinkReturn({
+  pending,
+  microsoft,
+}: {
+  pending: TeamsPendingLink | null;
+  microsoft: TeamsMicrosoftReturn;
+}) {
+  const { client } = useAppContext();
+  const [result, setResult] = useState<
+    { kind: "linking" } | { kind: "linked" } | { kind: "failed"; message: string }
+  >(() =>
+    microsoft.kind === "failed"
+      ? { kind: "failed", message: teamsMicrosoftFailureText(microsoft, "link") }
+      : pending
+        ? { kind: "linking" }
+        : {
+            kind: "failed",
+            message: "This link expired. Message Opengeni in Teams to get a new link.",
+          },
+  );
+  const finished = useRef(false);
+
+  useEffect(() => {
+    // The code and pending link are single-use; neither survives a reload.
+    clearTeamsMicrosoftReturn();
+    clearPendingTeamsLink();
+    if (microsoft.kind !== "signed_in" || !pending || finished.current) return;
+    finished.current = true;
+    void teamsApi(client, pending.workspaceId)
+      .linkAccount(pending.linkToken, { code: microsoft.code, state: microsoft.state })
+      .then(() => setResult({ kind: "linked" }))
+      .catch((caught) =>
+        setResult({
+          kind: "failed",
+          message: teamsErrorText(
+            caught,
+            "Microsoft sign-in couldn't be verified. Open the link from Teams again.",
+          ),
+        }),
+      );
+  }, [client, microsoft, pending]);
+
+  const plugins = pending ? `/workspaces/${encodeURIComponent(pending.workspaceId)}/plugins` : null;
+  if (result.kind === "linking")
+    return (
+      <ConsentFrame>
+        <EmptyState
+          variant="page"
+          icon={<BotIcon />}
+          title="Linking your Teams account…"
+          description="Checking your Microsoft sign-in."
+        />
+      </ConsentFrame>
+    );
+  if (result.kind === "linked")
+    return (
+      <ConsentFrame>
+        <EmptyState
+          variant="page"
+          icon={<BotIcon />}
+          title="Teams account linked"
+          description="Return to Teams to continue."
+          action={
+            <div className="flex flex-col items-center gap-3">
+              <Button onClick={() => window.location.assign("https://teams.microsoft.com")}>
+                Return to Teams
+              </Button>
+              {plugins ? (
+                <a className="text-sm text-fg-muted underline underline-offset-4" href={plugins}>
+                  Manage connection
+                </a>
+              ) : null}
+            </div>
+          }
+        />
+      </ConsentFrame>
+    );
+  return (
+    <ConsentFrame>
+      <EmptyState
+        variant="page"
+        icon={<BotIcon />}
+        title="Couldn't link your Teams account"
+        description={result.message}
+        action={
+          pending && plugins ? (
+            <Button
+              onClick={() =>
+                window.location.assign(
+                  `${plugins}#${new URLSearchParams({ teams_link: pending.linkToken })}`,
+                )
+              }
+            >
+              Try again
+            </Button>
+          ) : (
+            <Button onClick={() => window.location.assign("https://teams.microsoft.com")}>
+              Open Teams
+            </Button>
+          )
+        }
+      />
+    </ConsentFrame>
+  );
 }
 
 /**
@@ -41,9 +173,8 @@ function readArrival(): Arrival {
  * workspace. Unless the operator approved this Teams identity, the person then
  * signs in with Microsoft as a tenant administrator before the bot connects.
  */
-export function TeamsConnectRoute() {
+function TeamsSetupPage({ arrival }: { arrival: Extract<Arrival, { kind: "setup" }> }) {
   const { client, workspaces, accessContext } = useAppContext();
-  const [arrival] = useState(readArrival);
   const [token, setToken] = useState(
     () => arrival.pending?.setupToken ?? teamsFragmentToken(window.location.hash, "teams_setup"),
   );
