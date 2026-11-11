@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Denied network backfill (1361), in its own transaction so that 1361's
+-- Denied network backfill (1368), in its own transaction so that 1368's
 -- settings-table lock is released before it runs: the running binary reads
 -- those settings at every Free admission and setup. Every capture is
 -- per account and best-effort; the rule tolerates an incomplete backfill,

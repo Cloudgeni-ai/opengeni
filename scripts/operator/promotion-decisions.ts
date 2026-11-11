@@ -41,7 +41,7 @@ const { values } = parseArgs({
     "prefix-threshold": { type: "string" },
     "rate-limit": { type: "string" },
     "rate-limit-max": { type: "string" },
-    // Denied network rule (migration 1361).
+    // Denied network rule (migration 1368).
     "denied-network-mode": { type: "string" },
     rule: { type: "string" },
     "network-holds": { type: "boolean" },
@@ -154,7 +154,7 @@ try {
     });
     console.log(JSON.stringify(result, null, 2));
   } else if (values["network-capture-flagged"]) {
-    // Re-runs the 1361 backfill: captures the owners' sign-in networks of
+    // Re-runs the 1368 backfill: captures the owners' sign-in networks of
     // every denied or held account (keyed hashes only). Safe to repeat.
     console.log(JSON.stringify(await captureFlaggedSignupNetworkOwners(client.db), null, 2));
   } else if (values["network-release-holds"]) {

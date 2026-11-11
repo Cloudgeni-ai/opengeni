@@ -21,7 +21,7 @@
 -- 3. Detect and hold. free_plan_credit_eligible evaluates the current account
 --    only. /24 and /48 prefixes never take part. Manual decisions and
 --    operator releases are never overwritten. Failures fail open.
--- 4. Backfill. 1366, in its own transaction, captures every account denied
+-- 4. Backfill. 1369, in its own transaction, captures every account denied
 --    or held now (including the accounts denied before 1354), one by one.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
@@ -190,7 +190,7 @@ END $$;
 REVOKE ALL ON FUNCTION opengeni_private.capture_flagged_owner_session_networks(text,uuid) FROM PUBLIC;
 
 -- Captures every account that is denied or held now, one account at a time,
--- each in its own subtransaction. Used by the 1366 backfill; operators can
+-- each in its own subtransaction. Used by the 1369 backfill; operators can
 -- run it again at any time. Owner context only.
 CREATE OR REPLACE FUNCTION opengeni_private.capture_all_flagged_owner_session_networks(p_data_schema text)
 RETURNS jsonb LANGUAGE plpgsql SET search_path FROM CURRENT AS $$

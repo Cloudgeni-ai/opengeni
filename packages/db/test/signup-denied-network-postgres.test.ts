@@ -33,7 +33,7 @@ import {
   inspectRuntimeDatabasePosture,
 } from "../src/runtime-posture";
 
-// Migration 1361: the denied network rule. Synthetic accounts, documentation
+// Migration 1368: the denied network rule. Synthetic accounts, documentation
 // addresses (RFC 5737 / RFC 3849) and synthetic signup hashes only.
 let shared: RestrictedRuntimeTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -379,7 +379,7 @@ test("decisions capture networks that outlive the sessions; the operator capture
     expect(others!.count).toBe(1);
 
     // The backfill covers a denied owner with no setup record and nothing
-    // captured at decision time, like the accounts denied before 1361.
+    // captured at decision time, like the accounts denied before 1368.
     const legacyIp = address();
     const legacy = await owner([legacyIp], { source: null });
     await decide(legacy.accountId, "denied");

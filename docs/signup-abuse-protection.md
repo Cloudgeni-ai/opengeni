@@ -213,7 +213,7 @@ for review.
 
 ## Denied network
 
-`1361_signup_denied_network.sql` adds a third rule (`denied-network-v1`) for farms
+`1368_signup_denied_network.sql` adds a third rule (`denied-network-v1`) for farms
 that come back in small waves: a few accounts after a quiet period on an address
 already used by denied accounts never reach the velocity threshold. It holds the
 Free credit of a new self-serve owner whose exact network (IPv4 address or IPv6
@@ -250,8 +250,8 @@ session networks (newest 200 sessions in the last 90 days) and remembers the
 owner (`opengeni_private.signup_network_flagged_owners`), so the networks
 outlast the sessions. Sign-ins after the decision are captured when the capture
 runs again (`--network-capture-flagged`). Setup itself only writes the new
-account's own rows. `1366_signup_denied_network_backfill.sql`, in its own
-transaction so 1361's settings lock is not held meanwhile, captures every
+account's own rows. `1369_signup_denied_network_backfill.sql`, in its own
+transaction so 1368's settings lock is not held meanwhile, captures every
 account already denied or held, account by account, including those decided
 before 1354; a failure is a migration warning with counts, and
 `--network-holds` reports `deniedNetworkCoverage` (denied or held accounts, how

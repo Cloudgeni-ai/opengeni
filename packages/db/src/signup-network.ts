@@ -7,14 +7,14 @@ import { nestedPostgresSqlState } from "./persistence-errors";
 
 /**
  * Signup network velocity (migration 1354) and the denied network rule
- * (migration 1361): the post-setup evaluation fan-out and the owner-only
+ * (migration 1368): the post-setup evaluation fan-out and the owner-only
  * operator review helpers. Rows hold keyed hashes only, never addresses, and
  * review output carries a 16-hex group key, email domains and account UUIDs
  * only.
  */
 
 export const SIGNUP_NETWORK_POLICY_VERSION = "ip-velocity-v1";
-/** Migration 1361: a network used by a denied or currently held account. */
+/** Migration 1368: a network used by a denied or currently held account. */
 export const SIGNUP_DENIED_NETWORK_POLICY_VERSION = "denied-network-v1";
 /** Detector holds listed by the network review and released by its rollback. */
 export const SIGNUP_NETWORK_HOLD_POLICY_VERSIONS = [
@@ -68,7 +68,7 @@ export type SignupNetworkVelocitySettings = {
   rateLimitEnabled: boolean;
   rateLimitMax: number;
   rateLimitWindowHours: number;
-  /** Migration 1361; "off" until set. Older databases omit it. */
+  /** Migration 1368; "off" until set. Older databases omit it. */
   deniedNetworkMode?: "off" | "observe" | "enforce";
   deniedNetworkLookbackDays?: number;
   operator: string | null;
@@ -480,7 +480,7 @@ async function readHoldGroup(tx: Database, addressHash: string): Promise<SignupN
 
 /**
  * Captures again, account by account, the owners' sign-in networks of every
- * account that is denied or held now (the migration 1361 backfill). Safe to
+ * account that is denied or held now (the migration 1368 backfill). Safe to
  * repeat; unchanged rows are not rewritten. Owner connection only.
  */
 export async function captureFlaggedSignupNetworkOwners(ownerDb: Database): Promise<{
