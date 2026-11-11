@@ -10,6 +10,7 @@ import {
 export * from "./workspace-control-event";
 export * from "./billing-auto-top-up";
 export * from "./secret-value";
+export * from "./citation-urls";
 export * from "./claude-cite-tags";
 export * from "./machine-access";
 export * from "./no-reply";
@@ -11298,8 +11299,13 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * 3: `child_waiting_capacity` is produced only for a long wait (reset far
  * away, unknown, or needing a person), carries `resetsAt`, and wakes the
  * parent immediately instead of riding its next claim.
+ *
+ * 4: a waiting child produces a further `child_waiting_capacity` for the same
+ * waiter when a later check finds its reset later than the parent was told
+ * (the time passed without capacity, or a longer limit binds) or unknown; its
+ * dedupe key adds that reset (`…:<waiterId>:<resetsAt|unknown>`).
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 3;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 4;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
@@ -17017,6 +17023,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     pinVersion: primitives.nonnegativeInteger.default(0),
     /** Personal explicit acknowledgment state; opening the session never clears it. */
     unread: primitives.boolean.default(false),
+    /**
+     * True when this failed session's failure was consumed by its parent agent,
+     * which owns the follow-up, so the rail does not ask a person to review it.
+     * Absent when false and on older servers; treat absence as unhandled.
+     */
+    failureHandled: primitives.optionalBoolean,
     /** Personal power-user label for work the member intends to continue. */
     activelyWorking: primitives.boolean.default(false),
     /** Optimistic revision for unread/actively-working state. */
@@ -17062,7 +17074,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
         /** Historical failed lifecycle states, including already-reviewed failures. */
         failedDescendants: primitives.nonnegativeInteger,
         unreadDescendants: z.number().int().nonnegative().optional(),
-        /** Failed descendants whose latest durable event this viewer has not acknowledged. */
+        /**
+         * Failed descendants that still need a person: this viewer has not
+         * acknowledged the latest durable event and no parent agent consumed the
+         * failure (see `failureHandled`).
+         */
         unreadFailedDescendants: z.number().int().nonnegative().optional(),
         activelyWorkingDescendants: z.number().int().nonnegative().optional(),
         /**
@@ -17246,6 +17262,7 @@ export const SessionListEntry = /* @__PURE__ */ defineSkillContractSchema(() =>
     pinnedAt: true,
     pinVersion: true,
     unread: true,
+    failureHandled: true,
     activelyWorking: true,
     attentionVersion: true,
     archived: true,
@@ -21598,6 +21615,23 @@ export const GitHubInstallationLifecycle = /* @__PURE__ */ defineSchema(() =>
 );
 export type GitHubInstallationLifecycle = z.infer<typeof GitHubInstallationLifecycle>;
 
+/**
+ * Why an installation is not active, in terms of the fix: removed or
+ * suspended on GitHub, no repositories shared, no owner proof for the link,
+ * GitHub could not be checked, or the installation's account changed.
+ */
+export const GitHubInstallationIssue = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "uninstalled",
+    "suspended",
+    "no_repositories",
+    "owner_unconfirmed",
+    "github_unreachable",
+    "account_changed",
+  ]),
+);
+export type GitHubInstallationIssue = z.infer<typeof GitHubInstallationIssue>;
+
 export const GitHubInstallationBinding = /* @__PURE__ */ defineSchema(() =>
   z.object({
     installationId: primitives.positiveInteger,
@@ -21605,6 +21639,8 @@ export const GitHubInstallationBinding = /* @__PURE__ */ defineSchema(() =>
     accountLogin: primitives.nullableString,
     accountType: primitives.nullableString,
     lifecycle: GitHubInstallationLifecycle,
+    /** Null while active. Older servers omit it. */
+    issue: GitHubInstallationIssue.nullable().optional(),
     repositoryScope: GitHubRepositoryScope,
     repositoryCount: primitives.nonnegativeInteger,
     configureUrl: z.string().url().nullable(),
@@ -23933,6 +23969,7 @@ export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./workspace-governance-context";
 export * from "./agent-instructions-context";
+export * from "./repository-skills-context";
 export * from "./prompt-cache-diagnostics";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";

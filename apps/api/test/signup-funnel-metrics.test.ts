@@ -53,6 +53,7 @@ describe("sign-up funnel metrics", () => {
     expect(await series(observability, "opengeni_organization_setup_total")).toEqual([
       'opengeni_organization_setup_total{outcome="created"} 0',
       'opengeni_organization_setup_total{outcome="failed"} 0',
+      'opengeni_organization_setup_total{outcome="rate_limited"} 0',
     ]);
   });
 

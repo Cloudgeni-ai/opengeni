@@ -5172,6 +5172,10 @@ async function terminateDrainableBox(
     // claim), otherwise the ordinary idle drain. Additive diagnostic
     // fact; no identifiers beyond the ones already carried above.
     drainReason: sandboxDrainReason(lease),
+    // False when only the lease drained and no box was stopped (a
+    // Connected Machine keeps running), so chats aren't told it stopped.
+    providerStopped:
+      managedProvider && lease.backend !== "selfhosted" && lease.resumeBackendId !== "selfhosted",
     // Shown to the people in the chat: a save without rebuildable
     // folders, or a box stopped after its saves kept failing, with the
     // time of its last good save (changes after it were not kept).

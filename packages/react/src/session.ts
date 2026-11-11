@@ -76,7 +76,7 @@ export type {
   ComposerState,
   UseComposerOptions,
 } from "./hooks/use-composer";
-export { useFileAttachments } from "./hooks/use-file-attachments";
+export { uploadScopeForSession, useFileAttachments } from "./hooks/use-file-attachments";
 export type {
   FileAttachment,
   UseFileAttachmentsOptions,

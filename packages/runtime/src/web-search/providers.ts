@@ -161,6 +161,10 @@ function tinyfishSearch(input: AdapterInput): WebSearchProvider {
   };
 }
 
+// TinyFish serves a cached copy of any age unless `ttl` bounds it, so a page
+// read could be weeks old. Accept only a recent copy.
+const TINYFISH_FETCH_MAX_CACHE_AGE_SECONDS = 600;
+
 function tinyfishFetch(input: AdapterInput): WebFetchProvider {
   return {
     id: "tinyfish",
@@ -174,7 +178,11 @@ function tinyfishFetch(input: AdapterInput): WebFetchProvider {
         {
           method: "POST",
           headers: { ...json, "x-api-key": requireKey(input) },
-          body: JSON.stringify({ urls: [request.url], format: "markdown" }),
+          body: JSON.stringify({
+            urls: [request.url],
+            format: "markdown",
+            ttl: TINYFISH_FETCH_MAX_CACHE_AGE_SECONDS,
+          }),
         },
         options?.signal,
       );

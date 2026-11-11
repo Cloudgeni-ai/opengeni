@@ -1621,7 +1621,11 @@ export const englishMessages = {
     "{workspace} doesn't offer this shortcut's model.",
   "desktopDictation.host.needsCredits": "Voice input needs credits. Your speech is saved.",
   "desktopDictation.host.notAllowed": "Voice input isn't allowed in this workspace.",
+  "desktopDictation.host.notInRegion":
+    "This model isn't available in your workspace's region. Your speech is saved.",
   "desktopDictation.host.notSaved": "The audio couldn't be saved. Try again.",
+  "desktopDictation.host.serviceOutOfCredit":
+    "The speech service is out of credit. Your speech is saved.",
   "desktopDictation.host.stopped": "Dictation stopped. Try again.",
   "desktopDictation.host.tooLong": "Too long to transcribe. Try a shorter one.",
   "desktopDictation.host.transcriptionFailed": "Transcription failed. Your speech is saved.",
@@ -3392,6 +3396,7 @@ export const englishMessages = {
   "messageTimeline.workerPaused": "Worker paused",
   "messageTimeline.workerReportedBack": "Worker reported back",
   "messageTimeline.workResumed": "work resumed",
+  "messageTimeline.attemptFailedRetried": "Attempt failed · retried",
   "messageTimeline.youAnswered": "You answered",
   "messageTimeline.youLetTheAgentDecide": "You let the agent decide",
   "modelPicker.codexOnlySession": "Codex-only session",
@@ -6300,6 +6305,7 @@ export const englishMessages = {
   "timeline.turnSummary.contextCompactedExpandForDetails": "Context compacted; expand for details",
   "timeline.turnSummary.copyTurn": "Copy turn",
   "timeline.turnSummary.interrupted": "· interrupted",
+  "timeline.turnSummary.failed": "Failed",
   "timeline.turnSummary.paused": "Paused",
   "timeline.turnSummary.preparation": "Preparation",
   "timeline.turnSummary.steps": "Steps",

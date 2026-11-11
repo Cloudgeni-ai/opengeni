@@ -1,4 +1,4 @@
-import type { SessionPaginationGroup } from "./session-group-pagination";
+import { type SessionPaginationGroup, sessionCreatedByMatches } from "./session-group-pagination";
 import type { RailSession } from "./session-list-entry";
 
 export type SessionListDirtyScopes = {
@@ -54,8 +54,7 @@ export function sessionListGroupRevision(
       group.kind === "channel"
         ? (root.session.channelId ?? null) === group.channelId
         : group.kind === "creator"
-          ? root.session.createdBy.kind === group.creator.kind &&
-            root.session.createdBy.subjectId === group.creator.subjectId
+          ? sessionCreatedByMatches(root.session.createdBy, group.creator)
           : true;
     if (matches) revision = Math.max(revision, root.revision);
   }

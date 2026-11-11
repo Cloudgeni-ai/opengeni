@@ -282,9 +282,16 @@ test("Drive callback requires an authenticated read and binds one exact personal
       ].sort(),
     );
     expect(authorize.searchParams.get("access_type")).toBe("offline");
-    expect(authorize.searchParams.get("prompt")).toBe("consent");
+    // Reconnecting a verified account pins Google to that account; a new
+    // connection lets the person pick which Google account to use.
+    const reconnectHint = reconnectAccountId ? authorize.searchParams.get("login_hint") : null;
+    if (reconnectHint) expect(reconnectHint).toBe("anna@example.test");
+    expect(authorize.searchParams.get("prompt")).toBe(
+      reconnectHint ? "consent" : "consent select_account",
+    );
+    if (!reconnectAccountId) expect(authorize.searchParams.has("login_hint")).toBe(false);
     expect(authorize.searchParams.get("code_challenge_method")).toBe("S256");
-    return { attempt: ready, state: authorize.searchParams.get("state")! };
+    return { attempt: ready, state: authorize.searchParams.get("state")!, authorize };
   };
   try {
     const catalog = await (await app.request(`${base}/catalog`, { headers })).json();
@@ -472,6 +479,9 @@ test("Drive callback requires an authenticated read and binds one exact personal
 
     readRejected = true;
     const reconnect = await begin(completed.account.id);
+    // Reconnecting the verified account asks Google for that same account.
+    expect(reconnect.authorize.searchParams.get("login_hint")).toBe("anna@example.test");
+    expect(reconnect.authorize.searchParams.get("prompt")).toBe("consent");
     await callback(reconnect.state);
     expect(await read(reconnect.attempt.id)).toMatchObject({
       state: "failed",

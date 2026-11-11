@@ -385,6 +385,9 @@ export function TurnSummary({
   // The chip names the failure (the projection already replaced diagnostic
   // text with its outcome); recorded technical text stays a hover title.
   const failure = outcome === "failed" ? failureText?.trim() || null : null;
+  // A failure shown elsewhere (the host's failed banner, or the step that
+  // failed) keeps only this quiet status on the turn's row.
+  const failedQuietly = outcome === "failed" && !failure && !bare;
 
   // Live open shell: keep the chip in-flow (so settle never inserts layout)
   // and quieter until there is an outcome or a settle beat — but still
@@ -494,7 +497,11 @@ export function TurnSummary({
         {statusLine}
         {liveHeader && !open && !status
           ? liveHeader
-          : !statusLine && facets.length === 0 && !failure && outcome !== "cancelled"
+          : !statusLine &&
+              facets.length === 0 &&
+              !failure &&
+              !failedQuietly &&
+              outcome !== "cancelled"
             ? turnSummaryFallbackLabel(t, context.items, unloadedSteps)
             : facets.map(({ facet, result }, index) => (
                 <FacetRenderBoundary key={facet.id}>
@@ -515,6 +522,12 @@ export function TurnSummary({
           <span className="text-og-status-failed" title={failureDetail}>
             {" "}
             · {failure}
+          </span>
+        ) : null}
+        {failedQuietly ? (
+          <span className="text-og-status-failed">
+            {statusLine || facets.length > 0 ? " · " : null}
+            {t("timeline.turnSummary.failed")}
           </span>
         ) : null}
         {outcome === "cancelled" ? (

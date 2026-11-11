@@ -29,7 +29,7 @@ jobs:
   publish:
     environment: package-release
     name: Publish canary.N
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
       cohort: ${{ steps.publish.outputs.cohort }}
@@ -179,7 +179,7 @@ jobs:
   confirm:
     name: Confirm canary.N registry receipts
     needs: publish
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # One 30-minute visibility window plus setup; re-run this job to wait longer.
     timeout-minutes: 40
     permissions:

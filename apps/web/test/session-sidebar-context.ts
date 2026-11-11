@@ -708,7 +708,8 @@ function filteredRows(options: SessionListPageOptions): Session[] {
     if (options.channelId !== undefined && row.channelId !== options.channelId) return false;
     if (
       options.createdBy &&
-      (row.createdBy.kind !== options.createdBy.kind ||
+      // Like the server: no kind matches every session the subject created.
+      ((options.createdBy.kind !== undefined && row.createdBy.kind !== options.createdBy.kind) ||
         row.createdBy.subjectId !== options.createdBy.subjectId)
     )
       return false;

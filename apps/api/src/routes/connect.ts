@@ -70,6 +70,7 @@ import { startPersonalGitHubOAuth } from "../integrations/personal-github";
 import { socialOAuthClientFor, startSocialOAuth } from "../integrations/social-oauth";
 import {
   githubAppConnectNavigation,
+  githubAppRepairNavigation,
   prepareGitHubAppConnectAction,
 } from "../integrations/github-app-connect";
 import { githubAppMissingSettings } from "@opengeni/github";
@@ -1719,16 +1720,18 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
           });
         }
         if (input.providerId === "github-app") {
-          if (
-            input.ownership !== "workspace" ||
-            input.installationTarget ||
-            input.reconnectAccountId
-          )
+          if (input.ownership !== "workspace" || input.installationTarget)
             throw new HTTPException(422, {
               message:
                 "GitHub App setup requires workspace ownership and explicit installation selection",
             });
-          const navigation = githubAppConnectNavigation(deps, scope, id, c.req.url, "discover");
+          // Repairing a linked installation goes straight to its fix.
+          const navigation = input.reconnectAccountId
+            ? await githubAppRepairNavigation(deps, scope, id, c.req.url, input.reconnectAccountId)
+            : {
+                ...githubAppConnectNavigation(deps, scope, id, c.req.url, "discover"),
+                account: undefined,
+              };
           return beginConnectAttempt(tx, scope, {
             ...(continuation ? { externalContinuation: continuation } : {}),
             idempotencyKey: input.idempotencyKey,
@@ -1744,6 +1747,7 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
               credentialsCommitted: false,
               integrationInstalled: false,
               completionRequirement: "provider_setup",
+              ...(navigation.account ? { account: navigation.account } : {}),
               nextAction: { type: "authorize", url: navigation.authorizationUrl },
               expiresAt: navigation.expiresAt,
             },

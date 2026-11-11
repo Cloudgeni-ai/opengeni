@@ -54,7 +54,7 @@ jobs:
     concurrency:
       group: merge-batcher
       cancel-in-progress: false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # The App key lives only in this environment, which only main can use.
     environment: merge-batcher

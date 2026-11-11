@@ -272,7 +272,12 @@ describe("fetch adapters", () => {
         { url: "https://a.example/x", final_url: "https://a.example/y", title: "A", text: "# A" },
       ],
     });
-    expect(tinyfish.call.body).toEqual({ urls: ["https://a.example/x"], format: "markdown" });
+    // A bounded cache age: without `ttl` TinyFish may return a copy of any age.
+    expect(tinyfish.call.body).toEqual({
+      urls: ["https://a.example/x"],
+      format: "markdown",
+      ttl: 600,
+    });
     expect(tinyfish.page).toEqual({
       url: "https://a.example/x",
       finalUrl: "https://a.example/y",

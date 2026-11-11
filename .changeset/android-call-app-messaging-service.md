@@ -1,0 +1,5 @@
+---
+"@opengeni/react-native": minor
+---
+
+Android apps that already have their own Firebase messaging service can now receive agents' call rings. Set `call.androidMessagingService: "app"` next to `call.androidSystemCall: true` in the config plugin: the plugin then declares no Opengeni messaging service (so the app's service stays the only `MESSAGING_EVENT` receiver) and sets the `dev.opengeni.call.APP_MESSAGING_SERVICE` meta-data flag, so `capabilities().incoming` is true and the shared call provider takes rings. The permissions, call service and ring screen are unchanged. The app's service calls `OpenGeniCallPush.handle(context, message.data)` first; it returns true when it consumed a ring or the end of a ring, and is now documented and callable from Java as a static method. The README documents the FCM payload (`data.opengeniCall` JSON with `type` `ring` or `ended`, high priority). The default, `"opengeni"`, behaves as before; an unknown mode, or `"app"` without `androidSystemCall`, fails the prebuild.

@@ -96,6 +96,20 @@ export type IntegrationAccess = {
   items: IntegrationAccessItem[];
   /** Shown instead of the list when there is nothing scoped yet. */
   emptyMessage?: string | undefined;
+  /**
+   * Folds a long list behind its count ("62 repositories") with a search
+   * field, so the blocks after it stay reachable. Omitted: always listed.
+   */
+  collapsed?:
+    | {
+        /** The count line, "62 repositories". */
+        summary: string;
+        /** Accessible name and placeholder of the search field. */
+        searchLabel: string;
+        /** Shown when the search matches nothing. */
+        noMatchesMessage?: string | undefined;
+      }
+    | undefined;
 };
 
 export type IntegrationToggleOption = {
@@ -155,6 +169,49 @@ export type IntegrationOption =
   | IntegrationLinkOption;
 
 /**
+ * One thing a section manages, such as one GitHub installation: a title, a
+ * quiet meta line, a status only when it needs attention, one action and an
+ * optional ⋯ menu.
+ */
+export type IntegrationSectionRow = {
+  id: string;
+  title: string;
+  /** One quiet line, "Organization · 12 repositories". */
+  meta?: string | undefined;
+  /** Present only when something is wrong; healthy rows carry no status. */
+  attention?:
+    | {
+        /** Short badge label, "Uninstalled on GitHub". */
+        label: string;
+        /** One sentence: what is wrong and what fixes it. Replaces the meta line. */
+        detail: string;
+      }
+    | undefined;
+  /** The one action, usually the fix. */
+  action?:
+    | {
+        label: string;
+        onClick: () => void;
+        ariaLabel?: string | undefined;
+        disabled?: boolean | undefined;
+        busy?: boolean | undefined;
+        /** Emphasise it (the fix for a row that needs attention). */
+        primary?: boolean | undefined;
+      }
+    | undefined;
+  /** Less common actions, in the row's ⋯ menu. */
+  menu?:
+    | Array<{
+        label: string;
+        onClick: () => void;
+        disabled?: boolean | undefined;
+        /** Renders in the destructive tone (still confirm before destroying). */
+        destructive?: boolean | undefined;
+      }>
+    | undefined;
+};
+
+/**
  * A named part of one integration with its own identity and single action,
  * for an integration that connects in more than one way (GitHub: the
  * person's own account and the workspace app). Rendered after About.
@@ -166,6 +223,10 @@ export type IntegrationSection = {
   description: string;
   /** One short state line, such as "Connected as @octo · 3 repos". */
   status?: string | undefined;
+  /** "warn" shows the status line in the needs-attention tone. */
+  statusTone?: "warn" | undefined;
+  /** The things this part manages, one row each (GitHub installations). */
+  rows?: IntegrationSectionRow[] | undefined;
   /** The one action for this part. Omitted when the viewer cannot act. */
   action?:
     | {
@@ -183,6 +244,55 @@ export type IntegrationSection = {
       }
     | undefined;
   /** Why there is no action, or what happens instead. */
+  note?: string | undefined;
+};
+
+/** One cell of an IntegrationPolicyTable. */
+export type IntegrationPolicyCell = {
+  /** One of the table's choices, or a value outside them ("mixed") shown as a disabled option. */
+  value: string;
+  disabled?: boolean | undefined;
+  busy?: boolean | undefined;
+};
+
+/**
+ * A compact grid of choices: rows are actions, columns are who acts, and
+ * each cell is one select ("Allow" / "Ask first"). An optional first row
+ * sets a whole column at once.
+ */
+export type IntegrationPolicyGrid = {
+  columns: Array<{ id: string; label: string }>;
+  rows: Array<{ id: string; label: string; description?: string | undefined }>;
+  choices: Array<{ value: string; label: string }>;
+  /** Labels for values outside `choices`, such as `{ mixed: "Mixed" }`. */
+  otherValueLabels?: Record<string, string> | undefined;
+  /** Missing cell: that column does not apply to the row. */
+  cell: (rowId: string, columnId: string) => IntegrationPolicyCell | undefined;
+  onChange: (rowId: string, columnId: string, value: string) => void;
+  /** A first row that sets every row of a column, "All actions". */
+  all?:
+    | {
+        label: string;
+        cell: (columnId: string) => IntegrationPolicyCell | undefined;
+        onChange: (columnId: string, value: string) => void;
+      }
+    | undefined;
+};
+
+export type IntegrationPolicyTable = IntegrationPolicyGrid & {
+  title: string;
+  /** One short line under the table. */
+  footnote?: string | undefined;
+  /** Finer-grained overrides behind one "Advanced" disclosure. */
+  advanced?:
+    | (IntegrationPolicyGrid & {
+        title: string;
+        summary?: string | undefined;
+      })
+    | undefined;
+  /** The settings could not be loaded: shown instead of the table. */
+  failure?: { message: string; onRetry: () => void } | undefined;
+  /** Why the viewer cannot change some cells, and who can. */
   note?: string | undefined;
 };
 
@@ -273,6 +383,8 @@ export type IntegrationViewModel = {
   access?: IntegrationAccess | undefined;
   /** Named parts with their own action, shown before Access and Settings. */
   sections?: IntegrationSection[] | undefined;
+  /** Approval choices shown after the sections and before Access. */
+  policies?: IntegrationPolicyTable | undefined;
   options: IntegrationOption[];
   footer: IntegrationFooter;
   /** Optional progressive disclosure for integrations with a simple everyday surface. */
