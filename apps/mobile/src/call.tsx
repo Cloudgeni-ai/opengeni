@@ -94,7 +94,10 @@ export function CallProvider({ children }: { children: ReactNode }) {
   return (
     <NativeAgentCallProvider
       client={client}
-      workspaceId={workspaceId}
+      // Calls start once the account can make requests: at launch the saved
+      // workspace is known before the sign-in is read, and a call requested
+      // from outside (a voice command that opened the app) waits until then.
+      workspaceId={status === "ready" ? workspaceId : null}
       codexConnected={codexConnected}
       callAdapter={callAdapter}
       webrtc={webrtc}

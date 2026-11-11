@@ -11,15 +11,16 @@ import { useAgentCall } from "@/call";
  */
 export default function CallLink() {
   const { session, workspace } = useLocalSearchParams<{ session?: string; workspace?: string }>();
-  const { workspaceId } = useAccount();
+  const { workspaceId, status } = useAccount();
   const { callFromOutside } = useAgentCall();
   const [started, setStarted] = useState(false);
-  // Wait for the account on a cold launch; leave only once the call is requested.
+  // Wait for the account on a cold launch (its sign-in read, not only its saved
+  // workspace); leave only once the call is requested.
   useEffect(() => {
-    if (started || !workspaceId) return;
+    if (started || !workspaceId || status !== "ready") return;
     setStarted(true);
     void callFromOutside(session ?? null, workspace ?? null);
-  }, [callFromOutside, session, started, workspace, workspaceId]);
+  }, [callFromOutside, session, started, status, workspace, workspaceId]);
   if (!started) return null;
   return (
     <Redirect

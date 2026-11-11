@@ -98,7 +98,11 @@ export type NativeOutsideCallContext = {
 
 export type NativeAgentCallProviderProps = {
   client: ChatClient<OpenGeniClient>;
-  /** No calls start until the host has a workspace. */
+  /**
+   * The workspace calls start in. No calls start until the host has one, so
+   * pass null until `client` can make requests (for example while the saved
+   * sign-in is still being read at launch): start requests wait until then.
+   */
   workspaceId: string | null;
   /** Whether the user's workspace can use Codex voice models. */
   codexConnected: boolean;
