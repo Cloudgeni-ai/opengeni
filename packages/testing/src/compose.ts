@@ -472,18 +472,19 @@ const FAILURE_CONTEXT_LINES = 20;
 
 /**
  * The part of a BuildKit log that belongs to the failure: every line of the
- * failing step (`#N ...` for the step that reports `#N ERROR`) and everything
- * from its error onward (the failing step's output box and the final
- * `ERROR: failed to solve` summary). Without a step error, the final error
- * summary and the lines before it.
+ * failing step (`#N ...` for the step that reports `#N ERROR`) and the final
+ * `ERROR: ...` summary lines. Parallel steps keep printing after the failing
+ * step's error, so their lines are left out. Without a step error, the final
+ * error summary and the lines before it.
  */
 export function failingBuildOutput(output: string): string {
   const lines = output.split(/\r?\n/u);
   const stepError = lines.findIndex((line) => /^#\d+ ERROR\b/u.test(line));
   if (stepError >= 0) {
     const step = /^(#\d+) /u.exec(lines[stepError]!)![1]!;
-    const stepLines = lines.slice(0, stepError).filter((line) => line.startsWith(`${step} `));
-    return [...stepLines, ...lines.slice(stepError)].join("\n");
+    const stepLines = lines.filter((line) => line.startsWith(`${step} `));
+    const summaryLines = lines.slice(stepError).filter((line) => /^ERROR:/u.test(line));
+    return [...stepLines, ...summaryLines].join("\n");
   }
   let summary = -1;
   for (let index = lines.length - 1; index >= 0; index--) {

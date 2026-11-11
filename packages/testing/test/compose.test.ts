@@ -97,6 +97,24 @@ test("only the failing build step decides whether a failure is retryable", () =>
   ].join("\n");
   expect(isTransientSandboxBuildFailure(failedBuild(recoveredThenRealFailure))).toBe(false);
 
+  // A parallel step (#9) keeps running after #12 fails, and prints a network
+  // error its own retry recovers from; that does not make #12 retryable.
+  const interleavedParallelStep = [
+    "#9 [fetch 2/3] RUN curl --retry 5 -fsSL https://example.test/tool.tgz -o /tool.tgz",
+    "#12 [build 4/6] RUN bun run build",
+    "#12 8.1 error TS2304: Cannot find name 'missing'.",
+    '#12 ERROR: process "/bin/sh -c bun run build" did not complete successfully: exit code: 2',
+    "#9 9.0 curl: (56) Recv failure: Connection reset by peer",
+    "#9 9.0 Warning: Problem : connection reset by peer. Will retry in 1 seconds.",
+    "#9 CANCELED",
+    "------",
+    " > [fetch 2/3] RUN curl --retry 5 -fsSL https://example.test/tool.tgz -o /tool.tgz:",
+    "9.0 curl: (56) Recv failure: Connection reset by peer",
+    "------",
+    'ERROR: failed to solve: process "/bin/sh -c bun run build" did not complete successfully: exit code: 2',
+  ].join("\n");
+  expect(isTransientSandboxBuildFailure(failedBuild(interleavedParallelStep))).toBe(false);
+
   const failingStepNetworkError = [
     "#7 [base 2/6] RUN apt-get update",
     "#7 DONE 3.0s",
