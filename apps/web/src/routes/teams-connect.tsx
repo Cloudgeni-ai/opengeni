@@ -173,8 +173,9 @@ function TeamsLinkReturn({
 
 /**
  * The signed Teams challenge is submitted only after the human chooses a
- * workspace. Unless the operator approved this Teams identity, the person then
- * signs in with Microsoft as a tenant administrator before the bot connects.
+ * workspace. The person then signs in with Microsoft before the bot connects:
+ * as a tenant administrator, or, when the operator approved this Teams
+ * identity, as that Teams user.
  */
 function TeamsSetupPage({ arrival }: { arrival: Extract<Arrival, { kind: "setup" }> }) {
   const { client, workspaces, accessContext } = useAppContext();
