@@ -419,7 +419,7 @@ or project write sent in the same request, only ID inputs (`subjectId`,
 `repositoryId`, …) and repository fields (`repositoryNameWithOwner`,
 `subIssueUrl`) count as its target, and an unrecognised mutation that also
 touches a node outside any repository, or one GitHub won't show, asks too.
-A request nested too deeply to read is treated as unrecognised, block strings are read as GitHub reads them, and a value under an ID input the gateway can't read as a node ID leaves the mutation unconfirmed. With All my
+A request nested too deeply to read is treated as unrecognised, strings GitHub might read differently (escaped quotes, tabs, form feeds or carriage returns in a block string, unknown escapes) make it unrecognised, and a value under an ID input or repository field the gateway can't read as a node ID leaves the mutation unconfirmed. With All my
 repositories at write access and no repository removed from the chat there is
 no allowlist to step around, so the person's policies decide as usual. The gateway replaces
 `Authorization` with the person's token, never forwards the bearer, does not

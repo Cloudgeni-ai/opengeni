@@ -537,9 +537,10 @@ const GRAPHQL_QUERY_MAX_BYTES = 256 * 1024;
 const GRAPHQL_MAX_DEPTH = 64;
 
 /**
- * A block string's value as GitHub reads it (GraphQL spec BlockStringValue):
- * the common indent of the lines after the first is removed, and blank first
- * and last lines are dropped.
+ * A block string's value (GraphQL spec BlockStringValue): the common indent
+ * of the lines after the first is removed, and blank first and last lines are
+ * dropped. The tokenizer only accepts block strings of spaces and newlines,
+ * where GitHub reads them the same way.
  */
 function blockStringValue(raw: string): string {
   const lines = raw.split(/\r\n|[\n\r]/u);
@@ -581,14 +582,17 @@ function tokenize(source: string): Token[] {
       continue;
     }
     if (source.startsWith('"""', index)) {
-      // Escaped triple quotes (\""") do not end a block string.
-      let close = source.indexOf('"""', index + 3);
-      while (close >= 0 && source[close - 1] === "\\") close = source.indexOf('"""', close + 3);
+      // GitHub's parser doesn't read escaped triple quotes, form feeds,
+      // carriage returns or tab indents the way the spec does, so a block
+      // string with any of them is unrecognised (it asks) rather than read
+      // differently from GitHub.
+      const close = source.indexOf('"""', index + 3);
       if (close < 0) throw new Error("Unterminated block string");
-      tokens.push({
-        kind: "string",
-        value: blockStringValue(source.slice(index + 3, close).replace(/\\"""/gu, '"""')),
-      });
+      const raw = source.slice(index + 3, close);
+      if (source[close - 1] === "\\" || /[\r\f\v]|(?:^|\n) *\t/u.test(raw)) {
+        throw new Error("Unsupported block string");
+      }
+      tokens.push({ kind: "string", value: blockStringValue(raw) });
       index = close + 3;
       continue;
     }
@@ -600,12 +604,29 @@ function tokenize(source: string): Token[] {
         if (source[cursor] === "\\") {
           const escaped = source[cursor + 1];
           if (escaped === "u") {
-            value += String.fromCharCode(Number.parseInt(source.slice(cursor + 2, cursor + 6), 16));
-            cursor += 6;
+            // `\uXXXX`, or `\u{…}` with four or more hex digits, as GitHub reads them.
+            const braced = /^\{([0-9A-Fa-f]{4,6})\}/u.exec(source.slice(cursor + 2, cursor + 10));
+            const plain = /^[0-9A-Fa-f]{4}/u.exec(source.slice(cursor + 2, cursor + 6));
+            const hex = braced?.[1] ?? plain?.[0];
+            const codePoint = hex === undefined ? Number.NaN : Number.parseInt(hex, 16);
+            if (!(codePoint <= 0x10ffff)) throw new Error("Unsupported string escape");
+            value += braced ? String.fromCodePoint(codePoint) : String.fromCharCode(codePoint);
+            cursor += 2 + (braced ? braced[0].length : 4);
             continue;
           }
-          const map: Record<string, string> = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f" };
-          value += map[escaped ?? ""] ?? escaped ?? "";
+          const map: Record<string, string> = {
+            n: "\n",
+            t: "\t",
+            r: "\r",
+            b: "\b",
+            f: "\f",
+            '"': '"',
+            "\\": "\\",
+            "/": "/",
+          };
+          const decoded = map[escaped ?? ""];
+          if (decoded === undefined) throw new Error("Unsupported string escape");
+          value += decoded;
           cursor += 2;
           continue;
         }
@@ -967,10 +988,12 @@ function collectScopeTargets(
       if (looksLikeGitHubNodeId(value)) into.nodeIds.add(value);
       else into.unreadableId = true;
     }
-    if (key !== null && REPOSITORY_NAMING_KEYS.has(key)) {
+    if (key !== null && REPOSITORY_NAMING_KEYS.has(key) && value !== "") {
       const named = new Map<string, { owner: string; name: string }>();
       collectNamedRepositories(value, named, key);
       if (named.size > 0) into.namesRepository = true;
+      // A repository the gateway can't read can't be write-checked: unscoped.
+      else into.unreadableId = true;
     }
     return;
   }
@@ -1224,8 +1247,11 @@ export function classifyGitHubGraphqlRequest(body: unknown): GitHubGraphqlClassi
         update !== null && typeof update === "object" ? (update as Record<string, unknown>) : {},
       );
       // A ref whose `afterOid` is all zeros is deleted.
+      // Anything but a full commit ID counts as a deletion.
       const deletes = (update: Record<string, unknown>) =>
-        typeof update.afterOid !== "string" || /^0+$/u.test(update.afterOid);
+        typeof update.afterOid !== "string" ||
+        !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(update.afterOid) ||
+        /^0+$/u.test(update.afterOid);
       const rewrites = records.filter((update) => deletes(update) || forced(update));
       for (const update of rewrites) {
         if (typeof update.name === "string" && typeof input?.repositoryId === "string") {

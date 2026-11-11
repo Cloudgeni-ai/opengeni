@@ -213,7 +213,7 @@ describe("GitHub gateway review fixes", () => {
     ]);
   });
 
-  test("block strings are read as GitHub reads them, and unreadable IDs leave a mutation unscoped", () => {
+  test("indented block strings are dedented, and unreadable IDs leave a mutation unscoped", () => {
     const transfer = classifyGitHubGraphqlRequest({
       query:
         'mutation { transferIssue(input: {\n  issueId: """\n  I_kwDOForbidden1\n  """, repositoryId: "R_kgDOAllowed1" }) { issue { id } } }',
@@ -229,12 +229,47 @@ describe("GitHub gateway review fixes", () => {
       variables: { issue: " I_kwDOForbidden1 " },
     });
     expect(padded.fields[0]).toMatchObject({ unreadableId: true });
-    // A body keeps its own text, and a block string's escaped quotes stay quotes.
     const comment = classifyGitHubGraphqlRequest({
       query:
-        'mutation { addComment(input: {subjectId: "I_kwDOWidgets1", body: """\n    hi \\""" there\n    """}) { clientMutationId } }',
+        'mutation { addComment(input: {subjectId: "I_kwDOWidgets1", body: """\n    hi there\n    """}) { clientMutationId } }',
     });
     expect(comment.fields[0]).toMatchObject({ nodeIds: ["I_kwDOWidgets1"], unreadableId: false });
+    // A repository field the gateway can't read can't be write-checked.
+    const subIssue = classifyGitHubGraphqlRequest({
+      query:
+        'mutation { addSubIssue(input: {issueId: "I_kwDOWidgets1", subIssueUrl: "github.com/other/secret/issues/1"}) { clientMutationId } }',
+    });
+    expect(subIssue.fields[0]).toMatchObject({ unreadableId: true });
+  });
+
+  test("strings GitHub might read differently are unrecognised", () => {
+    const unrecognised = { sensitive: true, unscoped: true };
+    // An escaped quote before the closing quotes: GitHub ends the block string there.
+    const hidden = classifyGitHubGraphqlRequest({
+      query:
+        'mutation($repo: ID!) { a: addComment(input: {subjectId: "I_kwDOWidgets1", body: """A\\"""""}) { clientMutationId } b: updateRepository(input: {repositoryId: $repo, hasWikiEnabled: false}) { clientMutationId } c: addComment(input: {subjectId: "I_kwDOWidgets1", body: """ }) { clientMutationId } # """}) { clientMutationId }\n}',
+      variables: { repo: "R_kgDOSecret1" },
+    });
+    expect(hidden.action).toMatchObject(unrecognised);
+    for (const body of ['"""\f\nx"""', '"""a\r\nb"""', '"""\n\tx\n"""', '"\\q"', '"\\u{63}"']) {
+      expect(
+        classifyGitHubGraphqlRequest({
+          query: `mutation { addComment(input: {subjectId: "I_kwDOWidgets1", body: ${body}}) { clientMutationId } }`,
+        }).action,
+      ).toMatchObject(unrecognised);
+    }
+    // Braced escapes decode as GitHub decodes them, so a zero commit ID is a deletion.
+    const zeros = "\\u{0030}".repeat(40);
+    const updateRefs = classifyGitHubGraphqlRequest({
+      query: `mutation { updateRefs(input: {repositoryId: "R_kgDOWidgets", refUpdates: [{name: "refs/tags/v1", afterOid: "${zeros}", force: false}]}) { clientMutationId } }`,
+    });
+    expect(updateRefs.action).toMatchObject({ title: "Delete branch or tag", sensitive: true });
+    // An afterOid that isn't a full commit ID counts as a deletion too.
+    const short = classifyGitHubGraphqlRequest({
+      query:
+        'mutation { updateRefs(input: {repositoryId: "R_kgDOWidgets", refUpdates: [{name: "refs/heads/f", afterOid: "abc", force: false}]}) { clientMutationId } }',
+    });
+    expect(short.action).toMatchObject({ title: "Delete branch or tag" });
   });
 
   test("only reruns and cancels are routine on a workflow run", () => {
@@ -503,9 +538,9 @@ describe("GitHub gateway force updates and deletions of refs", () => {
         i: {
           repositoryId: "R_kgDOAbCdEf",
           refUpdates: [
-            { name: "refs/heads/x", afterOid: "a", force: true },
+            { name: "refs/heads/x", afterOid: "a".repeat(40), force: true },
             { name: "refs/heads/y", afterOid: "0".repeat(40) },
-            { name: "refs/heads/z", afterOid: "b" },
+            { name: "refs/heads/z", afterOid: "b".repeat(40) },
           ],
         },
       },
