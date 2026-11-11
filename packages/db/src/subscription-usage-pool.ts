@@ -38,12 +38,14 @@ function iso(value: number | null): string | null {
 /**
  * Windows the provider refuses until a later time, as the account list shows
  * "Limit reached": an exhausted window, or the account's usage-limit deadline
- * matched to the window that resets then (otherwise by its distance).
+ * matched to the window that resets then (otherwise by its distance, among
+ * the windows the account has).
  */
 export function blockedSubscriptionWindows(
   provider: Provider,
   usage: ReturnType<typeof projectSubscriptionCoreAccountUsage>,
   now: number,
+  absent: readonly Window[] = [],
 ): Partial<Record<Window, number | null>> {
   const blocked: Partial<Record<Window, number | null>> = {};
   if (!usage) return blocked;
@@ -66,9 +68,32 @@ export function blockedSubscriptionWindows(
     const matched = windows.find(
       (window) => window.resetsAt !== null && Math.abs(window.resetsAt - until) <= 15 * 60_000,
     );
-    block(matched?.id ?? (until - now > 5 * 3_600_000 ? "weekly" : "five_hour"), until);
+    const guessed = until - now > 5 * 3_600_000 ? "weekly" : "five_hour";
+    const other = guessed === "weekly" ? "five_hour" : "weekly";
+    block(
+      matched?.id ?? (absent.includes(guessed) && !absent.includes(other) ? other : guessed),
+      until,
+    );
   }
   return blocked;
+}
+
+/**
+ * Windows the account does not have: a usage-endpoint snapshot of a provider
+ * whose usage readings are complete reports every window that limits the
+ * account and replaces the stored windows, so a window it omits does not
+ * exist for that plan (a weekly-only plan has no five-hour window). Any other
+ * snapshot (a refusal, response headers, an incomplete provider) can omit a
+ * running window, so nothing is absent.
+ */
+export function absentSubscriptionWindows(
+  provider: Provider,
+  usage: ReturnType<typeof projectSubscriptionCoreAccountUsage>,
+  usageReadingsComplete: boolean,
+): Window[] {
+  if (!usage || !usageReadingsComplete || usage.source !== "usage_endpoint") return [];
+  const reported = new Set(usage.windows.map((window) => windowId(provider, window.id)));
+  return (["five_hour", "weekly"] as const).filter((id) => !reported.has(id));
 }
 
 /** Relative estimates, not promised provider allowances; observations supersede these. */
@@ -152,12 +177,18 @@ export async function readSubscriptionUsagePool(
         accounts: rows.map((row) => {
           const usage = projectSubscriptionCoreAccountUsage(row);
           const history = readings.filter((reading) => reading.connectionId === row.id);
+          const absentWindows = absentSubscriptionWindows(
+            input.provider,
+            usage,
+            provider.adapter.usageReadingsComplete === true,
+          );
           return {
             id: row.id,
             label: row.label ?? row.account_email ?? row.provider_account_id ?? "Account",
             plan: row.plan_type,
             planWeight: subscriptionPlanWeight(input.provider, row.plan_type),
-            blocked: blockedSubscriptionWindows(input.provider, usage, now),
+            blocked: blockedSubscriptionWindows(input.provider, usage, now, absentWindows),
+            absentWindows,
             // The stored snapshot and the retained readings compete by time:
             // the newest observation of each window is its current value.
             windows: [
