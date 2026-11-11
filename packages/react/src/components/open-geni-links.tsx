@@ -2,6 +2,7 @@ import type { OpenGeniClient, OpenGeniLinkTarget } from "@opengeni/sdk";
 import type { ChatClient } from "@opengeni/sdk";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { type OpenGeniText } from "../messages/runtime";
+import { saveBlob } from "../app/lib/save-blob";
 import { ArtifactLinkScopeContext, type ArtifactLinkScope } from "./artifact-link-scope";
 
 export type { OpenGeniLinkTarget };
@@ -169,18 +170,6 @@ const SANDBOX_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024;
 type SessionLinkClient = Partial<
   Pick<ChatClient<OpenGeniClient>, "createFileDownloadUrl" | "fsRead">
 >;
-
-function saveBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  link.rel = "noopener";
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
-}
 
 function openUrl(t: OpenGeniText, url: string): void {
   // A signed download URL is attachment-disposition; an anchor click keeps the
