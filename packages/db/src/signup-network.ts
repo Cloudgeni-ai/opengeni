@@ -6,13 +6,27 @@ import { getBillingBalance } from "./credit-balances";
 import { nestedPostgresSqlState } from "./persistence-errors";
 
 /**
- * Signup network velocity (migration 1354): the post-setup
- * evaluation fan-out and the owner-only operator review helpers. Raw client
- * addresses never reach the database; rows hold keyed hashes only, and review
- * output carries a 16-hex group key, email domains and account UUIDs only.
+ * Signup network velocity (migration 1354) and the denied network rule
+ * (migration 1361): the post-setup evaluation fan-out and the owner-only
+ * operator review helpers. Rows hold keyed hashes only, never addresses, and
+ * review output carries a 16-hex group key, email domains and account UUIDs
+ * only.
  */
 
 export const SIGNUP_NETWORK_POLICY_VERSION = "ip-velocity-v1";
+/** Migration 1361: a network used by a denied or currently held account. */
+export const SIGNUP_DENIED_NETWORK_POLICY_VERSION = "denied-network-v1";
+/** Detector holds listed by the network review and released by its rollback. */
+export const SIGNUP_NETWORK_HOLD_POLICY_VERSIONS = [
+  SIGNUP_NETWORK_POLICY_VERSION,
+  SIGNUP_DENIED_NETWORK_POLICY_VERSION,
+] as const;
+export type SignupNetworkHoldPolicyVersion = (typeof SIGNUP_NETWORK_HOLD_POLICY_VERSIONS)[number];
+/** Plain review reason for each network hold rule. */
+export const SIGNUP_NETWORK_HOLD_REASONS: Record<SignupNetworkHoldPolicyVersion, string> = {
+  "ip-velocity-v1": "Several new organizations from one network within the velocity window",
+  "denied-network-v1": "Network used in the last 90 days by a denied or currently held account",
+};
 export const PROMOTION_DETECTOR_ACTOR = "service:promotion-detector";
 /** SQLSTATE raised by the setup receipt trigger when the network rate limit refuses. */
 export const SIGNUP_NETWORK_RATE_LIMIT_SQLSTATE = "OG429";
@@ -54,6 +68,9 @@ export type SignupNetworkVelocitySettings = {
   rateLimitEnabled: boolean;
   rateLimitMax: number;
   rateLimitWindowHours: number;
+  /** Migration 1361; "off" until set. Older databases omit it. */
+  deniedNetworkMode?: "off" | "observe" | "enforce";
+  deniedNetworkLookbackDays?: number;
   operator: string | null;
   changedAt: string | null;
 };
@@ -67,6 +84,7 @@ export type SignupNetworkVelocityChanges = Partial<
     | "prefixHoldThreshold"
     | "rateLimitEnabled"
     | "rateLimitMax"
+    | "deniedNetworkMode"
   >
 >;
 
@@ -111,12 +129,23 @@ export type SignupNetworkHoldAccount = {
   decidedAt: string;
   ruleId: string | null;
   policyVersion: string | null;
-  addressGroup: string;
-  prefixGroup: string;
+  /** Why the detector held the account (see SIGNUP_NETWORK_HOLD_REASONS). */
+  reason: string;
+  /** Null when the API had no trusted client address at setup. */
+  addressGroup: string | null;
+  prefixGroup: string | null;
   exactGroupSize: number | null;
   prefixGroupSize: number | null;
+  /** denied-network-v1 evidence; null for ip-velocity-v1 holds. */
+  deniedNetwork: {
+    deniedAccounts: number | null;
+    heldAccounts: number | null;
+    matchedVia: string[];
+    matchedAccountIds: string[];
+    lastFlaggedUseAt: string | null;
+  } | null;
   signupAt: string | null;
-  setUpAt: string;
+  setUpAt: string | null;
   emailDomain: string | null;
   chats: number | null;
   sessions: number | null;
@@ -154,8 +183,8 @@ export type SignupNetworkHoldGroup = {
 };
 
 export type SignupNetworkHolds = {
-  schemaVersion: 1;
-  policyVersion: typeof SIGNUP_NETWORK_POLICY_VERSION;
+  schemaVersion: 2;
+  policyVersions: readonly SignupNetworkHoldPolicyVersion[];
   settings: SignupNetworkVelocitySettings;
   holdCount: number;
   truncated: boolean;
@@ -173,8 +202,8 @@ const iso = (value: unknown) => (value ? new Date(value as string).toISOString()
 const num = (value: unknown) => (value === null || value === undefined ? null : Number(value));
 
 /**
- * Pending detector holds from the network velocity rule with per-account and
- * per-network evidence, for an operator or agent reviewer. Owner connection
+ * Pending detector holds from the network rules (velocity and denied network)
+ * with per-account and per-network evidence, for an operator or agent reviewer. Owner connection
  * only; every read runs in one transaction that is always rolled back. A part
  * that cannot be read is null and named in `unreadable`.
  */
@@ -206,21 +235,27 @@ export async function listSignupNetworkHolds(
         join opengeni_private.promotion_decision_history h
           on h.data_schema = session_tenancy_fence_target_schema()::regnamespace::text
           and h.account_id = d.account_id and h.revision = d.revision
-        join opengeni_private.signup_network_sources s
+        left join opengeni_private.signup_network_sources s
           on s.data_schema = h.data_schema and s.account_id = d.account_id
         where d.decision = 'held' and d.actor = ${PROMOTION_DETECTOR_ACTOR}
-          and h.policy_version = ${SIGNUP_NETWORK_POLICY_VERSION}
-        order by s.set_up_at desc, d.account_id limit ${limit + 1}`,
+          and h.policy_version in (${SIGNUP_NETWORK_POLICY_VERSION}, ${SIGNUP_DENIED_NETWORK_POLICY_VERSION})
+        order by coalesce(s.set_up_at, d.updated_at) desc, d.account_id limit ${limit + 1}`,
       );
       const selected = holds.slice(0, limit);
       const accounts: SignupNetworkHoldAccount[] = [];
       for (const hold of selected) accounts.push(await readHoldAccount(txDb, hold));
       const groups: SignupNetworkHoldGroup[] = [];
-      const addressHashes = [...new Set(selected.map((hold) => String(hold.address_hash)))];
+      const addressHashes = [
+        ...new Set(
+          selected
+            .map((hold) => hold.address_hash)
+            .filter((hash): hash is string => typeof hash === "string"),
+        ),
+      ];
       for (const addressHash of addressHashes) groups.push(await readHoldGroup(txDb, addressHash));
       throw new RolledBackRead<SignupNetworkHolds>({
-        schemaVersion: 1,
-        policyVersion: SIGNUP_NETWORK_POLICY_VERSION,
+        schemaVersion: 2,
+        policyVersions: SIGNUP_NETWORK_HOLD_POLICY_VERSIONS,
         settings,
         holdCount: accounts.length,
         truncated: holds.length > limit,
@@ -283,10 +318,14 @@ async function readHoldAccount(
       set_config('opengeni.workspace_id', '', true), set_config('opengeni.subject_id', '', true)`,
   );
   const owner = await part(tx, "owner", unreadable, async (db) => {
+    // The setup record names the owner; without one (no trusted address at
+    // setup), the account's owning user.
     const [row] = await rawRows<{ created_at: unknown; email_domain: string | null }>(
       db,
       sql`select created_at, nullif(lower(substring(email from '@([^@]*)$')), '') as email_domain
-        from auth_users where id = ${String(hold.owner_auth_user_id)}`,
+        from auth_users where id = coalesce(${(hold.owner_auth_user_id as string | null) ?? null}::text,
+          (select external_id from managed_accounts
+            where id = ${accountId}::uuid and external_source = 'better-auth:user'))`,
     );
     return row ?? null;
   });
@@ -330,6 +369,10 @@ async function readHoldAccount(
     );
     return row ?? null;
   });
+  const policyVersion = (hold.policy_version as string | null) ?? null;
+  const deniedNetwork = policyVersion === SIGNUP_DENIED_NETWORK_POLICY_VERSION;
+  const strings = (value: unknown) =>
+    Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
   return {
     accountId,
     decision: String(hold.decision),
@@ -337,13 +380,25 @@ async function readHoldAccount(
     actor: String(hold.actor),
     decidedAt: iso(hold.updated_at)!,
     ruleId: (hold.rule_id as string | null) ?? null,
-    policyVersion: (hold.policy_version as string | null) ?? null,
-    addressGroup: String(hold.address_hash).slice(0, 16),
-    prefixGroup: String(hold.prefix_hash).slice(0, 16),
+    policyVersion,
+    reason: SIGNUP_NETWORK_HOLD_REASONS[deniedNetwork ? "denied-network-v1" : "ip-velocity-v1"],
+    addressGroup: typeof hold.address_hash === "string" ? hold.address_hash.slice(0, 16) : null,
+    prefixGroup: typeof hold.prefix_hash === "string" ? hold.prefix_hash.slice(0, 16) : null,
     exactGroupSize: num(evidence.exactGroupSize),
     prefixGroupSize: num(evidence.prefixGroupSize),
+    deniedNetwork: deniedNetwork
+      ? {
+          deniedAccounts: num(evidence.deniedAccounts),
+          heldAccounts: num(evidence.heldAccounts),
+          matchedVia: strings(evidence.matchedVia),
+          matchedAccountIds: strings(evidence.matchedAccountIds),
+          lastFlaggedUseAt:
+            typeof evidence.lastFlaggedUseAt === "string" ? evidence.lastFlaggedUseAt : null,
+        }
+      : null,
     signupAt: iso(owner?.created_at),
-    setUpAt: iso(hold.set_up_at)!,
+    setUpAt:
+      iso(hold.set_up_at) ?? (typeof evidence.setUpAt === "string" ? evidence.setUpAt : null),
     emailDomain: owner?.email_domain ?? null,
     chats: chats ? chats.top_level : null,
     sessions: chats ? chats.sessions : null,
@@ -387,14 +442,21 @@ async function readHoldGroup(tx: Database, addressHash: string): Promise<SignupN
 
 /**
  * Rollback helper: releases (decision eligible) every current detector hold
- * from the network velocity rule, one account per transaction through the
+ * from the network rules (both, or only the given policy versions), one
+ * account per transaction through the
  * revision-fenced decision setter with an operator actor and reason, so the
  * detector never re-holds them. Owner connection only. A stale revision (an
  * account decided meanwhile) is skipped and reported, never overwritten.
  */
 export async function releaseSignupNetworkHolds(
   ownerDb: Database,
-  input: { operator: string; reason: string; limit?: number; dryRun?: boolean },
+  input: {
+    operator: string;
+    reason: string;
+    limit?: number;
+    dryRun?: boolean;
+    policyVersions?: readonly SignupNetworkHoldPolicyVersion[];
+  },
 ): Promise<{
   candidates: number;
   wouldRelease?: { accountId: string; revision: number }[];
@@ -403,6 +465,10 @@ export async function releaseSignupNetworkHolds(
   dryRun: boolean;
 }> {
   const limit = Math.max(1, Math.min(input.limit ?? 1000, 5000));
+  const policyVersions = SIGNUP_NETWORK_HOLD_POLICY_VERSIONS.filter(
+    (version) => !input.policyVersions || input.policyVersions.includes(version),
+  );
+  if (policyVersions.length === 0) throw new Error("no network hold policy version selected");
   const candidates = await rawRows<{ account_id: string; revision: number }>(
     ownerDb,
     sql`select d.account_id::text as account_id, d.revision::int as revision
@@ -411,7 +477,7 @@ export async function releaseSignupNetworkHolds(
         on h.data_schema = session_tenancy_fence_target_schema()::regnamespace::text
         and h.account_id = d.account_id and h.revision = d.revision
       where d.decision = 'held' and d.actor = ${PROMOTION_DETECTOR_ACTOR}
-        and h.policy_version = ${SIGNUP_NETWORK_POLICY_VERSION}
+        and h.policy_version = any(${`{${policyVersions.join(",")}}`}::text[])
       order by d.account_id limit ${limit}`,
   );
   const released: { accountId: string; revision: number }[] = [];
@@ -423,7 +489,7 @@ export async function releaseSignupNetworkHolds(
           ownerDb,
           sql`select opengeni_private.set_promotion_decision(
             ${candidate.account_id}::uuid, 'eligible', 'operator-v1', 'manual-review',
-            ${JSON.stringify({ reason: input.reason, bulkRelease: SIGNUP_NETWORK_POLICY_VERSION })}::jsonb,
+            ${JSON.stringify({ reason: input.reason, bulkRelease: policyVersions.join(",") })}::jsonb,
             ${input.operator}, ${candidate.revision}::bigint) as decision`,
         );
         released.push({

@@ -7,7 +7,9 @@ import {
   readSignupNetworkVelocitySettings,
   releaseSignupNetworkHolds,
   setSignupNetworkVelocitySettings,
+  SIGNUP_NETWORK_HOLD_POLICY_VERSIONS,
   withAccountRls,
+  type SignupNetworkHoldPolicyVersion,
   type SignupNetworkVelocityChanges,
 } from "@opengeni/db";
 import { sql } from "drizzle-orm";
@@ -38,6 +40,9 @@ const { values } = parseArgs({
     "prefix-threshold": { type: "string" },
     "rate-limit": { type: "string" },
     "rate-limit-max": { type: "string" },
+    // Denied network rule (migration 1361).
+    "denied-network-mode": { type: "string" },
+    rule: { type: "string" },
     "network-holds": { type: "boolean" },
     "network-release-holds": { type: "boolean" },
     "dry-run": { type: "boolean" },
@@ -102,9 +107,14 @@ function networkVelocityChanges(): SignupNetworkVelocityChanges {
   }
   const rateLimitMax = integer("rate-limit-max", values["rate-limit-max"]);
   if (rateLimitMax !== undefined) changes.rateLimitMax = rateLimitMax;
+  if (values["denied-network-mode"] !== undefined) {
+    if (!["off", "observe", "enforce"].includes(values["denied-network-mode"]))
+      throw new Error("--denied-network-mode must be off, observe or enforce");
+    changes.deniedNetworkMode = values["denied-network-mode"] as "off" | "observe" | "enforce";
+  }
   if (Object.keys(changes).length === 0)
     throw new Error(
-      "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max",
+      "Give at least one of --mode, --window-hours, --exact-threshold, --prefix-threshold, --rate-limit, --rate-limit-max, --denied-network-mode",
     );
   return changes;
 }
@@ -141,15 +151,20 @@ try {
     });
     console.log(JSON.stringify(result, null, 2));
   } else if (values["network-release-holds"]) {
-    // Rollback: releases current detector holds of the network velocity rule.
+    // Rollback: releases current detector holds of the network rules (both,
+    // or one with --rule ip-velocity-v1|denied-network-v1).
     if (!values.operator?.trim() || !values.reason || values.reason.trim().length < 6)
       throw new Error("Provide --operator and --reason (six characters)");
     const limit = values.limit && /^\d+$/.test(values.limit) ? Number(values.limit) : undefined;
+    const rule = values.rule as SignupNetworkHoldPolicyVersion | undefined;
+    if (rule !== undefined && !SIGNUP_NETWORK_HOLD_POLICY_VERSIONS.includes(rule))
+      throw new Error(`--rule must be one of ${SIGNUP_NETWORK_HOLD_POLICY_VERSIONS.join(", ")}`);
     const result = await releaseSignupNetworkHolds(client.db, {
       operator: `operator:${values.operator.trim()}`,
       reason: values.reason.trim(),
       dryRun: values["dry-run"] === true,
       ...(limit ? { limit } : {}),
+      ...(rule ? { policyVersions: [rule] } : {}),
     });
     console.log(JSON.stringify(result, null, 2));
   } else if (values["detector-mode"]) {
