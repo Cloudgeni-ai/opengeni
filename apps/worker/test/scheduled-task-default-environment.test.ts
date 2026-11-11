@@ -272,6 +272,39 @@ describe("scheduled task default Sandbox Environment", () => {
     expect(
       (await getScheduledTask(client.db, workspace.workspaceId, task.id))?.agentConfig.resources,
     ).toEqual(resources);
+
+    // Each run re-resolves the owner's Your GitHub choice: once a repository
+    // leaves their chosen list, later runs stop instead of running as anyone else.
+    const current = await getPersonalGitHubRepositorySelectionState(client.db, {
+      accountId: workspace.accountId,
+      originWorkspaceId: workspace.workspaceId,
+      subjectId: workspace.subjectId,
+      connectionId: connection.id,
+    });
+    if (!current) throw new Error("synthetic repository selection is unavailable");
+    await replacePersonalGitHubRepositorySelections(client.db, {
+      accountId: workspace.accountId,
+      originWorkspaceId: workspace.workspaceId,
+      subjectId: workspace.subjectId,
+      connectionId: connection.id,
+      expectedConnectionAuthorityGeneration: current.connectionAuthorityGeneration,
+      expectedSelectionGeneration: current.selectionGeneration,
+      idempotencyKey: crypto.randomUUID(),
+      repositories: [repositories[0]!],
+    });
+    const later = await activities({ githubPersonalOauthEnabled: true })
+      .dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `repository-removed-${crypto.randomUUID()}`,
+      })
+      .catch(() => ({ action: "refused" as const }));
+    expect(later.action).not.toBe("signal");
+    const runs = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id);
+    expect(runs.filter((item) => item.status === "dispatched").map((item) => item.id)).toEqual([
+      run!.id,
+    ]);
   }, 60_000);
 
   test("an omitted environment freezes the workspace default at creation and every run rides it", async () => {

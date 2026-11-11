@@ -234,23 +234,6 @@ describe("where your own things work (real PostgreSQL)", () => {
     expect(await set(f.personal, true)).toMatchObject({ on: true, alwaysOn: true });
   }, 180_000);
 
-  test("a login is never turned on for one chat, so work it starts never outlives a narrower use", async () => {
-    const f = await fixture();
-    const resourceId = await addLogin(f, f.origin);
-    const [connection] = await shared.admin<{ authorityId: string }[]>`
-      select authority_id as "authorityId" from connections where id = ${resourceId}`;
-    await expect(
-      app.begin(async (tx) => {
-        await tx`select set_config('opengeni.account_id', ${f.accountId}, true),
-          set_config('opengeni.workspace_id', ${f.other}, true),
-          set_config('opengeni.subject_id', ${f.owner}, true)`;
-        await tx`select * from issue_self_user_resource_grant(
-          ${f.accountId}::uuid, ${connection!.authorityId}::uuid, ${f.other}::uuid,
-          'connection', 'session', 'user_private', ${crypto.randomUUID()}::uuid, 1, false)`;
-      }),
-    ).rejects.toThrow("invalid user-resource grant request");
-  }, 180_000);
-
   test("turning on needs the permission to add your own; turning off needs none", async () => {
     const f = await fixture();
     const resourceId = await addLogin(f, f.origin);

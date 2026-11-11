@@ -302,13 +302,16 @@ Your GitHub access is refused with a message naming the cause. The child then
 inherits the connection use through durable propagation; it never receives
 another person's connection or more than the parent turn holds.
 
-A schedule an agent creates this way acts as the person on later runs only
-because their Your GitHub use is already standing: a login is turned on per
-workspace (an `always` `connection.use` grant, D-54) or is theirs in their
-Personal workspace, never for one message or one chat. Each run re-resolves the
-owner's current connection and repository access, so turning the login off,
-disconnecting, or removing the repository stops later runs instead of falling
-back to another identity.
+No Your GitHub use is limited to one message or one chat. A turn's personal
+repositories always come from the person's lasting choice on the connection,
+their chosen list or All my repositories (Your GitHub is not turned on per
+workspace; D-54 covers other logins), and a chat's attachments only narrow
+which of them it holds. So a schedule an agent saves can name only repositories
+the creating turn held, and those were already usable as the person beyond that
+turn. Each run re-resolves the owner's connection, chosen list and All my
+repositories: disconnecting, removing the repository from the list or turning
+All my repositories off stops later runs, and a run never falls back to the
+workspace's GitHub app.
 
 Repository owners follow GitHub's login rules, including enterprise managed
 users, whose logins carry an underscore suffix (`octocat_acme`): 1 to 39
