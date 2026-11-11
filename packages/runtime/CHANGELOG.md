@@ -1,5 +1,34 @@
 # @opengeni/runtime
 
+## 6.16.0
+
+### Patch Changes
+
+- 7c610c5: Claude's own thinking from an earlier turn is no longer resent as readable "[Historical reasoning from another model]" assistant text when it can't go back natively (after a system prompt, account, model or transport change, or after Claude refused the signature). It is left out instead, as Claude itself does with a block whose binding no longer matches. Shown back to Claude as text, its own reasoning could trip Claude's safety systems, which refused the whole request and every retry, so affected chats failed with "Claude blocked this request through its safety systems". An assistant message that held only such thinking is removed, and the messages around it are joined. Reasoning from other providers still reaches Claude as readable text.
+- 54dc5da: `sandbox_file_publish` publishes any file the agent's own shell can read, such as scratch output in `/tmp`, on managed sandboxes and Connected Machines alike, instead of refusing every path outside the workspace root. A managed box reads the file through its shell and a Connected Machine at its host path; the workspace root is only the base for relative paths, and a workspace file keeps its existing artifact identity. Callers that cannot run the session's shell (no agent attempt of that session and no `terminal:attach`) keep the workspace scope of their file reads.
+
+  A first-party tool that refuses the caller's own arguments (a schema mismatch, a bad field combination, an unknown ID, an API 400/422) now records `outcome="rejected"` in `opengeni_mcp_tool_calls_total` instead of `provider_declared_error`, and `OpenGeniMcpToolFailureRatio` leaves rejected calls out of both its failures and its total. The server marks the result in `_meta`; the worker honors the mark only from the first-party server and removes it, so the result the caller sees is unchanged.
+
+- Updated dependencies [fb19875]
+- Updated dependencies [54dc5da]
+- Updated dependencies [86e5358]
+- Updated dependencies [01feadc]
+  - @opengeni/contracts@6.16.0
+  - @opengeni/sdk@6.16.0
+  - @opengeni/xai-subscription@6.16.0
+  - @opengeni/capabilities@6.16.0
+  - @opengeni/codemode@6.16.0
+  - @opengeni/codex@6.16.0
+  - @opengeni/config@6.16.0
+  - @opengeni/decisions@6.16.0
+  - @opengeni/interaction@6.16.0
+  - @opengeni/observability@6.16.0
+  - @opengeni/tool-gateway@6.16.0
+  - @opengeni/vaults@6.16.0
+  - @opengeni/jev@6.16.0
+  - @opengeni/agent-proto@6.16.0
+  - @opengeni/network@6.16.0
+
 ## 6.15.0
 
 ### Patch Changes
