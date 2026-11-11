@@ -132,5 +132,22 @@ export function quarantineTest<Registrar extends (...args: never[]) => unknown>(
       }
       return Reflect.apply(target, thisArg, args);
     },
+    // bun's `test.skip`, `test.each` and the rest are native getters and
+    // methods that only accept the real `test` as their receiver: read
+    // getters from it, and call methods on it.
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== "function" || !isMethod(target, property)) return value;
+      return (...args: unknown[]) => Reflect.apply(value, target, args);
+    },
   });
+}
+
+/** Whether `property` is a plain data property (not a getter) on `target` or its prototypes. */
+function isMethod(target: object, property: PropertyKey): boolean {
+  for (let owner: object | null = target; owner; owner = Object.getPrototypeOf(owner)) {
+    const descriptor = Object.getOwnPropertyDescriptor(owner, property);
+    if (descriptor) return "value" in descriptor;
+  }
+  return false;
 }
