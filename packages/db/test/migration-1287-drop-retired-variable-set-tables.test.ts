@@ -11,8 +11,6 @@ import {
   bootstrapWorkspace,
   createDb,
   createRig,
-  createSession,
-  initializeSessionStartAtomically,
   type DbClient,
 } from "../src";
 import { migrate } from "../src/migrate";
@@ -20,6 +18,7 @@ import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
 import { postureThroughMigration } from "./predecessor-runtime-posture";
 import { attachLegacyVariableSets } from "./helpers/legacy-variable-sets";
+import { seedPrefixLedgerSession } from "./helpers/prefix-ledger-session";
 
 const migration = "1287_drop_retired_variable_set_tables.sql";
 const tables = [
@@ -91,23 +90,10 @@ beforeAll(async () => {
   });
   const grant = access.workspaceGrants[0]!;
   scope = { accountId: grant.accountId, workspaceId: grant.workspaceId! };
-  const session = await createSession(client.db, {
+  ({ sessionId } = await seedPrefixLedgerSession(owned.admin, {
     ...scope,
     initialMessage: "current accepted work",
-    resources: [],
-    metadata: {},
-    model: "test-model",
-    reasoningEffort: "medium",
-    latencyMode: "standard",
-    sandboxBackend: "none",
-  });
-  sessionId = session.id;
-  await initializeSessionStartAtomically(client.db, {
-    ...scope,
-    sessionId,
-    reasoningEffortFallback: "medium",
-    createdEventPayload: {},
-  });
+  }));
   const [row] = await owned.admin<{ id: string }[]>`
     insert into workspace_variable_sets (account_id, workspace_id, name)
     values (${scope.accountId}, ${scope.workspaceId}, 'empty-retired-set') returning id`;

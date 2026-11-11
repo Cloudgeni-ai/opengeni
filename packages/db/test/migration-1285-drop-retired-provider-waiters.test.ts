@@ -10,14 +10,13 @@ import postgres from "postgres";
 import {
   bootstrapWorkspace,
   createDb,
-  createSession,
-  initializeSessionStartAtomically,
   type DbClient,
 } from "../src";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { assertRuntimeDatabasePosture } from "../src/runtime-posture";
 import { postureBeforeMigration, postureThroughMigration } from "./predecessor-runtime-posture";
+import { seedPrefixLedgerSession } from "./helpers/prefix-ledger-session";
 
 const migration = "1285_drop_retired_provider_waiters.sql";
 const providers = ["claude", "codex", "xai"] as const;
@@ -82,27 +81,10 @@ beforeAll(async () => {
   });
   const grant = access.workspaceGrants[0]!;
   scope = { accountId: grant.accountId, workspaceId: grant.workspaceId! };
-  const session = await createSession(client.db, {
+  ({ sessionId, turnId } = await seedPrefixLedgerSession(owned.admin, {
     ...scope,
     initialMessage: "current queued work",
-    resources: [],
-    metadata: {},
-    model: "test-model",
-    reasoningEffort: "medium",
-    latencyMode: "standard",
-    sandboxBackend: "none",
-  });
-  sessionId = session.id;
-  await initializeSessionStartAtomically(client.db, {
-    ...scope,
-    sessionId,
-    reasoningEffortFallback: "medium",
-    createdEventPayload: {},
-  });
-  const [turn] = await owned.admin<{ id: string }[]>`
-    select id from session_turns where session_id = ${sessionId} order by position limit 1`;
-  if (!turn) throw new Error("Current session admission did not enqueue its turn");
-  turnId = turn.id;
+  }));
   before = await definitions();
   expect(before).toHaveLength(5);
   expect(before.every((routine) => /(?:codex|xai)_capacity_waiters/.test(routine.body))).toBe(true);
