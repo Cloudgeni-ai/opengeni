@@ -45,6 +45,7 @@ import {
   type BrowserActionNote as BrowserActionNoteValue,
   type BrowserActionResolvedTarget as BrowserActionResolvedTargetValue,
   type InteractionSemanticNodeValue,
+  type InteractionDestinationFailureReason,
   INTERACTION_MAX_RESOLVED_TARGET_TEXT,
   redactInteractionDriverMessage,
 } from "@opengeni/contracts";
@@ -3019,28 +3020,37 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
             action.type === "wait" &&
             onlyCommittedNavigation &&
             committedNavigations > 0
-          )
+          ) {
+            const waitFailure = new InteractionDefiniteDriverError(
+              error.code,
+              `browser action #${actionIndex} (wait) failed after the preceding navigation committed (${error.code}: ${error.message}); the tab shows the committed page`,
+              error.retryable,
+            );
+            waitFailure.failureReason = error.failureReason;
             throw await this.withFailureObservation(
               state,
               info.targetId,
               command,
-              new InteractionDefiniteDriverError(
-                error.code,
-                `browser action #${actionIndex} (wait) failed after the preceding navigation committed (${error.code}: ${error.message}); the tab shows the committed page`,
-                error.retryable,
-              ),
+              waitFailure,
               null,
             );
+          }
+          let thrownAfterEffects = error;
+          if (error instanceof InteractionDefiniteDriverError) {
+            const unknown = new InteractionOutcomeUnknownDriverError(
+              "outcome_unknown",
+              `browser action ${actions.length > 1 ? `#${actionIndex} (${action.type}) ` : ""}failed after it sent input or completed ${completedActions} action(s) (${error.code}: ${error.message}); check the current page before continuing and do not replay the completed actions automatically`,
+            );
+            // Operators still see what actually failed (a website that did
+            // not answer, a timeout) behind the generic outcome_unknown.
+            unknown.failureReason = error.failureReason ?? error.code;
+            thrownAfterEffects = unknown;
+          }
           throw await this.withFailureObservation(
             state,
             info.targetId,
             command,
-            error instanceof InteractionDefiniteDriverError
-              ? new InteractionOutcomeUnknownDriverError(
-                  "outcome_unknown",
-                  `browser action ${actions.length > 1 ? `#${actionIndex} (${action.type}) ` : ""}failed after it sent input or completed ${completedActions} action(s) (${error.code}: ${error.message}); check the current page before continuing and do not replay the completed actions automatically`,
-                )
-              : error,
+            thrownAfterEffects,
             requestsBeforeActions,
           );
         }
@@ -10809,11 +10819,13 @@ export class AgentBrowserDriver implements BrowserInteractionDriver {
     }
     // A failed load is reported whichever page the tab shows.
     if (errorText !== null && options.keepTabOnLoadError !== true) {
-      throw new InteractionDefiniteDriverError(
+      const failure = new InteractionDefiniteDriverError(
         "resource_unavailable",
         `browser could not navigate to the requested URL (${errorText})`,
         true,
       );
+      failure.failureReason = destinationLoadFailureReason(errorText);
+      throw failure;
     }
     await this.waitForDocumentReady(state, DEFAULT_ACTION_TIMEOUT_MS);
     await this.refreshFrame(state);
@@ -15636,6 +15648,7 @@ class NavigationNotAnsweredError extends InteractionDefiniteDriverError {
       true,
     );
     this.name = "NavigationNotAnsweredError";
+    this.failureReason = "destination_not_answered";
   }
 }
 
@@ -15644,4 +15657,52 @@ class NavigationNotAnsweredError extends InteractionDefiniteDriverError {
  * navigation errors, such as an invalid URL, leave no page for the URL. */
 function isPageLoadError(errorText: string): boolean {
   return /^net::ERR_[A-Z0-9_]+$/u.test(errorText);
+}
+
+const DESTINATION_CONNECTION_LOAD_ERRORS = new Set([
+  "net::ERR_CONNECTION_REFUSED",
+  "net::ERR_CONNECTION_RESET",
+  "net::ERR_CONNECTION_CLOSED",
+  "net::ERR_CONNECTION_ABORTED",
+  "net::ERR_CONNECTION_FAILED",
+  "net::ERR_CONNECTION_TIMED_OUT",
+  "net::ERR_ADDRESS_UNREACHABLE",
+  "net::ERR_TIMED_OUT",
+]);
+
+const DESTINATION_RESPONSE_LOAD_ERRORS = new Set([
+  "net::ERR_EMPTY_RESPONSE",
+  "net::ERR_INVALID_RESPONSE",
+  "net::ERR_INVALID_HTTP_RESPONSE",
+  "net::ERR_TOO_MANY_REDIRECTS",
+  "net::ERR_INVALID_REDIRECT",
+  "net::ERR_RESPONSE_HEADERS_TOO_BIG",
+  "net::ERR_RESPONSE_HEADERS_TRUNCATED",
+  "net::ERR_RESPONSE_HEADERS_MULTIPLE_CONTENT_LENGTH",
+  "net::ERR_RESPONSE_HEADERS_MULTIPLE_CONTENT_DISPOSITION",
+  "net::ERR_RESPONSE_HEADERS_MULTIPLE_LOCATION",
+  "net::ERR_CONTENT_DECODING_FAILED",
+  "net::ERR_CONTENT_LENGTH_MISMATCH",
+  "net::ERR_INCOMPLETE_CHUNKED_ENCODING",
+  "net::ERR_INVALID_CHUNKED_ENCODING",
+  "net::ERR_HTTP2_PROTOCOL_ERROR",
+]);
+
+/**
+ * The operator-only reason for a page load error that is the website's own:
+ * its name does not exist, it refused or dropped the connection, its TLS
+ * failed, or it sent a response the browser cannot use. Errors that can be the
+ * browser's or its network's (a proxy or tunnel, no network, a network
+ * change, a blocked or aborted load, a failing resolver) have none, so they
+ * keep counting as the browser's failures.
+ */
+export function destinationLoadFailureReason(
+  errorText: string,
+): InteractionDestinationFailureReason | undefined {
+  if (errorText === "net::ERR_NAME_NOT_RESOLVED") return "destination_name_not_resolved";
+  if (DESTINATION_CONNECTION_LOAD_ERRORS.has(errorText)) return "destination_connection_failed";
+  if (/^net::ERR_(?:CERT_|CERTIFICATE_|SSL_|BAD_SSL_)[A-Z0-9_]+$/u.test(errorText))
+    return "destination_tls_failed";
+  if (DESTINATION_RESPONSE_LOAD_ERRORS.has(errorText)) return "destination_response_invalid";
+  return undefined;
 }
