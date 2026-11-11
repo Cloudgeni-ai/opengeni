@@ -811,7 +811,7 @@ export async function handlePersonalGitHubGatewayRequest(
           if (field.accountLevel) return true;
           const targets = field.nodeIds.map((id) => nodeRepositories.get(id));
           if (field.sensitive && targets.some((t) => t === "other" || t === "unseen")) return false;
-          return field.namesRepository || targets.some((target) => typeof target === "object");
+          return field.namesRepository || targets.some((resolved) => typeof resolved === "object");
         });
         if (!scoped) action = unscopedWrite(action);
       }

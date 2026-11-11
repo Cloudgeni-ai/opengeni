@@ -71,8 +71,8 @@ export type GitHubRestClassification = {
 
 const READ_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
-function write(tools: readonly string[], title: string, sensitive = false): GitHubGatewayAction {
-  return { kind: "write", tools, sensitive, title };
+function write(tools: readonly string[], title: string, isSensitive = false): GitHubGatewayAction {
+  return { kind: "write", tools, sensitive: isSensitive, title };
 }
 
 function routine(title: string): GitHubGatewayAction {
