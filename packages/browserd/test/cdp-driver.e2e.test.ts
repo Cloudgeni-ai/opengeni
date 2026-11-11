@@ -2509,7 +2509,11 @@ chromiumE2e(
       const navigation = driver.dispatch(
         command(initial, { type: "navigate", url: `http://127.0.0.1:${silent.port}/` }),
       );
-      await expect(navigation).rejects.toMatchObject({ code: "outcome_unknown" });
+      // Operators can tell the website did not answer; callers see the same error.
+      await expect(navigation).rejects.toMatchObject({
+        code: "outcome_unknown",
+        failureReason: "destination_not_answered",
+      });
       await expect(navigation).rejects.toThrow(
         "timeout: browser could not load the requested URL: its server did not respond within 2 seconds",
       );
@@ -2518,7 +2522,7 @@ chromiumE2e(
       expect(names(await driver.observe(initial.target.id))).toContain("Static page content");
       await expect(
         driver.openTarget(`http://127.0.0.1:${silent.port}/opened`),
-      ).rejects.toMatchObject({ code: "timeout" });
+      ).rejects.toMatchObject({ code: "timeout", failureReason: "destination_not_answered" });
       expect(await driver.listTargets()).toHaveLength(1);
       // A page that can't load names Chromium's reason.
       await expect(
@@ -2526,6 +2530,17 @@ chromiumE2e(
       ).rejects.toMatchObject({
         code: "resource_unavailable",
         message: "browser could not navigate to the requested URL (net::ERR_CONNECTION_REFUSED)",
+        failureReason: "destination_connection_failed",
+      });
+      // So does a navigate action to it, behind its generic outcome_unknown.
+      const current = await driver.observe(initial.target.id);
+      await expect(
+        driver.dispatch(
+          command(current, { type: "navigate", url: `http://127.0.0.1:${refusedPort}/refused` }),
+        ),
+      ).rejects.toMatchObject({
+        code: "outcome_unknown",
+        failureReason: "destination_connection_failed",
       });
       // Chromium was still preparing the tabs that closed above; that
       // work must not hold the browser's shutdown.

@@ -1,6 +1,13 @@
 {{- if .Values.api.enabled }}
-{{- $extraEnv := include "opengeni.extraEnv" (dict "root" . "entries" .Values.api.extraEnv "reserved" (list "OPENGENI_API_METRICS_PORT")) }}
+{{- $extraEnv := include "opengeni.extraEnv" (dict "root" . "entries" .Values.api.extraEnv "reserved" (list "OPENGENI_API_METRICS_PORT" "OPENGENI_API_SHUTDOWN_GRACE_MS")) }}
 {{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.api.priorityClassName "tier" "control") }}
+{{- /* The API drains in-flight requests after SIGTERM, inside what is left of the pod grace once the preStop sleep has run. */}}
+{{- $apiGraceSeconds := int .Values.api.terminationGracePeriodSeconds }}
+{{- $apiPreStopSeconds := int (.Values.api.preStopDrainSeconds | default 0) }}
+{{- if le $apiGraceSeconds $apiPreStopSeconds }}
+{{- fail (printf "api.preStopDrainSeconds (%d) must be less than api.terminationGracePeriodSeconds (%d) so the API can drain after SIGTERM" $apiPreStopSeconds $apiGraceSeconds) }}
+{{- end }}
+{{- $apiShutdownGrace := not (hasKey (.Values.config | default dict) "OPENGENI_API_SHUTDOWN_GRACE_MS") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -71,11 +78,15 @@ spec:
                 name: {{ include "opengeni.secretName" . }}
           {{- $computeTrusted := include "opengeni.computeControl.trusted" . }}
           {{- $databasePasswordFiles := include "opengeni.databasePasswordFiles.enabled" . }}
-          {{- if or $extraEnv .Values.api.metricsPort .Values.config.OPENGENI_DEPLOYMENT_REVISION .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled $computeTrusted $databasePasswordFiles }}
+          {{- if or $extraEnv $apiShutdownGrace .Values.api.metricsPort .Values.config.OPENGENI_DEPLOYMENT_REVISION .Values.postgres.enabled .Values.temporal.enabled .Values.garage.enabled .Values.minio.enabled $computeTrusted $databasePasswordFiles }}
           env:
             {{- with .Values.api.metricsPort }}
             - name: OPENGENI_API_METRICS_PORT
               value: {{ . | quote }}
+            {{- end }}
+            {{- if $apiShutdownGrace }}
+            - name: OPENGENI_API_SHUTDOWN_GRACE_MS
+              value: {{ mul (sub $apiGraceSeconds $apiPreStopSeconds) 1000 | quote }}
             {{- end }}
             {{- include "opengeni.deploymentRevisionEnv" . | nindent 12 }}
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}

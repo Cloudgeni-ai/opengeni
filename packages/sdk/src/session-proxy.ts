@@ -363,7 +363,8 @@ export type SessionProxyHandlerOptions = {
         route: SessionProxyRoute,
         response: Response,
         context: SessionProxyContext,
-      ) => Response | undefined | Promise<Response | undefined>)
+        // `void` lets a record-only `async` hook end without `return undefined`.
+      ) => Response | undefined | void | Promise<Response | undefined | void>)
     | undefined;
   /**
    * Attach your product's MCP tool server to every chat this relay creates,
@@ -814,7 +815,9 @@ export function createSessionProxyHandler(
           upstream = await send();
         }
         const relayed = relayResponse(upstream, heartbeatMs, rejectedKeyNotice);
-        return (await options.afterForward?.(routeInfo, relayed, context)) ?? relayed;
+        // A record-only hook returns `void`, which is `undefined` at runtime.
+        const answered = await options.afterForward?.(routeInfo, relayed, context);
+        return (answered as Response | undefined) ?? relayed;
       };
 
       // --- Server-owned additions: the few routes whose body the relay reads.
@@ -1008,6 +1011,24 @@ export function createSessionProxyHandler(
           );
         }
         return response;
+      }
+
+      if (
+        method === "POST" &&
+        route.length === 2 &&
+        route[0] === "files" &&
+        route[1] === "uploads"
+      ) {
+        // An upload that names no scope follows this relay's chats, as in the
+        // web app: Only me when chats are private, so an older or custom client
+        // that omits it never shares a private chat's file with the workspace.
+        // An explicit scope is the uploader's own choice and passes through.
+        const body = (await readJsonBody(request, maxBodyBytes))!;
+        return await forward(
+          body.scope === undefined && defaults.visibility === "private"
+            ? { ...body, scope: "personal" }
+            : body,
+        );
       }
 
       if (inSession && sessionId) {

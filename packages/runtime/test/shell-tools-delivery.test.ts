@@ -30,10 +30,15 @@ afterAll(async () => {
 
 beforeAll(async () => {
   await mkdir(imageBin, { recursive: true });
+  // Track linked names directly: /bin is often the same directory as /usr/bin,
+  // and existsSync follows a dangling host symlink to "missing", which would
+  // link the same name twice.
+  const linked = new Set<string>();
   for (const directory of ["/usr/local/bin", "/usr/bin", "/bin"]) {
     if (!existsSync(directory)) continue;
     for (const name of readdirSync(directory)) {
-      if (name === "rg" || name === "jq" || existsSync(join(imageBin, name))) continue;
+      if (name === "rg" || name === "jq" || linked.has(name)) continue;
+      linked.add(name);
       await symlink(join(directory, name), join(imageBin, name));
     }
   }

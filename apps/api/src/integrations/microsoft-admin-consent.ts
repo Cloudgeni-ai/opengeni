@@ -1,9 +1,10 @@
 import type { IntegrationDefinition } from "@opengeni/capabilities";
-import { htmlPageResponse } from "../http/html-page-security";
+import type { ConnectResultPageText } from "@opengeni/config";
 import {
   MICROSOFT_ADMIN_CONSENT_STATE,
   microsoftAdminConsentUrl as adminConsentUrl,
 } from "@opengeni/contracts/connect";
+import { connectResultPage } from "./connect-finished-page";
 
 /**
  * Microsoft 365 organizations can require an administrator to approve an app
@@ -77,16 +78,31 @@ export function microsoftAuthorizationNotGranted(input: {
   };
 }
 
-/** Result page an administrator lands on after the approval link. */
-export function microsoftAdminConsentResultPage(query: {
-  adminConsent?: string | undefined;
-  error?: string | undefined;
-}): Response {
+/**
+ * Result page an administrator lands on after the approval link, in the
+ * deployment's words (`OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON`).
+ */
+export function microsoftAdminConsentResultPage(
+  query: {
+    adminConsent?: string | undefined;
+    error?: string | undefined;
+  },
+  text: ConnectResultPageText = {},
+): Response {
   const granted = query.adminConsent?.toLowerCase() === "true" && !query.error;
-  const title = granted ? "Approved" : "Not approved";
-  const body = granted
-    ? "People in your organization can now connect their Microsoft 365 accounts. Ask them to connect again."
-    : "Microsoft did not record an approval. Open the approval link again with a Microsoft 365 administrator account.";
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>body{font-family:system-ui,-apple-system,sans-serif;max-width:32rem;margin:15vh auto;padding:0 1.5rem;line-height:1.5;color:#1f2328}h1{font-size:1.4rem}</style></head><body><h1>${title}</h1><p>${body}</p><p>You can close this window.</p></body></html>`;
-  return htmlPageResponse(html, { status: granted ? 200 : 400 });
+  return connectResultPage({
+    text,
+    status: granted ? 200 : 400,
+    title: granted
+      ? (text.adminApprovedTitle ?? "Approved")
+      : (text.adminNotApprovedTitle ?? "Not approved"),
+    lines: [
+      granted
+        ? (text.adminApprovedBody ??
+          "People in your organization can now connect their Microsoft 365 accounts. Ask them to connect again.")
+        : (text.adminNotApprovedBody ??
+          "Microsoft did not record an approval. Open the approval link again with a Microsoft 365 administrator account."),
+      text.closeWindow ?? "You can close this window.",
+    ],
+  });
 }

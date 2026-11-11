@@ -1402,14 +1402,15 @@ export class MockOpenGeniClient implements SessionClientLike {
   }
 
   async uploadFile(workspaceId: string, input: UploadFileInput): Promise<FileAsset> {
+    const data = input.data;
     const sizeBytes =
-      input.data instanceof Blob
-        ? input.data.size
-        : typeof input.data === "string"
-          ? new TextEncoder().encode(input.data).byteLength
-          : input.data instanceof Uint8Array
-            ? input.data.byteLength
-            : (input.data as ArrayBuffer).byteLength;
+      data instanceof Blob
+        ? data.size
+        : typeof data === "string"
+          ? new TextEncoder().encode(data).byteLength
+          : data instanceof Uint8Array || data instanceof ArrayBuffer
+            ? data.byteLength
+            : data.sizeBytes;
     return this.fileAsset(workspaceId, {
       filename: input.filename,
       contentType: input.contentType,

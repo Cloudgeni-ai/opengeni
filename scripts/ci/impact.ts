@@ -791,6 +791,7 @@ function fullPlan(
       "format",
       "workspace-billing",
       "docs-refs",
+      "doc-snippets",
       "generated-fonts",
       "public-hygiene",
       // A migration ordinal that protected main has meanwhile assigned to
@@ -808,6 +809,9 @@ function fullPlan(
       "migration-online-safety",
       // Shipped migrations are applied once by name: a head may only add them.
       "migration-immutability",
+      // A rolling migration runs while the previous release serves: it must not
+      // revoke, drop or rename what that release's runtime posture requires.
+      "migration-previous-release",
       // A ledger-replaying test without an explicit budget is one shard repack
       // away from being killed at the shard default.
       "migration-test-budgets",
@@ -892,7 +896,15 @@ export function createImpactPlan(
       exampleBuildProjects: [],
       // The subscription contract is a document, so a docs-only change to it
       // must still be checked against the tests that claim its requirements.
-      guards: ["format", "docs-refs", "generated-fonts", "public-hygiene", "subscription-contract"],
+      guards: [
+        "format",
+        "docs-refs",
+        // Docs samples are typechecked against the SDK they describe.
+        "doc-snippets",
+        "generated-fonts",
+        "public-hygiene",
+        "subscription-contract",
+      ],
       reasons: changedFiles.map((path) => ({
         path,
         reason: "documentation-only change",
@@ -1020,6 +1032,8 @@ export function createImpactPlan(
     "format",
     "workspace-billing",
     "docs-refs",
+    // Any SDK or React change can break a docs sample; the check takes seconds.
+    "doc-snippets",
     "generated-fonts",
     "public-hygiene",
     // Not gated on `packages/db/drizzle/`: the case this exists for is a NEW
@@ -1038,6 +1052,7 @@ export function createImpactPlan(
       "migration-deployment-mode",
       "migration-online-safety",
       "migration-immutability",
+      "migration-previous-release",
     );
   }
   if (

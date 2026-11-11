@@ -832,6 +832,11 @@ const SettingsSchema = z.object({
   // one and existing links stop opening.
   privacyChatShareLinksAllowed: EnvBoolean.default(true),
   integrationsOauthClientsJson: z.string().default("{}"),
+  // The deployment's own words, in its own language, for the small pages the
+  // API shows outside any app: where a sign-in popup ends, and where an
+  // administrator lands after approving the app. See
+  // parseConnectResultPageTextJson.
+  connectResultPageTextJson: z.string().optional(),
   gmailWatchTopicName: z
     .string()
     .regex(/^projects\/[^/]+\/topics\/[^/]+$/u)
@@ -976,6 +981,11 @@ const SettingsSchema = z.object({
   // When set, GET /metrics is served only on this dedicated internal listener
   // and never on the public API port that an ingress forwards to.
   apiMetricsPort: z.coerce.number().int().positive().optional(),
+  // Time the API process has between SIGTERM and being killed: the pod's
+  // termination grace minus its preStop drain (the Helm chart renders it).
+  // In-flight requests drain for this less a ten-second exit margin, then the
+  // process closes its clients and exits within it.
+  apiShutdownGraceMs: z.coerce.number().int().min(0).max(3_600_000).default(30_000),
   workerHttpPort: z.coerce.number().int().positive().default(8001),
   // Worker-side first-party MCP traffic stays on the deployment's internal
   // network. OPENGENI_MCP_URL remains the sandbox/external route used by
@@ -4644,6 +4654,49 @@ export const IntegrationOAuthClientConfigSchema = z.object({
 });
 export type IntegrationOAuthClientConfig = z.infer<typeof IntegrationOAuthClientConfigSchema>;
 
+const resultPageLine = z.string().trim().min(1).max(500);
+/**
+ * Wording for the API's own result pages, which no app renders and so no
+ * app's message catalog reaches: the page a sign-in popup ends on and the
+ * page an administrator sees after the organization approval link. Every
+ * field is optional; what is left out stays in English. `lang` names the
+ * language of the given words (a BCP 47 tag such as `nb`).
+ */
+export const ConnectResultPageTextSchema = z
+  .object({
+    lang: z
+      .string()
+      .regex(/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/u)
+      .optional(),
+    signInFinishedTitle: resultPageLine.optional(),
+    signInFinishedBody: resultPageLine.optional(),
+    adminApprovedTitle: resultPageLine.optional(),
+    adminApprovedBody: resultPageLine.optional(),
+    adminNotApprovedTitle: resultPageLine.optional(),
+    adminNotApprovedBody: resultPageLine.optional(),
+    closeWindow: resultPageLine.optional(),
+  })
+  .strict();
+export type ConnectResultPageText = z.infer<typeof ConnectResultPageTextSchema>;
+
+/** The deployment's wording for the API's result pages (empty: English). */
+export function parseConnectResultPageTextJson(raw: string | undefined): ConnectResultPageText {
+  if (!raw?.trim()) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON must be valid JSON: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+  const result = ConnectResultPageTextSchema.safeParse(parsed);
+  if (!result.success)
+    throw new Error(`OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON is invalid: ${result.error.message}`);
+  return result.data;
+}
+
 /**
  * Runtime-resolved provider (built-in or registry), client-construction-ready.
  * The built-in OpenAI/Azure provider is always present and always "responses";
@@ -6027,6 +6080,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ),
     privacyChatShareLinksAllowed: optional("OPENGENI_PRIVACY_CHAT_SHARE_LINKS_ALLOWED"),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
+    connectResultPageTextJson: optional("OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON"),
     gmailWatchTopicName: optional("OPENGENI_GMAIL_WATCH_TOPIC_NAME"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
@@ -6062,6 +6116,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     apiHost: optional("OPENGENI_API_HOST"),
     apiPort: optional("OPENGENI_API_PORT"),
     apiMetricsPort: optional("OPENGENI_API_METRICS_PORT"),
+    apiShutdownGraceMs: optional("OPENGENI_API_SHUTDOWN_GRACE_MS"),
     workerHttpPort: optional("OPENGENI_WORKER_HTTP_PORT"),
     opengeniMcpInternalUrl: optional("OPENGENI_MCP_INTERNAL_URL"),
     opengeniMcpUrl: optional("OPENGENI_MCP_URL"),
@@ -12796,6 +12851,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     }
   }
   parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
+  parseConnectResultPageTextJson(settings.connectResultPageTextJson);
   parseSocialOauthClientsJson(settings.socialOauthClientsJson);
   // Only the operator's own environment is strict here. Settings resolved
   // from a stored catalog document re-parse providers without this check;

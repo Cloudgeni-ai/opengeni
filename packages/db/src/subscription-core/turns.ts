@@ -702,6 +702,23 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         : policy.kind === "valid" && policy.policy.latencyMode === "ultrafast"
           ? [upstreamModelId, modelServiceTierCatalogEntry(upstreamModelId, "ultrafast")]
           : [upstreamModelId];
+    const providerConnections = worldInput.connections.filter(
+      (connection) => connection.provider === providerId,
+    );
+    // A fresh catalog routes the turn to the accounts that list its model.
+    // When no account lists it, the catalog cannot choose, and its silence is
+    // ambiguous: the plan may lack the model, a rollout may be in progress, or
+    // the provider may hide it from this client version. This turn has no
+    // other provider to move to, so waiting would strand it behind an
+    // unrelated reset. Placement then runs on capacity alone, and the
+    // provider's answer decides: a plan refusal takes the plan-entitlement
+    // path, a client-version refusal fails the turn visibly. Cross-provider
+    // failover keeps its own catalog view (failover-world.ts).
+    const catalogDecides =
+      upstreamModelId !== null &&
+      providerConnections.some(
+        (connection) => connection.observedModelSlugs?.includes(upstreamModelId) === true,
+      );
     const input: PlacementInput = {
       ...worldInput,
       session: {
@@ -715,20 +732,18 @@ export const subscriptionCoreTurns = memoByProvider((provider: SubscriptionCoreP
         }),
       },
       settings: { ...worldInput.settings, crossProviderFailover: false, fallbackOrder: {} },
-      connections: worldInput.connections
-        .filter((connection) => connection.provider === providerId)
-        .map((connection) =>
-          requiredCatalogEntries !== null && connection.observedModelSlugs != null
-            ? {
-                ...connection,
-                entitledModelIds: requiredCatalogEntries.every((entry) =>
-                  connection.observedModelSlugs!.includes(entry),
-                )
-                  ? [productModelId]
-                  : [],
-              }
-            : connection,
-        ),
+      connections: providerConnections.map((connection) =>
+        catalogDecides && requiredCatalogEntries !== null && connection.observedModelSlugs != null
+          ? {
+              ...connection,
+              entitledModelIds: requiredCatalogEntries.every((entry) =>
+                connection.observedModelSlugs!.includes(entry),
+              )
+                ? [productModelId]
+                : [],
+            }
+          : connection,
+      ),
     };
     return { input, deletedExplicit };
   }

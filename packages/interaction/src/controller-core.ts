@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { deflateRawSync, inflateRawSync } from "node:zlib";
-import type { InteractionError, InteractionOperationState } from "@opengeni/contracts";
+import type {
+  InteractionError,
+  InteractionFailureReason,
+  InteractionOperationState,
+} from "@opengeni/contracts";
 
 export type InteractionControllerErrorCode = InteractionError["code"] | "journal_full";
 
@@ -23,6 +27,9 @@ export class InteractionDefiniteDriverError extends Error {
   observation: unknown = null;
   /** Optional structured facts about the failure, kept in the receipt's error. */
   details: InteractionError["details"] = undefined;
+  /** Optional operator-only reason for metrics (see InteractionFailureReason),
+   * returned beside the receipt and never part of its error. */
+  failureReason: InteractionFailureReason | undefined = undefined;
 
   constructor(
     readonly code: InteractionError["code"],
@@ -42,6 +49,8 @@ export class InteractionOutcomeUnknownDriverError extends Error {
   observation: unknown = null;
   /** Optional structured facts; see InteractionDefiniteDriverError. */
   details: InteractionError["details"] = undefined;
+  /** Optional operator-only reason; see InteractionDefiniteDriverError. */
+  failureReason: InteractionFailureReason | undefined = undefined;
 
   constructor(
     readonly code: InteractionError["code"],
@@ -93,6 +102,8 @@ export type InteractionDispatchTrace = {
 
 class BoundedDispatchTrace implements InteractionDispatchTrace {
   readonly items: unknown[] = [];
+  /** The operator-only reason the dispatch's typed driver error gave. */
+  failureReason: InteractionFailureReason | undefined = undefined;
 
   constructor(private readonly limit: number) {}
 
@@ -156,6 +167,11 @@ type InteractionCoreAdapter<
   /** Decorates the returned receipt with recorded trace items. It may throw
    * on invalid items; the undecorated receipt is then returned unchanged. */
   attachDispatchTrace?(receipt: TReceipt, items: readonly unknown[]): TReceipt;
+  /** Decorates the returned failed or outcome-unknown receipt with the
+   * operator-only reason its driver error gave. Like dispatch traces, the
+   * journal keeps the undecorated receipt. Without this hook the reason is
+   * dropped. */
+  attachFailureReason?(receipt: TReceipt, reason: InteractionFailureReason): TReceipt;
 };
 
 type InteractionCoreAuthority<TCommand> = {
@@ -407,7 +423,23 @@ export class InteractionControllerCore<
 
     const trace = new BoundedDispatchTrace(this.adapter.maxDispatchTraceItems ?? 0);
     const receipt = await this.dispatchAndSettle(entry, command, dispatchedAt, trace);
-    return this.attachDispatchTrace(receipt, trace.items);
+    return this.attachFailureReason(this.attachDispatchTrace(receipt, trace.items), trace);
+  }
+
+  private attachFailureReason(receipt: TReceipt, trace: BoundedDispatchTrace): TReceipt {
+    const reason = trace.failureReason;
+    if (
+      reason === undefined ||
+      !this.adapter.attachFailureReason ||
+      (receipt.state !== "failed" && receipt.state !== "outcome_unknown")
+    )
+      return receipt;
+    try {
+      return this.adapter.attachFailureReason(receipt, reason);
+    } catch {
+      // Diagnostics never change an operation's outcome.
+      return receipt;
+    }
   }
 
   /** Dispatch diagnostics decorate only the returned receipt. The journal keeps
@@ -426,7 +458,7 @@ export class InteractionControllerCore<
     entry: JournalEntry<TReceipt>,
     command: TCommand,
     dispatchedAt: string,
-    trace: InteractionDispatchTrace,
+    trace: BoundedDispatchTrace,
   ): Promise<TReceipt> {
     try {
       const dispatchedObservation = await this.driver.dispatch(command, trace);
@@ -460,6 +492,11 @@ export class InteractionControllerCore<
         );
       }
     } catch (error) {
+      if (
+        error instanceof InteractionDefiniteDriverError ||
+        error instanceof InteractionOutcomeUnknownDriverError
+      )
+        trace.failureReason = error.failureReason;
       if (error instanceof InteractionDefiniteDriverError) {
         return await this.settle(
           entry,
