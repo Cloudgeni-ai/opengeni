@@ -81,6 +81,7 @@ Reference: [Azure Bot registration](https://learn.microsoft.com/en-us/azure/bot-
 | `OPENGENI_TEAMS_BOT_ALLOWED_GROUP_CHAT_IDS` | Exact approved group chats as `tenantId:conversationId`; empty denies all groups, independently of broad rollout |
 | `OPENGENI_TEAMS_BOT_SETUP_ADMIN_IDS` | Explicit operator-approved `tenantId:actorObjectId` installer pairs |
 | `OPENGENI_TEAMS_BOT_SELF_SERVE_SETUP_ENABLED` | Lets a tenant administrator of an admitted tenant connect it after a Microsoft sign-in; default false |
+| `OPENGENI_TEAMS_WORKSPACE_ROUTING_ENABLED` | Lets a connected tenant's 1:1 chats start work in any workspace of the organization the linked person can use, within the organization's reach; default false. Turn it on only after every replica runs a release that reads `teams_bot_routes.agent_id` |
 | `OPENGENI_TEAMS_BOT_CLIENT_ID` | Bot's Entra application ID |
 | `OPENGENI_TEAMS_BOT_CLIENT_SECRET` | Server-only bot credential |
 | `OPENGENI_TEAMS_BOT_TENANT_ID` | Home tenant used to acquire bot service tokens |

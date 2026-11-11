@@ -2820,7 +2820,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "subscription_session_bindings",
   "subscription_settings",
   "subscription_turn_failures",
-  // 1361_teams_workspace_routing: a Teams person's chosen workspace and agent.
+  // 1363_teams_workspace_routing: a Teams person's chosen workspace and agent.
   "teams_bot_chat_choices",
   "teams_bot_context_cutoffs",
   "teams_bot_context_messages",
@@ -2833,7 +2833,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "teams_bot_proofs",
   // 1301_teams_bot_reply_claims: bot-answered activities claimed once across replicas.
   "teams_bot_reply_claims",
-  // 1361_teams_workspace_routing: switch cards and the message waiting for them.
+  // 1363_teams_workspace_routing: switch cards and the message waiting for them.
   "teams_bot_route_prompt_options",
   "teams_bot_route_prompts",
   "teams_bot_routes",

@@ -106,7 +106,7 @@ CREATE TABLE teams_bot_route_prompts (
   CONSTRAINT teams_bot_route_prompts_workspace_account_fkey FOREIGN KEY (workspace_id, account_id)
     REFERENCES workspaces(id, account_id) ON DELETE CASCADE
 );
-CREATE INDEX teams_bot_route_prompts_created_idx ON teams_bot_route_prompts (created_at);
+CREATE INDEX teams_bot_route_prompts_created_idx ON teams_bot_route_prompts (tenant_id, created_at);
 COMMENT ON TABLE teams_bot_route_prompts IS 'A Teams switch card a person was shown, with the message waiting for their choice.';
 
 CREATE TABLE teams_bot_route_prompt_options (

@@ -288,14 +288,22 @@ export async function setTeamsReach(
     expectedVersion?: number;
   },
 ): Promise<TeamsReach> {
+  if (input.workspaceIds?.some((id) => typeof id !== "string" || !UUID.test(id)))
+    throw new Error("teams_reach_invalid");
   const selected =
     input.workspaceIds === null
       ? null
-      : [...new Set(input.workspaceIds.filter((id) => id !== i.workspace_id))].sort();
+      : [
+          ...new Set(
+            input.workspaceIds
+              .map((id) => id.toLowerCase())
+              .filter((id) => id !== i.workspace_id.toLowerCase()),
+          ),
+        ].sort();
   if (selected && selected.length > 1000) throw new Error("teams_reach_invalid");
   if (selected && selected.length > 0) {
     const found = await organizationSharedWorkspaceIds(db, i.account_id, selected);
-    if (found.size !== selected.length) throw new Error("teams_reach_invalid");
+    if (selected.some((id) => !found.has(id))) throw new Error("teams_reach_invalid");
   }
   return teamsScoped(db, i, async (tx) => {
     const [row] = await rawRows<{
@@ -305,7 +313,7 @@ export async function setTeamsReach(
     }>(
       tx,
       sql`update teams_bot_installations set
-          reach_workspace_ids=${selected === null ? null : `{${selected.join(",")}}`}::uuid[],
+          reach_workspace_ids=${uuidArray(selected)},
           reach_personal_workspaces=${input.personalWorkspaces},
           reach_version=reach_version+1
         where tenant_id=${i.tenant_id}::uuid and workspace_id=${i.workspace_id}::uuid
@@ -321,6 +329,15 @@ export async function setTeamsReach(
   });
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/** A bound uuid[] (never a text literal a caller's string could extend). */
+function uuidArray(values: readonly string[] | null) {
+  return values === null
+    ? sql`NULL::uuid[]`
+    : sql`array(select jsonb_array_elements_text(${JSON.stringify(values)}::jsonb)::uuid)`;
+}
+
 /** Which of `workspaceIds` are shared (not Personal) workspaces of the organization. */
 async function organizationSharedWorkspaceIds(
   db: Database,
@@ -332,11 +349,11 @@ async function organizationSharedWorkspaceIds(
       tx,
       sql`select inventory.workspace_id from list_organization_workspace_ids(${accountId}::uuid) inventory
         join workspaces w on w.id=inventory.workspace_id and w.account_id=${accountId}::uuid
-        where inventory.workspace_id = any(${`{${workspaceIds.join(",")}}`}::uuid[])
+        where inventory.workspace_id = any(${uuidArray(workspaceIds)})
           and w.external_source is distinct from ${PERSONAL_WORKSPACE_EXTERNAL_SOURCE}`,
     ),
   );
-  return new Set(rows.map((row) => row.workspace_id));
+  return new Set(rows.map((row) => row.workspace_id.toLowerCase()));
 }
 
 /** A shared agent Teams can offer: ids, names and where it works. */
@@ -374,7 +391,7 @@ export async function listTeamsAgentDirectory(
         join workspaces w on w.id=a.workspace_id and w.account_id=a.account_id
         where a.account_id=${input.accountId}::uuid and a.visibility='workspace'
           and w.external_source is distinct from ${PERSONAL_WORKSPACE_EXTERNAL_SOURCE}
-          and a.workspace_id = any(${`{${input.workspaceIds.join(",")}}`}::uuid[])
+          and a.workspace_id = any(${uuidArray(input.workspaceIds.filter((id) => UUID.test(id)))})
         order by a.name_key, a.created_at, a.id
         limit 500`,
     ),

@@ -629,6 +629,10 @@ export async function disconnectTeamsBot(
     await tx.execute(
       sql`delete from teams_bot_context_cutoffs where workspace_id=${i.workspace_id}::uuid`,
     );
+    // Parked switch-card messages are unusable after the generation changes.
+    await tx.execute(
+      sql`delete from teams_bot_route_prompts where workspace_id=${i.workspace_id}::uuid`,
+    );
     if (options.audit && prior?.active) {
       await insertDisconnectAuditEventInScope(tx, {
         accountId: i.account_id,
@@ -660,11 +664,16 @@ export async function enqueueTeamsMessage(
     /** A 1:1 route's session in the sender's own Personal workspace. */
     sessionWorkspaceId?: string | null;
     /**
-     * A 1:1 route's session in another workspace of the organization (or an
-     * agent's): checked in the enqueue transaction by the caller's live
-     * authority check, which replaces the Personal-workspace-only rule.
+     * The caller's live authority check for a 1:1 route that names another
+     * workspace of the organization or an agent, run in the enqueue
+     * transaction. It replaces the Personal-workspace-only rule and must also
+     * confirm the agent may run in that workspace. A route that names an agent
+     * is refused without it.
      */
-    authorizeSessionWorkspace?: (tx: Database, workspaceId: string) => Promise<boolean>;
+    authorizeSessionWorkspace?: (
+      tx: Database,
+      target: { workspaceId: string; agentId: string | null },
+    ) => Promise<boolean>;
     /** The agent a 1:1 route's chat runs as. */
     agentId?: string | null;
   },
@@ -686,15 +695,22 @@ export async function enqueueTeamsMessage(
   return teamsScoped(db, i, async (tx) => {
     // Only the linked person's own Personal workspace, named by their active
     // organization membership, can hold their 1:1 chat, unless workspace
-    // routing checks their live access to the workspace here.
-    if (
+    // routing checks their live access to the workspace (and the agent) here.
+    if (input.authorizeSessionWorkspace && (sessionWorkspaceId || agentId)) {
+      if (
+        !(await input.authorizeSessionWorkspace(tx, {
+          workspaceId: sessionWorkspaceId ?? i.workspace_id,
+          agentId,
+        }))
+      )
+        throw new Error("teams_route_unavailable");
+    } else if (agentId) throw new Error("teams_route_unavailable");
+    else if (
       sessionWorkspaceId &&
-      !(input.authorizeSessionWorkspace
-        ? await input.authorizeSessionWorkspace(tx, sessionWorkspaceId)
-        : (await namedSubjectPersonalWorkspaceId(tx, {
-            accountId: i.account_id,
-            subjectId: input.subjectId,
-          })) === sessionWorkspaceId)
+      (await namedSubjectPersonalWorkspaceId(tx, {
+        accountId: i.account_id,
+        subjectId: input.subjectId,
+      })) !== sessionWorkspaceId
     )
       throw new Error("teams_route_unavailable");
     const active = await rawRows(

@@ -18,6 +18,7 @@ import {
   teamsReachIncludes,
   listTeamsAgentDirectory,
   removeTeamsLink,
+  disconnectTeamsBot,
   TEAMS_ROUTE_PROMPT_TTL_MS,
 } from "../src";
 import { PERSONAL_WORKSPACE_EXTERNAL_SOURCE } from "../src/personal-workspace-membership";
@@ -215,6 +216,30 @@ test("a switch card's numbers count once, only on the latest fresh card of this 
   await expect(
     putTeamsRoutePrompt(client!.db, o.i, { ...who, payload: null, options: [] }),
   ).rejects.toThrow("teams_route_prompt_options_invalid");
+
+  // Concurrent answers to one card: exactly one gets the choice.
+  await putTeamsRoutePrompt(client!.db, o.i, {
+    ...who,
+    payload: { text: "once" },
+    options: [{ workspaceId: o.design, agentId: null }],
+  });
+  const answers = await Promise.all(
+    Array.from({ length: 6 }, () =>
+      takeTeamsRoutePromptOption(client!.db, o.i, { ...who, position: 1 }),
+    ),
+  );
+  expect(answers.filter(Boolean)).toHaveLength(1);
+
+  // Disconnecting removes cards, with the messages waiting on them.
+  await putTeamsRoutePrompt(client!.db, o.i, {
+    ...who,
+    payload: { text: "waiting" },
+    options: [{ workspaceId: o.design, agentId: null }],
+  });
+  await disconnectTeamsBot(client!.db, o.i);
+  expect(
+    await shared!.admin`select 1 from teams_bot_route_prompts where tenant_id=${o.tenantId}`,
+  ).toHaveLength(0);
 });
 
 test("the organization's reach defaults to every workspace and narrows to shared workspaces it owns", async () => {
@@ -254,6 +279,15 @@ test("the organization's reach defaults to every workspace and narrows to shared
   await expect(
     setTeamsReach(client!.db, o.i, { workspaceIds: [o.personal], personalWorkspaces: true }),
   ).rejects.toThrow("teams_reach_invalid");
+  // An id can't smuggle more ids into the stored array.
+  for (const smuggled of [`${o.design},${other.design}`, `${o.design},${o.personal}`, "{}", ""])
+    await expect(
+      setTeamsReach(client!.db, o.i, { workspaceIds: [smuggled], personalWorkspaces: true }),
+    ).rejects.toThrow("teams_reach_invalid");
+  expect(await getTeamsReach(client!.db, o.i)).toMatchObject({
+    workspaceIds: [o.design],
+    version: 2,
+  });
   expect(
     await setTeamsReach(client!.db, o.i, { workspaceIds: [], personalWorkspaces: true }),
   ).toEqual({ workspaceIds: [], personalWorkspaces: true, version: 3 });
@@ -303,10 +337,11 @@ test("a routed 1:1 route holds its workspace and agent, checked by the caller in
     ...extra,
   });
   const checked: string[] = [];
-  const allow = async (_tx: unknown, workspaceId: string) => {
-    checked.push(workspaceId);
-    return workspaceId === o.design;
+  const allow = async (_tx: unknown, target: { workspaceId: string; agentId: string | null }) => {
+    checked.push(target.workspaceId);
+    return target.workspaceId === o.design && target.agentId !== mine;
   };
+  const mine = await agent(o.accountId, o.home, "Mine", "private", "user:someone-else");
   await expect(
     enqueueTeamsMessage(
       client!.db,
@@ -340,6 +375,23 @@ test("a routed 1:1 route holds its workspace and agent, checked by the caller in
     }),
   );
   expect(checked).toEqual([o.sales, o.design]);
+  // A route that names an agent in the installation's own workspace is still
+  // checked, and refused without a check.
+  await expect(
+    enqueueTeamsMessage(
+      client!.db,
+      o.i,
+      message(`route:${crypto.randomUUID()}`, { agentId: mine }),
+    ),
+  ).rejects.toThrow("teams_route_unavailable");
+  await expect(
+    enqueueTeamsMessage(
+      client!.db,
+      o.i,
+      message(`route:${crypto.randomUUID()}`, { agentId: mine, authorizeSessionWorkspace: allow }),
+    ),
+  ).rejects.toThrow("teams_route_unavailable");
+  expect(checked).toEqual([o.sales, o.design, o.home]);
   // The same route can't later be read as another agent's or as the plain assistant's.
   await expect(
     enqueueTeamsMessage(
