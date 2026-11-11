@@ -1485,6 +1485,7 @@ export const englishMessages = {
   "connectionTypePicker.connectionType": "Connection type",
   "connectionTypePicker.mcpServer": "MCP server",
   "connectPanel.authorizeConnection": "Authorize connection",
+  "connectPanel.backToConnections": "Back to connections",
   "connectPanel.connections": "Connections",
   "connectPanel.continueToServicename": "Continue to {serviceName}",
   "connectPanel.customConnection": "Custom connection",

@@ -109,6 +109,7 @@ import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPPER_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+  parseConnectResultPageTextJson,
 } from "@opengeni/config";
 import { parseRequestJson } from "../http/request-body";
 import { connectRequestActor, assertAgentPreparedConnect } from "../prepared-mcp-actor";
@@ -1444,7 +1445,9 @@ export function registerConnectRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
   });
   // Public and content-free: the sign-in popup's last page (finishInPopup).
-  app.get(CONNECT_FINISHED_PATH, () => connectFinishedPage());
+  app.get(CONNECT_FINISHED_PATH, () =>
+    connectFinishedPage(parseConnectResultPageTextJson(deps.settings.connectResultPageTextJson)),
+  );
   app.post("/v1/workspaces/:workspaceId/connect/attempts", async (c) => {
     if (!deps.settings.integrationsEnabled)
       throw new HTTPException(403, { message: "integrations disabled" });
