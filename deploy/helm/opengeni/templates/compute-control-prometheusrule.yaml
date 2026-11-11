@@ -233,10 +233,14 @@ spec:
           expr: |
             max by (host_name) (compute_fleet_host_renewal_age_seconds{ {{- $scope }}}) > 20
           for: 1m
+          # The leader gives a silent host up within give_up_after and its
+          # series goes, which would resolve the alert before Alertmanager's
+          # group wait sends it; keep it firing long enough to be delivered.
+          keep_firing_for: 15m
           labels:
             severity: critical
           annotations:
-            summary: 'A compute host holding sandboxes has not renewed its 30-second lease for over 20 seconds: its agent is stuck or the host is cut off from the control service. The leader waits for such a host for its give-up time (give_up_after) before giving it up; a host with no sandboxes is given up sooner.'
+            summary: 'A compute host has not renewed its 30-second lease for over 20 seconds, for a minute: its agent is stuck or the host is cut off from the control service. The leader waits for a host holding sandboxes for its give-up time (give_up_after) before giving it up; the alert keeps firing for 15 minutes after the host is given up or recovers.'
             headline: 'Compute host {{ "{{ $labels.host_name }}" }} unreachable'
             value: '{{ "{{ printf `%.0f` $value }}" }}s since a renewal'
             user_impact: 'Its sandboxes do not answer; if it stays silent, its VMs stop and lose their running programs.'

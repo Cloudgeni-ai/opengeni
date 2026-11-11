@@ -1045,12 +1045,14 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
     an hour, and refused one in the last ten minutes, for a quarter of an
     hour; a single burst that stops does not fire it.
   - `OpenGeniComputeHostUnreachable` (critical): a host has not renewed
-    its 30-second lease for over 20 seconds, for a minute. The leader
-    waits for a silent host that holds sandboxes for its give-up time
-    (`give_up_after`, 120 seconds by default) before giving it up, which
-    is what lets this fire; a silent host with no sandboxes is given up
-    sooner and raises only `OpenGeniComputeHostGivenUp` (and
-    `OpenGeniComputeHostGiveUpFailing` if its fence keeps failing).
+    its 30-second lease for over 20 seconds, for a minute, and keeps
+    firing for 15 minutes after, so a host the leader gives up (its
+    series then goes) is still delivered past Alertmanager's group wait.
+    The leader waits for a silent host that holds sandboxes for its
+    give-up time (`give_up_after`, 120 seconds by default); a silent host
+    with no sandboxes is usually given up before this fires and raises
+    `OpenGeniComputeHostGivenUp`, but fires this too if fencing it is
+    slow or keeps failing (`OpenGeniComputeHostGiveUpFailing`).
   - `OpenGeniComputeFleetFull`: the host group is at its maximum size
     (`compute_fleet_group_size` against `compute_fleet_group_max_size`)
     and no live host can promise `computeControl.alerts.spareMemoryMib`

@@ -709,6 +709,30 @@ describe("compute alerts", () => {
         fires: [{ labels: { host_name: "h1" }, value: 30 }],
       },
       {
+        name: "a silent host given up keeps firing until it is delivered",
+        series: [
+          {
+            series: `compute_fleet_host_renewal_age_seconds{${own},pod="a",host_name="h1"}`,
+            values: "1x5 30x2 _x40",
+          },
+        ],
+        alert: "OpenGeniComputeHostUnreachable",
+        at: "22m",
+        fires: [{ labels: { host_name: "h1" }, value: 30 }],
+      },
+      {
+        name: "a host given up long ago no longer fires",
+        series: [
+          {
+            series: `compute_fleet_host_renewal_age_seconds{${own},pod="a",host_name="h1"}`,
+            values: "1x5 30x2 _x40",
+          },
+        ],
+        alert: "OpenGeniComputeHostUnreachable",
+        at: "40m",
+        fires: [],
+      },
+      {
         name: "renewals a few seconds late are not unreachable",
         series: [
           {

@@ -1651,7 +1651,7 @@ computeControl:
     # full in 30 minutes, and is still refusing.
     refusedWakes: 3
     # 0 or unset means the default for each threshold above, except
-    # spareMemoryMib, where 0 turns FleetFull off.
+    # spareMemoryMib, where 0 or unset turns FleetFull off.
   hostsService:
     # Hosts dial this endpoint from outside the cluster: a LoadBalancer
     # (annotations for an internal one) or a NodePort.
