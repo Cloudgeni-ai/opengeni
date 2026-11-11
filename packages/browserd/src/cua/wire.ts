@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { ToolResult } from "@trycua/cua-driver";
-import { ComputerBackendError, type ComputerBackendErrorCode } from "../computer-backend";
+import {
+  ComputerBackendError,
+  ComputerHelperStoppedError,
+  type ComputerBackendErrorCode,
+} from "../computer-backend";
 
 /** Only the desktop tool seam is exposed. Browser tools never enter this adapter. */
 export interface CuaDesktopRuntime {
@@ -377,6 +381,18 @@ export const WINDOWS_SET_VALUE_REFUSED = "windows_set_value_refused";
 const WINDOWS_SET_VALUE_REFUSAL =
   /^set_value: element \[\d+\] does not implement ValuePattern or RangeValuePattern\b/u;
 
+/** Whether a CUA SDK call failed because its worker process is gone before
+ * the request reached it: the SDK reports Shutdown once it knows, and
+ * ActionInterrupted when the worker exited before the request was written. */
+export function cuaWorkerGone(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const { tag, inner } = error as { tag?: unknown; inner?: unknown };
+  if (tag === "Shutdown") return true;
+  if (tag !== "ActionInterrupted" || typeof inner !== "object" || inner === null) return false;
+  const { reason } = inner as { reason?: unknown };
+  return typeof reason === "string" && /\bbefore the request was written\b/u.test(reason);
+}
+
 export async function callDesktop(
   runtime: CuaDesktopRuntime,
   name: string,
@@ -391,7 +407,10 @@ export async function callDesktop(
     if (!result.structuredJson || result.structuredJson.length > 8 * 1024 * 1024)
       throw new Error("invalid envelope");
     data = z.record(z.string(), z.unknown()).parse(JSON.parse(result.structuredJson));
-  } catch {
+  } catch (error) {
+    // Nothing reached a worker that is gone, whether or not the call writes.
+    if (result === undefined && cuaWorkerGone(error))
+      throw new ComputerHelperStoppedError(`the CUA worker stopped before ${name}`);
     // Windows CUA reports a window that was not in front only as text, both
     // when it refused before sending anything (its text then says no input
     // was sent, or could be sent) and after a click it already sent.

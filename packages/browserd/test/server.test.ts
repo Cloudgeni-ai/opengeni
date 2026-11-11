@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserActionCommand, BrowserObservation, BrowserTarget } from "@opengeni/contracts";
 import {
+  InteractionDefiniteDriverError,
   InteractionControllerError,
   InteractionOutcomeUnknownDriverError,
 } from "@opengeni/interaction";
@@ -561,6 +562,85 @@ describe("BrowserControlServer", () => {
       {
         beforeDriverOperation: (name) => {
           calls.push(name);
+        },
+      },
+    );
+  });
+
+  test("a website's failure reason goes beside the receipt or error, only to callers that ask", async () => {
+    let failure: Error | null = null;
+    await withServer(
+      async ({ server, reference }) => {
+        const created = (
+          await json(
+            await request(server, "/v1/browser-sessions", {
+              method: "POST",
+              token: adminToken,
+              body: createBody(reference),
+            }),
+          )
+        ).data.observation as BrowserObservation;
+        const actions = `/v1/browser-sessions/${reference.browserSessionId}/actions`;
+        const unknown = new InteractionOutcomeUnknownDriverError(
+          "outcome_unknown",
+          "browser action failed after it sent input (timeout: its server did not respond)",
+        );
+        unknown.failureReason = "destination_not_answered";
+        failure = unknown;
+        const act = async (query: string) =>
+          await json(
+            await request(server, `${actions}${query}`, {
+              method: "POST",
+              token: controlToken,
+              body: { ...command(created), operationId: randomUUID() },
+            }),
+          );
+        // Receipts are parsed strictly: a caller that did not ask never gets it.
+        const plain = await act("?receiptTargets=1&receiptNotes=2");
+        expect(plain.data.state).toBe("outcome_unknown");
+        expect(plain.data).not.toHaveProperty("failureReason");
+        const asked = await act("?receiptFailureReason=1");
+        expect(asked.data.state).toBe("outcome_unknown");
+        expect(asked.data.failureReason).toBe("destination_not_answered");
+        // The error callers and models are shown is the same either way.
+        expect(asked.data.error).toEqual(plain.data.error);
+
+        // A refused tab open carries it beside the error, never inside it.
+        const notAnswered = new InteractionDefiniteDriverError(
+          "timeout",
+          "browser could not load the requested URL: its server did not respond within 20 seconds",
+          true,
+        );
+        notAnswered.failureReason = "destination_not_answered";
+        failure = notAnswered;
+        const refused = await request(
+          server,
+          `/v1/browser-sessions/${reference.browserSessionId}/targets`,
+          { method: "POST", token: controlToken, body: { url: "https://down.example.test/" } },
+        );
+        expect(refused.status).toBe(504);
+        const body = (await refused.json()) as { error: unknown; failureReason?: unknown };
+        expect(body.error).toEqual({
+          code: "timeout",
+          message: notAnswered.message,
+          retryable: false,
+        });
+        expect(body.failureReason).toBe("destination_not_answered");
+
+        // A typed failure without a reason adds nothing.
+        failure = new InteractionDefiniteDriverError("resource_unavailable", "proxy failed", true);
+        const ours = (await (
+          await request(server, `/v1/browser-sessions/${reference.browserSessionId}/targets`, {
+            method: "POST",
+            token: controlToken,
+            body: { url: "https://example.test/" },
+          })
+        ).json()) as Record<string, unknown>;
+        expect(ours).not.toHaveProperty("failureReason");
+      },
+      {
+        beforeDriverOperation: (name) => {
+          if ((name === "dispatch" || name === "openTarget") && failure) throw failure;
         },
       },
     );
@@ -1552,6 +1632,98 @@ describe("BrowserControlServer", () => {
     );
   });
 
+  test("a download upload outlives one request window and a later ask joins it", async () => {
+    let browserContext: BrowserSupervisorDriverContext | null = null;
+    let uploads = 0;
+    const release = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    await withServer(
+      async ({ server, reference }) => {
+        try {
+          await request(server, "/v1/browser-sessions", {
+            method: "POST",
+            token: adminToken,
+            body: createBody(reference),
+          });
+          const download = await browserContext!.downloadEvents!.begin({
+            guid: "slow-download",
+            targetId: null,
+            suggestedFilename: "large.bin",
+          });
+          await writeFile(join(browserContext!.downloadDirectory, "slow-download"), "bytes");
+          await browserContext!.downloadEvents!.progress({
+            guid: "slow-download",
+            state: "completed",
+            receivedBytes: 5,
+            totalBytes: 5,
+          });
+          const path = `/v1/browser-sessions/${reference.browserSessionId}/downloads/${download.id}/uploads`;
+          const body = {
+            operationId: randomUUID(),
+            downloadId: download.id,
+            waitMs: 10,
+            upload: {
+              url: "https://storage.test/large.bin?signature=first",
+              requiredHeaders: {},
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            },
+          };
+          expect(
+            (await request(server, path, { method: "POST", token: viewToken, body })).status,
+          ).toBe(401);
+          // Lose a response after browserd has started the transfer. Aborting
+          // this HTTP wait must not cancel the PUT or poison the operation.
+          const deadline = new AbortController();
+          const timedOut = request(server, path, {
+            method: "POST",
+            token: controlToken,
+            body: { ...body, waitMs: 1_000 },
+            signal: deadline.signal,
+          }).then(
+            () => null,
+            (error: unknown) => error,
+          );
+          await started.promise;
+          deadline.abort(new DOMException("Request timed out", "TimeoutError"));
+          expect(await timedOut).toBeInstanceOf(Error);
+          const first = await request(server, path, { method: "POST", token: controlToken, body });
+          expect(first.status).toBe(200);
+          expect((await json(first)).data).toEqual({
+            operationId: body.operationId,
+            downloadId: download.id,
+            receipt: null,
+          });
+          expect(uploads).toBe(1);
+          body.upload.url = "https://storage.test/large.bin?signature=renewed";
+          const second = await request(server, path, { method: "POST", token: controlToken, body });
+          expect((await json(second)).data.receipt).toBeNull();
+          expect(uploads).toBe(1);
+          release.resolve();
+          body.waitMs = 1_000;
+          const last = await request(server, path, { method: "POST", token: controlToken, body });
+          expect((await json(last)).data.receipt).toMatchObject({
+            operationId: body.operationId,
+            downloadId: download.id,
+            sizeBytes: 5,
+          });
+          expect(uploads).toBe(1);
+        } finally {
+          release.resolve();
+        }
+      },
+      {
+        onBrowserContext: (context) => {
+          browserContext = context;
+        },
+        uploadDownload: async () => {
+          uploads++;
+          started.resolve();
+          await release.promise;
+        },
+      },
+    );
+  });
+
   test("enrolls exact browser origins monotonically through admin authority", async () => {
     await withServer(
       async ({ server }) => {
@@ -2496,6 +2668,7 @@ async function request(
     token?: string;
     origin?: string;
     body?: unknown;
+    signal?: AbortSignal;
   } = {},
 ): Promise<Response> {
   const headers: Record<string, string> = {};
@@ -2505,6 +2678,7 @@ async function request(
   return await fetch(`${server.url}${path}`, {
     method: options.method ?? "GET",
     headers,
+    ...(options.signal ? { signal: options.signal } : {}),
     ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
   });
 }

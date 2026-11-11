@@ -8,7 +8,7 @@ export {
 } from "./failure-attribution";
 import { createHash, randomUUID } from "node:crypto";
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
-import { SandboxBackend } from "@opengeni/contracts";
+import { INTERACTION_DESTINATION_FAILURE_REASONS, SandboxBackend } from "@opengeni/contracts";
 import {
   CLIENT_DESKTOP_APP_VERSION_PATTERN,
   CLIENT_ERROR_REVISION_PATTERN,
@@ -320,8 +320,12 @@ const INTERACTION_OPERATION_REASONS = new Set([
   "outcome_unknown",
   "invalid_action",
   "timeout",
+  "tab_not_responding",
+  "tab_crashed",
   "controller_lost",
   "driver_failed",
+  // The website the browser was asked to load failed, not the browser.
+  ...INTERACTION_DESTINATION_FAILURE_REASONS,
   "action_failed",
   "stale",
   "unauthenticated",

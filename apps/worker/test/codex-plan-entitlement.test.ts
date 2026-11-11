@@ -410,4 +410,26 @@ describe("Codex entitlement failures outside settlement", () => {
     });
     expect(agentRunFailurePayload(new CodexPlanEntitlementError(payload))).toEqual(payload);
   });
+
+  test("a client-version refusal fails the turn visibly and never benches the account or model", () => {
+    const versionText =
+      "The 'gpt-6.1-sol' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again.";
+    for (const body of [
+      { type: "invalid_request_error", message: versionText },
+      // Even if the backend tags it with an upgrade code, it is not about the plan.
+      { type: "invalid_request_error", code: "upgrade_required", message: versionText },
+    ]) {
+      const error = transportError(400, body);
+      // Not an account refusal: no quota, health or failover state is written.
+      expect(classifyCodexCredentialFailure(error)).toBeNull();
+      expect(agentRunFailurePayload(error, { isCodexTurn: true })).toEqual({
+        error:
+          "The Codex service needs a newer client than this Opengeni version for this model. " +
+          "Choose another model for now; this one works again once Opengeni is updated.",
+        code: "codex_client_version_rejected",
+        retryable: false,
+        detail: versionText,
+      });
+    }
+  });
 });

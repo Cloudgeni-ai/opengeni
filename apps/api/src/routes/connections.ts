@@ -44,6 +44,7 @@ import {
   opperCredentialProblem,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
+  parseConnectResultPageTextJson,
 } from "@opengeni/config";
 import {
   ATLASSIAN_PROVIDER_DOMAIN,
@@ -1405,10 +1406,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // An administrator returning from an approval link derived from a
     // Microsoft sign-in that uses this callback, not a connect attempt.
     if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
-      return microsoftAdminConsentResultPage({
-        adminConsent: c.req.query("admin_consent"),
-        error: c.req.query("error"),
-      });
+      return microsoftAdminConsentResultPage(
+        {
+          adminConsent: c.req.query("admin_consent"),
+          error: c.req.query("error"),
+        },
+        parseConnectResultPageTextJson(settings.connectResultPageTextJson),
+      );
     const input = {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),
@@ -1436,10 +1440,13 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertIntegrationsEnabled();
     // An administrator returning from the Microsoft approval link, not a connect attempt.
     if (c.req.query("state") === MICROSOFT_ADMIN_CONSENT_STATE)
-      return microsoftAdminConsentResultPage({
-        adminConsent: c.req.query("admin_consent"),
-        error: c.req.query("error"),
-      });
+      return microsoftAdminConsentResultPage(
+        {
+          adminConsent: c.req.query("admin_consent"),
+          error: c.req.query("error"),
+        },
+        parseConnectResultPageTextJson(settings.connectResultPageTextJson),
+      );
     const result = await completeApiIntegrationProviderOAuth(deps, {
       ...(c.req.query("code") ? { code: c.req.query("code") } : {}),
       ...(c.req.query("state") ? { state: c.req.query("state") } : {}),

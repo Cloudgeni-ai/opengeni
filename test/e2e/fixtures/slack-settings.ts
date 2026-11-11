@@ -159,7 +159,7 @@ export async function slackFixtureResponse(request: Request, state: SlackFixture
     if (path.endsWith("/channels") || path.endsWith("/rigs") || path.endsWith("/variable-sets"))
       return json([]);
     if (path.endsWith("/github/app"))
-      return json({ configured: false, missing: [], installUrl: null });
+      return json({ configured: false, status: "disabled", missing: [], installUrl: null, installations: [] });
     return json({});
 }
 

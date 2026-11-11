@@ -122,6 +122,18 @@ export interface NativeIncomingCallAdapter {
    * microphone only on answer. Absent or false means connect on answer.
    */
   connectsBeforeAnswer?: boolean | undefined;
+  /**
+   * Whether a ring shows full screen over the lock screen, like a phone call.
+   * From Android 14, Play lets only calling and alarm apps do that without
+   * asking; in other apps the person allows it in system settings
+   * ({@link openFullScreenRingSettings}), and until then a ring is only a
+   * heads-up notification. Read it again when the app returns to the
+   * foreground. Absent means rings always show full screen (iOS, older
+   * Android). `useFullScreenRings` wraps both.
+   */
+  canRingFullScreen?(): boolean;
+  /** Open the system setting that lets rings show full screen; false when none opened. */
+  openFullScreenRingSettings?(): Promise<boolean>;
 }
 
 /** Native hosts can stream voice over WebRTC; WebSocket audio transports need a browser. */

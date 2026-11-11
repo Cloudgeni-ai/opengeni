@@ -7,21 +7,20 @@
   </a>
 </p>
 
-<h3 align="center">Agents in your product. Infrastructure out of the box.</h3>
+<h3 align="center">The open-source agent harness your team runs on its own infrastructure.</h3>
 
 <p align="center">
-  Durable streaming sessions · sandboxes · tools and MCP · per-user credentials · memory · multi-tenant workspaces · React components you restyle · managed cloud or self-host
+  AI agents your whole team shares · approvals on every tool · your models, your cloud, your data
 </p>
 
 <p align="center">
-  <a href="https://app.opengeni.ai"><strong>Start free at app.opengeni.ai →</strong></a>
+  <a href="https://docs.opengeni.ai/guides/self-host"><strong>Self-host Opengeni →</strong></a>
 </p>
 
 <p align="center">
-  <a href="https://docs.opengeni.ai/embed-manually">Add it to your product</a> ·
-  <a href="https://docs.opengeni.ai/why-opengeni">Why Opengeni</a> ·
+  <a href="#try-it-locally">Try it locally</a> ·
   <a href="https://docs.opengeni.ai">Docs</a> ·
-  <a href="https://docs.opengeni.ai/guides/self-host">Self-host</a> ·
+  <a href="https://app.opengeni.ai">Hosted version</a> ·
   <a href="https://github.com/Cloudgeni-ai/opengeni/issues">Issues</a>
 </p>
 
@@ -33,47 +32,36 @@
 
 ---
 
-**Opengeni is open-source infrastructure for adding AI agents to your product.** Your product keeps its users, data, and UI. Opengeni runs the agent behind them: streaming sessions that survive reloads and restarts, a sandbox to run code in, your MCP servers called as the signed-in user and your APIs through OpenAPI, memory across conversations, and a separate workspace for every customer. Drop the React conversation into your app and restyle it with CSS variables, or drive everything from the TypeScript SDK and HTTP API. Use the managed cloud at [app.opengeni.ai](https://app.opengeni.ai) or self-host the same Apache-2.0 code.
+Opengeni gives your team AI agents that do real work in the tools you already use: meeting follow-ups, weekly reports, research, pull request reviews, invoices from the inbox. Agents ask a person before anything risky, stay inside the budget you set, and keep working for hours or days until the job is done.
 
-**Who it's for:** teams shipping an agent inside a SaaS or internal product, such as a support agent, an analyst, or an operations or coding agent, who would rather configure that agent than build and run the platform underneath it. The same platform is also a ready-to-use agent workspace for your own team in the browser. It grew out of two years of running agents against production cloud infrastructure at [Cloudgeni](https://cloudgeni.ai).
+Opengeni is the harness around the agent, and you run all of it. One deployment on your own Kubernetes, in the region you choose, serves your whole organization: a workspace per team or client, sign-in for your people, your own model accounts, and every conversation, approval, and piece of team knowledge in a Postgres database you operate. It grew out of two years of running agents against production cloud infrastructure at [Cloudgeni](https://cloudgeni.ai), which still runs every agent session on it.
 
-## How it fits into your product
+## What your team gets
 
-1. **Your server** mounts one route with `createSessionProxyRoute` from `@opengeni/sdk/next` (or `createSessionProxyHandler` from `@opengeni/sdk` on other servers). It runs your existing auth, maps each customer to an Opengeni workspace, and keeps your API key on the server.
-2. **Your frontend** renders `OpenGeniChat` from `@opengeni/react`: the user's chats and a conversation with streaming replies, tool activity, attachments, and questions, styled with your colors, fonts, and corner radii.
-3. **Opengeni** runs every session: the model loop, calls to your MCP server with a short-lived token for that user or to your API through an OpenAPI description, code in a sandbox, files, and memory. Every event is stored in Postgres, so any client can reconnect mid-stream and continue where it left off.
+- **A workspace per team, or per client.** Each workspace has its own people and roles, tools connected once for everyone, its own instructions, knowledge, and budget. Chats stay private until someone shares them.
+- **Agents where your team already works.** The web app, a desktop app for macOS, Windows, and Linux, and Slack: mention it in a thread and it does the work there. Microsoft Teams is in early access.
+- **Approvals built into every tool.** Each connected action is Allow, Ask first, or Block. Only a person can approve; agents never approve for you. Approvals arrive in the chat, the inbox, or a desktop notification.
+- **No surprise bills.** A monthly budget per workspace, a limit per member, and a limit per task. Insights show usage by person and project.
+- **What one person teaches it, the whole team gets.** Agent Knowledge keeps facts, files, and house rules in the workspace, versioned and searchable, with optional review before anything is published.
+- **Work that finishes.** Give a session a goal and the agent keeps going until it completes it with evidence or pauses with a reason. Work splits across sub-agents that report back to one session. Sessions run on the server, so closing the laptop does not stop them.
+- **Recurring and event-driven work.** Schedule a job ("post last week's sales in #sales every Monday at 8") or start one when something happens in GitHub, Sentry, Linear, or any signed webhook.
+- **Secrets the agent never reads.** Keys and passwords live in an encrypted vault and are used by reference at the moment of the call; the value never reaches the model or the logs.
+- **Your choice of compute.** Each session gets its own sandbox (Docker, Modal, or a cloud sandbox provider) with your repositories and tools, or runs directly on a **Connected Machine**: a laptop, build server, or GPU box you enroll once. Machines only dial out.
 
-The fastest way to wire it up is to install the Opengeni plugin in your coding agent (Claude Code, Codex, or Cursor) and [ask it to add Opengeni](https://docs.opengeni.ai/embed-with-a-coding-agent). To do it by hand, follow [Embed manually](https://docs.opengeni.ai/embed-manually), or see the code [below](#use-it-from-your-code-and-product).
+## Your infrastructure, your data
 
-**Opengeni and agent frameworks.** LangGraph, Mastra, CrewAI, the OpenAI Agents SDK, and the Vercel AI SDK help you write an agent loop in your own code. Opengeni ships the loop and runs it as a service, together with what a product agent needs in production: sessions, streaming, sandboxes, tools, credentials, memory, tenancy, and UI. If you want to hand-code the agent's control flow, a framework is the right tool. If you want an agent feature in your product without building that platform, use Opengeni. See [Why Opengeni](https://docs.opengeni.ai/why-opengeni) and the [framework comparison](https://docs.opengeni.ai/compare-agent-frameworks).
+Everything is Apache-2.0: the API, web app, workers, desktop app, Helm chart, and reference Terraform.
 
-## Get started
+- **Deploy where you want.** A version-pinned Helm chart plus reference Terraform for Azure, AWS, and GCP. Use your managed Postgres, Temporal, NATS, and object storage (Azure Blob, S3, or GCS). See [Self-host](https://docs.opengeni.ai/guides/self-host) and the [deployment guide](docs/deployment.md).
+- **Bring your own models.** OpenAI, Azure OpenAI, Anthropic Claude, OpenRouter, or any OpenAI-compatible server, set per deployment, organization, or workspace. Organizations can turn on [EU-only inference](docs/eu-only-inference.md), which refuses any model route that does not process data in the EU instead of rerouting it. See [model providers](docs/model-providers.md).
+- **Your people, your sign-in.** Email and password, Google, GitHub, and passkeys. Close public sign-up and invite teammates into your organization, with owners, admins, and members. See [organization tenancy](docs/organization-tenancy.md).
+- **You own the record.** Every session event, approval, and tool call is stored in Postgres and replays exactly, so an audit sees what the agent saw and did. Back it up with the [backup runner](docs/backups.md), export it, or leave with it.
 
-**The fastest way is the managed cloud.** Sign up at [app.opengeni.ai](https://app.opengeni.ai), name your organization, and start your first session. Nothing to deploy. Eligible new verified accounts get monthly model credit on the Free plan. You can also use a provider API key, prepaid Opengeni credits, or, on Pro, Max or Enterprise, your own ChatGPT/Codex, Claude or SuperGrok subscription. The [quickstart](https://docs.opengeni.ai/quickstart) walks through it.
+Don't want to operate it? The same product runs as a hosted service, on Azure in the EU, at [app.opengeni.ai](https://app.opengeni.ai).
 
-Prefer to run it yourself? Everything is open source under Apache-2.0. Jump to [Run it locally](#run-it-locally) for a one-command dev stack, or to [Self-host](https://docs.opengeni.ai/guides/self-host) for production with the Helm chart and reference Terraform for AWS, Azure, and GCP.
+## Try it locally
 
-## Features
-
-- **Embed in your product.** `OpenGeniChat` and `SessionConversation` from `@opengeni/react` render the complete conversation, and every visual decision is a `--og-*` CSS variable, so it matches your brand. Your server mounts a packaged, tenant- and user-scoped proxy, and your organization API key stays there. Already have a Vercel AI SDK `useChat` UI? A text-only chat facade can serve it.
-- **Durable streaming sessions.** Replies stream over SSE with automatic reconnect and resume. Every event lands in Postgres, so a reload, a new client, or a worker restart continues the same session instead of losing it.
-- **Sandboxes and your own machines.** A session runs code in a managed sandbox (Docker, Modal, or a cloud sandbox provider), on a **Connected Machine** you enroll (a laptop, build server, or GPU box that only dials out), or with no compute at all.
-- **Tools and MCP.** Give the agent your product's actions through an MCP server or an OpenAPI description, plus built-in connections. You choose exactly which tools each session gets.
-- **Credentials, handled.** Per-user OAuth connections, short-lived tokens you mint per session, and encrypted secrets that stay out of prompts.
-- **Memory.** Agent Knowledge keeps files, sources, and findings in one searchable library with personal and workspace scope, so agents remember what matters across sessions.
-- **Multi-tenant workspaces.** Each customer gets its own workspace, created on first use by the session proxy or explicitly with `ensureWorkspace`. Sessions, files, knowledge, and connections stay inside it, enforced by the API and Postgres row-level security.
-- **Swap models freely.** OpenAI, Azure OpenAI, Anthropic, OpenRouter, Vercel AI Gateway, or any OpenAI-compatible endpoint, chosen per session. In the Opengeni apps, Pro, Max and Enterprise can also use a ChatGPT/Codex, Claude or SuperGrok subscription.
-- **Background agents and goals.** Start agents on a schedule or from webhooks, and give a session a goal with success criteria so it keeps working until the job is done.
-- **Approvals and questions when you need them.** Require approval for sensitive tools, and let the agent ask the user structured questions mid-task.
-- **Managed or self-hosted.** Use [app.opengeni.ai](https://app.opengeni.ai) with nothing to run, or deploy the same API, web app, workers, Helm chart, and reference Terraform yourself. All of it is Apache-2.0.
-
-## Run it locally
-
-Repository changes land through the [merge batcher](docs/merge-batcher.md): queued
-PRs are tested together on the combined tree and each lands as one squash commit.
-Main runs the full suite on a cadence and is the release gate.
-
-For development, or to evaluate Opengeni before self-hosting. You need [Bun at the exact version in `.bun-version`](.bun-version), Git, curl, Docker, [rustup](https://rustup.rs), a C compiler (Xcode Command Line Tools on macOS or `build-essential` on Debian/Ubuntu), and an OpenAI or Azure OpenAI key.
+Run the whole stack on one machine before you deploy it. You need [Bun at the exact version in `.bun-version`](.bun-version), Git, curl, Docker, [rustup](https://rustup.rs), a C compiler (Xcode Command Line Tools on macOS or `build-essential` on Debian/Ubuntu), and an OpenAI or Azure OpenAI key.
 
 ```bash
 git clone https://github.com/Cloudgeni-ai/opengeni.git
@@ -84,11 +72,11 @@ bun run dev
 
 Open http://127.0.0.1:3000, describe a task, and watch the session run.
 
-`bun run dev` installs dependencies, starts Postgres, NATS, Temporal, and object storage, runs migrations, and starts the API, workers, and web app. By default the agent runs commands directly on your machine (the `local` sandbox), not in an isolated container, so the API and web app listen only on 127.0.0.1. Set `OPENGENI_SANDBOX_BACKEND=docker` to run the agent in the local sandbox image instead. See [Local development](docs/local-development.md) for manual startup, configuration, network exposure, and the native (no Docker) path.
+`bun run dev` installs dependencies, starts Postgres, NATS, Temporal, and object storage, runs migrations, and starts the API, workers, and web app. By default the agent runs commands directly on your machine (the `local` sandbox), not in an isolated container, so the API and web app listen only on 127.0.0.1. Set `OPENGENI_SANDBOX_BACKEND=docker` to run the agent in the local sandbox image instead. To try the multi-user team setup (sign-in, organizations, invitations), set `OPENGENI_PRODUCT_ACCESS_MODE=managed`. See [Local development](docs/local-development.md) for manual startup, configuration, network exposure, and the native (no Docker) path.
 
 ## Desktop app
 
-Opengeni for macOS, Windows and Linux: your sessions, chat and inbox in a native window, with notifications and one click to let agents use the computer you're on.
+Your team's sessions, chat, and inbox in a native window, with notifications for approvals and one click to let agents use the computer you're on. It works with any Opengeni server, including yours.
 
 ```bash
 # macOS
@@ -98,11 +86,13 @@ brew install --cask cloudgeni-ai/tap/opengeni
 curl -fsSL https://<your-opengeni-server>/desktop/install.sh | sh
 ```
 
-On Windows, download `Opengeni-<version>-windows.exe` from the newest [`desktop-v` release](https://github.com/Cloudgeni-ai/opengeni/releases?q=desktop-v&expanded=true). The web app's account menu has the same downloads under **Desktop app**. Every way of installing updates itself afterwards.
+On Windows, download `Opengeni-<version>-windows.exe` from the newest [`desktop-v` release](https://github.com/Cloudgeni-ai/opengeni/releases?q=desktop-v&expanded=true). The web app's account menu has the same downloads under **Desktop app**. Every install updates itself afterwards.
 
-## Use it from your code and product
+## Build on it
 
-**Let your coding agent do it.** Install the Opengeni plugin, then ask your agent to add Opengeni to your product:
+The same deployment that serves your team can put agents inside your own product. Each of your customers gets its own sessions, data, files, and credentials, behind one server route and one React component (`@opengeni/sdk` and `@opengeni/react`).
+
+The fastest way is to let your coding agent wire it up. Install the Opengeni plugin, then ask your agent to add Opengeni to your product:
 
 ```bash
 # Claude Code
@@ -114,36 +104,7 @@ codex plugin marketplace add Cloudgeni-ai/opengeni
 codex plugin add opengeni@opengeni
 ```
 
-In Cursor, use **Customize → From GitHub Repository** with this repository. The plugin adds the Opengeni skills and connects your agent to your organization over MCP (sign in once in the browser). See the [plugin guide](https://docs.opengeni.ai/guides/developer-plugin).
-
-**Or wire it yourself** — one server route and one component:
-
-```ts
-// app/api/opengeni/[...path]/route.ts  (server only; the key stays here)
-import { Opengeni } from "@opengeni/sdk/chat";
-import { createSessionProxyRoute } from "@opengeni/sdk/next";
-
-const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
-
-export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
-  resolve: async (request) => {
-    const me = await authenticate(request); // your product's own auth
-    if (!me) return new Response("Unauthorized", { status: 401 });
-    return { user: me.id, tenant: me.teamId }; // workspaces and members are created on first use
-  },
-  createSession: (input) => input,
-});
-```
-
-```tsx
-// Browser
-import { OpenGeniChat } from "@opengeni/react";
-import "@opengeni/react/compiled.css";
-
-<OpenGeniChat baseUrl="/api/opengeni" />;
-```
-
-Follow [Embed manually](https://docs.opengeni.ai/embed-manually) for the details, then the [TypeScript SDK](packages/sdk/README.md) and [React components](packages/react/README.md). [Northstar support](examples/northstar-support) is a runnable SaaS embed with a product MCP server.
+In Cursor, use **Customize → From GitHub Repository** with this repository. See the [plugin guide](https://docs.opengeni.ai/guides/developer-plugin), or wire it yourself with [Embed manually](https://docs.opengeni.ai/embed-manually), the [TypeScript SDK](packages/sdk/README.md), and the [React components](packages/react/README.md). [Northstar support](examples/northstar-support) is a runnable SaaS embed with a product MCP server.
 
 ## How it works
 
@@ -179,21 +140,23 @@ Opengeni is built as those layers.
   └───────────────┘   └───────────────────────────────────────────────────────┘
 ```
 
-**Rent the edges, own the middle.** Models, provider APIs, and the raw compute box change too fast to own, so every one of them is a swappable boundary. Durable state, governance, and knowledge are where your workflows, permissions, audit record, and institutional memory actually live, so they sit in a Postgres database you operate, export, and can leave with.
+**Rent the edges, own the middle.** Models, provider APIs, and the raw compute box change too fast to own, so every one of them is a swappable boundary. Durable state, governance, and knowledge are where your team's workflows, permissions, audit record, and institutional memory actually live, so they sit in a Postgres database you operate, export, and can leave with.
 
 ## Documentation
 
 | I want to...                          | Read                                                                                                        |
 | ------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Start on the managed service          | [Quickstart](https://docs.opengeni.ai/quickstart)                                                           |
-| Run it locally                        | [Local development](docs/local-development.md)                                                              |
-| Deploy to production                  | [Self-host](https://docs.opengeni.ai/guides/self-host) · [Deployment guide](docs/deployment.md)             |
-| Add agents to my product              | [Product integration](docs/product-integration.md) · [SDK reference](https://docs.opengeni.ai/reference/sdk) |
-| Run sessions on my own hardware       | [Connect a machine](https://docs.opengeni.ai/guides/connect-a-machine) · [Connected Machines](docs/connected-machines.md) |
-| Call the HTTP API directly            | [HTTP API overview](docs/http-api.md)                                                                       |
-| Configure models and providers        | [Model providers](docs/model-providers.md)                                                                  |
+| Deploy Opengeni for my team           | [Self-host](https://docs.opengeni.ai/guides/self-host) · [Deployment guide](docs/deployment.md)             |
+| Try it on my machine first            | [Local development](docs/local-development.md)                                                              |
+| Set up people, workspaces, and roles  | [Organization tenancy](docs/organization-tenancy.md)                                                        |
+| Configure models and providers        | [Model providers](docs/model-providers.md) · [EU-only inference](docs/eu-only-inference.md)                 |
+| Bring agents into Slack               | [Slack](docs/slack-bot.md)                                                                                  |
+| Control what agents may do and spend  | [Tool approvals](docs/tool-approvals.md) · [Usage allowances](docs/usage-allowances.md) · [Secrets](docs/secrets.md) |
 | Give agents repository access         | [GitHub App](docs/github-app.md)                                                                            |
-| Understand goals, approvals, memory   | [Goals](docs/goals.md) · [Human input](docs/human-input.md) · [Knowledge](docs/knowledge.md)                |
+| Run sessions on my own hardware       | [Connect a machine](https://docs.opengeni.ai/guides/connect-a-machine) · [Connected Machines](docs/connected-machines.md) |
+| Understand goals, approvals, knowledge | [Goals](docs/goals.md) · [Human input](docs/human-input.md) · [Knowledge](docs/knowledge.md)               |
+| Add agents to my product              | [Product integration](docs/product-integration.md) · [SDK reference](https://docs.opengeni.ai/reference/sdk) |
+| Call the HTTP API directly            | [HTTP API overview](docs/http-api.md)                                                                       |
 | Understand the internals              | [Architecture](docs/architecture.md) · [Run lifecycle](docs/run-lifecycle.md) · [Docs map](docs/README.md)  |
 | See what is planned                   | [Roadmap](docs/roadmap.md)                                                                                  |
 
@@ -215,6 +178,8 @@ Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, ch
 bun run typecheck
 bun test
 ```
+
+Changes land through the [merge batcher](docs/merge-batcher.md): queued PRs are tested together on the combined tree and each lands as one squash commit. Main runs the full suite on a cadence and is the release gate.
 
 ## License
 
