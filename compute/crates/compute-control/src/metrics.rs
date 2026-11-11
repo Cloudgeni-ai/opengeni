@@ -645,7 +645,7 @@ fn render_group(out: &mut Text, group: &GroupSeen) {
         ),
         (
             "compute_fleet_group_max_size",
-            "The most hosts the group may have (--scale-max).",
+            "The most hosts that take sandboxes the group may have (--scale-max); it may grow past it by one place per draining host it lists.",
             group.max,
         ),
     ] {

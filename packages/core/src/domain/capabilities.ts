@@ -22,6 +22,7 @@ import {
   environmentsEncryptionKeyBytes,
   findIntegrationsOauthClient,
   parseIntegrationsOauthClientsJson,
+  parseSocialOauthClientsJson,
   type Settings,
 } from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
@@ -100,6 +101,12 @@ import {
 import { HTTPException } from "hono/http-exception";
 import { isPersonalIntegrationSetupCandidate } from "@opengeni/contracts/personal-integration-setup";
 import { PERSONAL_GITHUB_CAPABILITY_ID } from "@opengeni/contracts/personal-github";
+import {
+  canonicalMcpEndpointUrl,
+  microsoftDynamicsProductForMcpUrl,
+  MICROSOFT_DYNAMICS_CAPABILITY_ID,
+  MICROSOFT_DYNAMICS_CONNECTION_NAME,
+} from "@opengeni/contracts/microsoft-dynamics";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
@@ -500,6 +507,13 @@ export async function createCatalogItem(input: {
    */
   memberCreate?: { settings: Settings } | undefined;
 }): Promise<CapabilityCatalogItem> {
+  // A Dynamics environment address is stored as its MCP endpoint, so a pasted
+  // browser address reaches the reviewed Microsoft Dynamics sign-in.
+  if (input.payload.endpointUrl) {
+    const endpointUrl = canonicalMcpEndpointUrl(input.payload.endpointUrl);
+    if (endpointUrl !== input.payload.endpointUrl)
+      input = { ...input, payload: { ...input.payload, endpointUrl } };
+  }
   const id = input.payload.id?.trim() || generatedCapabilityId(input.payload);
 
   if (id.startsWith("skill:")) {
@@ -572,8 +586,16 @@ export async function createCatalogItem(input: {
         message: "A connection with this ID already exists. Only an admin can change it.",
       });
   }
+  // A Dynamics environment signs in through its reviewed Microsoft profile,
+  // as the person: record that with the entry so every card shows its sign-in
+  // (not a server review) and connects the person's own account.
+  const dynamicsEndpoint =
+    input.payload.endpointUrl && microsoftDynamicsProductForMcpUrl(input.payload.endpointUrl)
+      ? input.payload.endpointUrl
+      : null;
   const metadata = {
     ...input.payload.metadata,
+    ...(dynamicsEndpoint ? { defaultConnectionOwnership: "personal" } : {}),
     ...(input.payload.kind === "mcp" &&
     input.payload.endpointUrl &&
     !input.payload.metadata.mcpServerId
@@ -594,6 +616,13 @@ export async function createCatalogItem(input: {
     endpointUrl: input.payload.endpointUrl ?? null,
     installUrl: input.payload.installUrl ?? null,
     authModel: input.payload.authModel?.trim() || null,
+    ...(dynamicsEndpoint
+      ? {
+          authKind: "oauth2" as const,
+          mcpUrl: dynamicsEndpoint,
+          providerDomain: new URL(dynamicsEndpoint).hostname,
+        }
+      : {}),
     metadata,
     ...(input.memberCreate ? { createOnly: true } : {}),
   });
@@ -2478,12 +2507,15 @@ const SOCIAL_PROVIDER_TOOL_NAMES = {
  * operator's own and carry no known brand.
  */
 export function builtInConnectorCatalogItems(input: {
-  settings: Parameters<typeof excelAddin>[0];
+  settings: Parameters<typeof excelAddin>[0] & { socialOauthClientsJson?: string | undefined };
   socialConnections: SocialConnection[];
   workspaceConnections: ConnectionMetadata[];
 }): CapabilityCatalogItem[] {
   return [
-    ...providerIntegrationCatalogItems(input.socialConnections),
+    ...providerIntegrationCatalogItems(
+      input.socialConnections,
+      socialOAuthClientConfigured(input.settings),
+    ),
     fikenCatalogItem(input.workspaceConnections.filter(isFikenConnection)),
     onePasswordCatalogItem(input.workspaceConnections.filter(isOnePasswordConnection)),
     excelAddinCatalogItem(excelAddin(input.settings)),
@@ -2669,12 +2701,31 @@ export function excelAddinCatalogItem(addin: ExcelAddin): CapabilityCatalogItem 
   });
 }
 
+/**
+ * X and Reddit connect through Opengeni's own OAuth client, which the operator
+ * registers in `OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON`. Without it the OAuth
+ * start fails with 503, so the catalog says so instead of offering a Connect.
+ */
+function socialOAuthClientConfigured(settings: {
+  socialOauthClientsJson?: string | undefined;
+}): (provider: SocialProviderIntegrationDefinition["provider"]) => boolean {
+  let configured: ReturnType<typeof parseSocialOauthClientsJson> = {};
+  try {
+    configured = parseSocialOauthClientsJson(settings.socialOauthClientsJson);
+  } catch {
+    // Startup validates this setting; a malformed value can configure nothing.
+  }
+  return (provider) => configured[provider] !== undefined;
+}
+
 function providerIntegrationCatalogItems(
   socialConnections: SocialConnection[],
+  oauthClientConfigured: (provider: SocialProviderIntegrationDefinition["provider"]) => boolean,
 ): CapabilityCatalogItem[] {
   return SOCIAL_PROVIDER_INTEGRATIONS.map((definition) => {
     const counts = socialConnectionCounts(socialConnections, definition.provider);
     const enabled = counts.connected + counts.needsReauth > 0;
+    const clientConfigured = oauthClientConfigured(definition.provider);
     return CapabilityCatalogItem.parse({
       id: `api:${definition.provider}`,
       kind: "api",
@@ -2692,8 +2743,13 @@ function providerIntegrationCatalogItems(
       runtime: {
         available: true,
         mcpServerId: "opengeni",
+        operatorOAuthClient: { configured: clientConfigured },
+        // Existing accounts keep their status note; the setup note is for a
+        // provider nobody here has connected yet.
         notes:
-          "Opengeni's social provider adapter routes every call through an exact visible account Connection.",
+          clientConfigured || counts.total > 0
+            ? "Opengeni's social provider adapter routes every call through an exact visible account Connection."
+            : "New connections are unavailable until this deployment registers an OAuth client with the provider.",
       },
       enabled,
       enabledReason: socialConnectionSummary(counts),
@@ -2852,6 +2908,8 @@ export function nativeConnectionCapabilityRecommendations(
     browserExtension?: BrowserExtension;
     /** Reviewed API integration definitions this deployment can connect here. */
     integrationDefinitions?: readonly IntegrationDefinition[];
+    /** This deployment has its Microsoft Dynamics sign-in app configured. */
+    microsoftDynamics?: { financeOperations: boolean };
   } = {},
 ): CapabilityCatalogItem[] {
   const extensionUrl = options.browserExtension?.installUrl ?? OPENGENI_BROWSER_EXTENSION_URL;
@@ -2994,6 +3052,43 @@ export function nativeConnectionCapabilityRecommendations(
           browserExtensionUrl: extensionUrl,
           recommendationOnly: true,
         },
+      }),
+    );
+  }
+  if (options.microsoftDynamics) {
+    const products = options.microsoftDynamics.financeOperations
+      ? "Dynamics 365 Sales, Customer Service and other Dataverse apps, or Finance and Operations"
+      : "Dynamics 365 Sales, Customer Service and other Dataverse apps";
+    items.push(
+      CapabilityCatalogItem.parse({
+        id: MICROSOFT_DYNAMICS_CAPABILITY_ID,
+        kind: "api",
+        source: "built_in",
+        name: MICROSOFT_DYNAMICS_CONNECTION_NAME,
+        description: `Read and update the person's ${products} data (accounts, contacts, leads, opportunities, activities and any other table) as them, with their Microsoft work account.`,
+        // Product names only: a question that names no system must not rank
+        // Dynamics above other CRMs.
+        category: "sales",
+        tags: ["dynamics", "dynamics 365", "microsoft dynamics", "d365", "dataverse", "power apps"],
+        homepageUrl: "https://dynamics.microsoft.com",
+        providerDomain: "dynamics.com",
+        authModel: "oauth2_authorization_code",
+        authKind: "oauth2",
+        surfaceType: "microsoft_dynamics",
+        tools: [],
+        runtime: {
+          available: true,
+          notes:
+            "Each connection is one Dynamics environment, identified by the web address the person opens Dynamics at.",
+        },
+        lifecycle: {
+          status: "available",
+          readiness: "setup_required",
+          detail: "Connect an environment from the chat card.",
+          managedBy: "platform",
+        },
+        actions: ["connect", "inspect"],
+        metadata: { recommendationOnly: true },
       }),
     );
   }

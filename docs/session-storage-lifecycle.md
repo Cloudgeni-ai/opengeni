@@ -225,6 +225,12 @@ archived by a person qualifies when all of these hold for the idle period:
    `session_send_message` and `session_steer` return a non-retryable
    `<tool>_session_read_only` error that says to start a new session. A
    message cannot race the archive.
+   The session's workflow treats the session as closed: its work peek
+   reports `read-only`, and a control write already in flight (for example
+   a cancelled turn's late quiescence receipt, which the database now
+   refuses) fails non-retryably once instead of retrying forever, so the
+   workflow closes. A restored session's missing receipt is reconciled
+   through Temporal like any other lost receipt.
 2. The worker streams two zstd-compressed JSON-lines objects to a temporary
    file and uploads them through the bounded object-storage path, which reads
    every byte back before success. On object stores without read-after-write

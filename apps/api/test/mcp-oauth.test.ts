@@ -188,7 +188,7 @@ describe("MCP OAuth protocol", () => {
     expect(html).not.toContain("letter-spacing");
     expect(html).toContain("event.submitter");
     expect(html).toContain("submitter.name");
-    expect(html).toContain("button.disabled=true");
+    expect(html).toContain("button.disabled = true");
   });
 
   test("authorization handoff is 200 HTML for loopback and custom-scheme redirects", async () => {

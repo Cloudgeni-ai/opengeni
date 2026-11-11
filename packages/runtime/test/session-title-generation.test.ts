@@ -72,7 +72,7 @@ function chatCompletion(content: string | null, finishReason: string) {
 
 async function generateThroughResolvedChatModel(
   respond: (request: CapturedRequest) => Response,
-  options: { reasoningEffort?: "low" } = {},
+  options: { reasoningEffort?: "low"; titleInstructions?: string } = {},
 ) {
   const upstream = providerServer(respond);
   const settings = testSettings({ sandboxBackend: "none" });
@@ -144,6 +144,26 @@ describe("session title generation", () => {
     expect(SESSION_TITLE_GENERATION_INSTRUCTIONS).toContain(
       `(only a greeting, thanks or small talk), return exactly ${SESSION_TITLE_NOT_YET}.`,
     );
+  });
+
+  test("the host's title instructions follow the unchanged fixed rules", async () => {
+    const titleInstructions =
+      "If the messages have no clear language, write the title in Norwegian bokmål.";
+    const { requests } = await generateThroughResolvedChatModel(
+      () => chatCompletion("Kubernetes-pod krasjer", "stop"),
+      { titleInstructions },
+    );
+
+    expect(requests[0]!.body.messages).toEqual([
+      {
+        role: "system",
+        content: `${SESSION_TITLE_GENERATION_INSTRUCTIONS}\n\n${titleInstructions}`,
+      },
+      {
+        role: "user",
+        content: "My pod keeps crashing in Kubernetes, can you help me debug it?",
+      },
+    ]);
   });
 
   for (const answer of [

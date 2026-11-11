@@ -167,6 +167,14 @@ export const INTEGRATIONS: readonly IntegrationSpec[] = [
     toolNamePatterns: [/sharepoint/],
   },
   {
+    // Per-customer hosts (`<org>.crm4.dynamics.com`, `<env>.operations.dynamics.com`)
+    // resolve through the shared `dynamics.com` parent.
+    id: "microsoft_dynamics",
+    label: "Microsoft Dynamics",
+    families: ["integration:dynamics.com"],
+    labelWords: ["microsoft dynamics", "dynamics 365", "dynamics", "dataverse"],
+  },
+  {
     // Never connected in either test workspace: only the strong-match card row uses it.
     id: "clickup",
     label: "ClickUp",

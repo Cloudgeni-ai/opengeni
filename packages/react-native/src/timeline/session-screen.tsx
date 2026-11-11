@@ -16,6 +16,7 @@ import {
   type StoredFileSource,
   type UserMessageItem,
 } from "@opengeni/react/session";
+import { formatClock } from "@opengeni/react/recordings";
 import { machineDisplayName } from "@opengeni/react/sandbox-label-model";
 import { resolveAgentSignals, type AgentSignals } from "@opengeni/react/session-agents-model";
 import {
@@ -762,15 +763,17 @@ function StuckCard({
   // the block is only known from its status event. Most refusals start by
   // themselves once fixed, so they offer no button; the machine's owner gets
   // Allow for this chat, and only an unknown failure gets Try again.
+  const paused = session.effectiveControl.state === "paused";
   const copy = reason
     ? start.needsMachineAccess && start.machineAccess
       ? sessionAdmissionMachineAccessCopy(t, start.machineAccess, {
           canAllowHere: start.allowMachine !== undefined,
+          paused,
+          shared: start.sharedChat,
         })
       : sessionAdmissionCopy(t, reason)
     : null;
   const allowing = start.needsMachineAccess && start.machineAccess?.isOwner === true;
-  const paused = session.effectiveControl.state === "paused";
   const actionLabel = !copy
     ? paused
       ? null
@@ -898,8 +901,11 @@ function StuckCard({
       ) : copy ? (
         <>
           <Text style={textStyle}>{copy.body}</Text>
-          <Text style={textStyle}>{copy.next}</Text>
-          {paused ? <Text style={textStyle}>{t("sessionAdmission.pausedNote")}</Text> : null}
+          {copy.next ? <Text style={textStyle}>{copy.next}</Text> : null}
+          {/* The owner's own words already say it starts once resumed. */}
+          {paused && !allowing ? (
+            <Text style={textStyle}>{t("sessionAdmission.pausedNote")}</Text>
+          ) : null}
         </>
       ) : (
         <Text style={textStyle}>{m.stuckBody}</Text>
@@ -986,17 +992,28 @@ export function AttachmentChips({
       {items.map((item) => {
         const failed = item.status === "failed";
         const busy = item.status === "uploading" || item.status === "preparing";
-        if (item.kind === "image" && (item.previewUri || item.file)) {
-          // Photos show as photos, as on the web: a thumbnail with its state on top.
+        const video = item.kind === "video";
+        if (video || (item.kind === "image" && (item.previewUri || item.file))) {
+          // Photos show as photos, as on the web: a thumbnail with its state on
+          // top. Videos get the same tile with their length, and a long upload
+          // shows how far it is.
+          const percent =
+            item.status === "uploading" && item.progress !== undefined
+              ? Math.round(item.progress * 100)
+              : null;
+          const label = failed
+            ? t("native.timeline.sessionScreen.retryName", { name: item.name })
+            : percent !== null
+              ? t("native.timeline.sessionScreen.uploadingNamePercent", {
+                  name: item.name,
+                  percent,
+                })
+              : item.name;
           return (
             <View key={item.id} style={{ width: 56, height: 56 }}>
               <Pressable
                 accessibilityRole={failed ? "button" : "image"}
-                accessibilityLabel={
-                  failed
-                    ? t("native.timeline.sessionScreen.retryName", { name: item.name })
-                    : item.name
-                }
+                accessibilityLabel={label}
                 disabled={!failed}
                 onPress={() => void attachments.retry(item.id)}
                 style={{
@@ -1009,23 +1026,47 @@ export function AttachmentChips({
                   backgroundColor: c["surface-2"],
                 }}
               >
-                <StoredFileImage
-                  source={source}
-                  file={item.file}
-                  localUri={item.previewUri}
-                  style={{ width: "100%", height: "100%" }}
-                  fallback={
-                    <View
-                      style={{
-                        flex: 1,
-                        alignItems: "center",
-                        justifyContent: "center",
-                      }}
-                    >
-                      <Icon name="image" size={18} color={c["fg-subtle"]} />
-                    </View>
-                  }
-                />
+                {video ? (
+                  <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+                    <Icon name="video" size={20} color={c["fg-muted"]} />
+                    {item.durationSeconds !== undefined && !busy && !failed ? (
+                      <Text
+                        numberOfLines={1}
+                        style={{
+                          ...fontStyle(theme, 500),
+                          position: "absolute",
+                          left: 4,
+                          right: 4,
+                          bottom: 3,
+                          textAlign: "center",
+                          fontSize: 10,
+                          fontVariant: ["tabular-nums"],
+                          color: c["fg-muted"],
+                        }}
+                      >
+                        {formatClock(item.durationSeconds * 1000)}
+                      </Text>
+                    ) : null}
+                  </View>
+                ) : (
+                  <StoredFileImage
+                    source={source}
+                    file={item.file}
+                    localUri={item.previewUri}
+                    style={{ width: "100%", height: "100%" }}
+                    fallback={
+                      <View
+                        style={{
+                          flex: 1,
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        <Icon name="image" size={18} color={c["fg-subtle"]} />
+                      </View>
+                    }
+                  />
+                )}
                 {busy || failed ? (
                   <View
                     style={{
@@ -1041,7 +1082,18 @@ export function AttachmentChips({
                         : "rgba(0,0,0,0.35)",
                     }}
                   >
-                    {busy ? (
+                    {percent !== null ? (
+                      <Text
+                        style={{
+                          ...fontStyle(theme, 600),
+                          fontSize: 12,
+                          fontVariant: ["tabular-nums"],
+                          color: "#FFFFFF",
+                        }}
+                      >
+                        {`${percent}%`}
+                      </Text>
+                    ) : busy ? (
                       <ActivityIndicator size="small" color="#FFFFFF" />
                     ) : (
                       <Icon name="rotate-ccw" size={16} color="#FFFFFF" />
@@ -1112,6 +1164,18 @@ export function AttachmentChips({
                 {item.name}
                 {failed ? t("native.timeline.sessionScreen.tapToRetrySuffix") : ""}
               </Text>
+              {item.status === "uploading" && item.progress !== undefined ? (
+                <Text
+                  style={{
+                    ...fontStyle(theme),
+                    fontSize: theme.size.xs,
+                    fontVariant: ["tabular-nums"],
+                    color: c["fg-subtle"],
+                  }}
+                >
+                  {`${Math.round(item.progress * 100)}%`}
+                </Text>
+              ) : null}
             </Pressable>
             <Pressable
               accessibilityRole="button"

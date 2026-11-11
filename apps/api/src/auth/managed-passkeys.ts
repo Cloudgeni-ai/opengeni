@@ -63,16 +63,18 @@ const KNOWN_PROVIDERS: Record<string, string> = {
   "53414d53-554e-4700-0000-000000000000": "Samsung Pass",
 };
 
-export type ManagedPasskeyCeremonyKind = "sign_in" | "sign_up" | "register";
+export type ManagedPasskeyCeremonyKind = "sign_in" | "sign_up" | "register" | "step_up";
 
 const StoredCeremony = z
   .object({
     version: z.literal(1),
-    kind: z.enum(["sign_in", "sign_up", "register"]),
+    kind: z.enum(["sign_in", "sign_up", "register", "step_up"]),
     challenge: z.string().min(16),
     origin: z.string().url(),
     rpId: z.string().min(1),
     userId: z.string().min(1).optional(),
+    /** A step-up: the browser session it confirms. */
+    authSessionId: z.string().min(1).optional(),
     name: z.string().min(1).max(80).optional(),
     signupChallengeVerified: z.boolean().optional(),
   })
@@ -211,6 +213,39 @@ export async function startManagedPasskeySignIn(
     kind: "sign_in",
     challenge: options.challenge,
     ...relyingParty,
+  });
+  return { challengeId, options: options as unknown as Record<string, unknown> };
+}
+
+/**
+ * A signed-in person confirming it's them with one of their own passkeys
+ * (admin step-up). The ceremony is bound to that person.
+ */
+export async function startManagedPasskeyStepUp(
+  auth: ManagedAuth,
+  relyingParty: { origin: string; rpId: string },
+  input: {
+    userId: string;
+    authSessionId: string;
+    allow: { credentialId: string; transports: string[] }[];
+  },
+): Promise<{ challengeId: string; options: Record<string, unknown> }> {
+  const options = await generateAuthenticationOptions({
+    rpID: relyingParty.rpId,
+    userVerification: "required",
+    timeout: CEREMONY_TIMEOUT_MS,
+    allowCredentials: input.allow.map((credential) => ({
+      id: credential.credentialId,
+      transports: credential.transports,
+    })),
+  });
+  const challengeId = await storeCeremony(auth, {
+    version: 1,
+    kind: "step_up",
+    challenge: options.challenge,
+    ...relyingParty,
+    userId: input.userId,
+    authSessionId: input.authSessionId,
   });
   return { challengeId, options: options as unknown as Record<string, unknown> };
 }

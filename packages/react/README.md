@@ -69,11 +69,18 @@ import "@opengeni/react/connect.css";
   controller={controller}
   returnUrl={hostSelectedReturnUrl}
   onAuthorize={hostAuthorizeFromClick}
+  finishInPopup // when onAuthorize opens the sign-in in a popup
 />;
 ```
 
 The host owns synchronous popup/full-redirect navigation and pending-attempt
 recovery. Backend state, not a popup message or URL query, proves completion.
+With `finishInPopup`, a popup sign-in returns to a small page that closes
+itself instead of loading `returnUrl` inside the popup; leave it unset for
+full-page redirects. When the provider ends a sign-in with an administrator
+approval link on the attempt (an organization that must approve the app), the
+panel keeps that help visible, including after a cancel, until the person
+tries again or goes back to the list.
 Operation installation uses explicit selection; OAuth success alone is not
 installation. Account disconnect requires an observed version and confirmation,
 revokes local Opengeni access only, and never silently retries an unknown outcome.

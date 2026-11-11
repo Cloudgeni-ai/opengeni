@@ -230,6 +230,7 @@ export {
   connectorActionPoliciesForAccountRoutes,
   connectorToolPolicyRevision,
   ConnectorToolPermissionConflictError,
+  type ResolvedConnectorActionPolicy,
 } from "./connector-action-policy";
 import {
   agentSelectionNotes,
@@ -444,6 +445,9 @@ import {
   ModalRouterProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
+  REPOSITORY_SKILLS_CONTEXT_PREFIX,
+  readRepositorySkillsContext,
+  repositorySkillsContextItem,
   WORKSPACE_GOVERNANCE_CONTEXT_PREFIX,
   WORKSPACE_GOVERNANCE_NONE,
   readWorkspaceGovernanceContext,
@@ -466,6 +470,7 @@ import { settleExitedWorkerAdmissions } from "./exited-worker-admissions";
 import {
   crashedWorkerOrphanAdmissionSql,
   sessionAttemptPendingWritersSql,
+  sessionMayAwaitQuiescenceSql,
   sessionPendingWriterAttemptIdsSql,
   sessionQuiescenceCandidateAttemptIdsSql,
 } from "./session-attempt-writers";
@@ -546,6 +551,7 @@ export * from "./subscription-core-xai";
 // track C2a); every caller reads the Claude provider route first.
 export * from "./subscription-core-claude-usage";
 export * from "./subscription-core-claude-reads";
+export * from "./subscription-core-claude-limit-resets";
 // Provider-neutral operations outside chat (media, transcription, realtime,
 // usage and catalog probes), bound per provider by the caller.
 export {
@@ -1290,6 +1296,7 @@ import {
 } from "./child-lifecycle-notices";
 import {
   CAPACITY_WAIT_NOTICE_KEY,
+  CAPACITY_WAIT_PARENT_NOTICE_KEY,
   capacityWaitAttention,
   capacityWaitNoticeMarker,
   capacityWaitNoticeNeedsRestating,
@@ -8192,6 +8199,10 @@ export type CreateCapabilityCatalogItemInput = {
   endpointUrl?: string | null;
   installUrl?: string | null;
   authModel?: string | null;
+  /** A known service's sign-in, when the address identifies it (e.g. Microsoft Dynamics). */
+  authKind?: "oauth2" | null;
+  mcpUrl?: string | null;
+  providerDomain?: string | null;
   metadata?: Record<string, unknown>;
   /**
    * Insert only: an existing workspace row with this id is returned unchanged
@@ -10970,11 +10981,11 @@ export async function upsertCapabilityCatalogItem(
         endpointUrl: input.endpointUrl ?? null,
         installUrl: input.installUrl ?? null,
         authModel: input.authModel ?? null,
-        providerDomain: null,
+        providerDomain: input.providerDomain ?? null,
         surfaceType: null,
         transport: null,
-        mcpUrl: null,
-        authKind: null,
+        mcpUrl: input.mcpUrl ?? null,
+        authKind: input.authKind ?? null,
         credentialFacts: [],
         tier: null,
         provenance: null,
@@ -27562,15 +27573,22 @@ export async function armSubscriptionCoreCapacityWait(
                 }),
               )
             : null;
-        const waitingMetadata = personNotice
-          ? {
-              ...recoveryMetadata,
-              [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
-                personNotice.key,
-                attention!.resetsAt,
-              ),
-            }
-          : recoveryMetadata;
+        // A worker's turn remembers the reset its parent is told below (set
+        // once the waiter exists), so a later check can restate it; a short
+        // wait tells the parent nothing.
+        const { [CAPACITY_WAIT_PARENT_NOTICE_KEY]: _toldParent, ...unannouncedMetadata } =
+          recoveryMetadata as Record<string, unknown>;
+        const waitingMetadata = {
+          ...unannouncedMetadata,
+          ...(personNotice
+            ? {
+                [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
+                  personNotice.key,
+                  attention!.resetsAt,
+                ),
+              }
+            : {}),
+        };
         const waitingPrompt = stopped
           ? await runnableQueuedTurnExists(tx, {
               accountId: input.accountId,
@@ -27764,7 +27782,19 @@ export async function armSubscriptionCoreCapacityWait(
           .set({
             status: stopped ? "failed" : "waiting_capacity",
             activeAttemptId: null,
-            metadata: waitingMetadata,
+            metadata:
+              attention && session.parentSessionId && waiter
+                ? {
+                    ...waitingMetadata,
+                    [CAPACITY_WAIT_PARENT_NOTICE_KEY]: capacityWaitNoticeMarker(
+                      childWaitingCapacityDedupeKey({
+                        childSessionId: input.sessionId,
+                        waiterId: waiter.waiterId,
+                      }),
+                      attention.resetsAt,
+                    ),
+                  }
+                : waitingMetadata,
             version: turn.version + 1,
             finishedAt: stopped ? now : null,
             updatedAt: now,
@@ -27945,14 +27975,32 @@ export async function reconcileSubscriptionCoreCapacityWait(
           return { action: "stale", events: [] } as const;
         }
         const vocabulary = subscriptionCoreWaitVocabulary(waiterRead.provider);
+        // A worker's parent is locked with it, as for every child lifecycle
+        // notice: the wait below may restate its reset to the parent.
+        const [preview] = await tx
+          .select({ parentSessionId: schema.sessions.parentSessionId })
+          .from(schema.sessions)
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, input.workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+            ),
+          )
+          .limit(1);
         const locks = await lockSessionEventWriteRows(tx, {
           workspaceId: input.workspaceId,
           controlLock: "already_locked",
           workspaceLock: "already_locked",
-          sessionIds: [input.sessionId],
+          sessionIds: [
+            input.sessionId,
+            ...(preview?.parentSessionId ? [preview.parentSessionId] : []),
+          ],
           turnIds: [waiterRead.blockedTurnId],
         });
-        const session = locks.sessions[0];
+        const session = locks.sessions.find((row) => row.id === input.sessionId);
+        if (session && session.parentSessionId !== (preview?.parentSessionId ?? null)) {
+          throw new Error(`Session parent changed while locking: ${input.sessionId}`);
+        }
         const blockedTurn = locks.turns[0];
         const effectiveControl = session
           ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
@@ -28104,14 +28152,16 @@ export async function reconcileSubscriptionCoreCapacityWait(
             waiter.waitReason !== waitEvaluation.waitReason
               ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
               : null;
-          // A top-level chat's person is told again, in place, once the reset
-          // their notification named no longer holds (it passed without
-          // capacity, or a longer limit binds), and told for the first time
-          // when a short wait has become a long one. Only an evaluation that
-          // found no capacity says when it returns; a held false-resumption
-          // delay or legacy evaluation leaves the notice as it is.
+          // Whoever was told when the wait ends (a top-level chat's person,
+          // or a worker's parent) is told again once the reset they heard no
+          // longer holds (it passed without capacity, or a longer limit
+          // binds), and told for the first time when a short wait has become
+          // a long one; the session's timeline gets a waiting event naming
+          // the reset that now holds. Only an evaluation that found no
+          // capacity says when it returns; a held false-resumption delay or
+          // legacy evaluation restates nothing.
           const attention =
-            session.parentSessionId || evaluation.kind !== "wait"
+            evaluation.kind !== "wait"
               ? null
               : capacityWaitAttention({
                   waitReason: waitEvaluation.waitReason,
@@ -28119,29 +28169,56 @@ export async function reconcileSubscriptionCoreCapacityWait(
                   healthRetryAt: waitEvaluation.healthRetryAt,
                   now,
                 });
-          const openNotice = readCapacityWaitNotice(blockedTurn.metadata);
+          const toldKey = session.parentSessionId
+            ? CAPACITY_WAIT_PARENT_NOTICE_KEY
+            : CAPACITY_WAIT_NOTICE_KEY;
+          const told = readCapacityWaitNotice(blockedTurn.metadata, toldKey);
+          const restate =
+            attention !== null &&
+            (!told || capacityWaitNoticeNeedsRestating(told, attention.resetsAt));
+          // What agents see (a worker's parent woken by a notice, the
+          // session's own timeline) is restated only for a real change: the
+          // first long wait, a told time that passed without capacity, a
+          // limit's reset that now binds later, or a reset that became
+          // unknown. A health-retry time that moves later at each check while
+          // the told time still lies ahead would otherwise wake the parent at
+          // every check; the person's silent in-place notification still
+          // follows it.
+          const toldTimePassed =
+            typeof told?.resetsAt === "string" && Date.parse(told.resetsAt) <= now.getTime();
+          const restateToAgents =
+            restate &&
+            (!told ||
+              toldTimePassed ||
+              waitEvaluation.earliestResetAt !== null ||
+              attention!.resetsAt === null);
+          const openNotice = session.parentSessionId ? null : told;
           const personNotice =
-            attention &&
-            (!openNotice || capacityWaitNoticeNeedsRestating(openNotice, attention.resetsAt))
+            restate && !session.parentSessionId
               ? SessionNotificationPostedPayload.parse({
                   ...capacityWaitNotificationPayload({
                     turnId: blockedTurn.id,
                     provider: waiter.provider,
-                    resetsAt: attention.resetsAt,
+                    resetsAt: attention!.resetsAt,
                   }),
                   // Same key: the open notification is updated in place, silently.
                   replaced: openNotice !== null,
                 })
               : null;
+          const waitingText =
+            changedReasonText ??
+            (restateToAgents
+              ? subscriptionCapacityWaitReasonText(waitEvaluation.waitReason, vocabulary.label)
+              : null);
           const restated = [
-            ...(changedReasonText
+            ...(waitingText
               ? [
                   {
                     type: vocabulary.waitingEventType,
                     payload: {
                       ...vocabulary.waitingPayload,
                       code: "subscription_capacity_unavailable",
-                      error: changedReasonText,
+                      error: waitingText,
                       waitReason: waitEvaluation.waitReason,
                       actionRequired: subscriptionCapacityWaitNeedsAction(
                         waitEvaluation.waitReason,
@@ -28193,18 +28270,37 @@ export async function reconcileSubscriptionCoreCapacityWait(
               );
             restatedEvents = insertedEvents.map(mapEvent);
           }
-          if (personNotice) {
-            // The turn remembers what the notification now says, and its key
-            // for the withdrawal when the wait ends.
+          // A worker's parent hears the restated reset in a new notice (the
+          // system-update outbox delivers it), keyed by that reset so it never
+          // collides with the arm's notice or an earlier restatement.
+          const parentNoticeKey =
+            restateToAgents && session.parentSessionId
+              ? childWaitingCapacityDedupeKey({
+                  childSessionId: session.id,
+                  waiterId: waiter.waiterId,
+                  restatedResetsAt: attention!.resetsAt?.toISOString() ?? null,
+                })
+              : null;
+          if (parentNoticeKey) {
+            await enqueueChildWaitingCapacityOutboxTx(tx, input.workspaceId, session, {
+              turnId: blockedTurn.id,
+              waiterId: waiter.waiterId,
+              provider: waiter.provider,
+              nextCheckAt,
+              resetsAt: attention!.resetsAt,
+              restated: true,
+            });
+          }
+          const noticeKey = personNotice?.key ?? parentNoticeKey;
+          if (noticeKey) {
+            // The turn remembers what it said and to whom; the person's
+            // notification key also serves its withdrawal when the wait ends.
             const [noticedTurn] = await tx
               .update(schema.sessionTurns)
               .set({
                 metadata: {
                   ...blockedTurn.metadata,
-                  [CAPACITY_WAIT_NOTICE_KEY]: capacityWaitNoticeMarker(
-                    personNotice.key,
-                    attention!.resetsAt,
-                  ),
+                  [toldKey]: capacityWaitNoticeMarker(noticeKey, attention!.resetsAt),
                 },
                 version: blockedTurn.version + 1,
                 updatedAt: now,
@@ -31757,17 +31853,21 @@ export async function resolveAttemptConnectorToolDecision(
     serverId: string;
     toolName: string;
     defaultDecision: "allow" | "ask";
+    /** Decide from the resolved policy instead of its plain decision. */
+    decide?: (resolved: ResolvedConnectorActionPolicy) => "allow" | "ask" | "block";
   },
 ): Promise<"allow" | "ask" | "block"> {
+  const { decide, ...policyInput } = input;
   return await withRlsContext(
     db,
     { accountId: identity.accountId, workspaceId: identity.workspaceId },
     async (scopedDb) => {
       const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
       const resolved = resolveConnectorActionPolicy(snapshot, {
-        ...input,
-        actionName: input.toolName,
+        ...policyInput,
+        actionName: policyInput.toolName,
       });
+      if (decide) return decide(resolved);
       return resolved.managed ? connectorActionPolicyDecision(resolved) : input.defaultDecision;
     },
   );
@@ -32717,9 +32817,10 @@ async function existingSessionForCreateKey(
   tx: Database,
   workspaceId: string,
   createIdempotencyKey: string,
-): Promise<typeof schema.sessions.$inferSelect | undefined> {
+): Promise<SessionRowWithSkills | undefined> {
+  // A replay returns the complete existing Session, so this reads its Skills too.
   const [existing] = await tx
-    .select()
+    .select(sessionRowWithSkillsColumns)
     .from(schema.sessions)
     .where(
       and(
@@ -33267,7 +33368,7 @@ async function createSessionInTransaction(
         input.codeSearchDeploymentPolicy ?? codeSearchDeploymentPolicyForCreate(),
         id,
       );
-  let insertedRows: (typeof schema.sessions.$inferSelect)[];
+  let insertedRows: SessionRowWithSkills[];
   let privateCreateCapabilityId: string | null = null;
   let privateCreateOwnerMembershipId: string | null = null;
   let privateCreateOwnerSubjectId: string | null = null;
@@ -33406,7 +33507,6 @@ async function createSessionInTransaction(
         titleSource: "agent",
         resources: input.resources,
         removedRepositories,
-        skills: input.skills ?? [],
         tools: input.tools ?? [],
         toolPolicy: input.toolPolicy ?? {
           mode: "explicit",
@@ -33491,6 +33591,9 @@ async function createSessionInTransaction(
       "initialMessage",
       "initialMessageCodecVersion",
     );
+    // Skill folders are written through `sessionSkillSets`, never as part of
+    // the `sessions` row model (see that table's comment).
+    const skills = input.skills ?? [];
     if (
       input.createdByActor &&
       parentTurnId &&
@@ -33506,14 +33609,18 @@ async function createSessionInTransaction(
       const columns = getTableColumns(schema.sessions);
       // The creation seam's column allow-list predates removal records; the
       // inherited records are written right after, in this transaction.
-      const valuesByColumn = Object.fromEntries(
-        Object.entries(insertValues)
+      const valuesByColumn = Object.fromEntries([
+        ...Object.entries(insertValues)
           .filter(([key, value]) => value !== undefined && key !== "removedRepositories")
           .map(([key, value]) => {
             const column = columns[key as keyof typeof columns];
-            return [column.name, agentChildCreationColumnValue(column, value)];
+            return [column.name, agentChildCreationColumnValue(column, value)] as const;
           }),
-      );
+        [
+          schema.sessionSkillSets.skills.name,
+          agentChildCreationColumnValue(schema.sessionSkillSets.skills, skills),
+        ] as const,
+      ]);
       const actor = input.createdByActor;
       const created = await tx.execute<{
         id: string;
@@ -33529,17 +33636,35 @@ async function createSessionInTransaction(
               .update(schema.sessions)
               .set({ removedRepositories })
               .where(eq(schema.sessions.id, created[0]!.id))
-              .returning()
-          : await tx.select().from(schema.sessions).where(eq(schema.sessions.id, created[0]!.id));
+              .returning(sessionRowWithSkillsColumns)
+          : await tx
+              .select(sessionRowWithSkillsColumns)
+              .from(schema.sessions)
+              .where(eq(schema.sessions.id, created[0]!.id));
     } else {
       // Non-agent creates, unscoped legacy creates and turns with no initiating
       // human retain their original path. Never infer the request subject from
       // readable parent IDs: these creates gain no machine-tree witness.
-      insertedRows = await tx
+      const [insertedRow] = await tx
         .insert(schema.sessions)
         .values(insertValues)
         .onConflictDoNothing()
         .returning();
+      insertedRows = !insertedRow
+        ? []
+        : skills.length === 0
+          ? [{ ...insertedRow, skills: [] }]
+          : await tx
+              .update(schema.sessionSkillSets)
+              .set({ skills })
+              .where(
+                and(
+                  eq(schema.sessionSkillSets.workspaceId, input.workspaceId),
+                  eq(schema.sessionSkillSets.id, insertedRow.id),
+                ),
+              )
+              .returning({ skills: schema.sessionSkillSets.skills })
+              .then((rows) => rows.map((row) => ({ ...insertedRow, skills: row.skills })));
     }
     if (privateCreateCapabilityId) {
       await closePrivateSessionCreateCapability(tx, privateCreateCapabilityId);
@@ -33734,7 +33859,7 @@ export async function getSessionByCreateIdempotencyKey(
 ): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select()
+      .select(sessionRowWithSkillsColumns)
       .from(schema.sessions)
       .where(
         and(
@@ -33997,11 +34122,25 @@ async function readSession(
   presentation: "full" | "model_gate",
 ): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .select()
-      .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-      .limit(1);
+    // The model gate returns only the model fields, so it leaves the Skill
+    // folders unread; a full read takes them from the same statement.
+    const sessionWhere = and(
+      eq(schema.sessions.workspaceId, workspaceId),
+      eq(schema.sessions.id, sessionId),
+    );
+    const [row] =
+      presentation === "full"
+        ? await scopedDb
+            .select(sessionRowWithSkillsColumns)
+            .from(schema.sessions)
+            .where(sessionWhere)
+            .limit(1)
+        : await scopedDb
+            .select()
+            .from(schema.sessions)
+            .where(sessionWhere)
+            .limit(1)
+            .then((rows) => rows.map((sessionRow) => ({ ...sessionRow, skills: [] })));
     if (!row) return null;
     // mapSessionWithControl applies the effective policy after loading control.
     // Do not perform the same policy projection twice in this scoped read.
@@ -35257,7 +35396,7 @@ export async function getAnySessionInGroup(
 ): Promise<Session | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select()
+      .select(sessionRowWithSkillsColumns)
       .from(schema.sessions)
       .where(
         and(
@@ -35618,6 +35757,70 @@ type SessionRow = typeof schema.sessions.$inferSelect & {
   failureHandled?: boolean;
 };
 
+/** A session row with its Skill folders, which a complete `Session` carries. */
+type SessionRowWithSkills = SessionRow & { skills: unknown[] };
+
+/**
+ * Every `sessions` row column plus the Skill folders, for readers that return
+ * a complete `Session` and must read both in one statement. Every other reader
+ * selects the row without them; see `schema.sessionSkillSets`.
+ */
+const sessionRowWithSkillsColumns = {
+  ...getTableColumns(schema.sessions),
+  skills: schema.sessionSkillSets.skills,
+};
+
+/**
+ * A Session for a response that never carries its Skill folders, such as the
+ * compact chat projection. Its readers leave the folders unread.
+ */
+export type SessionWithoutSkills = Omit<Session, "skills">;
+
+/** Whether a complete-Session reader also reads the Skill folders. */
+export type SessionSkillsRead = "read" | "omit";
+
+/**
+ * The columns of a complete-Session read. Without the Skill folders, SQL
+ * substitutes an empty set before transfer, so mapping is unchanged and the
+ * stored folders are never detoasted; `omitSessionSkills` then removes the key.
+ */
+function sessionReadColumns(skills: SessionSkillsRead) {
+  return skills === "read"
+    ? sessionRowWithSkillsColumns
+    : {
+        ...getTableColumns(schema.sessions),
+        skills: sql<SessionRowWithSkills["skills"]>`'[]'::jsonb`,
+      };
+}
+
+function omitSessionSkills<S extends Session>(session: S): Omit<S, "skills"> {
+  const { skills: _unread, ...rest } = session;
+  return rest;
+}
+
+/**
+ * The Skill folders of sessions whose rows the caller already holds locked, so
+ * they match the rows it read without them. Unlocked readers of a complete
+ * Session select `sessionRowWithSkillsColumns` in one statement instead.
+ */
+async function readSessionSkills(
+  db: Database,
+  workspaceId: string,
+  sessionIds: readonly string[],
+): Promise<Map<string, unknown[]>> {
+  if (sessionIds.length === 0) return new Map();
+  const rows = await db
+    .select({ id: schema.sessionSkillSets.id, skills: schema.sessionSkillSets.skills })
+    .from(schema.sessionSkillSets)
+    .where(
+      and(
+        eq(schema.sessionSkillSets.workspaceId, workspaceId),
+        anyOf(schema.sessionSkillSets.id, [...new Set(sessionIds)]),
+      ),
+    );
+  return new Map(rows.map((row) => [row.id, row.skills]));
+}
+
 /**
  * Turn sources a person starts: a human or API message, or an operator's
  * manual `/compact`. Such a turn brings no machine input the agent is waiting
@@ -35739,11 +35942,11 @@ function sessionInputWaitDecidingTurnSql(
 }
 
 /** One bounded query in the caller's RLS scope; never infer waits from history text. */
-async function withCurrentSessionInputWait(
+async function withCurrentSessionInputWait<Row extends SessionRow>(
   db: Database,
   workspaceId: string,
-  rows: readonly SessionRow[],
-): Promise<SessionRow[]> {
+  rows: readonly Row[],
+): Promise<Row[]> {
   const candidates = rows.filter(
     (row) =>
       row.status === "idle" && !row.activeTurnId && row.inputWaitTurnId && row.inputWaitUntil,
@@ -35813,12 +36016,12 @@ export function currentSessionInputWaitTurnsQuery(
  * meaningful frontier; raw deltas and housekeeping must not create unread dots.
  * The compatibility column may lag raw deltas but cannot lead the durable cursor.
  */
-async function canonicalSessionRowsFromEventCursors(
+async function canonicalSessionRowsFromEventCursors<Row extends SessionRow>(
   db: Database,
   workspaceId: string,
-  rows: readonly SessionRow[],
+  rows: readonly Row[],
   includeEffectivePolicy = true,
-): Promise<SessionRow[]> {
+): Promise<Row[]> {
   if (rows.length === 0) return [];
   const sessionIds = [...new Set(rows.map((row) => row.id))];
   const cursors = await db
@@ -37742,17 +37945,42 @@ export async function listWorkspaceBackgroundCommandsForSubject(
  * the committed workspace revision and every continuation reads only `limit +
  * 1` candidate ids. Legacy short-lived snapshot cursors remain readable during
  * rolling upgrades, while hydration always joins live rows for current
- * lifecycle/title and authorization data.
+ * lifecycle/title and authorization data. A response that never carries the
+ * Skill folders passes `skills: "omit"`.
  */
 export async function listSessionsForSubject(
   db: Database,
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
-): Promise<SessionListResponse> {
-  const page = await readSessionListForSubject(db, workspaceId, options, false);
+  skills: SessionSkillsRead,
+): Promise<SessionListWithoutSkillsResponse>;
+export async function listSessionsForSubject(
+  db: Database,
+  workspaceId: string,
+  options: ListSessionsForSubjectOptions,
+  skills?: "read",
+): Promise<SessionListResponse>;
+export async function listSessionsForSubject(
+  db: Database,
+  workspaceId: string,
+  options: ListSessionsForSubjectOptions,
+  skills: SessionSkillsRead = "read",
+): Promise<SessionListResponse | SessionListWithoutSkillsResponse> {
+  const page = await readSessionListForSubject(db, workspaceId, options, false, skills);
   if ("projection" in page) throw new Error("Unexpected compact session projection");
-  return page;
+  if (skills === "read") return page;
+  return {
+    ...page,
+    pinned: page.pinned.map(omitSessionSkills),
+    sessions: page.sessions.map(omitSessionSkills),
+  };
 }
+
+/** A session-list page whose sessions were read without their Skill folders. */
+export type SessionListWithoutSkillsResponse = Omit<SessionListResponse, "pinned" | "sessions"> & {
+  pinned: SessionWithoutSkills[];
+  sessions: SessionWithoutSkills[];
+};
 
 /** Same subject, paging and authorization fences, without execution configuration. */
 export async function listSessionEntriesForSubject(
@@ -37869,6 +38097,7 @@ async function readSessionListForSubject(
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
   summary: boolean,
+  skills: SessionSkillsRead = "read",
 ): Promise<SessionListResponse | SessionListEntryResponse> {
   const requestedLimit = options.limit ?? 50;
   const limit = Number.isFinite(requestedLimit)
@@ -37990,13 +38219,15 @@ async function readSessionListForSubject(
 
         // Configuration is never exposed by the summary branch. SQL substitutes
         // typed placeholders before transfer, so large JSON/prompt fields do not
-        // become process allocations. Full reads select every original column.
-        const fullColumns = getTableColumns(schema.sessions);
+        // become process allocations. Full reads select every original column
+        // and, unless the caller omits them, the Skill folders a complete
+        // Session carries.
+        const fullColumns = sessionReadColumns(skills);
         const listColumns = summary
           ? {
               ...fullColumns,
               resources: sql<SessionRow["resources"]>`'[]'::jsonb`,
-              skills: sql<SessionRow["skills"]>`'[]'::jsonb`,
+              skills: sql<SessionRowWithSkills["skills"]>`'[]'::jsonb`,
               tools: sql<SessionRow["tools"]>`'[]'::jsonb`,
               instructions: sql<SessionRow["instructions"]>`null::text`,
               initialModelContext: sql<SessionRow["initialModelContext"]>`null::text`,
@@ -38024,7 +38255,7 @@ async function readSessionListForSubject(
         // or activity change and return content that no longer matches the page.
         let selectedOrdinaryRows:
           | Array<{
-              session: SessionRow;
+              session: SessionRowWithSkills;
               pin: typeof schema.sessionPins.$inferSelect | null;
             }>
           | undefined;
@@ -38570,17 +38801,35 @@ async function sessionFailureDiagnostics(
   };
 }
 
+/** A response that never carries the Skill folders passes `skills: "omit"`. */
+export async function getSessionForSubject(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  subjectId: string,
+  relatedSessionAccess: "target" | "root",
+  skills: SessionSkillsRead,
+): Promise<SessionWithoutSkills | null>;
+export async function getSessionForSubject(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  subjectId: string,
+  relatedSessionAccess?: "target" | "root",
+  skills?: "read",
+): Promise<Session | null>;
 export async function getSessionForSubject(
   db: Database,
   workspaceId: string,
   sessionId: string,
   subjectId: string,
   relatedSessionAccess: "target" | "root" = "root",
-): Promise<Session | null> {
+  skills: SessionSkillsRead = "read",
+): Promise<Session | SessionWithoutSkills | null> {
   return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
-        session: schema.sessions,
+        session: sessionReadColumns(skills),
         pin: schema.sessionPins,
         cursor: schema.sessionEventCursors,
       })
@@ -38643,7 +38892,7 @@ export async function getSessionForSubject(
       sessionId,
     ]);
     const failureDiagnostics = await sessionFailureDiagnostics(scopedDb, workspaceId, session);
-    return projectSessionForRelatedAccess(
+    const projected = projectSessionForRelatedAccess(
       {
         ...(await mapSessionWithControl(
           scopedDb,
@@ -38659,6 +38908,7 @@ export async function getSessionForSubject(
       },
       relatedSessionAccess,
     );
+    return skills === "read" ? projected : omitSessionSkills(projected);
   });
 }
 
@@ -38692,7 +38942,7 @@ export async function setSessionPin(
         await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
         await requireSessionPersonalStateWriteAuthority(tx, input);
         const [storedSession] = await tx
-          .select()
+          .select(sessionRowWithSkillsColumns)
           .from(schema.sessions)
           .where(
             and(
@@ -38843,7 +39093,7 @@ export async function setSessionAttention(
         await requireSessionPersonalStateWriteAuthority(tx, input);
 
         const [storedSession] = await tx
-          .select()
+          .select(sessionRowWithSkillsColumns)
           .from(schema.sessions)
           .where(
             and(
@@ -39020,7 +39270,7 @@ export async function listSessions(
       }
     }
     const rows = await scopedDb
-      .select()
+      .select(sessionRowWithSkillsColumns)
       .from(schema.sessions)
       .where(and(...filters))
       .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
@@ -40457,6 +40707,17 @@ export type SessionLineage = {
   truncated: boolean;
 };
 
+/** A lineage whose sessions were read without their Skill folders. */
+export type SessionLineageWithoutSkills = {
+  ancestors: SessionWithoutSkills[];
+  children: LineageNodeWithoutSkills[];
+  truncated: boolean;
+};
+export type LineageNodeWithoutSkills = {
+  session: SessionWithoutSkills;
+  children: LineageNodeWithoutSkills[];
+};
+
 /**
  * Resolve a session tree to its root without materializing the full lineage.
  * Every recursive hop stays workspace-scoped and invalid/cyclic/deep chains
@@ -40588,13 +40849,27 @@ export async function listSessionTreeIds(
  * 200 total rows, returned as a nested tree with each level newest first (as
  * the sidebar lists chats). The cap keeps shallower agents before deeper ones
  * and newer before older, so a long fleet loses its oldest grandchildren
- * first, never a direct child picked at random.
+ * first, never a direct child picked at random. A response that never carries
+ * the Skill folders passes `skills: "omit"`.
  */
 export async function getSessionLineage(
   db: Database,
   workspaceId: string,
   sessionId: string,
-): Promise<SessionLineage | null> {
+  skills: SessionSkillsRead,
+): Promise<SessionLineageWithoutSkills | null>;
+export async function getSessionLineage(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  skills?: "read",
+): Promise<SessionLineage | null>;
+export async function getSessionLineage(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  skills: SessionSkillsRead = "read",
+): Promise<SessionLineage | SessionLineageWithoutSkills | null> {
   const descendantLimit = SESSION_TREE_DESCENDANT_LIMIT;
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     // Existence check on the ALREADY-SCOPED connection — never a nested
@@ -40654,7 +40929,7 @@ export async function getSessionLineage(
       return { ancestors: [], children: [], truncated: false };
     }
     const rows = await scopedDb
-      .select()
+      .select(sessionReadColumns(skills))
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), anyOf(schema.sessions.id, ids)));
     const canonicalRows = await canonicalSessionRowsFromEventCursors(scopedDb, workspaceId, rows);
@@ -40669,15 +40944,19 @@ export async function getSessionLineage(
       workspaceId,
       canonicalRows.filter((row) => row.status === "requires_action").map((row) => row.id),
     );
+    const omitUnreadSkills = (session: Session): Session | SessionWithoutSkills =>
+      skills === "read" ? session : omitSessionSkills(session);
     const sessionsById = new Map(
       canonicalRows.map((row) => {
         const control = controls.get(row.id);
         if (!control) throw new Error(`Effective control missing for session ${row.id}`);
         return [
           row.id,
-          withRequiresActionSince(
-            mapSession(row, control, grouped.get(row.id) ?? []),
-            requiresActionSince,
+          omitUnreadSkills(
+            withRequiresActionSince(
+              mapSession(row, control, grouped.get(row.id) ?? []),
+              requiresActionSince,
+            ),
           ),
         ] as const;
       }),
@@ -40685,16 +40964,16 @@ export async function getSessionLineage(
 
     const ancestors = ancestorRows
       .map((row) => sessionsById.get(row.id))
-      .filter((session): session is Session => Boolean(session));
+      .filter((session): session is Session | SessionWithoutSkills => Boolean(session));
 
-    const nodesById = new Map<string, LineageNode>();
+    const nodesById = new Map<string, LineageNodeWithoutSkills>();
     for (const row of descendantRows) {
       const session = sessionsById.get(row.id);
       if (session) {
         nodesById.set(row.id, { session, children: [] });
       }
     }
-    const children: LineageNode[] = [];
+    const children: LineageNodeWithoutSkills[] = [];
     for (const row of descendantRows) {
       const node = nodesById.get(row.id);
       if (!node) continue;
@@ -40704,7 +40983,8 @@ export async function getSessionLineage(
         nodesById.get(row.parentSessionId ?? "")?.children.push(node);
       }
     }
-    return { ancestors, children, truncated };
+    // Read with the Skill folders, every node carries them.
+    return { ancestors, children, truncated } as SessionLineage | SessionLineageWithoutSkills;
   });
 }
 
@@ -44519,6 +44799,14 @@ const SKILL_CATALOG_CHANNEL: SessionContextChannel = {
   item: skillCatalogContextItem,
 };
 
+const REPOSITORY_SKILLS_CHANNEL: SessionContextChannel = {
+  label: "Repository skills",
+  metadataKey: "opengeniRepositorySkillsHistoryId",
+  contentPrefix: REPOSITORY_SKILLS_CONTEXT_PREFIX,
+  read: readRepositorySkillsContext,
+  item: repositorySkillsContextItem,
+};
+
 const WORKSPACE_GOVERNANCE_CHANNEL: SessionContextChannel = {
   label: "Workspace governance",
   metadataKey: "opengeniWorkspaceGovernanceHistoryId",
@@ -44561,6 +44849,41 @@ export async function ensureSessionSkillCatalog(
       { ...scope, text: catalog, ...(omitWhenEmpty ? { omitWhenAbsent: true } : {}) },
       SKILL_CATALOG_CHANNEL,
     )) ?? ""
+  );
+}
+
+/**
+ * Persist the repository Skill index the run discovered in the live
+ * workspace, once per logical turn, as a history item before the turn's first
+ * history item (with that turn's id). Retries reuse the turn's snapshot even
+ * when the workspace changed meanwhile. Nothing is written while the newest
+ * item already shows the same index. Null means this run did not index the
+ * workspace (a deferred run): nothing is written, and the turn keeps what the
+ * model already reads, so a later attempt of the turn cannot add an item
+ * between its requests. Returns the model-visible index, or null when there
+ * is none.
+ *
+ * Discovery runs inside the model run, after this turn's history was loaded,
+ * so the run shows the returned item at the same place itself (see the
+ * runtime's `publishRepositorySkills`).
+ */
+export async function ensureSessionRepositorySkills(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    index: string | null;
+  },
+): Promise<string | null> {
+  const { index, ...scope } = input;
+  return await ensureSessionContextSnapshot(
+    db,
+    { ...scope, text: index },
+    REPOSITORY_SKILLS_CHANNEL,
   );
 }
 
@@ -61095,6 +61418,23 @@ async function lockWorkspaceMutationSessionTx(
   return session;
 }
 
+/**
+ * False only when no attempt of the session can await its physical-quiescence
+ * receipt (see `sessionMayAwaitQuiescenceSql`). It lets the hot peek and claim
+ * paths skip the exact quiescence and writer queries, which cost tens of
+ * milliseconds of planning on every call, for the sessions that have none of
+ * their rows.
+ */
+async function sessionMayAwaitQuiescence(
+  db: Database,
+  scope: { workspaceId: string; sessionId: string },
+): Promise<boolean> {
+  const [row] = await db.execute<{ possible: boolean }>(
+    sql`select ${sessionMayAwaitQuiescenceSql(scope)} as possible`,
+  );
+  return row?.possible === true;
+}
+
 /** True while an exact closed attempt still owns the physical-quiescence gate.
  * Both user control interruptions and activity-owned recoverable shutdowns use
  * this predicate so wake delivery cannot turn an unfinished writer drain into
@@ -61110,6 +61450,7 @@ async function hasPendingSessionAttemptQuiescenceTx(
     writerMode?: "physical" | "containment";
   },
 ): Promise<boolean> {
+  if (!(await sessionMayAwaitQuiescence(tx, input))) return false;
   const [row] = await tx.execute<{ pending: boolean }>(sql`
     select exists (
       select 1
@@ -80251,17 +80592,25 @@ export async function claimSessionWorkForAttempt(
           )
           .orderBy(desc(schema.sessionAttemptInterruptions.requestedAt))
           .limit(1);
-        const [unsettledWriters] = await tx.execute<{ pending: boolean }>(sql`
-          select exists (
-            select 1 from session_turn_attempts attempt
-            where attempt.workspace_id = ${workspaceId}
-              and attempt.session_id = ${sessionId}
-              and attempt.state = 'closed'
-              and attempt.quiesced_at is null
-              and attempt.id in ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })}
-              and ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")}
-          ) as pending
+        // Only a session with an unsettled admission or an active retained
+        // process can have a pending writer. Most have neither, and then the
+        // exact predicate below (mostly planning cost) need not run.
+        const [writerCandidates] = await tx.execute<{ present: boolean }>(sql`
+          select exists ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })} as present
         `);
+        const [unsettledWriters] = writerCandidates?.present
+          ? await tx.execute<{ pending: boolean }>(sql`
+              select exists (
+                select 1 from session_turn_attempts attempt
+                where attempt.workspace_id = ${workspaceId}
+                  and attempt.session_id = ${sessionId}
+                  and attempt.state = 'closed'
+                  and attempt.quiesced_at is null
+                  and attempt.id in ${sessionPendingWriterAttemptIdsSql({ workspaceId, sessionId })}
+                  and ${sessionAttemptPendingWritersSql(sql`attempt`, "inference")}
+              ) as pending
+            `)
+          : [];
         if (unquiescedInterruption || unsettledWriters?.pending) {
           return { action: "unclaimed", reason: "control-pending" };
         }
@@ -81005,7 +81354,7 @@ export async function claimSessionWorkForAttempt(
                     savepoint as unknown as Database,
                     {
                       sessionId,
-                      session: mapSession(
+                      session: mapSessionWithoutSkills(
                         claimedSession,
                         serializeEffectiveSessionControl(effectiveControl),
                         connectorMetadata.get(sessionId) ?? [],
@@ -81787,7 +82136,7 @@ export async function claimSessionWorkForAttempt(
               tx as unknown as Database,
               {
                 sessionId,
-                session: mapSession(
+                session: mapSessionWithoutSkills(
                   session,
                   serializeEffectiveSessionControl(effectiveControl),
                   connectorMetadata.get(sessionId) ?? [],
@@ -83488,6 +83837,7 @@ export type SessionWorkPeek =
       waitTurnId: string;
       deadlineAt: string;
     }
+  | { kind: "read-only" }
   | { kind: "idle" };
 
 /**
@@ -83509,6 +83859,7 @@ async function nextSessionAttemptAwaitingQuiescence(
 ): Promise<{
   attemptId: string;
 } | null> {
+  if (!(await sessionMayAwaitQuiescence(db, { workspaceId, sessionId }))) return null;
   const [row] = await db
     .select({
       attemptId: schema.sessionTurnAttempts.id,
@@ -83898,11 +84249,20 @@ export async function peekSessionWork(
         compactRequested: schema.sessions.compactRequested,
         inputWaitTurnId: schema.sessions.inputWaitTurnId,
         inputWaitUntil: schema.sessions.inputWaitUntil,
+        contentArchiveState: schema.sessions.contentArchiveState,
+        importedArchiveImportId: schema.sessions.importedArchiveImportId,
       })
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!session) return { kind: observerAccountId ? "unavailable" : "idle" };
+    // An archived (or archiving) or imported session is read-only: the
+    // database refuses every turn, attempt and wake write for it, so there is
+    // no work to admit and no receipt that could still commit. Restoring its
+    // content makes it live again and the next wake peeks it afresh.
+    if (session.contentArchiveState !== null || session.importedArchiveImportId !== null) {
+      return { kind: "read-only" };
+    }
     // Pure event appends can leave the wide session projection behind. Admission
     // settlement fences against the allocation cursor, so observe that same
     // authority here without taking a writer lock during this advisory peek.
@@ -91128,6 +91488,8 @@ async function enqueueChildWaitingCapacityOutboxTx(
     provider: "codex" | "xai" | "claude";
     nextCheckAt: Date | null;
     resetsAt: Date | null;
+    /** A later notice restating the reset of a wait the parent already heard of. */
+    restated?: boolean;
   },
 ): Promise<boolean> {
   if (!session.parentSessionId || !childLifecycleNoticesEnabled()) return false;
@@ -91143,6 +91505,7 @@ async function enqueueChildWaitingCapacityOutboxTx(
     dedupeKey: childWaitingCapacityDedupeKey({
       childSessionId: session.id,
       waiterId: input.waiterId,
+      ...(input.restated ? { restatedResetsAt: payload.resetsAt } : {}),
     }),
     kind: "child_waiting_capacity",
     classification: "info",
@@ -96384,9 +96747,21 @@ export async function appendSessionEventsWithLockedSessionUpdate(
         if (!sessionRow) {
           throw new Error(`Session not found: ${sessionId}`);
         }
+        // The callback receives complete Sessions; the rows are locked, so
+        // their Skill folders read here are the ones this update replaces.
+        const lockedSkills = await readSessionSkills(
+          tx as unknown as Database,
+          workspaceId,
+          locks.sessions.map((row) => row.id),
+        );
+        const withLockedSkills = (row: (typeof locks.sessions)[number]): SessionRowWithSkills => {
+          const skills = lockedSkills.get(row.id);
+          if (!skills) throw new Error(`Session not found: ${row.id}`);
+          return { ...row, skills };
+        };
         const mappedSession = await mapSessionWithControl(
           tx as unknown as Database,
-          sessionRow,
+          withLockedSkills(sessionRow),
           [],
           undefined,
           undefined,
@@ -96426,7 +96801,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             return row
               ? await mapSessionWithControl(
                   tx as unknown as Database,
-                  row,
+                  withLockedSkills(row),
                   [],
                   undefined,
                   undefined,
@@ -96508,7 +96883,6 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               : {}),
             ...(update.agentConfig !== undefined ? { agentConfig: update.agentConfig } : {}),
             ...(update.instructions !== undefined ? { instructions: update.instructions } : {}),
-            ...(update.skills !== undefined ? { skills: update.skills } : {}),
             ...(update.toolPolicy !== undefined ? { toolPolicy: update.toolPolicy } : {}),
             ...(update.toolPolicyVersion !== undefined
               ? { toolPolicyVersion: update.toolPolicyVersion }
@@ -96540,6 +96914,18 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           throw new SessionToolPolicyVersionConflictError(
             Number(current?.toolPolicyVersion ?? update.expectedToolPolicyVersion ?? 1),
           );
+        }
+        if (update.skills !== undefined) {
+          // Written with the tool-policy CAS above, under the same row lock.
+          await tx
+            .update(schema.sessionSkillSets)
+            .set({ skills: update.skills })
+            .where(
+              and(
+                eq(schema.sessionSkillSets.workspaceId, workspaceId),
+                eq(schema.sessionSkillSets.id, sessionId),
+              ),
+            );
         }
         return inserted.map(mapEvent);
       }),
@@ -96575,7 +96961,7 @@ async function sessionControlProjections(
 
 async function mapSessionWithControl(
   db: Database,
-  row: typeof schema.sessions.$inferSelect,
+  row: SessionRowWithSkills,
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
   attention: Pick<Session, "unread" | "activelyWorking" | "attentionVersion"> = {
@@ -96676,8 +97062,38 @@ function mapSessionTenancy(
   };
 }
 
-function mapSession(
+type MapSessionDecorations = [
+  effectiveControl: Session["effectiveControl"],
+  mcpServers?: SessionMcpServerMetadata[],
+  pin?: Pick<Session, "pinned" | "pinnedAt" | "pinVersion">,
+  attention?: Pick<Session, "unread" | "activelyWorking" | "attentionVersion">,
+  archive?: ReturnType<typeof mapSessionArchive>,
+  tenancyViewer?: { subjectId: string },
+];
+
+function mapSession(row: SessionRowWithSkills, ...decorations: MapSessionDecorations): Session {
+  // mapSessionFields sets `skills` whenever it is given them.
+  return mapSessionFields(
+    row,
+    StoredSessionSkills.parse(row.skills ?? []),
+    ...decorations,
+  ) as Session;
+}
+
+/**
+ * A session's configuration without its Skill folders, for internal callers
+ * that never use them and read the row without them.
+ */
+function mapSessionWithoutSkills(
   row: SessionRow,
+  ...decorations: MapSessionDecorations
+): Omit<Session, "skills"> {
+  return mapSessionFields(row, undefined, ...decorations);
+}
+
+function mapSessionFields(
+  row: SessionRow,
+  skills: Session["skills"] | undefined,
   effectiveControl: Session["effectiveControl"],
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
@@ -96688,7 +97104,7 @@ function mapSession(
   },
   archive: ReturnType<typeof mapSessionArchive> = mapSessionArchive(null),
   tenancyViewer?: { subjectId: string },
-): Session {
+): Omit<Session, "skills"> & Partial<Pick<Session, "skills">> {
   const bundledSkillIds = bundledSkillSelectionFromMetadata(row.metadata);
   return {
     id: row.id,
@@ -96724,7 +97140,8 @@ function mapSession(
     memoryScope: sessionMemoryScopeFromRow(row),
     resources: row.resources as ResourceRef[],
     ...sessionRemovedRepositoriesProjection(row.removedRepositories),
-    skills: StoredSessionSkills.parse(row.skills ?? []),
+    // Same key position as always, so serialized sessions keep their bytes.
+    ...(skills !== undefined ? { skills } : {}),
     ...(bundledSkillIds !== undefined ? { bundledSkillIds } : {}),
     tools: row.tools as ToolRef[],
     toolPolicy: row.toolPolicy as SessionToolPolicy,

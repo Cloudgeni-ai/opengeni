@@ -1,5 +1,18 @@
 # @opengeni/jev
 
+## 6.16.0
+
+### Patch Changes
+
+- @opengeni/decisions@6.16.0
+
+## 6.15.0
+
+### Patch Changes
+
+- db28286: `code_search` lets a second passage of a file compete without the file-diversity penalty, so a large file with several strong regions is no longer cut down to one or two passages in favour of weaker passages from other files. Results now end with `(engine scout-0.4.1)`.
+  - @opengeni/decisions@6.15.0
+
 ## 6.14.0
 
 ### Patch Changes

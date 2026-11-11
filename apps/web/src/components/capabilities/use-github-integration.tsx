@@ -9,14 +9,17 @@ import type {
   GitHubActionPoliciesResponse,
   GitHubActionPolicyActorState,
   GitHubActionPolicyDecision,
-  GitHubActionPolicyGroup,
+  PersonalGitHubActionPolicyGroup,
+  GitHubInstallationBinding,
 } from "@opengeni/sdk";
 
 import type {
   IntegrationChip,
   IntegrationFooter,
-  IntegrationOption,
+  IntegrationPolicyCell,
+  IntegrationPolicyTable,
   IntegrationSection,
+  IntegrationSectionRow,
   IntegrationViewModel,
 } from "@opengeni/react/app/components/capabilities/integration-view-model";
 import {
@@ -51,26 +54,113 @@ export const GITHUB_APP_SECTION = {
 export const GITHUB_LOGO_URL = "/capability-logos/github.svg";
 
 const GITHUB_ACTION_POLICY_GROUPS: Array<{
-  id: GitHubActionPolicyGroup;
+  id: PersonalGitHubActionPolicyGroup;
   label: string;
-  description: string;
 }> = [
-  {
-    id: "routine",
-    label: "Create and update work",
-    description: "Branches, issues, pull requests, comments, and reviewer requests.",
-  },
-  {
-    id: "review",
-    label: "Submit reviews",
-    description: "Comment, approve, or request changes on a pull request.",
-  },
-  {
-    id: "merge",
-    label: "Merge pull requests",
-    description: "Merge, squash, or rebase a pull request. This can change protected branches.",
-  },
+  { id: "routine", label: "Create and update work" },
+  { id: "review", label: "Submit reviews" },
+  { id: "merge", label: "Merge pull requests" },
+  // Only Your GitHub has it: settings, secrets, deletions and other
+  // hard-to-undo or unrecognised changes made with gh or Git.
+  { id: "sensitive", label: "Settings and deletions" },
 ];
+
+const GITHUB_ACTION_POLICY_CHOICES = [
+  { value: "allow", label: "Allow" },
+  { value: "ask", label: "Ask first" },
+  { value: "block", label: "Block" },
+];
+
+/** The fix an installation that is not active needs, in the order people meet it. */
+export type GitHubInstallationFix = "reinstall" | "configure" | "authorize" | "recheck" | "remove";
+
+/**
+ * What is wrong with one installation and the one action that fixes it.
+ * `problem` is what is wrong; `remedy` says what the action does, for people
+ * who can take it. Null while active. Servers before the `issue` field fall
+ * back to the lifecycle, with "unverified" read as a link that needs
+ * authorizing again.
+ */
+export function githubInstallationAttention(installation: GitHubInstallationBinding): {
+  label: string;
+  /** The page's one-line summary, naming the installation. */
+  summary: string;
+  problem: string;
+  remedy: string | null;
+  fix: GitHubInstallationFix;
+  actionLabel: string;
+} | null {
+  if (installation.lifecycle === "active") return null;
+  const account = installation.accountLogin ?? "this account";
+  const organization = installation.accountType === "Organization";
+  const issue =
+    installation.issue ??
+    (installation.lifecycle === "deleted"
+      ? "uninstalled"
+      : installation.lifecycle === "suspended"
+        ? "suspended"
+        : "owner_unconfirmed");
+  switch (issue) {
+    case "uninstalled":
+      return {
+        label: "Uninstalled on GitHub",
+        summary: `The Opengeni app was uninstalled from ${account} on GitHub.`,
+        problem: `The Opengeni app was removed from ${account} on GitHub.`,
+        remedy: "Reinstall it, or remove it here.",
+        fix: "reinstall",
+        actionLabel: "Reinstall",
+      };
+    case "suspended":
+      return {
+        label: "Suspended on GitHub",
+        summary: `The Opengeni app is suspended on ${account}.`,
+        problem: `The Opengeni app is suspended on ${account}.`,
+        remedy: "Unsuspend it in GitHub's settings.",
+        fix: "configure",
+        actionLabel: "Unsuspend on GitHub",
+      };
+    case "no_repositories":
+      return {
+        label: "No repositories",
+        summary: `${account} shares no repositories with Opengeni.`,
+        problem: `${account} shares no repositories with Opengeni.`,
+        remedy: "Choose some on GitHub.",
+        fix: "configure",
+        actionLabel: "Choose repositories",
+      };
+    case "github_unreachable":
+      return {
+        label: "Not checked",
+        summary: `Opengeni couldn't check ${account} on GitHub.`,
+        problem: `Opengeni couldn't check ${account} on GitHub.`,
+        remedy: null,
+        fix: "recheck",
+        actionLabel: "Check again",
+      };
+    case "account_changed":
+      return {
+        label: "Account changed",
+        summary: `The installation on ${account} moved to another GitHub account.`,
+        problem: "This installation now belongs to another GitHub account.",
+        remedy: "Remove it, then install the app again.",
+        fix: "remove",
+        actionLabel: "Remove",
+      };
+    case "owner_unconfirmed":
+      return {
+        label: "Needs authorization",
+        summary: `${account} needs authorization.`,
+        problem: organization
+          ? `An owner of ${account} hasn't confirmed this link.`
+          : `${account} hasn't confirmed this link.`,
+        remedy: organization
+          ? "An owner signs in to GitHub to confirm it."
+          : `Sign in to GitHub as ${account} to confirm it.`,
+        fix: "authorize",
+        actionLabel: "Authorize",
+      };
+  }
+}
 
 /**
  * Maps the workspace GitHub App binding onto the shared integration view-model.
@@ -138,7 +228,10 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   // Stored installations stay unlinkable even when none is active (suspended,
   // deleted or unverified leave the workspace "unbound" but still linked).
   const linked = status !== null && installations.length > 0;
-  const broken = bound && installations.some((installation) => installation.lifecycle !== "active");
+  // Any linked installation that is not active needs attention, including
+  // when none is active and the workspace reads as unbound.
+  const broken =
+    linked && installations.some((installation) => installation.lifecycle !== "active");
   const chip =
     personalNeedsAttention || broken || loadFailed
       ? ({ label: "Needs attention", tone: "warn" } as const)
@@ -216,41 +309,49 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     };
   }, [actionPolicyActorKey, refreshActionPolicies]);
 
-  async function updateActionPolicy(
-    actor: GitHubActionPolicyActorState,
-    group: GitHubActionPolicyGroup,
-    decision: GitHubActionPolicyDecision,
+  /**
+   * Saves one or more actor/group decisions in order. The endpoint returns the
+   * whole actor, so one batch runs at a time and each save applies before the
+   * next starts; older snapshots cannot overwrite another group, including
+   * same-frame changes. A failure stops the batch and says so.
+   */
+  async function updateActionPolicies(
+    changes: Array<{
+      actor: GitHubActionPolicyActorState;
+      group: PersonalGitHubActionPolicyGroup;
+      decision: GitHubActionPolicyDecision;
+    }>,
+    busyKey: string,
   ) {
-    // The endpoint returns the whole actor. Permit one save at a time so older
-    // snapshots cannot overwrite another group, including same-frame changes.
-    if (actionPolicyMutation.current !== null) return;
+    if (actionPolicyMutation.current !== null || changes.length === 0) return;
     const request = ++actionPolicyRequest.current;
     actionPolicyMutation.current = request;
-    const key = githubActionPolicyOptionId(actor, group);
-    setActionPolicyBusy(key);
+    setActionPolicyBusy(busyKey);
     try {
-      const updated = await context.client.updateGitHubActionPolicy(workspaceId, {
-        actor:
-          actor.kind === "workspace_app"
-            ? { kind: "workspace_app", installationId: actor.installationId }
-            : { kind: "personal", connectionId: actor.connectionId },
-        group,
-        decision,
-      });
-      if (actionPolicyRequest.current !== request) return;
-      setActionPolicies((current) =>
-        current
-          ? {
-              ...current,
-              actors: current.actors.map((candidate) =>
-                sameGitHubActionPolicyActor(candidate, updated) ? updated : candidate,
-              ),
-            }
-          : current,
-      );
+      for (const { actor, group, decision } of changes) {
+        const updated = await context.client.updateGitHubActionPolicy(workspaceId, {
+          actor:
+            actor.kind === "workspace_app"
+              ? { kind: "workspace_app", installationId: actor.installationId }
+              : { kind: "personal", connectionId: actor.connectionId },
+          group,
+          decision,
+        });
+        if (actionPolicyRequest.current !== request) return;
+        setActionPolicies((current) =>
+          current
+            ? {
+                ...current,
+                actors: current.actors.map((candidate) =>
+                  sameGitHubActionPolicyActor(candidate, updated) ? updated : candidate,
+                ),
+              }
+            : current,
+        );
+      }
     } catch (error) {
       if (actionPolicyRequest.current !== request) return;
-      toast.error("Could not update GitHub action approvals", {
+      toast.error("Could not update GitHub approvals", {
         description: userErrorText(error),
       });
     } finally {
@@ -262,15 +363,8 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   }
 
   const facts: IntegrationViewModel["connection"] = [];
-  for (const installation of installations) {
-    facts.push({
-      label: installation.accountType === "Organization" ? "Organization" : "GitHub account",
-      value: installation.accountLogin ?? `Installation ${installation.installationId}`,
-    });
-    if (installation.lifecycle !== "active") {
-      facts.push({ label: "GitHub status", value: installation.lifecycle });
-    }
-  }
+  // Installations are rows on the page (with their status), so the aside
+  // keeps only what the rows cannot say.
   if (
     status &&
     installations.length === 0 &&
@@ -283,12 +377,20 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     });
   }
 
-  function reconnect() {
+  function reconnect(
+    repair?: Pick<
+      NativeConnectRequest,
+      "title" | "description" | "authorizeLabel" | "reconnectAccountId"
+    >,
+  ) {
     if (status?.configured && canManage) {
       setConnectRequest({
         scope: { workspaceId, transport: connectTransport },
         providerId: "github-app",
         displayName: "GitHub App",
+        // A repair names its installation, so Connect starts at that
+        // installation's fix instead of the account chooser.
+        ...(repair ? { ...repair, logoUrl: GITHUB_LOGO_URL } : {}),
         ownership: "workspace",
         returnUrl: window.location.href,
         idempotencyKey: crypto.randomUUID(),
@@ -325,15 +427,17 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       ? { kind: "setup", onSetup: () => {}, disabled: true }
       : bound
         ? {
-            kind: broken ? "repair" : "connected",
-            onReconnect: reconnect,
+            // Each installation row carries its own specific fix, so the
+            // header keeps the generic Reconnect in its ⋯ menu.
+            kind: "connected",
+            onReconnect: () => reconnect(),
             onDisconnect: () => setDisconnectOpen(true),
             reconnectDisabled: connectUrl === null,
             busy,
           }
         : {
             kind: "setup",
-            onSetup: reconnect,
+            onSetup: () => reconnect(),
             disabled:
               connectUrl === null && !(status.setupMode === "operator" && !status.configured),
             busy,
@@ -355,10 +459,6 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       : { kind: "actions" }
     : appFooter;
 
-  const configurableInstallations = installations.filter(
-    (installation) => installation.configureUrl,
-  );
-  const configureUrl = configurableInstallations[0]?.configureUrl ?? null;
   // Installation settings links carry ten-minute signed state, so the copy in
   // the loaded status may be stale: open the tab inside the click, then mint a
   // fresh link for it. One at a time, so a double-click opens one tab.
@@ -383,55 +483,108 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
       });
   }
 
-  // With several installations, one shared "Change repositories" link would
-  // silently open only the first installation's GitHub settings; emit one
-  // action per installation instead, each with its own Unlink. (One
-  // active installation unlinks with "Disconnect Opengeni app"; installations
-  // that are no longer active are always listed so they stay unlinkable.)
-  const installationOptions: IntegrationOption[] =
-    linked && canManage && (installations.length > 1 || !bound)
-      ? installations.map((installation) => {
-          const account =
-            installation.accountLogin ?? `GitHub installation ${installation.installationId}`;
-          const unlink = {
-            label: "Unlink",
-            ariaLabel: `Unlink ${account}`,
-            onClick: () =>
-              setUnlinkTarget({ installationId: installation.installationId, account }),
-            destructive: true,
-          };
-          return {
-            kind: "link" as const,
-            id: `github-repositories-${installation.installationId}`,
-            label: account,
-            disabled: busy || openingInstallationId !== null,
-            ...(installation.lifecycle !== "active"
-              ? { description: "Not active. Unlink it to remove it from this workspace." }
-              : installation.configureUrl
-                ? { description: "Choose which repositories this installation shares." }
-                : {}),
-            ...(installation.configureUrl
-              ? {
-                  action: {
-                    label: "Change repositories",
-                    ariaLabel: `Change repositories for ${account}`,
-                    onClick: () => openInstallationRepositories(installation.installationId),
-                  },
-                  secondaryAction: unlink,
-                }
-              : {
-                  action: {
-                    label: unlink.label,
-                    ariaLabel: unlink.ariaLabel,
-                    onClick: unlink.onClick,
-                  },
-                }),
-          };
-        })
-      : [];
+  // One compact row per installation, every installation listed so each one
+  // stays fixable and removable. A healthy row shows what it shares and opens
+  // its own GitHub settings (one shared link would only ever open the
+  // first); a row that needs attention says what is wrong and offers the one
+  // action that fixes it. Remove sits in the row's ⋯ menu.
+  const installationRows: IntegrationSectionRow[] = installations.map((installation) => {
+    const account =
+      installation.accountLogin ?? `GitHub installation ${installation.installationId}`;
+    const attention = githubInstallationAttention(installation);
+    const rowDisabled = busy || openingInstallationId !== null;
+    const remove = () => setUnlinkTarget({ installationId: installation.installationId, account });
+    const configurable = installation.configureUrl !== null;
+    // A fix that needs GitHub settings falls back to Remove when this viewer
+    // has no settings link.
+    const fix =
+      attention && attention.fix === "configure" && !configurable
+        ? ({ fix: "remove", actionLabel: "Remove" } as const)
+        : attention;
+    const action: IntegrationSectionRow["action"] = !canManage
+      ? undefined
+      : fix
+        ? {
+            label: fix.actionLabel,
+            ariaLabel: `${fix.actionLabel}: ${account}`,
+            primary: true,
+            disabled:
+              rowDisabled ||
+              ((fix.fix === "reinstall" || fix.fix === "authorize") && connectUrl === null),
+            onClick: () => {
+              if (fix.fix === "configure")
+                openInstallationRepositories(installation.installationId);
+              else if (fix.fix === "recheck")
+                void context.refreshGitHub(workspaceId, undefined, {
+                  sync: true,
+                  userInitiated: true,
+                });
+              else if (fix.fix === "remove") remove();
+              // A server that names no issue can't start a repair at one
+              // installation; it gets the account chooser.
+              else
+                reconnect(
+                  installation.issue === undefined
+                    ? undefined
+                    : githubRepairDialog(installation, fix.fix),
+                );
+            },
+          }
+        : configurable
+          ? {
+              label: "Change repositories",
+              ariaLabel: `Change repositories for ${account}`,
+              disabled: rowDisabled,
+              onClick: () => openInstallationRepositories(installation.installationId),
+            }
+          : undefined;
+    return {
+      id: `github-installation-${installation.installationId}`,
+      title: account,
+      meta: [
+        installation.accountType === "Organization" ? "Organization" : "Personal account",
+        installation.repositoryCount === 1
+          ? "1 repository"
+          : `${installation.repositoryCount} repositories`,
+      ].join(" · "),
+      ...(attention
+        ? {
+            attention: {
+              label: attention.label,
+              detail:
+                canManage && attention.remedy
+                  ? `${attention.problem} ${attention.remedy}`
+                  : attention.problem,
+            },
+          }
+        : {}),
+      ...(action ? { action } : {}),
+      ...(canManage && fix?.fix !== "remove"
+        ? { menu: [{ label: "Remove", onClick: remove, destructive: true, disabled: rowDisabled }] }
+        : {}),
+    };
+  });
   const personalLogin = personalConnection
     ? String(personalConnection.metadata.githubLogin ?? "connected")
     : null;
+  // The page opens with what needs attention, naming the installation. The
+  // row keeps the one fix, so the summary has no action of its own.
+  const attentionRows = installations.flatMap((installation, index) => {
+    const attention = githubInstallationAttention(installation);
+    return attention ? [{ attention, row: installationRows[index]! }] : [];
+  });
+  const attentionNotice: IntegrationViewModel["notice"] =
+    attentionRows.length === 0
+      ? undefined
+      : {
+          tone: "waiting",
+          title:
+            attentionRows.length === 1
+              ? attentionRows[0]!.attention.summary
+              : attentionRows.length <= 3
+                ? `${githubListText(attentionRows.map(({ row }) => row.title))} need attention.`
+                : `${attentionRows.length} installations need attention.`,
+        };
   // Unknown until the selection loads: a failed read is not "0 repos".
   const personalRepositoryCount = context.personalGitHubSelection?.repositories.length ?? null;
   const personalAllRepositories =
@@ -456,7 +609,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
                 : `Connected as @${personalLogin} · ${personalRepositoryCount === 1 ? "1 repo" : `${personalRepositoryCount} repos`}`,
         }
       : personalNeedsAttention
-        ? { status: `@${personalLogin} needs to reconnect.` }
+        ? { status: `@${personalLogin} needs to reconnect.`, statusTone: "warn" as const }
         : {}),
     ...(!canManagePersonal
       ? { note: "Your access doesn't allow connecting accounts in this workspace." }
@@ -477,26 +630,17 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
               },
         }),
   };
-  const installedOn = installations.map(
-    (installation) => installation.accountLogin ?? `installation ${installation.installationId}`,
-  );
   const operatorUnconfigured =
     status !== null && status.setupMode === "operator" && !status.configured;
   const appSection: IntegrationSection = {
     id: "github-app",
     ...GITHUB_APP_SECTION,
-    ...(status === null
-      ? { status: "Loading…" }
-      : bound
-        ? {
-            status: broken
-              ? `Installed on ${installedOn.join(", ")}. Needs attention.`
-              : `Installed on ${installedOn.join(", ")}`,
-          }
-        : {}),
+    // The rows say where it is installed and what needs attention.
+    ...(status === null ? { status: "Loading…" } : {}),
+    ...(linked ? { rows: installationRows } : {}),
     ...(!canManage
       ? {
-          note: bound
+          note: linked
             ? "A workspace admin manages the Opengeni app."
             : "Ask a workspace admin to install the Opengeni app.",
         }
@@ -507,56 +651,171 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
               ? { note: "Not set up on this server yet. Installing creates it first." }
               : {}),
             action: {
-              label: broken ? "Repair" : bound ? "Install on another account" : "Install app",
-              onClick: reconnect,
-              primary: broken,
+              label: linked ? "Install on another account" : "Install app",
+              onClick: () => reconnect(),
+              primary: !linked,
               busy,
               disabled: connectUrl === null && !operatorUnconfigured,
               ...(operatorUnconfigured ? {} : { connectProviderId: "github-app" }),
             },
           }),
   };
-  const actionPolicyOptions: IntegrationOption[] = actionPolicyFailed
-    ? [
-        {
-          kind: "link",
-          id: "github-action-policy-retry",
-          label: "Action approvals",
-          description: "Approval settings could not be loaded.",
-          action: { label: "Retry", onClick: () => void refreshActionPolicies() },
+  // Approvals: one compact table. Rows are the three kinds of action; columns
+  // are who acts. "Opengeni app" covers every installation at once (Mixed when
+  // they differ), with per-installation choices behind Advanced.
+  const policyActors = actionPolicies?.enabled ? actionPolicies.actors : [];
+  const appPolicyActors = policyActors.filter((actor) => actor.kind === "workspace_app");
+  const personalPolicyActors = policyActors.filter((actor) => actor.kind === "personal");
+  const policyColumns: Array<{
+    id: string;
+    label: string;
+    actors: GitHubActionPolicyActorState[];
+    editable: boolean;
+  }> = [
+    ...(appPolicyActors.length > 0
+      ? [{ id: "app", label: "Opengeni app", actors: appPolicyActors, editable: canManage }]
+      : []),
+    ...(personalPolicyActors.length > 0
+      ? [
+          {
+            id: "personal",
+            label: "Your GitHub",
+            actors: personalPolicyActors,
+            editable: canManagePersonal,
+          },
+        ]
+      : []),
+  ];
+  const policyCell = (
+    actors: GitHubActionPolicyActorState[],
+    groups: PersonalGitHubActionPolicyGroup[],
+    editable: boolean,
+    busyKey: string,
+  ): IntegrationPolicyCell | undefined =>
+    // Settings and deletions applies to Your GitHub only: no cell for the app.
+    actors.some((actor) => groups.some((group) => actor.groups[group] !== undefined))
+      ? {
+          value: commonGitHubActionPolicyDecision(actors, groups),
+          disabled: !editable || actionPolicyBusy !== null,
+          busy: actionPolicyBusy === busyKey,
+        }
+      : undefined;
+  const setPolicies = (
+    actors: GitHubActionPolicyActorState[],
+    groups: PersonalGitHubActionPolicyGroup[],
+    value: string,
+    busyKey: string,
+  ) => {
+    if (value !== "allow" && value !== "ask" && value !== "block") return;
+    void updateActionPolicies(
+      actors.flatMap((actor) =>
+        groups
+          .filter((group) => actor.groups[group] !== undefined && actor.groups[group] !== value)
+          .map((group) => ({ actor, group, decision: value })),
+      ),
+      busyKey,
+    );
+  };
+  const policyGroupIds = GITHUB_ACTION_POLICY_GROUPS.map((group) => group.id);
+  const isPolicyGroup = (id: string): id is PersonalGitHubActionPolicyGroup =>
+    policyGroupIds.includes(id as PersonalGitHubActionPolicyGroup);
+  const columnFor = (columnId: string) => policyColumns.find((column) => column.id === columnId);
+  const installationName = (actor: GitHubActionPolicyActorState) =>
+    actor.kind === "workspace_app"
+      ? (installations.find((installation) => installation.installationId === actor.installationId)
+          ?.accountLogin ?? actor.label)
+      : actor.label;
+  const rowsFor = (actors: GitHubActionPolicyActorState[]) =>
+    GITHUB_ACTION_POLICY_GROUPS.filter(({ id }) =>
+      actors.some((actor) => actor.groups[id] !== undefined),
+    ).map(({ id, label }) => ({ id, label }));
+  const appPolicyRows = rowsFor(appPolicyActors);
+  const appPoliciesDiffer = appPolicyRows.some(
+    ({ id }) => commonGitHubActionPolicyDecision(appPolicyActors, [id]) === "mixed",
+  );
+  const policyRows = rowsFor(policyActors);
+  const policies: IntegrationPolicyTable | undefined = actionPolicyFailed
+    ? {
+        title: "Approvals",
+        columns: [],
+        rows: [],
+        choices: [],
+        cell: () => undefined,
+        onChange: () => {},
+        failure: {
+          message: "Approval settings could not be loaded.",
+          onRetry: () => void refreshActionPolicies(),
         },
-      ]
-    : actionPolicies?.enabled
-      ? actionPolicies.actors.flatMap((actor) =>
-          GITHUB_ACTION_POLICY_GROUPS.map((group) => {
-            const value = actor.groups[group.id];
-            const optionId = githubActionPolicyOptionId(actor, group.id);
-            return {
-              kind: "choice" as const,
-              id: optionId,
-              label: `${actor.label} · ${group.label}`,
-              description: `${group.description} Applies to new attempts; existing approvals keep their original policy. Repository access and session approval settings still apply.`,
-              value,
-              choices: [
-                ...(value === "mixed" ? [{ value: "mixed", label: "Mixed", disabled: true }] : []),
-                { value: "ask", label: "Ask every time" },
-                { value: "allow", label: "Allow" },
-                { value: "block", label: "Block" },
-              ],
-              disabled:
-                actionPolicyBusy !== null ||
-                (actor.kind === "workspace_app" ? !canManage : !canManagePersonal),
-              busy: actionPolicyBusy === optionId,
-              onChange: (next: string) => {
-                if (next === "allow" || next === "ask" || next === "block") {
-                  void updateActionPolicy(actor, group.id, next);
-                }
-              },
-            };
-          }),
-        )
-      : [];
-  const options = [...installationOptions, ...actionPolicyOptions];
+      }
+    : policyColumns.length > 0
+      ? {
+          title: "Approvals",
+          columns: policyColumns.map(({ id, label }) => ({ id, label })),
+          rows: policyRows,
+          choices: GITHUB_ACTION_POLICY_CHOICES,
+          otherValueLabels: { mixed: "Mixed" },
+          cell: (rowId, columnId) => {
+            const column = columnFor(columnId);
+            return column && isPolicyGroup(rowId)
+              ? policyCell(column.actors, [rowId], column.editable, `${columnId}:${rowId}`)
+              : undefined;
+          },
+          onChange: (rowId, columnId, value) => {
+            const column = columnFor(columnId);
+            if (column && isPolicyGroup(rowId))
+              setPolicies(column.actors, [rowId], value, `${columnId}:${rowId}`);
+          },
+          all: {
+            label: "All actions",
+            cell: (columnId) => {
+              const column = columnFor(columnId);
+              return column
+                ? policyCell(column.actors, policyGroupIds, column.editable, `${columnId}:all`)
+                : undefined;
+            },
+            onChange: (columnId, value) => {
+              const column = columnFor(columnId);
+              if (column) setPolicies(column.actors, policyGroupIds, value, `${columnId}:all`);
+            },
+          },
+          footnote: "Changes apply to new actions.",
+          ...(policyColumns.some((column) => column.id === "app" && !column.editable)
+            ? { note: "A workspace admin sets the Opengeni app's approvals." }
+            : {}),
+          ...(appPolicyActors.length > 1
+            ? {
+                advanced: {
+                  title: "Advanced",
+                  summary: appPoliciesDiffer
+                    ? "Installations are set differently"
+                    : "Set each installation separately",
+                  columns: appPolicyActors.map((actor) => ({
+                    id: githubActionPolicyActorId(actor),
+                    label: installationName(actor),
+                  })),
+                  rows: appPolicyRows,
+                  choices: GITHUB_ACTION_POLICY_CHOICES,
+                  otherValueLabels: { mixed: "Mixed" },
+                  cell: (rowId, columnId) => {
+                    const actor = appPolicyActors.find(
+                      (candidate) => githubActionPolicyActorId(candidate) === columnId,
+                    );
+                    return actor && isPolicyGroup(rowId)
+                      ? policyCell([actor], [rowId], canManage, `${columnId}:${rowId}`)
+                      : undefined;
+                  },
+                  onChange: (rowId, columnId, value) => {
+                    const actor = appPolicyActors.find(
+                      (candidate) => githubActionPolicyActorId(candidate) === columnId,
+                    );
+                    if (actor && isPolicyGroup(rowId))
+                      setPolicies([actor], [rowId], value, `${columnId}:${rowId}`);
+                  },
+                },
+              }
+            : {}),
+        }
+      : undefined;
 
   const model: IntegrationViewModel = {
     id: "github",
@@ -565,7 +824,14 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     mark: { logoSrc: GITHUB_LOGO_URL, monogram: "G" },
     chip,
     connection: sectioned ? [] : facts,
-    ...(sectioned ? { sections: [personalSection, appSection] } : {}),
+    // Without personal sign-in the header owns connecting; the installation
+    // rows still need a home, so the app section keeps only them.
+    sections: sectioned
+      ? [personalSection, appSection]
+      : linked
+        ? [{ id: "github-app", ...GITHUB_APP_SECTION, rows: installationRows }]
+        : [],
+    ...(policies ? { policies } : {}),
     ...(bound && !repositoriesFailed
       ? {
           access: {
@@ -577,18 +843,21 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
             emptyMessage: catalogLoading
               ? "Loading repositories…"
               : githubEmptyRepositoriesMessage(installations),
-            // Several installations each get their own row instead.
-            ...(canManage && configureUrl && installations.length === 1
+            // Each installation row changes its own repositories. A long list
+            // folds behind its count so Approvals stay above the fold.
+            ...(repositories.length > GITHUB_REPOSITORY_LIST_FOLD_AT
               ? {
-                  editLabel: "Change repositories",
-                  onEdit: () =>
-                    openInstallationRepositories(configurableInstallations[0]!.installationId),
+                  collapsed: {
+                    summary: `${repositories.length} repositories`,
+                    searchLabel: "Search repositories",
+                    noMatchesMessage: "No repositories match.",
+                  },
                 }
               : {}),
           },
         }
       : {}),
-    options,
+    options: [],
     footer,
     ...(loadFailed
       ? {
@@ -607,14 +876,16 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
             },
           },
         }
-      : status && !status.configured && status.setupMode === "platform"
-        ? {
-            notice: {
-              tone: "muted" as const,
-              title: "GitHub is temporarily unavailable for this Opengeni deployment.",
-            },
-          }
-        : {}),
+      : attentionNotice
+        ? { notice: attentionNotice }
+        : status && !status.configured && status.setupMode === "platform"
+          ? {
+              notice: {
+                tone: "muted" as const,
+                title: "GitHub is temporarily unavailable for this Opengeni deployment.",
+              },
+            }
+          : {}),
   };
 
   const dialogs = (
@@ -646,9 +917,9 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
         onOpenChange={(open) => {
           if (!open) setUnlinkTarget(null);
         }}
-        title={`Unlink ${unlinkTarget?.account ?? "this installation"}?`}
+        title={`Remove ${unlinkTarget?.account ?? "this installation"} from this workspace?`}
         description="Sessions lose access to its repositories. The app stays installed on GitHub until you remove it there."
-        confirmLabel="Unlink"
+        confirmLabel="Remove"
         cancelAutoFocus
         onConfirm={async () => {
           if (unlinkTarget === null) return true;
@@ -711,11 +982,13 @@ export function githubChip(
       ? { label: "Needs attention", tone: "warn" }
       : { label: "Loading", tone: "plain" };
   }
+  // A linked installation that is not active needs attention even when none
+  // is active (the workspace then reads as unbound).
+  if (status.installations.some((installation) => installation.lifecycle !== "active")) {
+    return { label: "Needs attention", tone: "warn" };
+  }
   const bound = status.status === "bound" && status.installations.length > 0;
   if (bound) {
-    if (status.installations.some((installation) => installation.lifecycle !== "active")) {
-      return { label: "Needs attention", tone: "warn" };
-    }
     return canManage
       ? { label: "Connected", tone: "ok" }
       : { label: "Set up by an admin", tone: "plain" };
@@ -729,15 +1002,65 @@ function githubEmptyRepositoriesMessage(installations: GitHubAppInfo["installati
     : "No repositories are shared with Opengeni yet. Change repositories on GitHub to allow some.";
 }
 
-function githubActionPolicyOptionId(
-  actor: GitHubActionPolicyActorState,
-  group: GitHubActionPolicyGroup,
+/** Above this many repositories the list folds behind its count. */
+const GITHUB_REPOSITORY_LIST_FOLD_AT = 8;
+
+/** "a", "a and b", "a, b and c". */
+function githubListText(items: string[]): string {
+  return items.length <= 1
+    ? (items[0] ?? "")
+    : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+/**
+ * The repair of one installation: which installation, what is wrong and what
+ * to do. It names the installation, so Connect skips the account chooser.
+ */
+function githubRepairDialog(
+  installation: GitHubInstallationBinding,
+  fix: "reinstall" | "authorize",
+): Pick<NativeConnectRequest, "title" | "description" | "authorizeLabel" | "reconnectAccountId"> {
+  const account = installation.accountLogin ?? "this account";
+  const reconnectAccountId = `github-installation:${installation.installationId}`;
+  if (fix === "reinstall") {
+    return {
+      title: `Reinstall on ${account}`,
+      description: "The Opengeni app was removed on GitHub. Install it again.",
+      authorizeLabel: "Reinstall on GitHub",
+      reconnectAccountId,
+    };
+  }
+  return {
+    title: `Authorize ${account}`,
+    description:
+      installation.accountType === "Organization"
+        ? `Sign in to GitHub as an owner of ${account} to confirm this link.`
+        : `Sign in to GitHub as ${account} to confirm this link.`,
+    authorizeLabel: "Sign in to GitHub",
+    reconnectAccountId,
+  };
+}
+
+function githubActionPolicyActorId(actor: GitHubActionPolicyActorState): string {
+  return actor.kind === "workspace_app"
+    ? `app-${actor.installationId}`
+    : `personal-${actor.connectionId}`;
+}
+
+/** The one decision every actor has for every group it has, or "mixed". */
+function commonGitHubActionPolicyDecision(
+  actors: GitHubActionPolicyActorState[],
+  groups: PersonalGitHubActionPolicyGroup[],
 ): string {
-  const actorId =
-    actor.kind === "workspace_app"
-      ? `app-${actor.installationId}`
-      : `personal-${actor.connectionId}`;
-  return `github-action-policy-${actorId}-${group}`;
+  const values = new Set(
+    actors.flatMap((actor) =>
+      groups.flatMap((group) => {
+        const value = actor.groups[group];
+        return value === undefined ? [] : [value];
+      }),
+    ),
+  );
+  return values.size === 1 ? [...values][0]! : "mixed";
 }
 
 function sameGitHubActionPolicyActor(

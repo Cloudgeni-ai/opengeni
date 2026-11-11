@@ -49,7 +49,11 @@ export {
 } from "./agent-tool-metrics";
 export { failureDiagnostic } from "./failure-diagnostic";
 export { createLogThrottle, type LogThrottle } from "./log-throttle";
-import { TEMPORAL_SDK_COMPONENT_PATTERN, TEMPORAL_TYPE_NAME_PATTERN } from "./temporal-sdk-logger";
+import {
+  projectTemporalFailureFacts,
+  TEMPORAL_SDK_COMPONENT_PATTERN,
+  TEMPORAL_TYPE_NAME_PATTERN,
+} from "./temporal-sdk-logger";
 export {
   createTemporalSdkLogger,
   projectTemporalSdkLogRecord,
@@ -2195,6 +2199,7 @@ function projectTemporalSdkDiagnosticAttributes(attributes: Attributes): Attribu
     ...(typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
       ? { durationMs }
       : {}),
+    ...projectTemporalFailureFacts(attributes),
   };
 }
 

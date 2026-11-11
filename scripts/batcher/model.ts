@@ -123,10 +123,18 @@ export interface QueuedPull {
   /** When PR CI passed on this exact head, or null while it has not. */
   greenAt: number | null;
   /**
-   * Why the PR cannot land on main as it is (a Git conflict, a number main
-   * already uses, a Version PR whose PR CI failed), or null.
+   * Why the PR cannot land on main as it is and leaves the queue (a number
+   * main already uses, a Version PR whose PR CI failed), or null.
    */
   conflict: string | null;
+  /**
+   * It conflicts with main in a way only its author can settle. It keeps its
+   * place and label but is not batched until its branch merges main cleanly
+   * and PR CI passes on that head. `noted` once it was told so for this head.
+   * `recheck`: it is skipped only while it is in the running batch, whose
+   * branch must not move; once out of it, it is checked (and regenerated) again.
+   */
+  parked: { reason: string; noted: boolean; recheck?: true } | null;
   /**
    * Added files whose numbers main already uses, which the batcher moves to
    * free numbers on the PR's branch before testing it; empty when none.
@@ -134,7 +142,7 @@ export interface QueuedPull {
   renumber: string[];
   /**
    * It conflicts with main. The batcher merges main into its branch and
-   * regenerates the generated files that conflict, or ejects it when other
+   * regenerates the generated files that conflict, or parks it when other
    * files conflict too; it is not tested meanwhile.
    */
   regenerate: boolean;
@@ -150,6 +158,13 @@ export interface QueuedPull {
   /** A Version PR's head commit time (epoch ms): its notices are looked up from then. */
   headAt?: number;
   controlPlane: boolean;
+  /**
+   * It changes what Opengeni sends to model providers and the maintainer has
+   * not approved its current head (scripts/ci/model-request-review.ts). It is
+   * then never ready (`greenAt` is null), and a running batch that holds it
+   * is abandoned before it can land.
+   */
+  awaitingModelReview?: true;
 }
 
 export interface Member {
@@ -242,6 +257,12 @@ export type Action =
       blame?: string[];
       aheadOfBisection?: true;
     }
+  /**
+   * A PR that conflicts with main keeps its label and is skipped until its
+   * branch merges main cleanly; it is told so once per head. One parked only
+   * while in the running batch is told without that, as it is checked again.
+   */
+  | { kind: "park"; number: number; headSha: string; reason: string; recheck?: true }
   /** A queued Version PR holds main: nothing else builds until it lands or leaves the queue. */
   | {
       kind: "hold";
@@ -373,7 +394,14 @@ export function nextBatch(
         };
 
   const ready = pulls
-    .filter((p) => p.greenAt !== null && p.conflict === null && !p.renumber.length && !p.regenerate)
+    .filter(
+      (p) =>
+        p.greenAt !== null &&
+        p.conflict === null &&
+        p.parked === null &&
+        !p.renumber.length &&
+        !p.regenerate,
+    )
     .sort(fifo);
   if (!ready.length) return null;
   const alone = (p: QueuedPull) => p.controlPlane;
@@ -495,6 +523,29 @@ function split<T>(items: T[]): [T[], T[]] {
   return [items.slice(0, half), items.slice(half)];
 }
 
+/**
+ * A bisection's remaining groups as one group, in their order with the groups
+ * that hold a priority PR first, as they would have run. Two PRs that add the
+ * same migration number never share a batch, so a PR that would clash goes to
+ * the next group it fits in. A group of more than a batch tests its first
+ * maxBatch PRs and keeps the others next in line as their own group (see
+ * nextBatch).
+ */
+function rejoined(pending: number[][], pull: (n: number) => QueuedPull | undefined): number[][] {
+  const priority = (n: number) => pull(n)?.priority === true;
+  const urgent = pending.filter((group) => group.some(priority));
+  const rest = pending.filter((group) => !group.some(priority));
+  const groups: { numbers: number[]; taken: Set<string> }[] = [];
+  for (const number of [...urgent, ...rest].flat()) {
+    const slots = pull(number)?.slots ?? [];
+    let group = groups.find((g) => !slots.some((slot) => g.taken.has(slot)));
+    if (!group) groups.push((group = { numbers: [], taken: new Set() }));
+    group.numbers.push(number);
+    for (const slot of slots) group.taken.add(slot);
+  }
+  return groups.map((g) => g.numbers);
+}
+
 /** The running batch: the newest one, as `decide` treats any others as extra. */
 export function runningBatch<T extends { createdAt: number }>(batches: T[]): T | undefined {
   return [...batches].sort((a, b) => b.createdAt - a.createdAt)[0];
@@ -535,7 +586,16 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
         number: pull.number,
         reason: pull.conflict,
       });
-    else if (pull.regenerate) actions.push({ kind: "regenerate", number: pull.number });
+    else if (pull.parked !== null) {
+      if (!pull.parked.noted)
+        actions.push({
+          kind: "park",
+          number: pull.number,
+          headSha: pull.headSha,
+          reason: pull.parked.reason,
+          ...(pull.parked.recheck ? { recheck: true as const } : {}),
+        });
+    } else if (pull.regenerate) actions.push({ kind: "regenerate", number: pull.number });
     else if (pull.renumber.length)
       actions.push({
         kind: "renumber",
@@ -558,19 +618,31 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
     pending = [numbers, ...manifest.pending];
     blame = manifest.blame ?? [];
     // A new head that tests to the same tree (main merged in again, a rebase)
-    // changes nothing this batch tests, so it does not restart it.
+    // changes nothing this batch tests, so it does not restart it. A member
+    // that now conflicts with main is rebuilt out of it, though it stays queued.
     const left = manifest.members.find(
-      (m) => byNumber.get(m.number)?.headSha !== (batch.sameTree?.[m.number] ?? m.head),
+      (m) =>
+        byNumber.get(m.number)?.headSha !== (batch.sameTree?.[m.number] ?? m.head) ||
+        byNumber.get(m.number)?.parked,
     );
+    // A member whose model request approval is gone (dismissed, or revoked by
+    // a later review) must not land with the batch.
+    const unapproved = manifest.members.find((m) => byNumber.get(m.number)?.awaitingModelReview);
     // A priority PR goes into the next batch; it never cancels a running one.
     let reason: string | null = null;
     let changed: number | undefined;
     if (manifest.base !== mainSha) reason = "main moved since the batch was built";
     else if (left) {
       changed = left.number;
-      reason = byNumber.has(left.number)
-        ? `#${left.number} has a new head`
-        : `#${left.number} left the queue`;
+      const current = byNumber.get(left.number);
+      reason = !current
+        ? `#${left.number} left the queue`
+        : current.parked
+          ? `#${left.number} conflicts with main`
+          : `#${left.number} has a new head`;
+    } else if (unapproved) {
+      changed = unapproved.number;
+      reason = `#${unapproved.number} needs the maintainer's approval of its model request changes on its head`;
     }
     if (reason)
       actions.push({
@@ -620,7 +692,18 @@ export function decide(observation: Observation, settings: Settings = DEFAULT_SE
               : `it failed CI on top of main, also after a retry: ${run.url}`,
           });
           pulls = pulls.filter((p) => p.number !== numbers[0]);
-          pending = manifest.pending;
+          // The bisection found what broke it. The groups it still holds were
+          // split off only on the way to that PR, so they are retested
+          // together again rather than one group per round; a group that
+          // still fails is split again as any batch is. A PR ejected ahead
+          // of a bisection, or a Version PR (built alone in between), found
+          // nothing about its groups, so they stay as they are.
+          if (manifest.aheadOfBisection === true || manifest.members[0]?.version === true)
+            pending = manifest.pending;
+          else {
+            pending = rejoined(manifest.pending, (n) => byNumber.get(n));
+            blame = [];
+          }
         } else {
           // Bisect: test the first half now and keep the second half next in
           // line. Priority PRs among others are tested on their own first, so

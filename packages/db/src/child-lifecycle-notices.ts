@@ -93,8 +93,17 @@ export function childPausedDedupeKey(input: { childSessionId: string; receiptId:
 export function childWaitingCapacityDedupeKey(input: {
   childSessionId: string;
   waiterId: string;
+  /**
+   * Set for a notice restating the reset of a wait the parent was already
+   * told about (ISO, or null when it became unknown); the first notice of a
+   * waiter has no suffix.
+   */
+  restatedResetsAt?: string | null;
 }): string {
-  return `${CHILD_LIFECYCLE_DEDUPE_PREFIX.waitingCapacity}:${input.childSessionId}:${input.waiterId}`;
+  const base = `${CHILD_LIFECYCLE_DEDUPE_PREFIX.waitingCapacity}:${input.childSessionId}:${input.waiterId}`;
+  return input.restatedResetsAt === undefined
+    ? base
+    : `${base}:${input.restatedResetsAt ?? "unknown"}`;
 }
 
 export function childProgressDedupeKey(input: {

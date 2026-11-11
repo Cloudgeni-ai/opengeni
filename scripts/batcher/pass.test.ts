@@ -5,10 +5,12 @@ import type {
   CommitSummary,
   GitHub,
   MergeResult,
+  PullFile,
   PullSummary,
   RunSummary,
 } from "./github";
 import { GitHubError, GitHubNetworkError } from "./github";
+import { MAINTAINER, type Review } from "../ci/model-request-review";
 import {
   CI_WORKFLOW,
   DEFAULT_SETTINGS,
@@ -48,6 +50,8 @@ interface FakePull {
   merged?: string;
   headRef?: string;
   conflicting?: boolean;
+  author?: string;
+  reviews?: Review[];
 }
 
 /**
@@ -156,6 +160,7 @@ class FakeGitHub implements GitHub {
         labels: p.labels,
         labeledAt: NOW - 3_600_000 + p.number,
         autoMergeAt: null,
+        author: p.author ?? "contributor",
       }));
   }
 
@@ -191,8 +196,15 @@ class FakeGitHub implements GitHub {
     };
   }
 
-  async pullFiles(number: number) {
+  async pullFiles(number: number): Promise<PullFile[] | null> {
     return this.pulls.get(number)!.files.map((path) => ({ path, status: "added" }));
+  }
+
+  reviewReads: number[] = [];
+
+  async reviews(number: number) {
+    this.reviewReads.push(number);
+    return this.pulls.get(number)!.reviews ?? [];
   }
 
   /** The files of every PR applied in that commit, directly in the directory. */
@@ -564,7 +576,8 @@ describe("a batcher pass", () => {
       { number: 5, body: expect.stringContaining("holding main for this Version PR") },
     ]);
     expect(gh.comments[0]!.body).toContain("remove the queue-ready label");
-    expect(new Set(gh.commentLookups)).toEqual(new Set([NOW - 600_000]));
+    // A day early, as a commit's date may run ahead of GitHub's clock.
+    expect(new Set(gh.commentLookups)).toEqual(new Set([NOW - 600_000 - 24 * 60 * 60_000]));
 
     gh.pulls.get(5)!.green = true;
     await run(gh, options());
@@ -813,7 +826,12 @@ describe("a batcher pass", () => {
     gh.finishCi(single.sha, "failure", 2, [UNIT, SHARD]);
     await run(gh, options());
     expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
-    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+    // With what broke the batch found, the groups it split off are retested
+    // together, without the bisection's blame.
+    const rest = gh.batch();
+    expect(rest.manifest.members.map((m) => m.number)).toEqual([2, 3, 4]);
+    expect(rest.manifest.pending).toEqual([]);
+    expect(rest.manifest.blame).toBeUndefined();
   });
 
   test("a run that failed before any job started, so GitHub will not rerun its failed jobs, runs again in full", async () => {
@@ -1149,7 +1167,7 @@ describe("a batcher pass", () => {
     }
   });
 
-  test("a Git conflict still ejects a PR whose migration number main already uses", async () => {
+  test("a Git conflict parks a PR whose migration number main already uses instead of moving it", async () => {
     const gh = new FakeGitHub();
     gh.addPull(1, { files: ["packages/db/drizzle/0007_a.sql"], labels: [] });
     const landed = gh.store([gh.pulls.get(1)!.head], [await gh.mainSha()], "Change 1 (#1)");
@@ -1169,8 +1187,10 @@ describe("a batcher pass", () => {
     await run(gh, options());
     await run(gh, options());
     expect(gh.branchUpdates).toEqual([]);
-    expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
+    expect(gh.comments).toHaveLength(1);
     expect(gh.comments[0]!.body).toContain("it conflicts with main in `packages/db/src/schema.ts`");
+    expect(gh.dispatches).toHaveLength(1);
   });
 
   test("stops when a landed tree differs from the tested tree", async () => {
@@ -1225,7 +1245,7 @@ describe("a batcher pass", () => {
     expect(gh.commits.get(await gh.mainSha())!.tree).toBe(built.manifest.members[1]!.tree);
   });
 
-  test("a new head that now conflicts is ejected, never landed", async () => {
+  test("a new head that now conflicts is parked out of its batch, never landed", async () => {
     const gh = new FakeGitHub();
     gh.addPull(1);
     gh.addPull(2);
@@ -1239,9 +1259,24 @@ describe("a batcher pass", () => {
     gh.finishCi(built.sha, "success");
     await run(gh, options());
     expect(gh.pulls.get(2)!.merged).toBeUndefined();
-    expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(2)!.labels).not.toContain(IN_BATCH_LABEL);
+    expect(gh.comments.map((c) => c.number)).toEqual([2]);
+    expect(gh.comments[0]!.body).toContain(
+      "took this PR out of the running batch because it conflicts with main",
+    );
+    expect(gh.comments[0]!.body).not.toContain("merge-batcher:conflict");
     expect(gh.pulls.get(1)!.merged).toBeUndefined();
     expect(gh.refs.get(built.name)).toBeUndefined();
+    // The rest is rebuilt without it.
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+    expect(gh.dispatches).toEqual([]);
+
+    // Out of the batch, the same head is checked again: its conflict may be
+    // only in generated files, which the batcher regenerates.
+    await run(gh, options());
+    expect(gh.dispatches.map((d) => [d.pull, d.head])).toEqual([[2, fresh]]);
+    expect(gh.comments).toHaveLength(1);
   });
 
   test("a Version PR's new head restarts its batch", async () => {
@@ -1367,9 +1402,10 @@ describe("regenerating generated files a PR conflicts with main in", () => {
     expect([...gh.refs.keys()].some((name) => name.startsWith("batch-build/"))).toBe(false);
   });
 
-  test("a conflict in a file that is not generated ejects the PR, naming every conflicting file", async () => {
+  test("a conflict in a file that is not generated parks the PR, naming every conflicting file, once per head", async () => {
     const gh = new FakeGitHub();
     conflicting(gh, 1);
+    gh.addPull(2);
     gh.regenerateWith = (input) => ({
       conclusion: "success",
       result: {
@@ -1382,14 +1418,47 @@ describe("regenerating generated files a PR conflicts with main in", () => {
     await run(gh, options());
     expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
     await run(gh, options());
-    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
-    expect(gh.comments[0]!.body).toContain(
-      `it conflicts with main in \`apps/api/src/app.ts\`, \`${GENERATED}\`. Merge main into the branch`,
-    );
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+    const head = gh.pulls.get(1)!.head;
+    expect(gh.comments).toEqual([
+      {
+        number: 1,
+        body: expect.stringContaining(
+          `<!-- merge-batcher:conflict ${head} -->\nThe merge queue is skipping this PR for now because it conflicts with main in \`apps/api/src/app.ts\`, \`${GENERATED}\`. It keeps its \`${QUEUE_LABEL}\` label`,
+        ),
+      },
+    ]);
     expect(gh.branchUpdates).toEqual([]);
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+
+    // Later passes neither regenerate it again nor say it again.
+    await run(gh, options());
+    expect(gh.dispatches).toHaveLength(1);
+    expect(gh.comments).toHaveLength(1);
+
+    // A new head that still conflicts is regenerated and told about again.
+    gh.pulls.get(1)!.head = hash("head:1 still conflicting");
+    gh.headCommit(1);
+    await run(gh, options());
+    await run(gh, options());
+    expect(gh.dispatches).toHaveLength(2);
+    expect(gh.comments).toHaveLength(2);
+    expect(gh.comments[1]!.body).toContain(
+      `<!-- merge-batcher:conflict ${hash("head:1 still conflicting")} -->`,
+    );
+
+    // Once its branch merges main cleanly and PR CI passes, it is batched
+    // without being queued again.
+    gh.finishCi(gh.batch().sha, "success");
+    await run(gh, options());
+    gh.pulls.get(1)!.head = hash("head:1 merged main");
+    gh.pulls.get(1)!.conflicting = false;
+    await run(gh, options());
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+    expect(gh.comments).toHaveLength(2);
   });
 
-  test("waits while the run is going, and ejects when it fails or leaves no valid result", async () => {
+  test("waits while the run is going, and parks the PR when it fails or leaves no valid result", async () => {
     for (const ending of ["failure", "invalid", "missing"] as const) {
       const gh = new FakeGitHub();
       conflicting(gh, 1);
@@ -1414,7 +1483,7 @@ describe("regenerating generated files a PR conflicts with main in", () => {
           files: [{ path: ".github/workflows/ci.yml", mode: "100644", content: base64("x") }],
         });
       await run(gh, options());
-      expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+      expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
       expect(gh.comments[0]!.body).toContain(
         ending === "failure"
           ? `could not regenerate its generated files: ${running!.url} did not succeed`
@@ -1431,7 +1500,7 @@ describe("regenerating generated files a PR conflicts with main in", () => {
     await run(gh, options());
     await run(gh, options());
     expect(gh.branchUpdates).toEqual([]);
-    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
     expect(gh.comments[0]!.body).toContain("GitHub's merge of main differs from the one");
   });
 
@@ -1448,11 +1517,11 @@ describe("regenerating generated files a PR conflicts with main in", () => {
     await run(gh, options());
     await run(gh, options());
     expect(gh.branchUpdates).toEqual([]);
-    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
     expect(gh.comments[0]!.body).toContain(`merged ${side.slice(0, 10)}, which is not on main`);
   });
 
-  test("a clean merge on an older main asks again on the current one; on the same main it ejects", async () => {
+  test("a clean merge on an older main asks again on the current one; on the same main it parks", async () => {
     const gh = new FakeGitHub();
     conflicting(gh, 1);
     gh.regenerateWith = (input) => ({
@@ -1466,11 +1535,13 @@ describe("regenerating generated files a PR conflicts with main in", () => {
     expect(gh.dispatches.map((d) => d.main)).toEqual([gh.root, moved]);
     expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
     await run(gh, options());
-    expect(gh.pulls.get(1)!.labels).not.toContain(QUEUE_LABEL);
-    expect(gh.comments[0]!.body).toContain("it conflicts with main. Merge main into the branch");
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+    expect(gh.comments[0]!.body).toContain(
+      "skipping this PR for now because it conflicts with main.",
+    );
   });
 
-  test("GitHub failing postpones it; a production branch is ejected as before", async () => {
+  test("GitHub failing postpones it; a production branch is parked without regenerating", async () => {
     const gh = new FakeGitHub();
     conflicting(gh, 1);
     conflicting(gh, 2, { headRef: "production" });
@@ -1480,9 +1551,9 @@ describe("regenerating generated files a PR conflicts with main in", () => {
     };
     await run(gh, options());
     expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
-    expect(gh.pulls.get(2)!.labels).not.toContain(QUEUE_LABEL);
+    expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
     expect(gh.comments).toEqual([
-      { number: 2, body: expect.stringContaining("it conflicts with main. Merge main") },
+      { number: 2, body: expect.stringContaining("because it conflicts with main.") },
     ]);
     gh.regenerations = regenerations;
     await run(gh, options());
@@ -1575,7 +1646,7 @@ describe("the in-batch label", () => {
     expect(gh.marked()).toEqual([]);
   });
 
-  test("a member the batcher ejects itself gets no comment blaming it", async () => {
+  test("a member the batcher parks itself gets no comment blaming it", async () => {
     const gh = new FakeGitHub();
     gh.addPull(1);
     gh.addPull(2);
@@ -1583,7 +1654,8 @@ describe("the in-batch label", () => {
     gh.pulls.get(2)!.conflicting = true;
     await run(gh, options());
     expect(gh.comments.map((c) => c.number)).toEqual([2]);
-    expect(gh.comments[0]!.body).toContain("Removed from the merge queue because it conflicts");
+    expect(gh.comments[0]!.body).toContain("took this PR out of the running batch");
+    expect(gh.pulls.get(2)!.labels).toContain(QUEUE_LABEL);
     expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
     expect(gh.marked()).toEqual([1]);
   });
@@ -1600,5 +1672,120 @@ describe("the in-batch label", () => {
     gh.finishCi(gh.batch().sha, "success");
     await run(gh, options());
     expect(gh.pulls.get(1)!.merged).toBeDefined();
+  });
+});
+
+describe("model request review", () => {
+  const GUARDED = "packages/runtime/src/anthropic-messages.ts";
+  const review = (head: string, state = "APPROVED", extra: Partial<Review> = {}): Review => ({
+    login: MAINTAINER,
+    state,
+    commitId: head,
+    body: "",
+    submittedAt: NOW - 60_000,
+    ...extra,
+  });
+
+  test("a PR that changes model request files waits for the maintainer's approval of its head", async () => {
+    const gh = new FakeGitHub();
+    const lines: string[] = [];
+    gh.addPull(1, { files: [GUARDED, "packages/runtime/test/x.test.ts"] });
+    gh.addPull(2);
+    await run(gh, { ...options(), log: (line) => lines.push(line) });
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+    expect(gh.reviewReads).toEqual([1]);
+    expect(lines.some((l) => l.startsWith("Holding #1: it changes model request files"))).toBe(
+      true,
+    );
+    // Holding is not ejecting: it stays queued without a comment.
+    expect(gh.comments).toEqual([]);
+    expect(gh.pulls.get(1)!.labels).toContain(QUEUE_LABEL);
+  });
+
+  test("only an approval of the exact current head counts, and a later review revokes it", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: [GUARDED] });
+    const head = gh.pulls.get(1)!.head;
+    gh.pulls.get(1)!.reviews = [
+      review("0".repeat(40)),
+      review(head, "APPROVED", { login: "someone-else" }),
+      review(head, "COMMENTED", { body: "/approve-model-request" }),
+    ];
+    await run(gh, options());
+    expect([...gh.refs.keys()].filter((name) => name.startsWith("batch/"))).toEqual([]);
+
+    gh.pulls.get(1)!.reviews!.push(review(head, "APPROVED"));
+    gh.pulls.get(1)!.reviews!.push(review(head, "CHANGES_REQUESTED", { submittedAt: NOW }));
+    await run(gh, options());
+    expect([...gh.refs.keys()].filter((name) => name.startsWith("batch/"))).toEqual([]);
+
+    gh.pulls.get(1)!.reviews!.push(review(head, "APPROVED", { submittedAt: NOW + 1 }));
+    await run(gh, options());
+    gh.finishCi(gh.batch().sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.merged).toBeDefined();
+  });
+
+  test("on his own PR the maintainer approves with a comment review on the head", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: [GUARDED], author: MAINTAINER });
+    const head = gh.pulls.get(1)!.head;
+    gh.pulls.get(1)!.reviews = [review(head, "COMMENTED", { body: "/approve-model-request\nok" })];
+    await run(gh, options());
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([1]);
+  });
+
+  test("a running batch whose member loses its approval is cancelled and rebuilt without it", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: [GUARDED] });
+    gh.addPull(2);
+    const head = gh.pulls.get(1)!.head;
+    gh.pulls.get(1)!.reviews = [review(head)];
+    await run(gh, options());
+    const first = gh.batch();
+    expect(first.manifest.members.map((m) => m.number)).toEqual([1, 2]);
+
+    // Dismissed after the batch started; CI then passes.
+    gh.pulls.get(1)!.reviews = [review(head, "DISMISSED")];
+    gh.finishCi(first.sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.merged).toBeUndefined();
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+    expect(gh.comments.map((c) => c.number)).toEqual([1]);
+    expect(gh.comments[0]!.body).toContain(
+      "needs the maintainer's approval of its model request changes",
+    );
+  });
+
+  test("a member's new head with the tested tree lands only with an approval of that head", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1, { files: [GUARDED] });
+    gh.addPull(2);
+    const old = gh.pulls.get(1)!.head;
+    gh.pulls.get(1)!.reviews = [review(old)];
+    await run(gh, options());
+    const built = gh.batch();
+    expect(built.manifest.members.map((m) => m.number)).toEqual([1, 2]);
+
+    // Rebased: the same tree, a new head whose PR CI has not finished yet.
+    const fresh = hash("head:1 rebased");
+    gh.sameContent.set(fresh, old);
+    gh.pulls.get(1)!.head = fresh;
+    gh.pulls.get(1)!.ci = "running";
+    gh.finishCi(built.sha, "success");
+    await run(gh, options());
+    expect(gh.pulls.get(1)!.merged).toBeUndefined();
+    expect(gh.pulls.get(2)!.merged).toBeUndefined();
+    expect(gh.comments.map((c) => c.number)).toEqual([1]);
+    expect(gh.batch().manifest.members.map((m) => m.number)).toEqual([2]);
+  });
+
+  test("too many files to list needs the approval too", async () => {
+    const gh = new FakeGitHub();
+    gh.addPull(1);
+    gh.pullFiles = async () => null;
+    await run(gh, options());
+    expect([...gh.refs.keys()].filter((name) => name.startsWith("batch/"))).toEqual([]);
+    expect(gh.reviewReads).toEqual([1]);
   });
 });

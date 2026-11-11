@@ -6541,7 +6541,7 @@ export const McpPersonalConnectionDelegation = /* @__PURE__ */ defineSchema(() =
       repositories.forEach((repository, index) => {
         const canonicalUrl = repository.canonicalUrl.toLowerCase();
         if (
-          !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(
+          !/^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(
             repository.fullName,
           ) ||
           repository.canonicalUrl !== `https://github.com/${repository.fullName}`
@@ -11299,8 +11299,13 @@ export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
  * 3: `child_waiting_capacity` is produced only for a long wait (reset far
  * away, unknown, or needing a person), carries `resetsAt`, and wakes the
  * parent immediately instead of riding its next claim.
+ *
+ * 4: a waiting child produces a further `child_waiting_capacity` for the same
+ * waiter when a later check finds its reset later than the parent was told
+ * (the time passed without capacity, or a longer limit binds) or unknown; its
+ * dedupe key adds that reset (`…:<waiterId>:<resetsAt|unknown>`).
  */
-export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 3;
+export const CHILD_LIFECYCLE_NOTICE_PROTOCOL_REVISION = 4;
 
 /**
  * The byte limit of each `boundedUtf8String` check, keyed by the check, so the
@@ -21610,6 +21615,23 @@ export const GitHubInstallationLifecycle = /* @__PURE__ */ defineSchema(() =>
 );
 export type GitHubInstallationLifecycle = z.infer<typeof GitHubInstallationLifecycle>;
 
+/**
+ * Why an installation is not active, in terms of the fix: removed or
+ * suspended on GitHub, no repositories shared, no owner proof for the link,
+ * GitHub could not be checked, or the installation's account changed.
+ */
+export const GitHubInstallationIssue = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "uninstalled",
+    "suspended",
+    "no_repositories",
+    "owner_unconfirmed",
+    "github_unreachable",
+    "account_changed",
+  ]),
+);
+export type GitHubInstallationIssue = z.infer<typeof GitHubInstallationIssue>;
+
 export const GitHubInstallationBinding = /* @__PURE__ */ defineSchema(() =>
   z.object({
     installationId: primitives.positiveInteger,
@@ -21617,6 +21639,8 @@ export const GitHubInstallationBinding = /* @__PURE__ */ defineSchema(() =>
     accountLogin: primitives.nullableString,
     accountType: primitives.nullableString,
     lifecycle: GitHubInstallationLifecycle,
+    /** Null while active. Older servers omit it. */
+    issue: GitHubInstallationIssue.nullable().optional(),
     repositoryScope: GitHubRepositoryScope,
     repositoryCount: primitives.nonnegativeInteger,
     configureUrl: z.string().url().nullable(),
@@ -21666,6 +21690,18 @@ export const GitHubActionPolicyGroup = /* @__PURE__ */ defineSchema(() =>
 );
 export type GitHubActionPolicyGroup = z.infer<typeof GitHubActionPolicyGroup>;
 
+/**
+ * The groups of a personal actor. `sensitive` (Settings and deletions) covers
+ * what Your GitHub does through `gh` and Git that is hard to undo: repository
+ * settings, secrets, variables and environments, deletions, tag and
+ * default-branch rewrites, and requests the gateway does not recognise. It
+ * defaults to Ask.
+ */
+export const PersonalGitHubActionPolicyGroup = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["routine", "review", "merge", "sensitive"]),
+);
+export type PersonalGitHubActionPolicyGroup = z.infer<typeof PersonalGitHubActionPolicyGroup>;
+
 export const GitHubActionPolicyActor = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
     z.object({
@@ -21688,6 +21724,12 @@ const GitHubActionPolicyGroups = /* @__PURE__ */ defineSchema(() =>
   }),
 );
 
+const PersonalGitHubActionPolicyGroups = /* @__PURE__ */ defineSchema(() =>
+  GitHubActionPolicyGroups.extend({
+    sensitive: GitHubActionPolicyEffectiveDecision,
+  }),
+);
+
 export const GitHubActionPolicyActorState = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("kind", [
     z.object({
@@ -21700,7 +21742,7 @@ export const GitHubActionPolicyActorState = /* @__PURE__ */ defineSchema(() =>
       kind: z.literal("personal"),
       connectionId: primitives.string.trim().min(1).max(512),
       label: z.string().min(1).max(256),
-      groups: GitHubActionPolicyGroups,
+      groups: PersonalGitHubActionPolicyGroups,
     }),
   ]),
 );
@@ -21717,7 +21759,8 @@ export type GitHubActionPoliciesResponse = z.infer<typeof GitHubActionPoliciesRe
 export const UpdateGitHubActionPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   z.object({
     actor: GitHubActionPolicyActor,
-    group: GitHubActionPolicyGroup,
+    /** `sensitive` applies only to personal actors. */
+    group: PersonalGitHubActionPolicyGroup,
     decision: GitHubActionPolicyDecision,
   }),
 );
@@ -23945,6 +23988,7 @@ export * from "./slack-rest-mcp";
 export * from "./skill-catalog-context";
 export * from "./workspace-governance-context";
 export * from "./agent-instructions-context";
+export * from "./repository-skills-context";
 export * from "./prompt-cache-diagnostics";
 export * from "./sandbox-recovery";
 export * from "./modal-native-proof-v2";

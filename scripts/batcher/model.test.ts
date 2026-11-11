@@ -31,6 +31,7 @@ function pull(number: number, extra: Partial<QueuedPull> = {}): QueuedPull {
     queuedAt: NOW - 30 * MINUTE + number,
     greenAt: NOW - 20 * MINUTE,
     conflict: null,
+    parked: null,
     renumber: [],
     regenerate: false,
     slots: [],
@@ -593,14 +594,36 @@ describe("nextBatch", () => {
 });
 
 describe("decide", () => {
-  test("ejects conflicting PRs", () => {
-    const actions = decide(observe([pull(1, { conflict: "it conflicts with main." }), pull(2)]));
+  test("ejects PRs that cannot land as they are", () => {
+    const actions = decide(observe([pull(1, { conflict: "its PR CI failed." }), pull(2)]));
     expect(actions[0]).toMatchObject({
       kind: "eject",
       number: 1,
-      reason: "it conflicts with main.",
+      reason: "its PR CI failed.",
     });
     expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([2]);
+  });
+
+  test("skips PRs that conflict with main, keeping them queued, and tells each head once", () => {
+    const reason = "it conflicts with main in `a.ts`";
+    const actions = decide(
+      observe([
+        pull(1, { parked: { reason, noted: false } }),
+        pull(2, { parked: { reason, noted: true } }),
+        pull(3),
+      ]),
+    );
+    expect(actions.map((a) => a.kind)).toEqual(["park", "build"]);
+    expect(actions[0]).toEqual({ kind: "park", number: 1, headSha: sha(1), reason });
+    expect(actions[1]?.kind === "build" && actions[1].members.map((p) => p.number)).toEqual([3]);
+
+    // A member of the running batch that now conflicts is rebuilt out of it.
+    const running = decide(
+      observe([pull(1), pull(2, { parked: { reason, noted: false } })], [batch([1, 2])]),
+    );
+    expect(running.map((a) => a.kind)).toEqual(["park", "abandon", "build"]);
+    expect(running[1]).toMatchObject({ reason: "#2 conflicts with main", changed: 2 });
+    expect(running[2]?.kind === "build" && running[2].members.map((p) => p.number)).toEqual([1]);
   });
 
   test("moves a migration main took the number of, and batches the PR only after that", () => {
@@ -768,6 +791,64 @@ describe("decide", () => {
     expect(actions.map((a) => a.kind)).toEqual(["abandon", "eject", "build"]);
     expect(actions[1]).toMatchObject({ number: 3 });
     expect(actions[2]?.kind === "build" && actions[2].members.map((p) => p.number)).toEqual([4]);
+  });
+
+  test("once a bisection ejects what broke it, its other groups are retested together", () => {
+    const pulls = [3, 4, 5, 6, 7, 8, 9].map((n) => pull(n, { priority: n === 7 }));
+    const failed = batch(
+      [3],
+      { runs: [run({ conclusion: "failure", attempt: 2, failedJobs: ["A"] })] },
+      [[4, 5], [6], [7, 8]],
+    );
+    failed.manifest.blame = ["A"];
+    const actions = decide(observe(pulls, [failed]));
+    expect(actions.map((a) => a.kind)).toEqual(["abandon", "eject", "build"]);
+    expect(actions[1]).toMatchObject({ number: 3 });
+    // One batch instead of three rounds, the priority PR's group first; it is
+    // a fresh batch, so it gets its own retry instead of the old blame.
+    expect(actions[2]).toMatchObject({ kind: "build", pending: [] });
+    expect(actions[2]).not.toHaveProperty("blame");
+    expect(actions[2]?.kind === "build" && actions[2].members.map((p) => p.number)).toEqual([
+      7, 8, 4, 5, 6,
+    ]);
+
+    // More than a batch holds: the first maxBatch PRs go now, the rest next.
+    const small = { ...DEFAULT_SETTINGS, maxBatch: 2 };
+    const capped = decide(observe(pulls, [failed]), small);
+    expect(capped[2]).toMatchObject({ kind: "build", pending: [[4, 5, 6]] });
+    expect(capped[2]?.kind === "build" && capped[2].members.map((p) => p.number)).toEqual([7, 8]);
+
+    // A PR ejected ahead of a bisection learned nothing about its groups.
+    const ahead = batch(
+      [9],
+      { runs: [run({ conclusion: "failure", attempt: 2, failedJobs: ["B"] })] },
+      [[4, 5], [6], [7, 8]],
+    );
+    ahead.manifest.aheadOfBisection = true;
+    const kept = decide(observe(pulls, [ahead]));
+    expect(kept[1]).toMatchObject({ kind: "eject", number: 9 });
+    expect(kept[2]).toMatchObject({ kind: "build", pending: [[4, 5], [6]] });
+    expect(kept[2]?.kind === "build" && kept[2].members.map((p) => p.number)).toEqual([7, 8]);
+
+    // Nor did a Version PR built alone in between.
+    const release = batch(
+      [9],
+      { runs: [run({ conclusion: "failure", attempt: 2, failedJobs: ["B"] })] },
+      [[4, 5], [6], [7, 8]],
+    );
+    release.manifest.members[0]!.version = true;
+    const held = decide(observe(pulls, [release]));
+    expect(held[1]).toMatchObject({ kind: "eject", number: 9 });
+    expect(held[2]).toMatchObject({ kind: "build", pending: [[4, 5], [6]] });
+
+    // Two PRs adding the same migration number still never share a batch.
+    const clash = [3, 4, 5, 6].map((n) =>
+      pull(n, { slots: n === 4 || n === 6 ? ["packages/db/migrations/0042"] : [] }),
+    );
+    const split = batch([3], { runs: [run({ conclusion: "failure", attempt: 2 })] }, [[4, 5], [6]]);
+    const apart = decide(observe(clash, [split]));
+    expect(apart[2]).toMatchObject({ kind: "build", pending: [[6]] });
+    expect(apart[2]?.kind === "build" && apart[2].members.map((p) => p.number)).toEqual([4, 5]);
   });
 
   test("a bisection carries what it blamed to its own groups only, and drops it when it ends", () => {

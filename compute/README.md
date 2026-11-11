@@ -255,7 +255,8 @@ what is free. A booking stays until a reading after its save shows what
 the save used, and nothing needing disk is admitted before the first
 reading. Everything else that writes is booked the same way, before it can
 write: an awake VM books what its disk may still grow by (its length in
-whole allocation units, less what it holds alone, measured every sample;
+whole allocation units, less what it holds alone, measured every sample
+off the agent's loop, which never waits long for it;
 on XFS and btrfs only blocks no template or base image shares count); a
 wake from object storage books its local disk, the memory image its pager
 fills and its device state until the image is whole; a new sandbox's
@@ -355,8 +356,10 @@ A team may also save a sandbox as a template
 the disk (sharing its blocks, so in milliseconds) and store the copy as an
 image in the background, and records a template naming it; a create names
 it with `template`, by id or name, and boots afresh on that disk. Only the
-filesystem is kept. Images no template, sandbox or built image has used
-for an hour are forgotten.
+filesystem is kept. Images no template or sandbox names, and no name
+starts new sandboxes from, are forgotten after an hour, built ones too
+([ADR 35](docs/adr/0035-built-images-nothing-uses-are-forgotten.md)): an
+earlier release's image is built again if a rollback needs it.
 
 ## The fleet
 

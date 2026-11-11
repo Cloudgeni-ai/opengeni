@@ -22,6 +22,46 @@ split, the fill leaves out the PRs its halves hold, and priority batches and
 those halves take turns: after a priority batch goes ahead of a half, that half
 goes next, so priority PRs that keep arriving cannot stall a bisection.
 
+## Model request review
+
+A PR that changes what Opengeni sends to model providers is batched only once
+the maintainer (`jorgensandhaug`) has approved its exact current head. The
+guarded paths are the model request section at the end of
+`.github/CODEOWNERS`; `scripts/ci/model-request-review.ts` reads that section
+from `main` and decides, and the batcher and the status below share it.
+
+- **Which files:** the PR's changed files, including the old path of each
+  rename. A PR with more files than GitHub lists (3,000) needs the approval
+  too.
+- **Which approval:** the maintainer's latest decisive review submitted on the
+  PR's current head commit. An approval of an earlier head, a dismissed
+  approval, or anyone else's review does not count, and a later "changes
+  requested" revokes it. GitHub refuses self-approval, so on a PR he authored a
+  review he submits on the head whose first line is `/approve-model-request`
+  counts instead.
+- **The batcher** holds such a PR, queued and without a comment, as it holds a
+  PR whose PR CI has not passed. If a member of the running batch loses its
+  approval, the batch is cancelled and rebuilt without it, so it cannot land.
+  Right before landing it checks every member again on the exact head it
+  lands, which covers a new head with the tested tree.
+  Any new head, including one the batcher writes itself to renumber a
+  migration or regenerate files, needs a new approval.
+- **On the PR**, `.github/workflows/model-request-review.yml` (running main's
+  code through `pull_request_target`, and through `workflow_run` of the review
+  signal workflow for review events) posts the **Model request review**
+  status, re-requests the maintainer's review on every unapproved head and
+  keeps one comment that lists the guarded files.
+- **The batcher is the gate; the status only reports it.** Anyone who can
+  run a workflow can post a status, and the batcher's App bypasses rulesets,
+  so the batcher never reads the status: it recomputes the verdict from
+  main's code at every pass. The protection ruleset also requires the status
+  (from the GitHub Actions app), which only matters for a merge outside the
+  batcher.
+
+To check one PR by hand:
+`GITHUB_TOKEN=$(gh auth token) bun scripts/ci/model-request-review.ts --pull <n> --dry-run`
+prints the verdict and exits 1 when the gate blocks.
+
 ## Releasing: a Version PR holds main
 
 A queued Version PR (the `changeset-release/main` branch that the Open Version
@@ -60,8 +100,17 @@ then reproduces the original Version head from its own base. Consumed changesets
 are therefore validated without losing disjoint main changes or skipping the
 deterministic Version check.
 
-A PR leaves the queue with a comment saying why when it conflicts with `main`
-or fails CI on its own on top of `main`. Fix it and add the label again.
+A PR leaves the queue with a comment saying why when it fails CI on its own on
+top of `main`. Fix it and add the label again.
+
+A PR that conflicts with `main` keeps its `queue-ready` label and its place in
+the queue, but is skipped: it is not batched while it conflicts. It gets one
+comment per head saying that it conflicts, naming the conflicting files when
+the batcher knows them (see the regeneration below). Merge `main` into the
+branch and resolve the conflict; once the new head merges cleanly with `main`
+and PR CI passes on it, it is batched automatically, without being queued
+again. A head the batcher already told about is not regenerated or told about
+again; a new head that still conflicts is.
 
 The members of the running batch carry the `in-batch` label. The batcher adds
 it when the batch starts and removes it when they land, leave the queue or the
@@ -86,10 +135,11 @@ references in the PR's changed files, as `scripts/renumber-migration.ts
 order. It does this through GitHub's API with the planner from `main`, so it
 never runs PR code, and it only fast-forwards the branch. The PR stays queued,
 a comment says what moved, and it is batched once PR CI passes on the new head.
-If the move needs judgment (a Git conflict, a changed file that names the
-number without naming the migration, a changed text file it cannot read, a
-branch GitHub will not update, or any other failure), the PR leaves the queue
-with the `scripts/renumber-migration.ts` command instead. GitHub being down or
+A Git conflict skips the PR as above. If the move needs judgment (a changed
+file that names the number without naming the migration, a changed text file
+it cannot read, a branch GitHub will not update, or any other failure), the PR
+leaves the queue with the `scripts/renumber-migration.ts` command instead.
+GitHub being down or
 throttling (5xx, 429, a rate-limit 403) or the network failing only postpones
 the move to the next pass, and once the branch is updated nothing after it
 takes the PR out of the queue. Migrations on the `production` and
@@ -115,10 +165,14 @@ files), only if the run merged `main` or a commit behind it and changed only
 registered generated files, and it only fast-forwards the branch. The PR stays
 queued, a comment names the commands, and it is batched once PR CI passes on
 the new head, whose freshness checks fail a wrong regeneration as they would
-any stale artifact. A conflict in any other file ejects the PR with every
-conflicting file named; a failed run ejects it with a link to the run, and
-GitHub failing only postpones it. PRs on the `production` branch, Version PRs
-and members of the running batch are never regenerated.
+any stale artifact. A conflict in any other file skips the PR (it keeps its
+label, see above) with every conflicting file named; a failed run skips it
+with a link to the run, and GitHub failing only postpones it. PRs on the
+`production` branch and members of the running batch are never regenerated:
+a production PR is skipped at once, and a running batch with a conflicting
+member is rebuilt without it; that PR is checked again, and regenerated if
+that settles it, once it is out of the batch. Version PRs are never regenerated by the batcher either (see
+above).
 
 ## How a batch lands
 
@@ -141,7 +195,10 @@ and members of the running batch are never regenerated.
    (`impact.ts --full`, every unit, real-service, end-to-end and browser lane),
    deployment artifacts, the artifact runtime and every workload image. Images
    are built but never pushed or signed, and the API image builds beside the
-   lanes instead of waiting for the release-approval gate. A batch passes only
+   lanes (in its own `batch-api-image` job) instead of waiting for the
+   release-approval gate. The sandbox and desktop images build every layer
+   that does not need the artifact runtime while it is still being produced,
+   then add its verified inputs. A batch passes only
    when `Typecheck and unit tests`, `Deployment artifacts` and
    `Workload image builds` all passed, the same jobs canary admission requires
    on a `main` SHA. Failed jobs are retried once to absorb flaky tests. A run
@@ -156,7 +213,14 @@ and members of the running batch are never regenerated.
    that the new `main` tree is exactly the tree CI tested at that point, and
    stops with a comment on the PR if not.
 5. **Failures.** A failed batch is split in half and each half is tested in
-   turn until the failing PR is found and removed from the queue. A failed
+   turn until the failing PR is found and removed from the queue.
+   Once a PR the bisection tested alone is removed, the groups the bisection
+   still holds are tested together again as one batch (groups with a priority
+   PR first, up to `BATCHER_MAX_BATCH`, the rest next in line), without the
+   bisection's blame, instead of one group per round; a group that fails again
+   is split as any batch is. Two PRs that add the same migration number still
+   go into separate groups. A PR removed from a batch that went ahead of the
+   bisection, or a Version PR, leaves its groups as they were. A failed
    batch with both priority and other PRs is split into its priority PRs, tested
    first, and the rest, so a broken fill delays them one round. When the rest
    has at least two PRs and at least as many as the priority PRs, it is halved

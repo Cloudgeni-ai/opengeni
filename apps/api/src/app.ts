@@ -167,6 +167,12 @@ import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import {
+  CONSOLE_CONTENT_SECURITY_PATH,
+  consoleContentSecuritySources,
+  type ConsoleContentSecuritySources,
+} from "./http/console-content-security";
+import { registerImageProxyRoutes } from "./routes/image-proxy";
+import {
   ApiHttpError,
   agentConfigHttpError,
   allowanceExhaustedHttpError,
@@ -447,6 +453,7 @@ import { registerSessionArtifactAssociationRoutes } from "./routes/session-artif
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { adminStepUpGuard } from "./auth/admin-step-up";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
@@ -858,6 +865,16 @@ export function createAppComposition(
     }
   };
 
+  // Every API response, including errors, Better Auth and streams, tells the
+  // browser never to sniff a different content type. Set after the handler
+  // ran so it covers responses a route built itself; a route's own value wins.
+  app.use("*", async (c, next) => {
+    await next();
+    if (!c.res.headers.has("x-content-type-options")) {
+      c.header("x-content-type-options", "nosniff");
+    }
+  });
+
   // A trusted in-process dispatcher (a published Site, an organization
   // action) fixed who pays for this exact request; read it before any
   // middleware rebuilds the Request.
@@ -876,6 +893,11 @@ export function createAppComposition(
     correlationIds.set(c, correlationId);
     c.header(OPENGENI_CORRELATION_HEADER, correlationId);
     await next();
+    // A Response a route built itself replaces the prepared headers unless a
+    // later middleware materialized the response first; keep the id either way.
+    if (!c.res.headers.has(OPENGENI_CORRELATION_HEADER)) {
+      c.header(OPENGENI_CORRELATION_HEADER, correlationId);
+    }
   });
 
   // Unauthenticated local mode: admit only requests addressed to this computer
@@ -993,24 +1015,31 @@ export function createAppComposition(
       // request without credentials acts as the local user, so any site could
       // otherwise read its responses. Origins outside the local policy get no
       // CORS grant (in local development the boundary above refused them).
-      return origin ? localCors(c, next) : next();
+      return origin ? localCors(c, next) : withVaryOrigin(c, next);
     }
-    if (origin && landingOrigins.has(origin) && c.req.path === DISPLAY_IDENTITY_PATH) {
+    if (!origin) {
+      // No Origin header means no cross-origin browser read: servers, CLIs,
+      // same-origin GETs and no-cors subresources. They need no CORS grant, so
+      // none is sent. The answer still varies by Origin, so a cache never
+      // hands this grant-less response to a later cross-origin request.
+      return withVaryOrigin(c, next);
+    }
+    if (landingOrigins.has(origin) && c.req.path === DISPLAY_IDENTITY_PATH) {
       return displayIdentityCors(c, next);
     }
-    const middleware =
-      origin && allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
-        ? credentialedCors
-        : publicApiCors;
-    if (middleware === publicApiCors && c.req.path === DISPLAY_IDENTITY_PATH) {
-      // The answer depends on the caller's origin and cookie; caches must not
-      // share it across origins (the credentialed middlewares add Vary already).
-      return middleware(c, async () => {
-        await next();
-        c.res.headers.append("vary", "Origin");
-      });
-    }
-    return middleware(c, next);
+    // Allowlisted console origins get credentialed CORS. Every other browser
+    // origin gets the wildcard: customer pages call the public API directly
+    // with a bearer API key, which needs no cookie. The wildcard never carries
+    // credentials (browsers refuse `*` with credentials, and none is sent), so
+    // a non-allowlisted origin can never read a cookie-authenticated answer.
+    const middleware = allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
+      ? credentialedCors
+      : publicApiCors;
+    if (middleware === credentialedCors) return middleware(c, next);
+    // The wildcard answer differs from the grant-less no-Origin answer, so it
+    // varies by Origin too: a shared cache must never hand one to the other
+    // (the credentialed middleware adds Vary: Origin itself).
+    return middleware(c, () => withVaryOrigin(c, next));
   });
 
   const standardRequestBodyLimit = bodyLimit({
@@ -1316,6 +1345,10 @@ export function createAppComposition(
   // content never answers an Opengeni workspace that isn't EU-only.
   app.use("/v1/*", callingWorkspaceContentFlowGuard(routeDeps));
 
+  // Owners and admins confirm admin changes with a recent passkey; runs after
+  // personal API keys and agents acting as a person are stamped.
+  app.use("/v1/*", adminStepUpGuard(routeDeps));
+
   // These product-owned auth routes must be registered before Better Auth's
   // wildcard handler or the provider returns its own 404 first.
   registerManagedOnboardingRoutes(app, routeDeps);
@@ -1614,6 +1647,32 @@ export function createAppComposition(
   registerMcpOAuthRoutes(app, routeDeps);
 
   registerClientErrorRoutes(app, { observability, settings: deps.settings });
+
+  // The external origins the console's Content-Security-Policy must allow;
+  // the web server reads them (see http/console-content-security.ts).
+  let consoleContentSecurity: {
+    expiresAt: number;
+    value: Promise<ConsoleContentSecuritySources>;
+  } | null = null;
+  app.get(CONSOLE_CONTENT_SECURITY_PATH, async (c) => {
+    const now = Date.now();
+    if (!consoleContentSecurity || consoleContentSecurity.expiresAt <= now) {
+      const value = resolveCatalogSettings(deps.db, deps.settings)
+        .then((resolved) => resolved.settings)
+        .catch(() => undefined)
+        .then((catalogSettings) =>
+          consoleContentSecuritySources({
+            settings: deps.settings,
+            ...(catalogSettings ? { catalogSettings } : {}),
+            objectStorage: routeDeps.objectStorage,
+          }),
+        );
+      consoleContentSecurity = { expiresAt: now + 60_000, value };
+    }
+    c.header("cache-control", "no-store");
+    return c.json(await consoleContentSecurity.value);
+  });
+  registerImageProxyRoutes(app, routeDeps);
   registerAnalyticsConsentRoutes(app, { observability, settings: deps.settings });
 
   app.get("/v1/config/client", async (c) => {
@@ -2865,6 +2924,12 @@ export function appendVary(current: string | null, value: string): string {
   return values.join(", ");
 }
 
+/** Runs the rest of the chain, then marks the response as varying by `Origin`. */
+async function withVaryOrigin(c: Context, next: () => Promise<void>): Promise<void> {
+  await next();
+  c.header("vary", appendVary(c.res.headers.get("vary"), "Origin"));
+}
+
 const publicWorkspaceBrowserRoutePatterns = [
   /^\/v1\/workspaces\/[^/]+\/github\/connect$/,
   /^\/v1\/workspaces\/[^/]+\/github\/installations\/[^/]+\/configure$/,
@@ -3512,6 +3577,8 @@ const routeLabelPatterns: Array<{
   },
   { pattern: /^\/metrics$/, label: "/metrics" },
   { pattern: /^\/v1\/config\/client$/, label: "/v1/config/client" },
+  { pattern: /^\/v1\/config\/content-security$/, label: "/v1/config/content-security" },
+  { pattern: /^\/v1\/image-proxy$/, label: "/v1/image-proxy" },
   { pattern: /^\/v1\/client-errors$/, label: "/v1/client-errors" },
   { pattern: /^\/v1\/analytics-consent$/, label: "/v1/analytics-consent" },
   { pattern: /^\/v1\/billing$/, label: "/v1/billing" },

@@ -696,6 +696,12 @@ const SettingsSchema = z.object({
   // Google Calendar shares the Gmail OAuth client; enable once its consent screen lists the Calendar scopes.
   googleCalendarEnabled: EnvBoolean.default(false),
   microsoftTeamsToolsEnabled: EnvBoolean.default(false),
+  // Pre-registered multi-tenant Microsoft Entra app for Microsoft Dynamics MCP
+  // servers (Dataverse/Dynamics 365 Sales; Finance & Operations behind its own
+  // flag). Microsoft offers no dynamic client registration for these servers.
+  microsoftDynamicsClientId: z.string().optional(),
+  microsoftDynamicsClientSecret: z.string().optional(),
+  microsoftDynamicsFinanceOperationsEnabled: EnvBoolean.optional(),
   microsoftTeamsAllowedWorkspaceIds: z.preprocess(
     (value) =>
       typeof value === "string"
@@ -832,6 +838,11 @@ const SettingsSchema = z.object({
   // one and existing links stop opening.
   privacyChatShareLinksAllowed: EnvBoolean.default(true),
   integrationsOauthClientsJson: z.string().default("{}"),
+  // The deployment's own words, in its own language, for the small pages the
+  // API shows outside any app: where a sign-in popup ends, and where an
+  // administrator lands after approving the app. See
+  // parseConnectResultPageTextJson.
+  connectResultPageTextJson: z.string().optional(),
   gmailWatchTopicName: z
     .string()
     .regex(/^projects\/[^/]+\/topics\/[^/]+$/u)
@@ -2356,6 +2367,10 @@ const SettingsSchema = z.object({
     .min(1)
     .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+  // Owners and admins confirm admin changes in a browser session confirmed
+  // with a passkey (CASA 3.3.1). Off by default; production sets required.
+  // Applies only where passkey sign-in is offered.
+  adminPasskeyStepUp: z.enum(["off", "required"]).default("off"),
   // URL schemes the native app may receive its sign-in code on
   // (`<scheme>://auth/callback`). A host shipping its own build of the app
   // adds its scheme here.
@@ -4649,6 +4664,49 @@ export const IntegrationOAuthClientConfigSchema = z.object({
 });
 export type IntegrationOAuthClientConfig = z.infer<typeof IntegrationOAuthClientConfigSchema>;
 
+const resultPageLine = z.string().trim().min(1).max(500);
+/**
+ * Wording for the API's own result pages, which no app renders and so no
+ * app's message catalog reaches: the page a sign-in popup ends on and the
+ * page an administrator sees after the organization approval link. Every
+ * field is optional; what is left out stays in English. `lang` names the
+ * language of the given words (a BCP 47 tag such as `nb`).
+ */
+export const ConnectResultPageTextSchema = z
+  .object({
+    lang: z
+      .string()
+      .regex(/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/u)
+      .optional(),
+    signInFinishedTitle: resultPageLine.optional(),
+    signInFinishedBody: resultPageLine.optional(),
+    adminApprovedTitle: resultPageLine.optional(),
+    adminApprovedBody: resultPageLine.optional(),
+    adminNotApprovedTitle: resultPageLine.optional(),
+    adminNotApprovedBody: resultPageLine.optional(),
+    closeWindow: resultPageLine.optional(),
+  })
+  .strict();
+export type ConnectResultPageText = z.infer<typeof ConnectResultPageTextSchema>;
+
+/** The deployment's wording for the API's result pages (empty: English). */
+export function parseConnectResultPageTextJson(raw: string | undefined): ConnectResultPageText {
+  if (!raw?.trim()) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON must be valid JSON: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+  const result = ConnectResultPageTextSchema.safeParse(parsed);
+  if (!result.success)
+    throw new Error(`OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON is invalid: ${result.error.message}`);
+  return result.data;
+}
+
 /**
  * Runtime-resolved provider (built-in or registry), client-construction-ready.
  * The built-in OpenAI/Azure provider is always present and always "responses";
@@ -6007,6 +6065,11 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     googleDriveMcpEnabled: optional("OPENGENI_GOOGLE_DRIVE_MCP_ENABLED"),
     googleCalendarEnabled: optional("OPENGENI_GOOGLE_CALENDAR_ENABLED"),
     microsoftTeamsToolsEnabled: optional("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED"),
+    microsoftDynamicsClientId: optional("OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID"),
+    microsoftDynamicsClientSecret: optional("OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET"),
+    microsoftDynamicsFinanceOperationsEnabled: optional(
+      "OPENGENI_MICROSOFT_DYNAMICS_FINANCE_OPERATIONS_ENABLED",
+    ),
     microsoftTeamsAllowedWorkspaceIds: optional("OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS"),
     teamsBotEnabled: optional("OPENGENI_TEAMS_BOT_ENABLED"),
     teamsBotAllowedTenantIds: optional("OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS"),
@@ -6032,6 +6095,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ),
     privacyChatShareLinksAllowed: optional("OPENGENI_PRIVACY_CHAT_SHARE_LINKS_ALLOWED"),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
+    connectResultPageTextJson: optional("OPENGENI_CONNECT_RESULT_PAGE_TEXT_JSON"),
     gmailWatchTopicName: optional("OPENGENI_GMAIL_WATCH_TOPIC_NAME"),
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
@@ -6580,6 +6644,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         ? undefined
         : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
+    adminPasskeyStepUp: optional("OPENGENI_ADMIN_PASSKEY_STEP_UP"),
     nativeAppSchemes:
       source.OPENGENI_NATIVE_APP_SCHEMES === undefined
         ? undefined
@@ -12703,6 +12768,14 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       );
     }
   }
+  if (
+    Boolean(settings.microsoftDynamicsClientId?.trim()) !==
+    Boolean(settings.microsoftDynamicsClientSecret?.trim())
+  ) {
+    throw new Error(
+      "OPENGENI_MICROSOFT_DYNAMICS_CLIENT_ID and OPENGENI_MICROSOFT_DYNAMICS_CLIENT_SECRET must be configured together",
+    );
+  }
   if (Boolean(settings.slackClientId) !== Boolean(settings.slackClientSecret)) {
     throw new Error(
       "OPENGENI_SLACK_CLIENT_ID and OPENGENI_SLACK_CLIENT_SECRET must be configured together",
@@ -12802,6 +12875,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     }
   }
   parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
+  parseConnectResultPageTextJson(settings.connectResultPageTextJson);
   parseSocialOauthClientsJson(settings.socialOauthClientsJson);
   // Only the operator's own environment is strict here. Settings resolved
   // from a stored catalog document re-parse providers without this check;

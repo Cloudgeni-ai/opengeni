@@ -11,6 +11,7 @@ import {
   decisionCardClass,
   decisionCardPad,
 } from "./decision-card";
+import { displayImageSrc } from "../lib/content-hosting";
 
 /**
  * The inline connection-recovery card: missing or lapsed access surfaces as a
@@ -183,7 +184,7 @@ function AuthProviderLogo({ src, label }: { src: string | null; label: string })
     >
       {showImage ? (
         <img
-          src={src}
+          src={displayImageSrc(src)}
           alt=""
           loading="lazy"
           decoding="async"

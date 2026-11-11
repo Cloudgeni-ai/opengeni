@@ -229,7 +229,9 @@ describe("session-only entry", () => {
     // The one way every surface shows an attached image from its stored file
     // (a restored draft, a queued message, another device).
     expect(reactSources.some((id) => id.endsWith("/src/stored-file-preview.ts"))).toBe(true);
-    expect(reactSources.length).toBe(65);
+    // Pure host wording for tool actions: history names a decided action the host's way.
+    expect(reactSources.some((id) => id.endsWith("/src/tool-action-wording.ts"))).toBe(true);
+    expect(reactSources.length).toBe(66);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

@@ -1497,6 +1497,20 @@ them, and readiness requires them from then on. A release that still has the
 - Removing a passkey signs the person out everywhere, as a password change
   does: sessions don't record which passkey opened them, so ending all of them
   is the only way to shut out a removed passkey.
+- `OPENGENI_ADMIN_PASSKEY_STEP_UP=required` (default `off`) makes owners and
+  admins make admin changes from a browser session confirmed with a passkey:
+  members, roles and invitations, billing and plans, API keys, shared
+  integrations and connections, and organization and workspace settings, and
+  creating a personal API key. A session signed in with a passkey is confirmed;
+  otherwise the API refuses with `ADMIN_PASSKEY_STEP_UP_REQUIRED` in the error
+  details, the console asks for the passkey once and sends the change again,
+  and the session stays confirmed until it ends (`auth_sessions.mfa_verified_at`,
+  removed with the session on sign-out or revocation). Someone without a
+  passkey is sent to add one. The phone app, and agents and personal API keys
+  acting for a person, act under the person's existing authority and are not
+  asked; normal members, personal workspaces, reads and organization or
+  workspace API keys are not affected. It applies only where passkey sign-in
+  is offered. Production sets `required` (CASA 3.3.1).
 - Ceremonies are single use, expire after five minutes and are bound to the
   origin that started them. Requests for new ceremonies are rate limited per
   client address. Credentials are stored as public keys only; the signature
@@ -1794,6 +1808,10 @@ without per-application origin registration. `OPENGENI_CORS_ALLOW_ORIGIN_REGEX`
 is only the allowlist for origins that may send browser cookies cross-origin.
 Keep that regex narrow; unlisted origins receive wildcard, non-credentialed
 CORS responses and therefore cannot use a managed-login session cookie.
+A request without an `Origin` header (servers, command-line clients,
+same-origin page loads) is not a cross-origin browser read and receives no CORS
+headers at all, only `Vary: Origin` so caches keep the two answers apart. Every
+API response carries `X-Content-Type-Options: nosniff`.
 Browser and desktop controller requests also admit the configured
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_WEB_BASE_URL` origins directly; this
 does not grant those origins credentialed cross-origin responses.
@@ -2087,9 +2105,70 @@ from the previous builds' assets listed in `OPENGENI_WEB_PREVIOUS_ASSET_ROOTS`
 [Web assets across rollouts](#web-assets-across-rollouts). Every shell response carries
 `X-Content-Type-Options: nosniff` and `Referrer-Policy:
 strict-origin-when-cross-origin` (the setup-account page keeps its stricter
-`no-referrer`). The server deliberately sets no `X-Frame-Options`,
-`frame-ancestors`, or other CSP, because the console supports embedding. The
-API compresses JSON responses and leaves SSE and other streaming transports
+`no-referrer`).
+
+### Console Content-Security-Policy
+
+Every HTML page the web server serves carries an enforced
+`Content-Security-Policy` built in `apps/web/src/csp.ts`. Its fixed part is
+`default-src 'self'`; `script-src 'self' 'wasm-unsafe-eval'` plus the sha256
+hash of each inline script in the exact bytes served (hashed when the page is
+rendered, so they never drift from the build); `object-src 'none'`;
+`base-uri 'self'`; `form-action 'self'`; `frame-ancestors 'self'` (Office's
+hosts for the Excel add-in pages under `/office/`, which also get
+`https://appsforoffice.microsoft.com` and Office's other script hosts);
+`img-src`/`media-src 'self' data: blob:`; `font-src 'self' data:`;
+`connect-src 'self' blob:` (pdf.js reads downloaded bytes from a blob: URL);
+`worker-src`/`child-src 'self' blob:`; and `style-src`/`style-src-elem 'self'`
+plus a fresh nonce on every response, with `style-src-attr 'unsafe-inline'`.
+Libraries such as the toast, scroll-lock, terminal and diff components create
+`<style>` elements at runtime, so a hashed bootstrap script that runs first
+reads the response's nonce from a `csp-nonce` meta element and stamps it on
+every `<style>` element the page creates. Style attributes (React `style`
+props and the attributes the diff and terminal components write into markup)
+cannot carry a nonce or hash, so only `style-src-attr` allows them inline;
+they cannot load resources or run script. Pages are therefore rendered per
+response (the cached page holds a placeholder nonce). No directive ever contains `*` or a bare scheme such as
+`https:`. Other responses keep `frame-ancestors 'self'` and
+`X-Frame-Options: SAMEORIGIN` (none on `/office/`).
+
+The deployment-specific hosts come from the API's public
+`GET /v1/config/content-security`, derived from existing API settings:
+the object storage origin of signed URLs, the API origin when it differs from
+the console's, the relay and Modal tunnel sockets, Turnstile when the sign-up
+challenge is on, PostHog/Reo/GA4 when analytics is configured, Google and
+GitHub avatar hosts when those sign-ins are configured, catalog model logo
+hosts, `https://github.com` in `form-action` outside platform-managed mode
+(the GitHub App manifest form), and the HTML frame host
+`https://og.<sites domain>`. The web server reads it from
+`OPENGENI_WEB_CONTENT_SECURITY_API_URL` (the Helm chart sets it to the
+in-cluster API service when the chart deploys the API), else
+`OPENGENI_PUBLIC_BASE_URL`. It waits up to five seconds for the first answer
+before serving pages, then refreshes every five minutes; after a failure it
+logs one warning, keeps the last policy (or the base policy, which fails
+closed) and retries after 1, 2, 4 and then every 10 seconds. No new Helm value
+is needed.
+
+Agent-authored HTML (chat visualizations, HTML artifacts and Sites in the
+console) does not run under the console policy: it renders in an
+opaque-origin sandboxed frame of the HTML frame host page
+(`/_og/html-frame`), which the Sites gateway serves on `og.<sites domain>`
+(deploy the gateway with or before a web release that uses it) and the web
+server serves on the console origin only when there is no Sites domain (its
+policy cannot restrict the agent's HTML, so a deployment with a Sites domain
+keeps every console page under the strict policy). Both frame hosts may be framed by the console and by Office's
+hosts. Images from hosts the policy does not list load through the API's
+signed-in image proxy `GET /v1/image-proxy?url=`: public HTTPS images only,
+SSRF-checked on every redirect, magic-byte sniffed (SVG is served with
+`default-src 'none'; style-src 'unsafe-inline'; sandbox`), size and time
+capped, and rate limited. When the API has its own origin the console uses the
+absolute proxy URL the API publishes. The Excel add-in signs in with a bearer
+token, which an `<img>` cannot send, so it fetches a short-lived signed ticket
+from `GET /v1/image-proxy/ticket` and appends it to proxy URLs; tickets are
+signed with a key derived from the Better Auth secret (or the delegation or
+integration state secret), and without one the ticket route answers 404.
+
+The API compresses JSON responses and leaves SSE and other streaming transports
 uncompressed.
 
 Set `OPENGENI_WEB_NOINDEX=true` on a deployment search engines should not
@@ -4386,7 +4465,7 @@ Minimum production alerts:
 - Turn stuck: a physical worker attempt has made no durable progress for more than 15 minutes for 5 minutes. Overlapping recovery attempts are counted and aged independently.
 - Turn admission: Temporal's oldest eligible `runAgentTurn` backlog is above 30 seconds for 5 minutes, or a pod remains above 90% of memory-safe slots while eligible work waits. Durable prompts behind a pause do not count.
 - Turn startup SLOs: cumulative queue p95 above 5 seconds, queue-to-provider-dispatch p95 above 20 seconds (warning; a paging critical tier above 60 seconds replaces it), or queue-to-first-byte p95 above 120 seconds for 15 minutes with at least five samples. The Helm values are configurable; use the phase dashboard before assigning the delay to the sandbox or provider.
-- Model-request latency split: Opengeni's own per-request pre-dispatch work (`opengeni_model_request_pre_dispatch_seconds`: SDK model entry through admission, durable history/audit checkpoints and credit revalidation to the literal provider dispatch) warns when its p95 exceeds 2 seconds for 10 minutes with at least 20 requests. Provider time-to-first-token (`opengeni_model_provider_ttft_seconds{content="any"}`: literal dispatch to the first streamed reasoning-or-answer delta) never alerts on an absolute number; `OpenGeniModelProviderTtftRegression` warns only when a provider's 30-minute p90 exceeds 2x its own trailing 24-hour p90 (offset by 30 minutes), above a 5-second floor, with at least 30 recent and 200 baseline requests, and not while the pre-dispatch condition holds. A provider that is simply slower - reasoning models, subscription routes - stays quiet; the absolute `opengeni_stream_ttft_seconds` view remains on Streaming Health for investigation. Ratio, floor and sample gates are Helm values; a freshly deployed metric has no baseline and stays quiet until it accrues one.
+- Model-request latency split: Opengeni's own per-request pre-dispatch work (`opengeni_model_request_pre_dispatch_seconds`: SDK model entry through admission, durable history/audit checkpoints and credit revalidation to the literal provider dispatch) warns when its p95 exceeds 2 seconds for 10 minutes with at least 20 requests. Provider time-to-first-token (`opengeni_model_provider_ttft_seconds{content="any"}`: literal dispatch to the first streamed reasoning-or-answer delta) never alerts on an absolute number; `OpenGeniModelProviderTtftRegression` warns only when a provider's 30-minute p90 exceeds 2x its own trailing 24-hour p90 (offset by 30 minutes), above a 5-second floor, with at least 30 recent and 200 baseline requests, and not while the pre-dispatch condition holds. Where a provider reports response start (`opengeni_model_request_phase_duration_seconds{phase="headers"}`: response headers, or the first provider event on a persistent socket) in its baseline window, the alert judges that (`signal="headers"`), because context size and reasoning length barely move it; other providers are judged on first streamed content (`signal="first_content"`). A provider that is simply slower - reasoning models, subscription routes - stays quiet; the absolute `opengeni_stream_ttft_seconds` view remains on Streaming Health for investigation. Ratio, floor and sample gates are Helm values; a freshly deployed metric has no baseline and stays quiet until it accrues one.
 - Streaming write and delivery latency: durable session-event append p99 above 1 second for 10 minutes (warning) or above 2 seconds over 5 minutes (critical), and live NATS publish p99 above 500 ms for 10 minutes. Each needs at least 100 observations in its window (`observability.prometheusRule.sessionEventMinSamples`): below 100, a p99 is just the slowest single observation, so one slow write on a quiet deployment must not page.
 - Context compaction: an exact active attempt's latest automatic compaction landmark remains durably `started` for 15 minutes. Terminal skips settle normally, and the control-worker projection survives turn-worker replacement while following each resolved model's actual threshold.
 - Sandbox create failures: sandbox create failure ratio is above 20% for 10 minutes.

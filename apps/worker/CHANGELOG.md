@@ -1,5 +1,152 @@
 # @opengeni/worker-bundle
 
+## 6.16.0
+
+### Patch Changes
+
+- e8495b3: `OpenGeniModelProviderTtftRegression` no longer fires when a change in request mix lengthens first tokens. Long contexts and long reasoning delay the first streamed delta without any change at the provider. Providers that report response start (`opengeni_model_request_phase_duration_seconds{phase="headers"}`: response headers, or the first provider event on a persistent socket) are now judged on that, because request shape barely moves it. Providers without that report keep first streamed content. The new `opengeni:model_provider_regression_signal_*` recording rules make the choice per provider from its headers baseline, so a window is never judged against a baseline of the other signal. The alert carries the choice as a `signal` label (`headers` or `first_content`). Ratio, floor, windows, sample minimums and the pre-dispatch suppression are unchanged. The `opengeni:model_provider_ttft_*` records stay for the Streaming Health dashboard. The alert text and runbook no longer suggest steering users away before ruling out a mix change.
+- Updated dependencies [fb19875]
+- Updated dependencies [7c610c5]
+- Updated dependencies [54dc5da]
+- Updated dependencies [4c84667]
+- Updated dependencies [86e5358]
+- Updated dependencies [01feadc]
+  - @opengeni/contracts@6.16.0
+  - @opengeni/db@6.16.0
+  - @opengeni/runtime@6.16.0
+  - @opengeni/sdk@6.16.0
+  - @opengeni/xai-subscription@6.16.0
+  - @opengeni/capabilities@6.16.0
+  - @opengeni/codemode@6.16.0
+  - @opengeni/codex@6.16.0
+  - @opengeni/config@6.16.0
+  - @opengeni/core@6.16.0
+  - @opengeni/decisions@6.16.0
+  - @opengeni/documents@6.16.0
+  - @opengeni/events@6.16.0
+  - @opengeni/github@6.16.0
+  - @opengeni/interaction@6.16.0
+  - @opengeni/observability@6.16.0
+  - @opengeni/storage@6.16.0
+  - @opengeni/tool-gateway@6.16.0
+  - @opengeni/vaults@6.16.0
+  - @opengeni/vaults-bitwarden@6.16.0
+  - @opengeni/vaults-keeper@6.16.0
+  - @opengeni/vaults-onepassword@6.16.0
+  - @opengeni/vaults-protonpass@6.16.0
+  - @opengeni/jev@6.16.0
+  - @opengeni/agent-proto@6.16.0
+  - @opengeni/network@6.16.0
+  - @opengeni/subscriptions@6.16.0
+
+## 6.15.0
+
+### Patch Changes
+
+- 20e9d79: An event added to a chat while Opengeni is archiving it, after the archive has read the chat's events, again appears in the stored transcript. Since the transcript started being written from the events the archive bundle reads, such an event was left out of both the bundle and the transcript. One more read after the bundle picks up these late events; normally it finds none.
+
+  Purging an archived chat's content now treats an invalid starting table (not a whole number, negative, or past the last table) as the first table. Such a value could previously skip every table and record the purge as complete with content still left. Valid starting tables behave as before.
+
+- c71c1d1: A turn refused for lack of credits or a paid plan when it starts (no credits, API credits required, own-key paid credit or Pro required, own subscription needing Pro, or a host entitlements deny) now stops like a turn that runs out of credits midway: the session stays idle with the credits or upgrade notice, instead of failing with "Activity task failed". This matters most when workers' messages wake a parent chat after its credits ran out; the parent no longer ends as failed, though each such wake is an empty stopped turn. Monthly limits and a connected subscription used for API work still fail the turn with their message at start.
+- cd033ae: A Codex model gated above the client version Opengeni presents no longer strands turns. The version refusal ("requires a newer version of Codex") now fails the turn with `codex_client_version_rejected` and is never treated as a plan refusal, even when it carries an upgrade code. When the backend hides a model from every connected account's live model list, home-provider placement no longer waits behind another account's unrelated quota reset: it runs on capacity, and the provider's answer decides. Nothing is written against the account, so service returns as soon as the presented version is new enough.
+- 08c0fe4: Claude and SuperGrok requests on the shared subscription core no longer read the source and the turn lease in two separate transactions right before their reservation: the reservation already checks both in its own transaction, as Codex requests have done since their admission change. A turn's credential read no longer runs a separate source check either: a disconnected connection is disabled and scrubbed, so the credential load itself already refuses it. Each Claude or SuperGrok model request makes three fewer sequential database transactions before it reaches the provider, and each Codex request one fewer.
+- 05ac4a2: Existing meetings' audio is now converted to the compact kept format too. The recording retention sweep converts a few tracks per run to one Opus file per track and deletes their uploaded pieces, as new meetings already are.
+- 6c6eac9: A missing runtime EXECUTE grant no longer takes the API and workers out of service. When the runtime role lacks EXECUTE on a routine the binary requires (a declared private routine or a target-schema capability), startup and readiness now report it as degraded and stay ready. It is reported through a structured warning, the `opengeni_runtime_database_degraded_findings` gauge and the new `OpenGeniRuntimeDatabaseGrantMissing` warning alert. Calls to the affected routines still fail with a permission error. A finding counts as degraded only when granting the missing EXECUTE removes it without raising any other finding.
+
+  Unsafe posture still fails startup and readiness:
+
+  - excess, PUBLIC or forbidden privileges
+  - wrong owners or search paths
+  - RLS problems
+  - forbidden role attributes or memberships
+  - missing CONNECT or schema USAGE
+  - missing or ambiguous objects
+  - anything that cannot be inspected
+
+  The posture CLI (the Helm migration job), the runtime-posture compatibility workflow and the previous-binary checks keep the strict evaluation, where every finding still fails.
+
+  Embedders: `runtimeDatabaseReadyCheck` and the worker's `databasePosture` readiness now also degrade on a missing required grant. Both take an optional listener for the degraded findings (`onDegraded`, and `onDegradedDatabasePosture` on `runOpenGeniWorker`). New exports from `@opengeni/db`:
+
+  - `classifyRuntimeDatabasePosture`, `assertRuntimeDatabaseReadiness` and `reportRuntimeDatabaseDegraded`
+  - the types `RuntimeDatabasePostureFindings`, `RuntimeDatabaseDegradedListener` and `RuntimeDatabaseDegradedObserver`
+  - the constants `RUNTIME_DATABASE_DEGRADED_GAUGE`, `RUNTIME_DATABASE_DEGRADED_LOG_INTERVAL_MS` and `RUNTIME_DATABASE_DEGRADED_LOG_FINDINGS`
+
+- c71c1d1: Agents are told when their managed sandbox was stopped. A stopped sandbox is restored from its saved `/workspace`, so files elsewhere (such as `/tmp`) and running programs may be gone, and agents used to find out only from failing commands. The first turn attempt after a stop the agent hasn't acted since now carries one sentence with the time and what may be gone. With the short idle grace, this appears on most turns that follow a pause after sandbox use. A box found lost during a turn is not covered. The reaper's stop event now records `providerStopped`, so a Connected Machine's drain, which stops nothing, is not reported.
+- f22647a: The system prompt no longer changes when repository Skills are added or removed, the workspace becomes unreachable or degraded, or a turn switches between deferred and indexed Skill discovery. It keeps one stable "Repository skills" notice, and the live index reaches the model as a durable "Repository skills" developer history item, written only when it changes, frozen per turn and placed before the turn that first sees it. The current run sees the item at the same position later turns load it from, so earlier signed Claude thinking and cached prefixes stay valid. The one-shot request for a missing session title is now part of the turn's operational notice instead of being appended to the first request's system prompt. New exports: `ensureSessionRepositorySkills` (`@opengeni/db`), `repositorySkillsContextItem`, `readRepositorySkillsContext` and `latestRepositorySkillsIndex` (`@opengeni/contracts`), and the `publishRepositorySkills` agent option (`@opengeni/runtime`).
+- 3d56fc2: The turn retry alert no longer fires when agents deliberately move their active sandbox mid-turn, for example to work on a connected machine and back. Such a swap or detach continues the turn on its new route in a fresh attempt by design; it now counts in `opengeni_turn_recoveries_total` as `cause="route_change"` instead of `sandbox`, and `OpenGeniTurnRecoveryRatioHigh` excludes it alongside `provider`. A home backend that still needs recovery remains `sandbox`.
+- Updated dependencies [e6eeb48]
+- Updated dependencies [708848c]
+- Updated dependencies [a5e190e]
+- Updated dependencies [b110015]
+- Updated dependencies [20e9d79]
+- Updated dependencies [5164413]
+- Updated dependencies [5525e63]
+- Updated dependencies [e5c3dcd]
+- Updated dependencies [60d067d]
+- Updated dependencies [bf236a6]
+- Updated dependencies [da60317]
+- Updated dependencies [c867798]
+- Updated dependencies [db28286]
+- Updated dependencies [19ab8c3]
+- Updated dependencies [cd033ae]
+- Updated dependencies [464e61f]
+- Updated dependencies [a8137d2]
+- Updated dependencies [3bab763]
+- Updated dependencies [b81b7be]
+- Updated dependencies [98fb3c7]
+- Updated dependencies [1a1de47]
+- Updated dependencies [f92ff08]
+- Updated dependencies [2107e6f]
+- Updated dependencies [060c983]
+- Updated dependencies [bf804ef]
+- Updated dependencies [dfeab20]
+- Updated dependencies [ab4941f]
+- Updated dependencies [6a5023d]
+- Updated dependencies [e3df016]
+- Updated dependencies [02ac654]
+- Updated dependencies [dea4920]
+- Updated dependencies [b0fce89]
+- Updated dependencies [05ac4a2]
+- Updated dependencies [9885d37]
+- Updated dependencies [6c6eac9]
+- Updated dependencies [c71c1d1]
+- Updated dependencies [329ad8f]
+- Updated dependencies [1050d28]
+- Updated dependencies [f22647a]
+- Updated dependencies [7a83f9b]
+- Updated dependencies [3721c96]
+- Updated dependencies [8e15b0b]
+- Updated dependencies [850b4d5]
+- Updated dependencies [4459bd7]
+- Updated dependencies [ee44e4b]
+  - @opengeni/core@6.15.0
+  - @opengeni/contracts@6.15.0
+  - @opengeni/sdk@6.15.0
+  - @opengeni/runtime@6.15.0
+  - @opengeni/config@6.15.0
+  - @opengeni/db@6.15.0
+  - @opengeni/subscriptions@6.15.0
+  - @opengeni/jev@6.15.0
+  - @opengeni/codex@6.15.0
+  - @opengeni/interaction@6.15.0
+  - @opengeni/observability@6.15.0
+  - @opengeni/capabilities@6.15.0
+  - @opengeni/codemode@6.15.0
+  - @opengeni/decisions@6.15.0
+  - @opengeni/documents@6.15.0
+  - @opengeni/events@6.15.0
+  - @opengeni/github@6.15.0
+  - @opengeni/storage@6.15.0
+  - @opengeni/tool-gateway@6.15.0
+  - @opengeni/vaults@6.15.0
+  - @opengeni/vaults-bitwarden@6.15.0
+  - @opengeni/vaults-keeper@6.15.0
+  - @opengeni/vaults-onepassword@6.15.0
+  - @opengeni/vaults-protonpass@6.15.0
+  - @opengeni/agent-proto@6.15.0
+  - @opengeni/network@6.15.0
+  - @opengeni/xai-subscription@6.15.0
+
 ## 6.14.0
 
 ### Patch Changes

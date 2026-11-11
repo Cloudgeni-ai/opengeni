@@ -50,6 +50,7 @@ mod restart_in_place;
 mod roots;
 mod sleep;
 mod stopped;
+mod stuck_disk;
 
 /// Bytes of fake guest memory that hold its value. A memory image is as long
 /// as the sandbox's memory, so the rest of it is a hole.

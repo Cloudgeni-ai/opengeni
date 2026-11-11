@@ -4839,6 +4839,8 @@ describe("workflow contracts", () => {
           "batch-receipt",
           "merge-content",
           "full-green",
+          // Batch-only by design; asserted with the release-image gate below.
+          "batch-api-image",
         ].includes(name)
       )
         continue;
@@ -5003,13 +5005,51 @@ describe("workflow contracts", () => {
     }
     // A batch candidate has no approval to order: the gate is skipped and the
     // API image builds beside the lanes; the final aggregates still require
-    // every lane and image before the batcher lands it.
+    // every lane and image before the batcher lands it. A job starts only once
+    // every job it needs settled, even a skipped one, so the batch build is a
+    // separate job that does not need the gate.
     const batchPush = { event_name: "push", ref: "refs/heads/batch/0123456789ab" };
     expect(
       evaluate(gate.if, batchPush, { plan, "automation-admission": { result: "skipped" } }),
     ).toBe(false);
-    expect(evaluate(api.if, batchPush, needsWith("push", "skipped"))).toBe(true);
+    expect(evaluate(api.if, batchPush, needsWith("push", "skipped"))).toBe(false);
     expect(api.environment).not.toContain("batch/");
+    const batchApi = ci.jobs["batch-api-image"];
+    expect(batchApi.needs).toEqual(["plan", "artifact-runtime"]);
+    expect(batchApi.environment).toBe("ci-build");
+    const batchNeeds = { plan, "artifact-runtime": { result: "success" } };
+    expect(evaluate(batchApi.if, batchPush, batchNeeds)).toBe(true);
+    expect(evaluate(batchApi.if, batchPush, batchNeeds, true)).toBe(false);
+    expect(
+      evaluate(batchApi.if, batchPush, {
+        ...batchNeeds,
+        "artifact-runtime": { result: "failure" },
+      }),
+    ).toBe(false);
+    for (const github of [
+      mainPush,
+      { event_name: "push", ref: "refs/heads/production" },
+      { event_name: "pull_request", ref: "refs/pull/1/merge" },
+      { event_name: "schedule", ref: "refs/heads/main" },
+      { event_name: "workflow_dispatch", ref: "refs/heads/main" },
+    ]) {
+      expect(evaluate(batchApi.if, github, batchNeeds), `${github.event_name}/${github.ref}`).toBe(
+        false,
+      );
+    }
+    const batchApiBuild = batchApi.steps.find((step: any) => step.id === "api_image");
+    expect(batchApiBuild.with.push).toBe(false);
+    expect(batchApiBuild.with.file).toBe(
+      api.steps.find((step: any) => step.id === "api_image").with.file,
+    );
+    expect(batchApiBuild.with.target).toBe("api");
+    expect(ci.jobs.images.needs).toContain("batch-api-image");
+    expect(
+      ci.jobs.images.steps.find((step: any) => step.name === "Require every workload image build")
+        .env.API_IMAGE_RESULT,
+    ).toBe(
+      "${{ startsWith(github.ref, 'refs/heads/batch/') && needs.batch-api-image.result || needs.api-image.result }}",
+    );
     // The gate itself runs after failed or skipped lanes so it can fail
     // closed, but never in a cancelled run or after failed admission.
     const gateNeeds = { plan, "automation-admission": { result: "skipped" } };
@@ -5113,8 +5153,14 @@ describe("workflow contracts", () => {
     }
     for (const jobName of ["api-image", "artifact-materializer-image", "sandbox-image"]) {
       expect(ci.jobs[jobName].if).toContain("needs.plan.outputs.bake_images == 'true'");
+    }
+    for (const jobName of ["api-image", "artifact-materializer-image"]) {
       expect(ci.jobs[jobName].if).toContain("needs.artifact-runtime.result == 'success'");
     }
+    // The sandbox image waits for the artifact runtime inside the job.
+    expect(ci.jobs["sandbox-image"].if).toContain(
+      "needs.plan.outputs.artifact_runtime_required == 'true'",
+    );
     const imageSteps = imageLeaves.flatMap((jobName) =>
       ci.jobs[jobName].steps.filter((candidate: any) => candidate.with?.push),
     );

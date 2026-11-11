@@ -12,10 +12,19 @@ export async function resolveOutsideCallTarget(
     opened: string | null;
     unpin(): void;
     forgetOpened(): void;
+    /** The error for a named chat that no longer exists (a voice command's, say). */
+    missing?(sessionId: string): Error;
   },
 ): Promise<string> {
   const { requested, workspaceId, sessionExists, latestOrNew, client } = context;
-  if (requested) return requested;
+  if (requested) {
+    // A request that names the workspace (a voice command, a recent call, a
+    // link) is checked first: a deleted chat is an error, never another call.
+    if (context.requestedWorkspaceId && !(await sessionExists(requested))) {
+      throw preferences.missing?.(requested) ?? new Error("This chat no longer exists.");
+    }
+    return requested;
+  }
   if (preferences.target === "pinned" && preferences.pinned?.workspaceId === workspaceId) {
     if (await sessionExists(preferences.pinned.sessionId)) return preferences.pinned.sessionId;
     preferences.unpin();

@@ -20,6 +20,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import {
   githubBindingStatus,
+  githubInstallationBindingIssue,
   githubInstallationBindingLifecycle,
   GitHubRepositoryBranchAuthorityError,
   listWorkspaceGitHubRepositoryBranches,
@@ -370,6 +371,48 @@ describe("GitHub owner-authority binding routes", () => {
     ).toBe("unverified");
   });
 
+  test("names why a binding is not active by its fix", () => {
+    const stored = auditedInstallation();
+    const live = (overrides: Partial<{ installationId: number; suspended: boolean }> = {}) =>
+      new Map([[42, { installationId: 42, accountId: 501, suspended: false, ...overrides }]]);
+    expect(githubInstallationBindingIssue(stored, live(), 42, true)).toBeNull();
+    expect(githubInstallationBindingIssue(stored, new Map(), 42, true)).toBe("uninstalled");
+    expect(githubInstallationBindingIssue(stored, new Map([[42, null]]), 42, true)).toBe(
+      "uninstalled",
+    );
+    expect(githubInstallationBindingIssue(stored, live({ suspended: true }), 42, true)).toBe(
+      "suspended",
+    );
+    expect(githubInstallationBindingIssue(stored, live(), 42, false)).toBe("github_unreachable");
+    expect(
+      githubInstallationBindingIssue({ ...stored, authorityNonce: null }, live(), 42, true),
+    ).toBe("owner_unconfirmed");
+    expect(githubInstallationBindingIssue(stored, live({ installationId: 99 }), 42, true)).toBe(
+      "account_changed",
+    );
+    // GitHub stopped sharing every repository: the fix is choosing some again.
+    expect(githubInstallationBindingIssue({ ...stored, repositoryIds: [] }, live(), 42, true)).toBe(
+      "no_repositories",
+    );
+    // ...unless the installation itself is gone, which is fixed first.
+    expect(
+      githubInstallationBindingIssue({ ...stored, repositoryIds: [] }, new Map(), 42, true),
+    ).toBe("uninstalled");
+    // An app uninstalled on GitHub reads as uninstalled even when its owner
+    // proof is also missing: reinstalling is the fix.
+    expect(
+      githubInstallationBindingIssue(
+        { ...stored, authorityNonce: null, repositoryIds: [] },
+        new Map(),
+        42,
+        true,
+      ),
+    ).toBe("uninstalled");
+    expect(
+      githubInstallationBindingIssue({ ...stored, authorityNonce: null }, live(), 42, false),
+    ).toBe("owner_unconfirmed");
+  });
+
   test("reports configured-but-unbound and non-active lifecycle states truthfully", () => {
     const binding = {
       installationId: 42,
@@ -475,6 +518,16 @@ describe("GitHub owner-authority binding routes", () => {
     );
     expect(response.status).toBe(200);
     const html = await response.text();
+    // The chooser's GET forms lead to a redirect to GitHub, which browsers
+    // check against form-action too.
+    const formAction = response.headers
+      .get("content-security-policy")
+      ?.split(";")
+      .map((directive) => directive.trim())
+      .find((directive) => directive.startsWith("form-action "));
+    expect(formAction?.split(" ")).toEqual(
+      expect.arrayContaining(["'self'", "https://github.com"]),
+    );
     expect(html).toContain("owner");
     expect(html).toContain("owners-org");
     expect(html).toContain(`/v1/workspaces/${workspaceId}/github/installations/select`);

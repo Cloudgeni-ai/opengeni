@@ -4,10 +4,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { OpenGeniClient, type GitHubActionPoliciesResponse } from "@opengeni/sdk";
 import type { AccessContext, GitHubAppInfo } from "@opengeni/react/app/types";
-import type {
-  IntegrationChoiceOption,
-  IntegrationViewModel,
-} from "@opengeni/react/app/components/capabilities/integration-view-model";
+import type { IntegrationViewModel } from "@opengeni/react/app/components/capabilities/integration-view-model";
 
 const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
 const OTHER_WORKSPACE_ID = "44444444-4444-4444-8444-444444444444";
@@ -40,7 +37,8 @@ mock.module("./personal-github-dialog", () => ({
 // Before the adapter loads: Radix decides at import whether it can use layout
 // effects, and without a document its dialogs never mount.
 GlobalRegistrator.register();
-const { useGitHubIntegration } = await import("./use-github-integration");
+const { useGitHubIntegration, githubInstallationAttention } =
+  await import("./use-github-integration");
 const { markPersonalGitHubRepositoryChooser } = await import("@/lib/personal-github-oauth");
 const { returningFromGitHub } = await import("@opengeni/react/app/lib/github-access-return");
 
@@ -148,17 +146,19 @@ function appContext(permissions: string[], update: ReturnType<typeof mock>) {
     personalGitHubSelection: null,
     personalGitHubBusy: false,
     client: {
-      getGitHubActionPolicies: mock(async () => ({
-        enabled: true,
-        actors: [
-          {
-            kind: "workspace_app" as const,
-            installationId: 71,
-            label: "Opengeni bot on Cloudgeni-ai",
-            groups: { routine: "ask" as const, review: "ask" as const, merge: "ask" as const },
-          },
-        ],
-      })),
+      getGitHubActionPolicies: mock(
+        async (): Promise<GitHubActionPoliciesResponse> => ({
+          enabled: true,
+          actors: [
+            {
+              kind: "workspace_app" as const,
+              installationId: 71,
+              label: "Opengeni bot on Cloudgeni-ai",
+              groups: { routine: "ask" as const, review: "ask" as const, merge: "ask" as const },
+            },
+          ],
+        }),
+      ),
       updateGitHubActionPolicy: update,
     },
     disconnectGitHubInstallation: async () => true,
@@ -167,12 +167,38 @@ function appContext(permissions: string[], update: ReturnType<typeof mock>) {
   };
 }
 
-function choice(model: IntegrationViewModel, suffix: string): IntegrationChoiceOption {
-  const option = model.options.find(
-    (candidate) => candidate.kind === "choice" && candidate.id.endsWith(suffix),
+function policies(model: IntegrationViewModel) {
+  if (!model.policies) throw new Error("Missing approvals table");
+  return model.policies;
+}
+
+function policyCell(model: IntegrationViewModel, row: string, column = "app") {
+  const cell = policies(model).cell(row, column);
+  if (!cell) throw new Error(`Missing approval cell ${row}:${column}`);
+  return cell;
+}
+
+function installationRows(model: IntegrationViewModel) {
+  return model.sections?.find((candidate) => candidate.id === "github-app")?.rows ?? [];
+}
+
+function installationRow(model: IntegrationViewModel, installationId: number) {
+  const row = installationRows(model).find(
+    (candidate) => candidate.id === `github-installation-${installationId}`,
   );
-  if (!option || option.kind !== "choice") throw new Error(`Missing policy option ${suffix}`);
-  return option;
+  if (!row) throw new Error(`Missing installation row ${installationId}`);
+  return row;
+}
+
+function workspaceAppActor(
+  installationId: number,
+  groups: {
+    routine: "allow" | "ask" | "block";
+    review: "allow" | "ask" | "block";
+    merge: "allow" | "ask" | "block";
+  },
+) {
+  return { kind: "workspace_app" as const, installationId, label: `bot ${installationId}`, groups };
 }
 
 describe("GitHub action approval controls", () => {
@@ -185,20 +211,103 @@ describe("GitHub action approval controls", () => {
     }));
     const rendered = await renderAdapter(appContext(["github:manage"], update));
     try {
-      expect(choice(rendered.model(), "-routine").value).toBe("ask");
-      expect(choice(rendered.model(), "-merge").value).toBe("ask");
+      const table = policies(rendered.model());
+      expect(table.columns).toEqual([{ id: "app", label: "Opengeni app" }]);
+      expect(table.rows.map((row) => row.label)).toEqual([
+        "Create and update work",
+        "Submit reviews",
+        "Merge pull requests",
+      ]);
+      expect(table.choices.map((choice) => choice.label)).toEqual(["Allow", "Ask first", "Block"]);
+      // One short footnote, no per-control boilerplate.
+      expect(table.footnote).toBe("Changes apply to new actions.");
+      expect(table.advanced).toBeUndefined();
+      expect(policyCell(rendered.model(), "routine").value).toBe("ask");
+      expect(policyCell(rendered.model(), "merge").value).toBe("ask");
       await act(async () => {
-        choice(rendered.model(), "-routine").onChange("allow");
+        policies(rendered.model()).onChange("routine", "app", "allow");
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
+      expect(update).toHaveBeenCalledTimes(1);
       expect(update).toHaveBeenCalledWith(WORKSPACE_ID, {
         actor: { kind: "workspace_app", installationId: 71 },
         group: "routine",
         decision: "allow",
       });
-      expect(choice(rendered.model(), "-routine").value).toBe("allow");
-      expect(choice(rendered.model(), "-review").value).toBe("ask");
-      expect(choice(rendered.model(), "-merge").value).toBe("ask");
+      expect(policyCell(rendered.model(), "routine").value).toBe("allow");
+      expect(policyCell(rendered.model(), "review").value).toBe("ask");
+      expect(policyCell(rendered.model(), "merge").value).toBe("ask");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("All actions sets every action on every installation, one save at a time", async () => {
+    const saved: Array<{ installationId: number; group: string; decision: string }> = [];
+    const actors = new Map([
+      [71, workspaceAppActor(71, { routine: "allow", review: "ask", merge: "ask" })],
+      [81, workspaceAppActor(81, { routine: "allow", review: "allow", merge: "ask" })],
+    ]);
+    let inFlight = 0;
+    const update = mock(
+      async (
+        _workspaceId: string,
+        input: {
+          actor: { kind: "workspace_app"; installationId: number };
+          group: "routine" | "review" | "merge";
+          decision: "allow" | "ask" | "block";
+        },
+      ) => {
+        inFlight += 1;
+        expect(inFlight).toBe(1);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        inFlight -= 1;
+        saved.push({
+          installationId: input.actor.installationId,
+          group: input.group,
+          decision: input.decision,
+        });
+        const actor = actors.get(input.actor.installationId)!;
+        const next = { ...actor, groups: { ...actor.groups, [input.group]: input.decision } };
+        actors.set(input.actor.installationId, next);
+        return next;
+      },
+    );
+    const context = appContext(["github:manage"], update);
+    context.githubStatus.installations = [
+      { ...context.githubStatus.installations[0]!, installationId: 71, accountLogin: "acme" },
+      { ...context.githubStatus.installations[0]!, installationId: 81, accountLogin: "octocat" },
+    ];
+    (context.client as Record<string, unknown>).getGitHubActionPolicies = mock(async () => ({
+      enabled: true,
+      actors: [...actors.values()],
+    }));
+    const rendered = await renderAdapter(context);
+    try {
+      const table = policies(rendered.model());
+      // The installations agree on nothing but routine work.
+      expect(table.all?.label).toBe("All actions");
+      expect(table.all?.cell("app")?.value).toBe("mixed");
+      expect(table.otherValueLabels).toEqual({ mixed: "Mixed" });
+      expect(policyCell(rendered.model(), "routine").value).toBe("allow");
+      expect(policyCell(rendered.model(), "review").value).toBe("mixed");
+      // Each installation can still be set on its own, behind Advanced.
+      expect(table.advanced?.columns.map((column) => column.label)).toEqual(["acme", "octocat"]);
+      expect(table.advanced?.summary).toBe("Installations are set differently");
+      await act(async () => {
+        policies(rendered.model()).all!.onChange("app", "ask");
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      // Only the values that change are saved.
+      expect(saved).toEqual([
+        { installationId: 71, group: "routine", decision: "ask" },
+        { installationId: 81, group: "routine", decision: "ask" },
+        { installationId: 81, group: "review", decision: "ask" },
+      ]);
+      for (const row of ["routine", "review", "merge"])
+        expect(policyCell(rendered.model(), row).value).toBe("ask");
+      expect(policies(rendered.model()).all?.cell("app")?.value).toBe("ask");
+      expect(policies(rendered.model()).advanced?.summary).toBe("Set each installation separately");
     } finally {
       await rendered.unmount();
     }
@@ -223,14 +332,14 @@ describe("GitHub action approval controls", () => {
     );
     try {
       await act(async () => {
-        choice(rendered.model(), "-routine").onChange("block");
+        policies(rendered.model()).onChange("routine", "app", "block");
       });
       await rendered.rerender(OTHER_WORKSPACE_ID);
       await act(async () => {
         resolveSave(actor);
         await pending;
       });
-      expect(choice(rendered.model(), "-routine").value).toBe("ask");
+      expect(policyCell(rendered.model(), "routine").value).toBe("ask");
     } finally {
       await rendered.unmount();
     }
@@ -251,19 +360,20 @@ describe("GitHub action approval controls", () => {
     const rendered = await renderAdapter(appContext(["github:manage"], update));
     try {
       await act(async () => {
-        choice(rendered.model(), "-routine").onChange("allow");
-        choice(rendered.model(), "-merge").onChange("block");
+        policies(rendered.model()).onChange("routine", "app", "allow");
+        policies(rendered.model()).onChange("merge", "app", "block");
       });
       expect(update).toHaveBeenCalledTimes(1);
-      expect(choice(rendered.model(), "-merge").disabled).toBe(true);
+      expect(policyCell(rendered.model(), "merge").disabled).toBe(true);
+      expect(policyCell(rendered.model(), "routine").busy).toBe(true);
       await act(async () => {
         resolveSave(actor);
         await pending;
       });
-      expect(choice(rendered.model(), "-routine").value).toBe("allow");
-      expect(choice(rendered.model(), "-merge").disabled).toBe(false);
+      expect(policyCell(rendered.model(), "routine").value).toBe("allow");
+      expect(policyCell(rendered.model(), "merge").disabled).toBe(false);
       await act(async () => {
-        choice(rendered.model(), "-merge").onChange("block");
+        policies(rendered.model()).onChange("merge", "app", "block");
         await pending;
       });
       expect(update).toHaveBeenCalledTimes(2);
@@ -280,9 +390,110 @@ describe("GitHub action approval controls", () => {
       ),
     );
     try {
-      expect(choice(rendered.model(), "-routine").disabled).toBe(true);
-      expect(choice(rendered.model(), "-review").disabled).toBe(true);
-      expect(choice(rendered.model(), "-merge").disabled).toBe(true);
+      expect(policyCell(rendered.model(), "routine").disabled).toBe(true);
+      expect(policyCell(rendered.model(), "review").disabled).toBe(true);
+      expect(policyCell(rendered.model(), "merge").disabled).toBe(true);
+      expect(policies(rendered.model()).all?.cell("app")?.disabled).toBe(true);
+      expect(policies(rendered.model()).note).toBe(
+        "A workspace admin sets the Opengeni app's approvals.",
+      );
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a failed load shows a retry in place of the table", async () => {
+    const context = appContext(
+      ["github:manage"],
+      mock(async () => ({})),
+    );
+    let fail = true;
+    const getPolicies = mock(async () => {
+      if (fail) throw new Error("unavailable");
+      return {
+        enabled: true,
+        actors: [workspaceAppActor(71, { routine: "ask", review: "ask", merge: "ask" })],
+      };
+    });
+    (context.client as Record<string, unknown>).getGitHubActionPolicies = getPolicies;
+    const rendered = await renderAdapter(context);
+    try {
+      expect(policies(rendered.model()).failure?.message).toBe(
+        "Approval settings could not be loaded.",
+      );
+      fail = false;
+      await act(async () => {
+        policies(rendered.model()).failure!.onRetry();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(policies(rendered.model()).failure).toBeUndefined();
+      expect(policyCell(rendered.model(), "merge").value).toBe("ask");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("offers Settings and deletions for Your GitHub only", async () => {
+    const personal = {
+      kind: "personal" as const,
+      connectionId: "personal-1",
+      label: "@benyhh",
+      groups: {
+        routine: "allow" as const,
+        review: "allow" as const,
+        merge: "allow" as const,
+        sensitive: "ask" as const,
+      },
+    };
+    const update = mock(async () => ({
+      ...personal,
+      groups: { ...personal.groups, sensitive: "allow" as const },
+    }));
+    const context = appContext(["github:manage", "connections:write"], update);
+    const workspaceApp = (await context.client.getGitHubActionPolicies()).actors[0]!;
+    context.client.getGitHubActionPolicies = mock(async () => ({
+      enabled: true,
+      actors: [workspaceApp, personal],
+    }));
+    const rendered = await renderAdapter(context);
+    try {
+      const row = policies(rendered.model()).rows.find((candidate) => candidate.id === "sensitive");
+      expect(row?.label).toBe("Settings and deletions");
+      // The Opengeni app has no gh gateway: no cell, and All actions ignores it.
+      expect(policies(rendered.model()).cell("sensitive", "app")).toBeUndefined();
+      expect(policyCell(rendered.model(), "sensitive", "personal").value).toBe("ask");
+      expect(policies(rendered.model()).all?.cell("personal")?.value).toBe("mixed");
+      expect(policies(rendered.model()).all?.cell("app")?.value).not.toBeUndefined();
+      await act(async () => {
+        policies(rendered.model()).onChange("sensitive", "personal", "allow");
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledWith(WORKSPACE_ID, {
+        actor: { kind: "personal", connectionId: "personal-1" },
+        group: "sensitive",
+        decision: "allow",
+      });
+      expect(policyCell(rendered.model(), "sensitive", "personal").value).toBe("allow");
+      expect(policies(rendered.model()).all?.cell("personal")?.value).toBe("allow");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a table with only the Opengeni app has no Settings and deletions row", async () => {
+    const rendered = await renderAdapter(
+      appContext(
+        ["github:manage"],
+        mock(async () => ({})),
+      ),
+    );
+    try {
+      expect(policies(rendered.model()).rows.map((row) => row.id)).toEqual([
+        "routine",
+        "review",
+        "merge",
+      ]);
     } finally {
       await rendered.unmount();
     }
@@ -321,7 +532,7 @@ describe("GitHub action approval controls", () => {
     const rendered = await renderAdapter(context);
     try {
       await rendered.rerender(OTHER_WORKSPACE_ID);
-      expect(choice(rendered.model(), "-routine").value).toBe("allow");
+      expect(policyCell(rendered.model(), "routine").value).toBe("allow");
 
       await act(async () => {
         resolveFirst?.({
@@ -338,7 +549,7 @@ describe("GitHub action approval controls", () => {
         await first;
       });
 
-      expect(choice(rendered.model(), "-routine").value).toBe("allow");
+      expect(policyCell(rendered.model(), "routine").value).toBe("allow");
     } finally {
       await rendered.unmount();
     }
@@ -355,6 +566,7 @@ for (const count of [1, 2])
       Array.from({ length: count }, (_, index) => ({
         ...context.githubStatus.installations[0]!,
         installationId: 71 + index,
+        accountLogin: `account-${71 + index}`,
         configureUrl: `https://api.example.test/github/configure/${71 + index}?state=${suffix}`,
       }));
     context.githubStatus.installations = installations("loaded");
@@ -373,29 +585,21 @@ for (const count of [1, 2])
     }));
     window.open = open as unknown as typeof window.open;
     try {
-      if (count === 1) {
+      // One row per installation, and no shared header link that would open only the first.
+      expect(rendered.model().access?.onEdit).toBeUndefined();
+      for (let index = 0; index < count; index++) {
+        const installationId = 71 + index;
+        const action = installationRow(rendered.model(), installationId).action;
+        expect(action).toMatchObject({
+          label: "Change repositories",
+          ariaLabel: `Change repositories for account-${installationId}`,
+        });
         await act(async () => {
-          rendered.model().access!.onEdit!();
+          installationRow(rendered.model(), installationId).action!.onClick();
           // A double-click while the link is minted opens one tab.
-          rendered.model().access!.onEdit!();
+          installationRow(rendered.model(), installationId).action!.onClick();
           await new Promise((resolve) => setTimeout(resolve, 0));
         });
-      } else {
-        // One row per installation, and no shared header link that would open only the first.
-        expect(rendered.model().access?.onEdit).toBeUndefined();
-        const ids = rendered
-          .model()
-          .options.filter(
-            (option) => option.kind === "link" && option.id.startsWith("github-repositories-"),
-          )
-          .map((option) => option.id);
-        for (const id of ids) {
-          await act(async () => {
-            const option = rendered.model().options.find((candidate) => candidate.id === id);
-            if (option?.kind === "link") option.action.onClick();
-            await new Promise((resolve) => setTimeout(resolve, 0));
-          });
-        }
       }
       expect(open).toHaveBeenCalledTimes(count);
       // Back from GitHub, the composer's repository menu refreshes and syncs.
@@ -414,14 +618,28 @@ for (const count of [1, 2])
     }
   });
 
-test("several installations each unlink on their own, after a confirm", async () => {
+function confirmButton(label: string) {
+  const button = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+    (candidate) => candidate.textContent === label,
+  );
+  if (!button) throw new Error(`Missing ${label} button`);
+  return button;
+}
+
+test("several installations each remove on their own, after a confirm", async () => {
   const context = appContext(
     ["github:manage"],
     mock(async () => ({})),
   );
   context.githubStatus.installations = [
     { ...context.githubStatus.installations[0]!, installationId: 71, accountLogin: "Cloudgeni-ai" },
-    { ...context.githubStatus.installations[0]!, installationId: 81, accountLogin: "benyhh" },
+    {
+      ...context.githubStatus.installations[0]!,
+      installationId: 81,
+      accountLogin: "benyhh",
+      accountType: "User",
+      repositoryCount: 4,
+    },
   ];
   const unlinked: number[] = [];
   const rendered = await renderAdapter({
@@ -432,31 +650,24 @@ test("several installations each unlink on their own, after a confirm", async ()
     },
   });
   try {
-    const rows = rendered
-      .model()
-      .options.filter(
-        (option) => option.kind === "link" && option.id.startsWith("github-repositories-"),
-      );
-    expect(rows.map((row) => row.label)).toEqual(["Cloudgeni-ai", "benyhh"]);
+    const rows = installationRows(rendered.model());
+    expect(rows.map((row) => [row.title, row.meta])).toEqual([
+      ["Cloudgeni-ai", "Organization · 1 repository"],
+      ["benyhh", "Personal account · 4 repositories"],
+    ]);
+    // Healthy rows carry no status.
+    expect(rows.every((row) => row.attention === undefined)).toBe(true);
     const benyhh = rows[1]!;
-    if (benyhh.kind !== "link") throw new Error("expected a link row");
-    expect(benyhh.secondaryAction).toMatchObject({
-      label: "Unlink",
-      ariaLabel: "Unlink benyhh",
-      destructive: true,
-    });
+    expect(benyhh.menu).toEqual([expect.objectContaining({ label: "Remove", destructive: true })]);
     await act(async () => {
-      benyhh.secondaryAction!.onClick();
+      benyhh.menu![0]!.onClick();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    // Nothing is unlinked until the confirm.
+    // Nothing is removed until the confirm.
     expect(unlinked).toEqual([]);
-    expect(document.body.textContent).toContain("Unlink benyhh?");
-    const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent === "Unlink",
-    );
+    expect(document.body.textContent).toContain("Remove benyhh from this workspace?");
     await act(async () => {
-      confirm!.click();
+      confirmButton("Remove").click();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(unlinked).toEqual([81]);
@@ -465,7 +676,7 @@ test("several installations each unlink on their own, after a confirm", async ()
   }
 });
 
-test("installations that are no longer active stay unlinkable", async () => {
+test("an installation that is not active says why, offers its fix, and stays removable", async () => {
   const context = appContext(
     ["github:manage"],
     mock(async () => ({})),
@@ -478,6 +689,7 @@ test("installations that are no longer active stay unlinkable", async () => {
       installationId: 71,
       accountLogin: "Cloudgeni-ai",
       lifecycle: "suspended",
+      issue: "suspended",
     },
   ];
   const unlinked: number[] = [];
@@ -491,30 +703,232 @@ test("installations that are no longer active stay unlinkable", async () => {
   } as typeof context);
   try {
     const model = rendered.model();
-    const row = model.options.find((option) => option.id === "github-repositories-71");
-    if (row?.kind !== "link") throw new Error("expected an installation row");
-    expect(row.description).toContain("Not active");
-    expect(row.secondaryAction?.ariaLabel ?? row.action.ariaLabel).toBe("Unlink Cloudgeni-ai");
+    expect(model.chip).toEqual({ label: "Needs attention", tone: "warn" });
+    const row = installationRow(model, 71);
+    expect(row.attention).toEqual({
+      label: "Suspended on GitHub",
+      detail: "The Opengeni app is suspended on Cloudgeni-ai. Unsuspend it in GitHub's settings.",
+    });
+    expect(row.action).toMatchObject({
+      label: "Unsuspend on GitHub",
+      ariaLabel: "Unsuspend on GitHub: Cloudgeni-ai",
+      primary: true,
+    });
     expect(model.footer).toMatchObject({
       kind: "actions",
       secondary: { label: "Disconnect Opengeni app" },
     });
     await act(async () => {
-      (row.secondaryAction ?? row.action).onClick();
+      row.menu!.find((item) => item.label === "Remove")!.onClick();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    expect(document.body.textContent).toContain("Unlink Cloudgeni-ai?");
-    const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent === "Unlink",
-    );
+    expect(document.body.textContent).toContain("Remove Cloudgeni-ai from this workspace?");
     await act(async () => {
-      confirm!.click();
+      confirmButton("Remove").click();
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(unlinked).toEqual([71]);
   } finally {
     await rendered.unmount();
   }
+});
+
+test("a member sees what is wrong without the fix they cannot make", async () => {
+  const context = appContext(
+    ["github:use"],
+    mock(async () => ({})),
+  );
+  context.githubStatus.installations = [
+    {
+      ...context.githubStatus.installations[0]!,
+      lifecycle: "deleted",
+      issue: "uninstalled",
+    },
+  ];
+  const rendered = await renderAdapter(context);
+  try {
+    const row = installationRow(rendered.model(), 71);
+    expect(row.attention).toEqual({
+      label: "Uninstalled on GitHub",
+      detail: "The Opengeni app was removed from Cloudgeni-ai on GitHub.",
+    });
+    expect(row.action).toBeUndefined();
+    expect(row.menu).toBeUndefined();
+    // The summary still names it, without an action the member cannot take.
+    expect(rendered.model().notice).toEqual({
+      tone: "waiting",
+      title: "The Opengeni app was uninstalled from Cloudgeni-ai on GitHub.",
+    });
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+/** A Connect transport that records each begin, for the repair dialog. */
+function connectRecorder() {
+  const begun: unknown[][] = [];
+  const attempt = {
+    id: "attempt-repair",
+    workspaceId: WORKSPACE_ID,
+    providerId: "github-app",
+    ownership: "workspace",
+    revision: 1,
+    state: "requires_user_action",
+    nextAction: { type: "authorize", url: "https://github.com/apps/opengeni/installations/new" },
+    credentialsCommitted: false,
+    integrationInstalled: false,
+    completionRequirement: "provider_setup",
+    expiresAt: new Date(Date.now() + 600_000).toISOString(),
+  };
+  const transport = {
+    catalog: async () => [],
+    accounts: async () => [],
+    pending: async () => [],
+    begin: async (...args: unknown[]) => {
+      begun.push(args);
+      return structuredClone(attempt);
+    },
+    recover: async () => structuredClone(attempt),
+    get: async () => structuredClone(attempt),
+    advance: async () => structuredClone(attempt),
+    cancel: async () => structuredClone(attempt),
+    disconnect: async () => {},
+  };
+  // Connect returns to the page it started from, which must be a web address.
+  (window as unknown as { happyDOM: { setURL: (url: string) => void } }).happyDOM.setURL(
+    "https://app.example.test/integrations/github",
+  );
+  return { begun, transport };
+}
+
+test("an app uninstalled on one account is named at the top, and Reinstall repairs that installation", async () => {
+  const context = appContext(
+    ["github:manage"],
+    mock(async () => ({})),
+  );
+  const healthy = context.githubStatus.installations[0]!;
+  context.githubStatus.installations = [
+    {
+      ...healthy,
+      installationId: 81,
+      githubAccountId: 82,
+      accountLogin: "benyhh",
+      accountType: "User",
+      lifecycle: "deleted",
+      issue: "uninstalled",
+      repositoryCount: 0,
+    },
+    healthy,
+  ];
+  const { begun, transport } = connectRecorder();
+  const rendered = await renderAdapter({
+    ...context,
+    client: { ...context.client, connectTransport: () => transport },
+  });
+  try {
+    const model = rendered.model();
+    expect(installationRow(model, 81).attention?.label).toBe("Uninstalled on GitHub");
+    expect(installationRow(model, 71).attention).toBeUndefined();
+    // The summary names it; the row keeps the one fix.
+    expect(model.notice).toEqual({
+      tone: "waiting",
+      title: "The Opengeni app was uninstalled from benyhh on GitHub.",
+    });
+    expect(installationRow(model, 81).action?.label).toBe("Reinstall");
+    await act(async () => {
+      installationRow(model, 81).action!.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    // The dialog names the fix, and Connect starts at this installation
+    // instead of the account chooser.
+    expect(document.body.textContent).toContain("Reinstall on benyhh");
+    expect(document.body.textContent).toContain(
+      "The Opengeni app was removed on GitHub. Install it again.",
+    );
+    expect(document.body.textContent).not.toContain("Choose an account");
+    expect(JSON.stringify(begun)).toContain('"reconnectAccountId":"github-installation:81"');
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("against a server that names no issue, Reinstall falls back to the account chooser", async () => {
+  const context = appContext(
+    ["github:manage"],
+    mock(async () => ({})),
+  );
+  context.githubStatus.installations = [
+    { ...context.githubStatus.installations[0]!, lifecycle: "deleted" },
+  ];
+  const { begun, transport } = connectRecorder();
+  const rendered = await renderAdapter({
+    ...context,
+    client: { ...context.client, connectTransport: () => transport },
+  });
+  try {
+    await act(async () => {
+      installationRow(rendered.model(), 71).action!.onClick();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(begun).toHaveLength(1);
+    expect(JSON.stringify(begun)).not.toContain("reconnectAccountId");
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("several installations that need attention are named together", async () => {
+  const context = appContext(
+    ["github:manage"],
+    mock(async () => ({})),
+  );
+  const healthy = context.githubStatus.installations[0]!;
+  context.githubStatus.installations = [
+    { ...healthy, accountLogin: "benyhh", lifecycle: "deleted", issue: "uninstalled" },
+    { ...healthy, installationId: 91, lifecycle: "suspended", issue: "suspended" },
+  ];
+  const rendered = await renderAdapter(context);
+  try {
+    expect(rendered.model().notice).toEqual({
+      tone: "waiting",
+      title: "benyhh and Cloudgeni-ai need attention.",
+    });
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+describe("githubInstallationAttention", () => {
+  const base = githubStatus().installations[0]!;
+  test("an active installation needs nothing", () => {
+    expect(githubInstallationAttention(base)).toBeNull();
+  });
+  for (const [issue, label, fix, actionLabel] of [
+    ["uninstalled", "Uninstalled on GitHub", "reinstall", "Reinstall"],
+    ["suspended", "Suspended on GitHub", "configure", "Unsuspend on GitHub"],
+    ["no_repositories", "No repositories", "configure", "Choose repositories"],
+    ["github_unreachable", "Not checked", "recheck", "Check again"],
+    ["account_changed", "Account changed", "remove", "Remove"],
+    ["owner_unconfirmed", "Needs authorization", "authorize", "Authorize"],
+  ] as const)
+    test(`${issue} is named by its fix`, () => {
+      expect(
+        githubInstallationAttention({ ...base, lifecycle: "unverified", issue }),
+      ).toMatchObject({ label, fix, actionLabel });
+    });
+  test("a server without the issue field falls back to the lifecycle", () => {
+    expect(githubInstallationAttention({ ...base, lifecycle: "deleted" })?.fix).toBe("reinstall");
+    expect(githubInstallationAttention({ ...base, lifecycle: "suspended" })?.fix).toBe("configure");
+    expect(githubInstallationAttention({ ...base, lifecycle: "unverified" })?.fix).toBe(
+      "authorize",
+    );
+  });
 });
 
 describe("GitHub load failures", () => {
@@ -628,7 +1042,9 @@ describe("GitHub connects two ways", () => {
       expect(personal.action?.connectProviderId).toBe("github-personal");
       const app = section(model, "github-app");
       expect(app.description).toBe("Work appears as the Opengeni bot, shared with the workspace.");
-      expect(app.status).toBe("Installed on Cloudgeni-ai");
+      // The rows say where it is installed.
+      expect(app.status).toBeUndefined();
+      expect(app.rows?.map((row) => row.title)).toEqual(["Cloudgeni-ai"]);
       expect(app.action?.label).toBe("Install on another account");
       expect(app.action?.connectProviderId).toBe("github-app");
       expect(model.connection).toEqual([]);
@@ -822,7 +1238,11 @@ describe("GitHub connects two ways", () => {
     );
     try {
       const model = rendered.model();
-      expect(model.sections).toBeUndefined();
+      // The header owns connecting; the app section holds only the installation rows.
+      expect(model.sections?.map((entry) => [entry.id, entry.action])).toEqual([
+        ["github-app", undefined],
+      ]);
+      expect(installationRows(model).map((row) => row.title)).toEqual(["Cloudgeni-ai"]);
       expect(model.description).toBe(
         "Work on repositories, issues, and pull requests through the Opengeni app.",
       );

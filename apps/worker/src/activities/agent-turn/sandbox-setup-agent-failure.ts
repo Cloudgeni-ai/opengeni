@@ -17,6 +17,7 @@ import {
   type UnresponsiveAgentRecovery,
   type UnresponsiveComputeMachine,
 } from "@opengeni/runtime";
+import { ComputeControlError } from "@opengeni/runtime/sandbox";
 import { CancelledFailure } from "@temporalio/activity";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 
@@ -705,12 +706,22 @@ export async function recoverUnresponsiveComputeAgent(
         { type: "sandbox.operation.failed", payload: { name, error: errorText(restartError) } },
       ])
       .catch(() => undefined);
-    return "restart_failed";
+    // The control service could not carry it out for now (`503 unavailable`):
+    // most often the box's host is restarting its own agent while the box
+    // runs on. A 503 does not prove nothing was restarted, so the words say
+    // "probably" and send the agent to check its commands first.
+    return isComputeHostUnavailable(restartError) ? "host_unavailable" : "restart_failed";
   }
   await recovery
     .publish([{ type: "sandbox.operation.completed", payload: { name } }])
     .catch(() => undefined);
   return "restarted";
+}
+
+/** A compute control refusal of `503 unavailable`: the box's host cannot
+ * serve it now (see compute/docs/agent-link.md). */
+function isComputeHostUnavailable(error: unknown): boolean {
+  return error instanceof ComputeControlError && error.kind === "unavailable";
 }
 
 /** A lost attempt (fenced, superseded) or a cancelled operation: never

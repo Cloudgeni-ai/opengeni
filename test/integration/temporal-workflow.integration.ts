@@ -15,6 +15,8 @@ import {
   POST_CLAIM_DATABASE_RECOVERY_FAILURE_TYPE,
   PRE_CLAIM_FAILURE_MESSAGE,
   PRE_CLAIM_FAILURE_TYPE,
+  SESSION_READ_ONLY_FAILURE_MESSAGE,
+  SESSION_READ_ONLY_FAILURE_TYPE,
 } from "../../apps/worker/src/activities/types";
 
 // An ungraceful worker death cannot be faked by throwing a TimeoutFailure
@@ -1985,6 +1987,119 @@ describe("Temporal workflow integration", () => {
         if (!firstWorkerStopped) firstWorker.shutdown();
         restartedWorker?.shutdown();
         await Promise.all([firstWorkerStopped ? undefined : firstRun, restartedRun]);
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "a late quiescence proof for a read-only session fails once and the workflow closes",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const proof = {
+        ...scope,
+        sessionId,
+        attemptId: crypto.randomUUID(),
+        workflowId,
+        workflowRunId: crypto.randomUUID(),
+        activityId: "old-activity-7",
+      };
+      let receiptAttempts = 0;
+      let reconciliations = 0;
+      const peeks: string[] = [];
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        // The session's content was archived after its turn was cancelled; the
+        // database refuses the receipt on every attempt, so the activity
+        // reports that non-retryably instead of retrying for days.
+        persistSessionAttemptQuiescence: async () => {
+          receiptAttempts += 1;
+          throw ApplicationFailure.create({
+            message: SESSION_READ_ONLY_FAILURE_MESSAGE,
+            type: SESSION_READ_ONLY_FAILURE_TYPE,
+            nonRetryable: true,
+          });
+        },
+        peekSessionWork: async () => {
+          peeks.push("read-only");
+          return { kind: "read-only" } as const;
+        },
+        reconcileSessionAttemptQuiescence: async () => {
+          reconciliations += 1;
+          return { action: "pending" as const };
+        },
+        runAgentTurn: async () => {
+          throw new Error("a read-only session must not dispatch a turn");
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ ...scope, sessionId }],
+          signal: "sessionAttemptQuiesced",
+          signalArgs: [proof],
+        });
+        await resultWithin(handle, staleWaitFailFastMs);
+        expect(receiptAttempts).toBe(1);
+        expect(peeks).toEqual(["read-only"]);
+        expect(reconciliations).toBe(0);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "a receipt reconciliation refused as read-only closes the workflow",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      let reconciliations = 0;
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        // Archived between this peek and the reconciliation's receipt write.
+        peekSessionWork: async () =>
+          ({ kind: "cancellation-wait", attemptId: "attempt-archived" }) as const,
+        reconcileSessionAttemptQuiescence: async () => {
+          reconciliations += 1;
+          throw ApplicationFailure.create({
+            message: SESSION_READ_ONLY_FAILURE_MESSAGE,
+            type: SESSION_READ_ONLY_FAILURE_TYPE,
+            nonRetryable: true,
+          });
+        },
+        runAgentTurn: async () => {
+          throw new Error("a read-only session must not dispatch a turn");
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId }],
+        });
+        await resultWithin(handle, staleWaitFailFastMs);
+        expect(reconciliations).toBe(1);
+      } finally {
+        worker.shutdown();
+        await run;
       }
     },
     temporalWorkflowTestTimeoutMs,

@@ -2526,6 +2526,31 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     ]
   },
   {
+    "id": "GET /v1/config/content-security",
+    "method": "GET",
+    "path": "/v1/config/content-security",
+    "request": [],
+    "response": []
+  },
+  {
+    "id": "GET /v1/image-proxy",
+    "method": "GET",
+    "path": "/v1/image-proxy",
+    "request": [],
+    "query": [
+      "ticket",
+      "url"
+    ],
+    "response": []
+  },
+  {
+    "id": "GET /v1/image-proxy/ticket",
+    "method": "GET",
+    "path": "/v1/image-proxy/ticket",
+    "request": [],
+    "response": []
+  },
+  {
     "id": "GET /v1/organizations/:accountId/insights/calls",
     "method": "GET",
     "path": "/v1/organizations/:accountId/insights/calls",
@@ -7181,6 +7206,15 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "permission": "sessions:create"
   },
   {
+    "id": "POST /v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in",
+    "method": "POST",
+    "path": "/v1/workspaces/:workspaceId/integrations/teams/link/microsoft-sign-in",
+    "request": [],
+    "response": [],
+    "browserOnly": "connecting or disconnecting Teams and linking an account requires the person's own signed-in Opengeni browser",
+    "permission": "sessions:create"
+  },
+  {
     "id": "POST /v1/workspaces/:workspaceId/learning/revisions",
     "method": "POST",
     "path": "/v1/workspaces/:workspaceId/learning/revisions",
@@ -8919,7 +8953,11 @@ export const ACTION_CATALOG: readonly ActionCatalogEntry[] = [
     "request": [
       "BrowserDownloadSaveRequest"
     ],
+    "query": [
+      "respondAsync"
+    ],
     "response": [
+      "BrowserDownloadSaveProgress",
       "BrowserDownloadSaveResponse"
     ],
     "permission": "sessions:control"
