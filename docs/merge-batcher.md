@@ -196,6 +196,37 @@ above).
    and keeps the others next in line as their own group, so none of them
    drops out of the bisection.
 
+6. **A second batch built on the running one.** While a batch tests, the
+   batcher builds the next batch on top of it instead of waiting for it to
+   land: it starts from the running batch's candidate (its last merge commit),
+   merges the next PRs in line onto it and pushes that as its own
+   `batch/<id>`, so both test at once. At most two batches run
+   (`MERGE_BATCHER_CONCURRENT_BATCHES`, `1` turns it off). The second batch's
+   manifest lists the running batch's PRs first, then its own, with the same
+   `base` (the `main` both were built on) and `stackedOn` naming the running
+   batch and how many PRs it has; its title names only its own PRs.
+   - It is judged only once the batch under it landed. Its retries run at
+     once, but a pass or a failure waits, as a failure may be the lower
+     batch's. It lands only when `main` is exactly the lower batch landed as
+     tested on that `base`: one squash commit per PR, each carrying the lower
+     batch's `Batch:` line and the tree CI tested at that point. Then it lands
+     its own PRs, often in the same pass, with the same landed-tree check.
+   - When the lower batch fails, is rebuilt or is cancelled, the second batch
+     is cancelled with it, and its PRs go back in line for the next build on
+     `main`. When one of its own PRs changes or leaves the queue, or `main`
+     moves under both, it is rebuilt the same way as any batch.
+   - It is never built on a bisection's group, a batch ahead of a bisection,
+     a blamed batch, a Version PR or a CI or batcher change, and it
+     never contains a Version PR or a CI or batcher change, nor a PR adding a
+     migration number one of the lower batch's PRs adds. It waits for the
+     batching window like any batch. Once it lands, or the lower batch is
+     split, everything is judged on `main` as before.
+
+   Two batches run their CI at once, so the queue uses up to twice the batch
+   CI runners while one batch is testing. When the lower batch passes, the
+   second one's result is usually already there, so its PRs land in the same
+   pass instead of a full CI run later.
+
 A batch is rebuilt from scratch whenever `main` moves under it, a member leaves
 the queue, or a member gets a new head that changes what the batch tests. The
 rebuild happens in the same pass, without the changed PR (its new head waits
@@ -218,6 +249,9 @@ line in the commit message and checks, failing closed:
   successfully;
 - the tip's manifest names this batch, its tree is the last member's tree, and
   this commit sits on the batch's base with the members landed in order;
+  for a batch built on another one, the members include the lower batch's PRs
+  first, so its own PRs are attested only when they landed right after the
+  lower batch's PRs on the same base, with the trees CI tested;
 - `Explain change impact`, `Typecheck and unit tests`, `Deployment artifacts`
   and `Workload image builds` passed on that run, and its uploaded impact plan
   is `full`.
@@ -281,6 +315,8 @@ staging deploys use the newest fully green `main` SHA as before.
 - **Run a pass now:** `gh workflow run merge-batcher.yml`.
 - **Stop landing:** set `MERGE_BATCHER` to anything else. Nothing is lost: the
   queue is the labels, and a leftover `batch/<id>` branch is rebuilt later.
+- **Run one batch at a time:** set `MERGE_BATCHER_CONCURRENT_BATCHES` to `1`.
+  The next pass cancels a second batch already built on the running one.
 - **Hold main for a release:** queue the Version PR (see
   [Releasing](#releasing-a-version-pr-holds-main)); do not change the window,
   the batch size or other PRs' labels.

@@ -87,4 +87,6 @@ jobs:
           GITHUB_TOKEN: ${{ steps.token.outputs.token }}
           BATCHER_WINDOW_SECONDS: ${{ vars.MERGE_BATCHER_WINDOW_SECONDS }}
           BATCHER_MAX_BATCH: ${{ vars.MERGE_BATCHER_MAX_BATCH }}
+          # 1 turns off building a second batch on the running one.
+          BATCHER_CONCURRENT_BATCHES: ${{ vars.MERGE_BATCHER_CONCURRENT_BATCHES }}
         run: bun scripts/batcher/main.ts --max-minutes 10

@@ -123,6 +123,24 @@ describe("classifyMainPush", () => {
     }
   });
 
+  test("a batch built on another one is attested once both landed in order on its base", async () => {
+    // Its manifest lists the batch it was built on first: member 0 landed
+    // under that batch's own marker, so only members 1 and 2 carry this one.
+    const stacked: Manifest = { ...manifest, stackedOn: { id: "fedcba987654", count: 1 } };
+    const stackedReads = reads({
+      commit: async () => ({ tree: TREES.at(-1)!, message: renderManifest(stacked) }),
+    });
+    const last = await classifyMainPush(push(2), stackedReads);
+    expect(last.kind).toBe("attested");
+    if (last.kind === "full") throw new Error("unreachable");
+    expect(last.batch).toMatchObject({ member: 3, members: 3 });
+    expect((await classifyMainPush(push(1), stackedReads)).kind).toBe("intermediate");
+    // Landed without the batch below it, its first member sits one step above
+    // the base, not two: no receipt.
+    const alone = push(1, { firstParent: (n) => (n === 1 ? BASE : sha(0xd0 + n)) });
+    expect((await classifyMainPush(alone, stackedReads)).kind).toBe("full");
+  });
+
   test("a batch that passed after a failed-job retry is attested at that attempt", async () => {
     const receipt = await classifyMainPush(
       push(2),
