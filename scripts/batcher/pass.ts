@@ -48,17 +48,19 @@ import {
 export const PR_CHECK = "PR CI";
 export const PR_WORKFLOW = ".github/workflows/pr-ci.yml";
 
-export const CONFLICTING =
-  "it conflicts with main. Merge main into the branch, then queue it again.";
+export const CONFLICTING = "it conflicts with main";
 
 const code = (path: string) => `\`${path}\``;
 
 /** A conflict regenerating cannot settle, naming the files that conflict. */
 export const conflictsIn = (paths: string[]) =>
-  `it conflicts with main in ${paths.map(code).join(", ")}. Merge main into the branch, then queue it again.`;
+  `it conflicts with main in ${paths.map(code).join(", ")}`;
 
 export const couldNotRegenerate = (detail: string) =>
-  `it conflicts with main and the batcher could not regenerate its generated files: ${detail}. Merge main into the branch, then queue it again.`;
+  `it conflicts with main and the batcher could not regenerate its generated files: ${detail}`;
+
+/** Marks the one notice per PR head that it conflicts with main and is skipped. */
+const conflictMarker = (headSha: string) => `<!-- merge-batcher:conflict ${headSha} -->`;
 
 /** File statuses that put a new path on main. */
 const ADDED = new Set(["added", "renamed", "copied"]);
@@ -111,7 +113,10 @@ interface Context {
   queuedSlots: Map<number, string[]>;
   /** Plan only: create no branches, not even scratch ones. */
   dryRun: boolean;
-  /** PRs this pass ejected: their departure is the batcher's doing, not their author's. */
+  /**
+   * PRs this pass ejected or parked: their departure from a batch is the
+   * batcher's doing, not their author's.
+   */
   ejected: Set<number>;
   /** Batch runs GitHub refused to run again in this pass, by run ID: their failure is final. */
   unretryable: Set<number>;
@@ -175,12 +180,20 @@ async function observe(ctx: Context): Promise<Observation> {
     // Any other conflict may be only in generated files, which the batcher
     // regenerates; never on a production branch, which only lands as it is,
     // nor for a member of the running batch, whose branch it must not move.
-    const regenerate =
-      pull.mergeable === "CONFLICTING" &&
-      !version &&
-      pull.headRef !== PRODUCTION_BRANCH &&
-      !pull.labels.includes(IN_BATCH_LABEL);
-    let conflict = pull.mergeable === "CONFLICTING" && !version && !regenerate ? CONFLICTING : null;
+    // What regenerating cannot settle parks the PR: it keeps its label and is
+    // skipped until a new head merges main cleanly. A head it was told about
+    // is not regenerated again.
+    const conflicting = pull.mergeable === "CONFLICTING" && !version;
+    let parked: QueuedPull["parked"] = null;
+    if (conflicting && (await parkNoted(gh, pull.number, pull.headSha)))
+      parked = { reason: CONFLICTING, noted: true };
+    else if (
+      conflicting &&
+      (pull.headRef === PRODUCTION_BRANCH || pull.labels.includes(IN_BATCH_LABEL))
+    )
+      parked = { reason: CONFLICTING, noted: false };
+    const regenerate = conflicting && parked === null;
+    let conflict: string | null = null;
     if (regenerate)
       ctx.regenerating.set(pull.number, { headSha: pull.headSha, headRef: pull.headRef });
     let headAt: number | undefined;
@@ -201,7 +214,7 @@ async function observe(ctx: Context): Promise<Observation> {
     const renumber: string[] = [];
     // Numbers are compared once the conflict is settled, on the new head.
     for (const directory of new Set(
-      regenerate ? [] : added.map((f) => f.slot.slice(0, f.slot.lastIndexOf("/") + 1)),
+      conflicting ? [] : added.map((f) => f.slot.slice(0, f.slot.lastIndexOf("/") + 1)),
     )) {
       const main = await onMain(directory);
       const taken = takenNumbers(added, main);
@@ -238,6 +251,7 @@ async function observe(ctx: Context): Promise<Observation> {
       queuedAt,
       greenAt: green ? (check?.completedAt ?? now) : null,
       conflict,
+      parked: conflict === null ? parked : null,
       renumber: conflict === null ? renumber : [],
       regenerate,
       slots: added.map((f) => f.slot),
@@ -302,7 +316,7 @@ async function withFailedJobs(ctx: Context, runs: Batch["runs"]): Promise<Batch[
  * the batch carries on and lands the new head instead of starting over. Each
  * check merges on a scratch branch; anything unexpected keeps the old rule. A
  * new head that conflicts or takes a used migration number is never kept: it
- * is ejected. A dry run merges nothing, so it reports every new head.
+ * is parked or ejected. A dry run merges nothing, so it reports every new head.
  */
 async function sameTree(
   ctx: Context,
@@ -315,7 +329,9 @@ async function sameTree(
   const same: Record<number, string> = {};
   const heads = new Map(
     pulls
-      .filter((p) => p.conflict === null && !p.renumber.length && !p.regenerate)
+      .filter(
+        (p) => p.conflict === null && p.parked === null && !p.renumber.length && !p.regenerate,
+      )
       .map((p) => [p.number, p.headSha]),
   );
   const moved = manifest.members.flatMap((member, index) => {
@@ -369,6 +385,30 @@ async function eject(ctx: Context, number: number, reason: string) {
   await ctx.gh.removeLabel(number, QUEUE_LABEL);
   const autoMerge = ctx.autoMerge.get(number);
   if (autoMerge) await ctx.gh.disableAutoMerge(autoMerge);
+}
+
+/** Whether a PR was already told that this head conflicts with main and is skipped. */
+async function parkNoted(gh: GitHub, number: number, headSha: string): Promise<boolean> {
+  // A notice for a head can only be newer than that head.
+  const since = (await gh.commit(headSha)).date;
+  const marker = conflictMarker(headSha);
+  return (await gh.commentBodies(number, since)).some((body) => body.includes(marker));
+}
+
+/**
+ * A PR that conflicts with main in a way only its author can settle keeps its
+ * label and place in the queue, but is skipped until a new head merges main
+ * cleanly and passes PR CI. It is told so once per head, naming what
+ * conflicts.
+ */
+async function park(ctx: Context, number: number, headSha: string, reason: string) {
+  ctx.ejected.add(number);
+  if (await parkNoted(ctx.gh, number, headSha)) return;
+  ctx.log(`Skipping #${number} until it merges main cleanly: ${reason}`);
+  await ctx.gh.comment(
+    number,
+    `${conflictMarker(headSha)}\nThe merge queue is skipping this PR for now because ${reason}. It keeps its \`${QUEUE_LABEL}\` label and its place in the queue. Merge main into the branch and resolve the conflict: once the new head merges cleanly with main and PR CI passes on it, it is batched automatically. You don't need to queue it again.`,
+  );
 }
 
 async function abandon(ctx: Context, batch: Batch, reason: string, changed?: number) {
@@ -487,7 +527,7 @@ async function tryMoveMigrations(
     const branchPoint = (await gh.compareFiles(mainSha, pull.headSha))?.mergeBase;
     if (branchPoint !== mainSha) {
       const merged = await gh.mergeInto(scratch, mainSha, `Merge main into #${number}`);
-      if (merged.kind === "conflict") return await eject(ctx, number, CONFLICTING);
+      if (merged.kind === "conflict") return await park(ctx, number, pull.headSha, CONFLICTING);
       base = merged;
     }
     const changed = pull.files.filter((f) => f.status !== "removed").map((f) => f.path);
@@ -561,13 +601,14 @@ async function tryMoveMigrations(
 
 /**
  * A queued PR conflicts with main. Two PRs that both regenerated one generated
- * file conflict there although neither did anything wrong, so before ejecting
+ * file conflict there although neither did anything wrong, so before parking
  * it the batcher asks a regeneration run (scripts/ci/regenerate-merge.ts),
  * which merges main and runs the PR's generators with a read-only token. This
  * pass never runs PR code: it checks the run's result and writes it to the
  * branch through GitHub's API as three commits, main's version of the
  * conflicted files, the merge of main, whose tree must be exactly the one the
- * run regenerated on, and the regenerated files. Anything else ejects the PR,
+ * run regenerated on, and the regenerated files. Anything else parks the PR
+ * (it keeps its label and is skipped until a new head merges main cleanly),
  * naming the files that conflict; GitHub failing only postpones it a pass.
  */
 async function regenerateGenerated(ctx: Context, number: number) {
@@ -583,7 +624,7 @@ async function regenerateGenerated(ctx: Context, number: number) {
       return;
     }
     const detail = error instanceof Error ? error.message : String(error);
-    await eject(ctx, number, couldNotRegenerate(detail.slice(0, 300)));
+    await park(ctx, number, pull.headSha, couldNotRegenerate(detail.slice(0, 300)));
   }
 }
 
@@ -605,25 +646,38 @@ async function tryRegenerate(
     return;
   }
   if (latest.conclusion !== "success")
-    return await eject(ctx, number, couldNotRegenerate(`${latest.url} did not succeed`));
+    return await park(
+      ctx,
+      number,
+      pull.headSha,
+      couldNotRegenerate(`${latest.url} did not succeed`),
+    );
   const text = await gh.artifactText(latest.id, REGENERATION_ARTIFACT, REGENERATION_FILE);
   const result = text === null ? null : parseRegeneration(text, number, pull.headSha);
   if (!result)
-    return await eject(ctx, number, couldNotRegenerate(`${latest.url} left no valid result`));
+    return await park(
+      ctx,
+      number,
+      pull.headSha,
+      couldNotRegenerate(`${latest.url} left no valid result`),
+    );
   if (result.outcome === "conflict")
-    return await eject(ctx, number, conflictsIn(result.conflicted));
+    return await park(ctx, number, pull.headSha, conflictsIn(result.conflicted));
   if (result.outcome === "clean")
     // Main merged cleanly there; GitHub saw a later main, so ask again on it.
-    return result.main === mainSha ? await eject(ctx, number, CONFLICTING) : await dispatch();
+    return result.main === mainSha
+      ? await park(ctx, number, pull.headSha, CONFLICTING)
+      : await dispatch();
   // The PR's own generators ran in the job that wrote the result, so nothing
   // in it is trusted: the commit it merged must be main or behind it.
   if (
     result.main !== mainSha &&
     (await gh.compareFiles(result.main, mainSha)).mergeBase !== result.main
   )
-    return await eject(
+    return await park(
       ctx,
       number,
+      pull.headSha,
       couldNotRegenerate(`${latest.url} merged ${result.main.slice(0, 10)}, which is not on main`),
     );
   await applyRegeneration(ctx, number, pull, result, latest.url);
@@ -653,11 +707,13 @@ async function applyRegeneration(
   await gh.createBranch(scratch, taken);
   try {
     const merged = await gh.mergeInto(scratch, result.main, `Merge main into #${number}`);
-    if (merged.kind === "conflict") return await eject(ctx, number, conflictsIn(result.conflicted));
+    if (merged.kind === "conflict")
+      return await park(ctx, number, pull.headSha, conflictsIn(result.conflicted));
     if (merged.tree !== result.mergedTree)
-      return await eject(
+      return await park(
         ctx,
         number,
+        pull.headSha,
         couldNotRegenerate(`GitHub's merge of main differs from the one ${url} regenerated on`),
       );
     const entries: TreeEntry[] = [];
@@ -684,7 +740,12 @@ async function applyRegeneration(
         ctx.log(`Not regenerating #${number}: its branch moved meanwhile`);
         return;
       }
-      return await eject(ctx, number, couldNotRegenerate("GitHub refused to update its branch"));
+      return await park(
+        ctx,
+        number,
+        pull.headSha,
+        couldNotRegenerate("GitHub refused to update its branch"),
+      );
     }
     ctx.log(`Regenerated #${number}'s ${result.conflicted.join(", ")} as ${tip}`);
     // The branch is fixed; a failed note must not eject the PR.
@@ -802,12 +863,7 @@ async function build(
         // A Version PR is regenerated, not merged with main: the next pass holds it.
         if (pull.version)
           ctx.log(`Not building Version PR #${pull.number}: it conflicts with main`);
-        else if (head === base)
-          await eject(
-            ctx,
-            pull.number,
-            "it conflicts with main. Merge main into the branch, then queue it again.",
-          );
+        else if (head === base) await park(ctx, pull.number, pull.headSha, CONFLICTING);
         else ctx.log(`Deferring #${pull.number}: it conflicts with an earlier PR in this batch`);
         continue;
       }
@@ -851,6 +907,8 @@ async function act(ctx: Context, action: Action) {
       return land(ctx, action.batch);
     case "eject":
       return eject(ctx, action.number, action.reason);
+    case "park":
+      return park(ctx, action.number, action.headSha, action.reason);
     case "renumber":
       return moveMigrations(ctx, action.number, action.paths);
     case "regenerate":
@@ -920,6 +978,8 @@ export function describe(action: Action): string {
       return `land ${action.batch.branch}: ${action.batch.manifest.members.map((m) => `#${m.number}`).join(", ")}`;
     case "eject":
       return `eject #${action.number}: ${action.reason}`;
+    case "park":
+      return `skip #${action.number} until it merges main cleanly: ${action.reason}`;
     case "renumber":
       return `move #${action.number}'s ${action.paths.map(fileName).join(", ")} to the next free number`;
     case "regenerate":
