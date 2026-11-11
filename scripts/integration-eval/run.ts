@@ -13,8 +13,9 @@
  *   bun scripts/integration-eval/run.ts report --out DIR
  *
  * Environment: OPENGENI_EVAL_API_URL, and OPENGENI_EVAL_API_KEY (billed as
- * API use) or OPENGENI_EVAL_LOGIN_EMAIL and OPENGENI_EVAL_LOGIN_PASSWORD (a
- * signed-in test person, billed as app use),
+ * API use: purchased credits, no connected subscriptions) or
+ * OPENGENI_EVAL_LOGIN_EMAIL and OPENGENI_EVAL_LOGIN_PASSWORD (a signed-in test
+ * person, billed as app use),
  * OPENGENI_EVAL_CONNECTED_WORKSPACE_ID (integrations connected),
  * OPENGENI_EVAL_EMPTY_WORKSPACE_ID (nothing connected; for not_connected rows),
  * optional OPENGENI_EVAL_APP_URL for chat links, and VERIFY_* (see verify.ts).
