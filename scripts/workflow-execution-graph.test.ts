@@ -1431,7 +1431,7 @@ describe("workflow execution graph manifest", () => {
     expect(job["timeout-minutes"]).toBeGreaterThanOrEqual(stepBudget + 3);
   });
 
-  test("removing any one of the 55 approved caps invalidates the committed graph", async () => {
+  test("removing any one of the 57 approved caps invalidates the committed graph", async () => {
     type MutableStep = { "timeout-minutes"?: unknown; run?: unknown; uses?: unknown };
     type MutableWorkflow = { jobs?: Record<string, { steps?: MutableStep[] }> };
     const sources = await loadWorkflowExecutionSources(root);
@@ -1448,7 +1448,7 @@ describe("workflow execution graph manifest", () => {
         }
       }
     }
-    expect(capped).toHaveLength(55);
+    expect(capped).toHaveLength(57);
 
     for (const [path, jobIndex, stepIndex] of capped) {
       const mutatedSources = { ...sources };
