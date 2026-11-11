@@ -681,7 +681,16 @@ async function startMcpOAuthWithinDeadline(
         }
       : {}),
     authorizationServerMetadataUrl: discovery.provenance.authorizationServerMetadataUrl,
-    ...(oidc?.endpoints ?? {}),
+    // A fixed authorization server's access token is for the resource, not
+    // the identity provider's userinfo endpoint: identity comes from the
+    // signed id_token alone.
+    ...(oidc?.endpoints
+      ? profile.fixedAuthorizationServer
+        ? oidc.endpoints.oidcJwksUri
+          ? { oidcJwksUri: oidc.endpoints.oidcJwksUri }
+          : {}
+        : oidc.endpoints
+      : {}),
     ...(oidcNonce ? { oidcNonce } : {}),
     clientRegistrationMethod: client.method,
     tokenEndpointAuthMethod: client.tokenEndpointAuthMethod,
@@ -3873,6 +3882,14 @@ function chooseProfileAuthorizeScopes(
       ...profile.requestedScopes,
       ...incremental.filter((scope) => wanted.has(scope)),
     ]);
+  }
+  // A fixed authorization server serves many resources with one client: the
+  // grant is always exactly the profile's scopes for this resource, so a
+  // caller can never point the client at another resource or API.
+  if (profile.fixedAuthorizationServer) {
+    return input.authorizationServerScopesSupported?.includes("offline_access")
+      ? uniqueStrings([...input.supported, "offline_access"])
+      : uniqueStrings(input.supported);
   }
   // Reconnecting with more access (step-up) keeps what the account already
   // holds: asking for only the new scope would narrow the account's grant.

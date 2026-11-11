@@ -1384,7 +1384,8 @@ export async function refreshOAuthConnectionCredential(
     stringValue((cred.metadata as { client_id?: unknown }).client_id);
   const clientSecret = personalGitHub
     ? settings.githubPersonalOauthClientSecret
-    : stringValue((cred.credential as { client_secret?: unknown }).client_secret);
+    : (deploymentClientSecret(settings, clientId) ??
+      stringValue((cred.credential as { client_secret?: unknown }).client_secret));
   const authMethod =
     stringValue(
       (cred.credential as { token_endpoint_auth_method?: unknown }).token_endpoint_auth_method,
@@ -1646,6 +1647,18 @@ function stringRecord(value: unknown): Record<string, string> | null {
     out[key] = raw;
   }
   return out;
+}
+
+/**
+ * The current secret of a deployment-managed client this connection was
+ * authorized with. Read at refresh time so a rotated secret takes effect for
+ * every existing connection; Entra client secrets expire.
+ */
+function deploymentClientSecret(settings: Settings, clientId: string | undefined) {
+  const secret = settings.microsoftDynamicsClientSecret?.trim();
+  return clientId && secret && clientId === settings.microsoftDynamicsClientId?.trim()
+    ? secret
+    : undefined;
 }
 
 function stringValue(value: unknown): string | undefined {

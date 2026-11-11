@@ -19,6 +19,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import postgres from "postgres";
 import { createApp } from "../src/app";
+import { chooseMcpAuthorizeScopes } from "../src/integrations/oauth-client";
 import {
   assertAuthorizationServerNotReserved,
   builtInOAuthProfileFor,
@@ -351,6 +352,19 @@ describe("Microsoft Dynamics MCP OAuth", () => {
     }
   }, 30_000);
 
+  test("a caller can't point the Dynamics client at another resource", () => {
+    expect(
+      chooseMcpAuthorizeScopes({
+        mcpUrl: DATAVERSE_MCP_URL,
+        requested: ["https://graph.microsoft.com/.default"],
+        challenged: ["https://other.crm.dynamics.com/user_impersonation"],
+        supported: [DATAVERSE_SCOPE],
+        authorizationServerScopesSupported: ["openid", "offline_access"],
+        reconnectGrantedScopes: ["https://graph.microsoft.com/Mail.Read"],
+      }),
+    ).toEqual([DATAVERSE_SCOPE, "offline_access"]);
+  });
+
   test("Finance and Operations stays off until its flag is on", async () => {
     const off = await fixture();
     try {
@@ -415,7 +429,8 @@ describe("Microsoft Dynamics MCP OAuth", () => {
             token_endpoint: ENTRA_TOKEN_URL,
             refresh_scope: `${DATAVERSE_SCOPE} offline_access`,
             client_id: CLIENT_ID,
-            client_secret: CLIENT_SECRET,
+            // A secret rotated since sign-in: refresh uses the deployment's current one.
+            client_secret: "rotated-away-secret",
             token_endpoint_auth_method: "client_secret_post",
           }),
         ),
@@ -444,6 +459,7 @@ describe("Microsoft Dynamics MCP OAuth", () => {
       expect(refresh.body.get("grant_type")).toBe("refresh_token");
       expect(refresh.body.get("scope")).toBe(`${DATAVERSE_SCOPE} offline_access`);
       expect(refresh.body.has("resource")).toBe(false);
+      expect(refresh.body.get("client_secret")).toBe(CLIENT_SECRET);
 
       // The Dataverse tools reuse the grant for the same environment's Web API only.
       const resolve = buildConnectionTokenResolver(client.db, provider.settings);

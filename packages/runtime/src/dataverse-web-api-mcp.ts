@@ -136,7 +136,7 @@ export const DATAVERSE_WEB_API_TOOLS: readonly DataverseTool[] = Object.freeze([
   ),
   tool(
     "dataverse_fetchxml",
-    "Runs a FetchXML query, including aggregates and grouping by date (dategrouping year, quarter, month, week or day) and linked tables. Use page and pagingCookie from a previous result's moreRecords to read further pages.",
+    "Runs a FetchXML query, including aggregates and grouping by date (dategrouping year, quarter, month, week or day) and linked tables. When a result has moreRecords, read the next page by setting the page attribute of <fetch> to nextPage and its paging-cookie attribute to pagingCookie (already escaped for the attribute); count sets the page size.",
     {
       table: entitySet,
       fetchXml: { type: "string", minLength: 1, maxLength: 16_384 },
@@ -424,18 +424,22 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
       get(
         `${entity}/Attributes/Microsoft.Dynamics.CRM.${cast}?$select=LogicalName&$expand=OptionSet($select=Options)`,
       );
-    const [definition, picklists, states, statuses, multi, relationships] = await Promise.all([
-      get(
-        `${entity}?$select=LogicalName,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute,DisplayName&$expand=Attributes($select=LogicalName,AttributeType,AttributeTypeName,DisplayName,RequiredLevel,IsValidForCreate,IsValidForUpdate,AttributeOf)`,
-      ),
-      options("PicklistAttributeMetadata"),
-      options("StateAttributeMetadata"),
-      options("StatusAttributeMetadata"),
-      options("MultiSelectPicklistAttributeMetadata"),
-      get(
-        `${entity}/ManyToOneRelationships?$select=ReferencingAttribute,ReferencedEntity,ReferencingEntityNavigationPropertyName`,
-      ),
-    ]);
+    const [definition, picklists, states, statuses, multi, booleans, relationships] =
+      await Promise.all([
+        get(
+          `${entity}?$select=LogicalName,EntitySetName,PrimaryIdAttribute,PrimaryNameAttribute,DisplayName&$expand=Attributes($select=LogicalName,AttributeType,AttributeTypeName,DisplayName,RequiredLevel,IsValidForCreate,IsValidForUpdate,AttributeOf)`,
+        ),
+        options("PicklistAttributeMetadata"),
+        options("StateAttributeMetadata"),
+        options("StatusAttributeMetadata"),
+        options("MultiSelectPicklistAttributeMetadata"),
+        get(
+          `${entity}/Attributes/Microsoft.Dynamics.CRM.BooleanAttributeMetadata?$select=LogicalName&$expand=OptionSet($select=TrueOption,FalseOption)`,
+        ),
+        get(
+          `${entity}/ManyToOneRelationships?$select=ReferencingAttribute,ReferencedEntity,ReferencingEntityNavigationPropertyName`,
+        ),
+      ]);
     const choices = new Map<string, { value: number; label: string | null }[]>();
     for (const payload of [picklists, states, statuses, multi])
       for (const attribute of arrayOf(payload.value)) {
@@ -448,6 +452,19 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
           })),
         );
       }
+    for (const attribute of arrayOf(booleans.value)) {
+      const optionSet = attribute.OptionSet as Record<string, unknown> | undefined;
+      const option = (value: unknown) => value as { Value?: unknown; Label?: unknown } | undefined;
+      choices.set(
+        stringOf(attribute.LogicalName),
+        [option(optionSet?.FalseOption), option(optionSet?.TrueOption)]
+          .filter((entry) => entry !== undefined)
+          .map((entry) => ({
+            value: Number(entry.Value),
+            label: labelOf(entry.Label),
+          })),
+      );
+    }
     const lookups = new Map<string, { table: string; bind: string }[]>();
     for (const relationship of arrayOf(relationships.value)) {
       const column = stringOf(relationship.ReferencingAttribute);
@@ -501,18 +518,17 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
       path = path.slice(this.base.length);
     }
     path = path.replace(/^\/+/u, "").replace(/^api\/data\/v[\d.]+\//iu, "");
-    const resource = path.split("?")[0]!;
+    const resource = decodeUriComponentSafe(path.split("?")[0]!);
     if (
       !/^[A-Za-z_]/u.test(path) ||
-      /(^|\/)\.\.?(\/|$)/u.test(resource) ||
+      /(^|[\/\\])\.\.?([\/\\]|$)/u.test(resource) ||
       /^\$batch/iu.test(path) ||
       path.includes("#")
     )
       throw new DataverseError(
         "path must start with an entity set or function name, for example accounts?$top=5.",
       );
-    // Spaces and quotes inside query options are encoded; existing escapes stay.
-    return encodeURI(decodeUriSafe(path));
+    return encodeQueryPath(path);
   }
 
   private page(payload: Record<string, unknown>): Record<string, unknown> {
@@ -533,7 +549,7 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
           }
         : {}),
       ...(payload["@Microsoft.Dynamics.CRM.morerecords"] === true
-        ? { moreRecords: true, ...(cookie ? { pagingCookie: pagingCookieOf(cookie) } : {}) }
+        ? { moreRecords: true, ...(cookie ? fetchXmlNextPage(cookie) : {}) }
         : {}),
     };
   }
@@ -611,7 +627,9 @@ export class DataverseWebApiMcpServer implements LocalMcpBridgeServer {
     }
     if (response.status === 401) {
       await response.body?.cancel().catch(() => undefined);
-      if (!mutation && !refreshed) return await this.request(toolName, request, signal, true);
+      // Dataverse authenticates before it changes anything, so a 401 applied
+      // nothing and one retry with a refreshed sign-in is safe for writes too.
+      if (!refreshed) return await this.request(toolName, request, signal, true);
       await this.reportAuthNeeded(
         {
           status: "auth_needed",
@@ -742,23 +760,53 @@ function withoutEmpty(row: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(row).filter(([, value]) => value !== null));
 }
 
-/** The `pagingcookie` attribute value from Dataverse's paging cookie annotation. */
-function pagingCookieOf(annotation: string): string {
-  const match = /pagingcookie="([^"]*)"/u.exec(annotation);
-  if (!match) return annotation;
-  try {
-    return decodeURIComponent(decodeURIComponent(match[1]!));
-  } catch {
-    return match[1]!;
+/**
+ * The next page of a FetchXML result from Dataverse's paging cookie
+ * annotation: its page number, and the cookie escaped for the `paging-cookie`
+ * attribute of `<fetch>`.
+ */
+function fetchXmlNextPage(annotation: string): { nextPage?: number; pagingCookie?: string } {
+  const page = Number(/pagenumber="(\d+)"/u.exec(annotation)?.[1]);
+  const encoded = /pagingcookie="([^"]*)"/u.exec(annotation)?.[1];
+  let cookie: string | undefined;
+  if (encoded !== undefined) {
+    try {
+      cookie = decodeURIComponent(decodeURIComponent(encoded));
+    } catch {
+      cookie = undefined;
+    }
   }
+  return {
+    ...(Number.isSafeInteger(page) && page > 0 ? { nextPage: page } : {}),
+    ...(cookie
+      ? {
+          pagingCookie: cookie
+            .replace(/&/gu, "&amp;")
+            .replace(/</gu, "&lt;")
+            .replace(/>/gu, "&gt;")
+            .replace(/"/gu, "&quot;"),
+        }
+      : {}),
+  };
 }
 
-function decodeUriSafe(value: string): string {
+function decodeUriComponentSafe(value: string): string {
   try {
-    return decodeURI(value);
+    return decodeURIComponent(value);
   } catch {
     return value;
   }
+}
+
+/**
+ * Percent-encodes what a URL cannot carry (spaces, quotes, non-ASCII) and a
+ * literal `+`, which servers read as a space in a query, while keeping the
+ * caller's own `%XX` escapes as they are, so `'A %26 B'` stays one literal.
+ */
+export function encodeQueryPath(path: string): string {
+  return path
+    .replace(/%(?![0-9A-Fa-f]{2})/gu, "%25")
+    .replace(/[^A-Za-z0-9\-._~!$&'()*,;=:@/?%]/gu, (character) => encodeURIComponent(character));
 }
 
 function arrayOf(value: unknown): Record<string, unknown>[] {

@@ -3,6 +3,7 @@ import { mcpToolRecommendsApproval, type McpServerConnectionRef } from "@opengen
 import {
   DATAVERSE_WEB_API_MCP_BRIDGE_ADAPTER,
   DataverseWebApiMcpServer,
+  encodeQueryPath,
   isDataverseMcpConfig,
 } from "../src/dataverse-web-api-mcp";
 
@@ -142,7 +143,26 @@ describe("Dataverse Web API bridge", () => {
     expect(foreign.isError).toBe(true);
     const traversal = await instance.callToolResult("dataverse_query", { path: "../../x" });
     expect(traversal.isError).toBe(true);
+    const encoded = await instance.callToolResult("dataverse_query", {
+      path: "accounts/%2e%2e/%2E%2E/x",
+    });
+    expect(encoded.isError).toBe(true);
     expect(calls).toHaveLength(1);
+  });
+
+  test("keeps the caller's escapes and encodes only what a URL cannot carry", () => {
+    expect(encodeQueryPath("accounts?$filter=name eq 'A %26 B'")).toBe(
+      "accounts?$filter=name%20eq%20'A%20%26%20B'",
+    );
+    expect(encodeQueryPath("tasks?$filter=createdon ge 2026-01-01T00:00:00+01:00")).toBe(
+      "tasks?$filter=createdon%20ge%202026-01-01T00:00:00%2B01:00",
+    );
+    expect(encodeQueryPath("accounts?$filter=name eq 'Bjørknes 100%'")).toBe(
+      "accounts?$filter=name%20eq%20'Bj%C3%B8rknes%20100%25'",
+    );
+    const nextLink =
+      "contacts?$select=fullname&$skiptoken=%3Ccookie%20pagenumber=%222%22%20pagingcookie=%22%253ccookie%2520page%253d%25221%2522%253e%22%20/%3E";
+    expect(encodeQueryPath(nextLink)).toBe(nextLink);
   });
 
   test("runs FetchXML with paging details", async () => {
@@ -164,7 +184,8 @@ describe("Dataverse Web API bridge", () => {
     expect(result.structuredContent).toEqual({
       rows: [{ total: 18000, month: 11 }],
       moreRecords: true,
-      pagingCookie: '<cookie page="1"></cookie>',
+      nextPage: 2,
+      pagingCookie: "&lt;cookie page=&quot;1&quot;&gt;&lt;/cookie&gt;",
     });
     expect((calls[0]!.init.headers as Record<string, string>).prefer).toContain(
       "odata.maxpagesize=",
@@ -308,7 +329,22 @@ describe("Dataverse Web API bridge", () => {
     expect(text(result)).toContain("security roles");
   });
 
-  test("a rejected token is refreshed once for reads, then asks to reconnect", async () => {
+  test("a write rejected for its sign-in is retried once with a refreshed one", async () => {
+    let attempt = 0;
+    const { instance, calls } = server(() =>
+      ++attempt === 1
+        ? new Response(null, { status: 401 })
+        : Response.json({ accountid: "00000000-0000-0000-0000-000000000001", name: "A" }),
+    );
+    const result = await instance.callToolResult("dataverse_create_record", {
+      table: "accounts",
+      record: { name: "A" },
+    });
+    expect(calls).toHaveLength(2);
+    expect(result.isError).toBeFalsy();
+  });
+
+  test("a rejected token is refreshed once, then asks to reconnect", async () => {
     const { instance, calls, authNeeded } = server(() => new Response(null, { status: 401 }));
     const result = await instance.callToolResult("dataverse_query", { path: "accounts" });
     expect(calls).toHaveLength(2);
