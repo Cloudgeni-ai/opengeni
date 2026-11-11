@@ -45,11 +45,30 @@ import { errorMessage } from "@opengeni/contracts/values";
  * person what to change (choose a credit-billed model, add credits, upgrade,
  * wait for a monthly limit). Its name reaches Temporal as the failure type, so
  * `turn.failed` can show the message instead of the generic activity failure.
+ * `stopsAsBudgetLimit` marks the refusals that adding credit or a paid plan
+ * fixes, which clients name from a `budget_exhausted` stop's detail: a claimed
+ * turn stops on those like a mid-turn credit stop instead of failing.
  */
 export class TurnAdmissionRefusedError extends Error {
-  constructor(message: string) {
+  readonly stopsAsBudgetLimit: boolean;
+
+  constructor(message: string, options: { stopsAsBudgetLimit?: boolean } = {}) {
     super(message);
     this.name = "TurnAdmissionRefusedError";
+    this.stopsAsBudgetLimit = options.stopsAsBudgetLimit ?? false;
+  }
+}
+
+/**
+ * The host's entitlements port refused the run. Its reason is the host's free
+ * text, so it is not used as a `turn.failed` message. A claimed turn stops on
+ * it like a credits stop, as it does between model calls, and the reason is
+ * the stop's `detail` either way.
+ */
+export class HostEntitlementDeniedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HostEntitlementDeniedError";
   }
 }
 
@@ -476,8 +495,10 @@ export async function ensureRunAllowed(
   // read does, so the mid-stream budget valve (`ensureRunAllowedBetweenModelCalls`)
   // wraps it in a `BudgetExhaustedError` and pauses identically — the valve never
   // learns whether the deny came from the local ledger or the host meter. The host's
-  // reason is free text, so it stays a plain Error (shown only as the generic turn
-  // failure); the local fixed refusals throw `TurnAdmissionRefusedError`.
+  // reason is free text, so it is a `HostEntitlementDeniedError`, not used as a
+  // `turn.failed` message (a claimed turn stops on it like a credits stop, with
+  // the reason as `detail`); the local fixed refusals throw
+  // `TurnAdmissionRefusedError`.
   //
   // This is an admission READ only; it records NO usage (metering stays the sole,
   // idempotency-keyed writer at recordModelUsageAndDebitCredits), so a PULL host meter
@@ -494,7 +515,7 @@ export async function ensureRunAllowed(
       quantity: 1,
     });
     if (!decision.allowed) {
-      throw new Error(decision.reason || "insufficient workspace credits");
+      throw new HostEntitlementDeniedError(decision.reason || "insufficient workspace credits");
     }
   } else if (
     chargesOpenGeniCredits &&
@@ -513,12 +534,15 @@ export async function ensureRunAllowed(
       // Plan credit never pays for API work: say which balance is empty.
       throw new TurnAdmissionRefusedError(
         billingOrigin === "api" ? API_CREDITS_REQUIRED_MESSAGE : "insufficient workspace credits",
+        { stopsAsBudgetLimit: true },
       );
     }
   } else if (!chargesOpenGeniCredits && ownSubscription) {
     // The person's own subscription pays no fee; it needs a paid plan.
     if (!(await ownSubscriptionPlanAllows(db, settings, accountId))) {
-      throw new TurnAdmissionRefusedError(SUBSCRIPTION_PLAN_REQUIRED_MESSAGE);
+      throw new TurnAdmissionRefusedError(SUBSCRIPTION_PLAN_REQUIRED_MESSAGE, {
+        stopsAsBudgetLimit: true,
+      });
     }
   } else if (!chargesOpenGeniCredits && byok && byokPlatformFeeActive(settings, accountId)) {
     // The person's own API key pays a platform fee, payable only from paid credit.
@@ -526,6 +550,7 @@ export async function ensureRunAllowed(
     if (balance.balanceMicros <= 0) {
       throw new TurnAdmissionRefusedError(
         byokPaidCreditRefusalMessage(balance, chargeBillingOrigin(billingOrigin)),
+        { stopsAsBudgetLimit: true },
       );
     }
   }

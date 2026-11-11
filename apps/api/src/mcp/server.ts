@@ -289,7 +289,7 @@ import {
   listPersonalGitHubConnections,
 } from "../integrations/personal-github";
 import {
-  GITHUB_IDENTITIES_GUIDANCE,
+  githubIdentitiesGuidance,
   GITHUB_APP_SETTINGS_GUIDANCE,
   githubSettingsUrl,
   personalGitHubConsoleBaseUrl,
@@ -305,6 +305,7 @@ import {
   codemodeCallExecutionMachine,
   publishSandboxFileArtifact,
 } from "../sandbox-file-artifacts";
+import { changeSiteAudienceForAgent } from "../site-audience-change";
 import {
   projectWorkspaceArtifactDetailProvenance,
   projectWorkspaceArtifactMutationProvenance,
@@ -892,12 +893,13 @@ const sessionCreateToolInputs = new Map<string, ReturnType<typeof buildSessionCr
 function sessionCreateToolInput(
   allowedTools: readonly FirstPartyMcpToolName[],
   servedBackends: readonly SandboxBackend[],
+  personalGitHub = false,
 ) {
-  const key = `${allowedTools.join(",")}|${servedBackends.join(",")}`;
+  const key = `${allowedTools.join(",")}|${servedBackends.join(",")}|${personalGitHub}`;
   let input = sessionCreateToolInputs.get(key);
   if (!input) {
     if (sessionCreateToolInputs.size >= 256) sessionCreateToolInputs.clear();
-    input = buildSessionCreateToolInput(allowedTools, servedBackends);
+    input = buildSessionCreateToolInput(allowedTools, servedBackends, personalGitHub);
     sessionCreateToolInputs.set(key, input);
   }
   return input;
@@ -906,6 +908,7 @@ function sessionCreateToolInput(
 function buildSessionCreateToolInput(
   allowedTools: readonly FirstPartyMcpToolName[],
   servedBackends: readonly SandboxBackend[],
+  personalGitHub = false,
 ) {
   const capabilityToggle = z4.boolean().optional();
   const sessionCreateAgentInput = z4
@@ -969,7 +972,11 @@ function buildSessionCreateToolInput(
         .array(ResourceRef)
         .optional()
         .describe(
-          "Omit to inherit parent repositories only. Files are never inherited automatically; explicitly include file resources to attach them. An empty array inherits no resources.",
+          `Omit to inherit parent repositories only. Files are never inherited automatically; explicitly include file resources to attach them. An empty array inherits no resources.${
+            personalGitHub
+              ? ' For a repository as the person, give uri, ref and connectionType "github_personal"; the rest comes from this turn\'s Your GitHub access.'
+              : ""
+          }`,
         ),
       tools: z4.array(ToolRef).optional(),
       mcpServers: z4.array(SessionMcpServerInput).optional(),
@@ -2367,6 +2374,7 @@ export function buildOpenGeniMcpServer(
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
           eventSourceFetch: deps.eventSourceFetch,
+          githubPersonalFetch: deps.githubPersonalFetch,
         });
         try {
           await syncCreatedScheduledTask({
@@ -2425,6 +2433,7 @@ export function buildOpenGeniMcpServer(
               ]
             : [];
         const updateOrError = await validatedScheduledTaskUpdate({
+          githubPersonalFetch: deps.githubPersonalFetch,
           settings: deps.settings,
           db: deps.db,
           objectStorage: deps.objectStorage,
@@ -2534,6 +2543,7 @@ export function buildOpenGeniMcpServer(
         }
         const previous: ScheduledTaskRestoreState = { task: existing };
         const update = await validatedScheduledTaskUpdate({
+          githubPersonalFetch: deps.githubPersonalFetch,
           settings: deps.settings,
           db: deps.db,
           objectStorage: deps.objectStorage,
@@ -2760,8 +2770,9 @@ function registerSandboxFileArtifactTool(
   server.registerTool(
     "sandbox_file_publish",
     {
-      description:
-        "Publish one file from this session's workspace so the person can open it. Use it for every file you hand over: document, spreadsheet, PDF, image, video, archive or data. Link the result as [Descriptive label](artifact:<artifactId>), or ![Descriptive label](artifact:<artifactId>) to preview an image, video, audio or PDF inline; never give a sandbox: link instead. The artifactId is also the file's workspace file ID, which tools such as a browser upload accept. A new file gets this chat's visibility unless you pass visibility. To change who can open an existing file, such as a generated image, pass its artifactId and visibility instead of path. Check access.whoCanOpen in the result before sharing the link with anyone else.",
+      // Sites take the same artifactId path, so they are named only where the
+      // grant may change one.
+      description: `Publish one file from this session's workspace so the person can open it. Use it for every file you hand over: document, spreadsheet, PDF, image, video, archive or data. Link the result as [Descriptive label](artifact:<artifactId>), or ![Descriptive label](artifact:<artifactId>) to preview an image, video, audio or PDF inline; never give a sandbox: link instead. The artifactId is also the file's workspace file ID, which tools such as a browser upload accept. A new file gets this chat's visibility unless you pass visibility. To change who can open an existing file${hasPermission(grant.permissions, "artifacts:publish") ? " or Site" : ""}, such as a generated image, pass its artifactId and visibility instead of path. Check access.whoCanOpen in the result before sharing the link with anyone else.`,
       inputSchema: {
         path: z4.string().min(1).max(4_096).optional(),
         artifactId: z4.string().uuid().optional(),
@@ -2782,7 +2793,11 @@ function registerSandboxFileArtifactTool(
           throw new ToolArgumentError(
             "Pass visibility with artifactId to change who can open that file.",
           );
-        return json(await changeWorkspaceFileVisibility(deps, { grant, artifactId, visibility }));
+        const change = { grant, artifactId, visibility };
+        return json(
+          (await changeWorkspaceFileVisibility(deps, change)) ??
+            (await changeSiteAudienceForAgent(deps, change)),
+        );
       }
       const session = await requireSession(deps.db, grant.workspaceId, sessionId);
       // A Codemode call names its operation in the worker's trusted call
@@ -6763,6 +6778,7 @@ function registerWorkspaceOrchestrationTools(
         inputSchema: sessionCreateToolInput(
           childSelectableTools,
           servedSandboxBackends(deps.settings).filter((backend) => backend !== "selfhosted"),
+          deps.settings.githubPersonalOauthEnabled,
         ),
       },
       async (args) => {
@@ -7650,6 +7666,7 @@ function registerCapabilityDiscoveryTools(
     nativeConnectionCapabilityRecommendations({
       connectedMachines: deps.settings.sandboxSelfhostedEnabled,
       personalGitHub: deps.settings.githubPersonalOauthEnabled,
+      personalGitHubAllRepositories: deps.settings.githubPersonalAllRepositoriesEnabled,
       browserExtension: browserExtension(deps.settings),
       integrationDefinitions: connectableIntegrationDefinitions(deps.settings, grant.workspaceId),
     });
@@ -8519,14 +8536,21 @@ async function personalGitHubStatusForGrant(
           subjectId,
         }),
       ),
-    loadRepositoryCount: async (subjectId, connection) => {
+    loadRepositoryChoice: async (subjectId, connection) => {
       const state = await getPersonalGitHubRepositorySelectionState(deps.db, {
         accountId: grant.accountId,
         originWorkspaceId: connection.workspaceId,
         subjectId,
         connectionId: connection.id,
       });
-      return state ? state.repositories.length : null;
+      if (!state) return null;
+      return {
+        repositoryCount: state.repositories.length,
+        // A mode saved while the deployment allowed it is not used once it no longer does.
+        allRepositoriesAccess: deps.settings.githubPersonalAllRepositoriesEnabled
+          ? (state.allRepositoriesAccess ?? null)
+          : null,
+      };
     },
   });
 }
@@ -8543,7 +8567,7 @@ function registerGitHubConnectTool(
     "github_connect_link",
     {
       description: deps.settings.githubPersonalOauthEnabled
-        ? `Report both GitHub identities and their setup links. ${GITHUB_IDENTITIES_GUIDANCE} The personal field covers the person's own account: connected, login and repositoryCount, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser). The other fields are the workspace's GitHub app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. ${GITHUB_APP_SETTINGS_GUIDANCE} When unclear, explain the difference in one or two sentences. On personal repositories mounted in a managed sandbox, git and gh act as the person; elsewhere use github_personal__* tools. Never returns tokens.`
+        ? `Report both GitHub identities and their setup links. ${githubIdentitiesGuidance(deps.settings.githubPersonalAllRepositoriesEnabled)} The personal field covers the person's own account: connected, login${deps.settings.githubPersonalAllRepositoriesEnabled ? ", repositoryCount (their chosen list) and allRepositories" : " and repositoryCount"}, or connectUrl to give them when it is not connected (manageUrl opens their repository chooser).${deps.settings.githubPersonalAllRepositoriesEnabled ? " When allRepositories.enabled, any repository the person can reach on GitHub is usable as them up to allRepositories.access, without choosing it first." : ""} The other fields are the workspace's GitHub app: truthful workspace binding status, installations, and for a caller with github:manage a fresh installUrl (also linkUrl) to install it on another organization or account. ${GITHUB_APP_SETTINGS_GUIDANCE} When unclear, explain the difference in one or two sentences. On personal repositories mounted in a managed sandbox, git and gh act as the person; elsewhere use github_personal__* tools. Never returns tokens.`
         : `Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. ${GITHUB_APP_SETTINGS_GUIDANCE} Server App configuration alone is never reported as a usable binding. Personal GitHub sign-in is not enabled on this deployment (personal.status is disabled).`,
       inputSchema: {},
     },
@@ -8562,6 +8586,7 @@ function registerGitHubConnectTool(
           status: "unknown",
           login: null,
           repositoryCount: null,
+          allRepositories: null,
           connectUrl: null,
           manageUrl: null,
           note: "Your GitHub status could not be read right now; try again.",

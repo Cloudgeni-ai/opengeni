@@ -197,7 +197,11 @@ import {
   SlackBotProviderError,
   slackHistoryRateLimited,
 } from "./slack-bot";
-import { slackMrkdwnFromMarkdown, slackMrkdwnKeepingClaudeCiteTags } from "./slack-mrkdwn";
+import {
+  slackMrkdwnFromMarkdown,
+  slackMrkdwnKeepingClaudeCiteTags,
+  slackMrkdwnKeepingProviderTracking,
+} from "./slack-mrkdwn";
 import { sessionAvatarImageUrl } from "./session-avatar-image";
 import { slackMentionedUserIds, slackReadableRequestText } from "./slack-request-text";
 import {
@@ -8187,7 +8191,8 @@ async function postDelivery(
  * claimed-but-unposted row, a response-loss retry, or a page replayed across
  * the deploy) must keep them, or every retry would conflict and wedge the
  * interaction. Earlier releases sent the unformatted bytes, then the
- * formatting from before Claude citation tags were rewritten. The ledger
+ * formatting from before Claude citation tags were rewritten, then the
+ * formatting from before source links lost hosted-search tracking. The ledger
  * reports a conflict from its durable claim, before any Slack write, so
  * retrying with each earlier rendering that differs under the same operation
  * id is safe. The id itself never changes: action handles and the post lookups
@@ -8229,6 +8234,7 @@ async function deliverSlackModelText(
 /** Current Slack formatting first, then each rendering an earlier release used. */
 const SLACK_MODEL_TEXT_RENDERINGS: readonly ((text: string) => string)[] = [
   slackMrkdwnFromMarkdown,
+  slackMrkdwnKeepingProviderTracking,
   slackMrkdwnKeepingClaudeCiteTags,
   (text) => text,
 ];

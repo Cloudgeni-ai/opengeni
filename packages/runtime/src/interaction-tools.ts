@@ -544,6 +544,14 @@ const DiscoveryOutput = z
   })
   .strict();
 
+/** browser_open's model view where only private profiles exist. */
+function withoutStorageMode(schema: AttemptToolJsonSchema): AttemptToolJsonSchema {
+  const properties = schema.properties as Record<string, unknown> | undefined;
+  if (!properties || !("storageMode" in properties)) return schema;
+  const { storageMode: _storageMode, ...rest } = properties;
+  return { ...schema, properties: rest } as AttemptToolJsonSchema;
+}
+
 /** browser_open may name the person's connected Chrome without a profile id;
  * the tool then resolves it (see chooseAttachedProfile). */
 const BrowserOpenPlacement = z.union([
@@ -1193,6 +1201,12 @@ export type CreateInteractionAttemptToolsInput = {
    * name and link it. Default: Opengeni Browser.
    */
   browserExtension?: { name: string; installUrl: string };
+  /**
+   * Whether the server accepts `storageMode: "ephemeral_context"` (the API's
+   * OPENGENI_EXPERIMENTAL_BROWSER_CONTEXT_POOL_ENABLED). When false, browser_open
+   * does not offer that mode to the model. Default: false, like the server.
+   */
+  ephemeralBrowserContexts?: boolean;
 };
 
 export function createInteractionAttemptToolDefinitions(
@@ -1204,6 +1218,10 @@ export function createInteractionAttemptToolDefinitions(
     name: "Opengeni Browser",
     installUrl: OPENGENI_BROWSER_EXTENSION_URL,
   };
+  const ephemeralContexts = input.ephemeralBrowserContexts ?? false;
+  const ephemeralGuidance = ephemeralContexts
+    ? " Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session."
+    : "";
   const definitions: AttemptToolDefinition[] = [];
   // A retried browser_act (same operation) must dispatch the same File IDs, so
   // each operation publishes a given path at most once.
@@ -1941,8 +1959,11 @@ export function createInteractionAttemptToolDefinitions(
     name: "browser_open",
     codemodePath: ["interaction", "browser", "open"],
     title: "Open or reuse browser",
-    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the ${extension.name} extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, do not fall back to a blank managed browser. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control. Operator-enabled disposable sandbox verification may explicitly request storageMode=ephemeral_context with headless=true: no saved identity, route, Computer, checkpoint or resume; process loss ends the session. Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task: BrowserSessions persist across tool calls, while shell-launched browser daemons do not survive remote-command cleanup. For repetitive or bulk work, such as screenshots of many pages or widths, script these same browsers with Code Mode instead of installing another browser automation library: openGeni.browsers.open({initialUrl}), tab.navigate(url, {waitUntil:'network_idle'}), tab.act({type:'viewport',width,height}) and tab.screenshot({saveTo}), or from the shell client, interaction.browser.screenshot with --save-image <path>. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
+    description: `Open a managed BrowserSession on the current agent placement, reuse a relevant compatible live session by default, attach to an explicit workspace BrowserSession, or open the user's own Chrome with placement={kind:'attached_device'}. Use that directly for requests about 'my browser', 'my tabs', or current Chrome: it opens the only Chrome profile connected through the ${extension.name} extension, or else the most recently active one (reported as attachedProfile, the rest as otherAttachedProfiles). Add deviceId (from interaction_discover scope=attached_browsers or otherAttachedProfiles) only when the user wants a different profile. Omitting placement never uses the user's Chrome. If no profile is connected, do not fall back to a blank managed browser. Never switch to the user's attached Chrome as a fallback for a failed managed browser unless the user requested that profile. Managed Chromium defaults to headed so OAuth and later human interaction use a supported browser; request headless=true only for agent-only work that will not require sign-in or human control.${ephemeralGuidance} Set includeScreenshot=true to also get a still image of the opened tab in the same call when its visual state matters. Call it first for any browser task: BrowserSessions persist across tool calls, while shell-launched browser daemons do not survive remote-command cleanup. For repetitive or bulk work, such as screenshots of many pages or widths, script these same browsers with Code Mode instead of installing another browser automation library: openGeni.browsers.open({initialUrl}), tab.navigate(url, {waitUntil:'network_idle'}), tab.act({type:'viewport',width,height}) and tab.screenshot({saveTo}), or from the shell client, interaction.browser.screenshot with --save-image <path>. Solve CAPTCHAs and other verification challenges yourself, retrying and trying alternatives as needed; never hand them to the user.`,
     input: BrowserOpenInput,
+    // A deployment without ephemeral contexts only has private profiles, so
+    // the model is not offered a mode the server refuses.
+    ...(ephemeralContexts ? {} : { modelInputSchema: withoutStorageMode }),
     output: BrowserOpenOutput,
     readOnly: false,
     idempotent: true,
@@ -3950,6 +3971,7 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
       name: input.settings.browserExtensionName,
       installUrl: input.settings.browserExtensionInstallUrl ?? OPENGENI_BROWSER_EXTENSION_URL,
     },
+    ephemeralBrowserContexts: input.settings.experimentalBrowserContextPoolEnabled,
     selectedTools: input.selectedTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS,
     permissions: input.permissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
     ...(input.interventionResume ? { interventionResume: input.interventionResume } : {}),

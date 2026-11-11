@@ -36,7 +36,9 @@ export { parseNativeCallEvent };
  * Expo autolinking). On iOS a call is a CallKit call. On Android it is a
  * system call (Telecom, with a call notification) where the app turned that
  * on with the config plugin's `call.androidSystemCall`, and agents' calls ring
- * the phone when it also has push; otherwise it sets up the phone's call
+ * the phone when it also has push (expo-notifications, or the app's own
+ * messaging service with `call.androidMessagingService: "app"`); otherwise it
+ * sets up the phone's call
  * audio (communication mode, audio focus, loudspeaker or headset) without a
  * system call. Returns null where it is unavailable (web, or a build without
  * the module), so voice still works without it.

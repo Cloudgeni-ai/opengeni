@@ -96,7 +96,10 @@ who can see a Site manages it like its owner: Site Data and Site SQL,
 publication settings, abuse reports, and taking it down or restoring it. Only an
 administrator lifts an administrator's takedown, raises resource limits, or
 grants a Site assistant extra workspace tools, and only the owner changes who
-can see an "Only me" Site.
+can see a Site (the whole workspace or "Only me"): from the Site page, with
+`PUT /v1/workspaces/:workspaceId/published-artifacts/:artifactId/visibility`,
+or through an agent turn acting for them with `sandbox_file_publish` and the
+Site's `artifactId`, as for a file. The Site keeps its link.
 
 ## Who can open a file
 

@@ -98,6 +98,7 @@ import { assertSlackTaskUploadTarget } from "../src/integrations/slack-task-file
 import {
   slackMrkdwnFromMarkdown,
   slackMrkdwnKeepingClaudeCiteTags,
+  slackMrkdwnKeepingProviderTracking,
 } from "../src/integrations/slack-mrkdwn";
 import {
   OPEN_SLACK_AGENT_FIRST_PARTY_MCP_TOOLS,
@@ -11107,6 +11108,75 @@ describe("Slack-to-Opengeni real PostgreSQL acceptance", () => {
 
     // The claim the previous release would have left: its formatting, which
     // kept the tags, with the provider call rejected.
+    await shared!.admin`
+      update slack_bot_post_operations set request_digest = ${digestOf(earlier)}
+      where connection_id = ${value.connectionId} and operation_id = ${operationId}`;
+    value.slack.failuresByText.clear();
+    await expireSlackProviderCooldown(value);
+    await shared!.admin`
+      update slack_interactions set delivery_retry_at = now() where id = ${route!.id}`;
+    const postsBefore = value.slack.posts.length;
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+
+    // The retry keeps the bound bytes under the same operation, and posts once.
+    expect(value.slack.posts.slice(postsBefore)).toEqual([
+      expect.objectContaining({ text: earlier, clientMessageId: operationId }),
+    ]);
+    const [completed] = await shared!.admin<{ request_digest: string; status: string }[]>`
+      select request_digest, status from slack_bot_post_operations
+      where connection_id = ${value.connectionId} and operation_id = ${operationId}`;
+    expect(completed).toEqual({ request_digest: digestOf(earlier), status: "completed" });
+  });
+
+  test("keeps the formatting an earlier release bound before source links lost hosted-search tracking", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_MRKDWN_TRACKING_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_MRKDWN_TRACKING",
+        ts: "1762000000.000003",
+        text: "Which rule applies?",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const output =
+      "**Rule 4-1** applies ([example.com](https://example.com/rules/4-1?_t_q=which+rule&utm_source=openai)).";
+    const formatted = slackMrkdwnFromMarkdown(output);
+    const earlier = slackMrkdwnKeepingProviderTracking(output);
+    expect(formatted).toBe("*Rule 4-1* applies (<https://example.com/rules/4-1|example.com>).");
+    expect(new Set([output, formatted, earlier]).size).toBe(3);
+    value.slack.failuresByText.set("applies", { status: 429, retryAfterSeconds: 30 });
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      { type: "turn.completed", payload: { output } },
+    ]);
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(true);
+    const attempted = value.slack.postAttempts.at(-1)!;
+    expect(attempted.text).toBe(formatted);
+    const operationId = attempted.clientMessageId!;
+    const digestOf = (text: string) =>
+      createHmac("sha256", environmentsEncryptionKeyBytes(value.deps.settings)!)
+        .update(
+          JSON.stringify({
+            operationId,
+            connectionId: value.connectionId,
+            targetKind: "channel",
+            targetId: attempted.channel,
+            threadTimestamp: attempted.threadTimestamp || null,
+            text,
+            blocks: null,
+          }),
+        )
+        .digest("hex");
+
+    // The claim the previous release would have left: its formatting, which
+    // kept the tracking, with the provider call rejected.
     await shared!.admin`
       update slack_bot_post_operations set request_digest = ${digestOf(earlier)}
       where connection_id = ${value.connectionId} and operation_id = ${operationId}`;

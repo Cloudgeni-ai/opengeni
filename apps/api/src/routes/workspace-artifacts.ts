@@ -28,7 +28,6 @@ import {
   requireSessionAuthorization,
   requireSessionAuthorizations,
   resolveNewSiteAudience,
-  resolveSiteAudienceChange,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   currentSiteSessionOrigin,
@@ -53,7 +52,6 @@ import {
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
   setWorkspaceArtifactStatus,
-  updateWorkspaceArtifactVisibility,
   WorkspaceArtifactConflictError,
   WorkspaceArtifactNotFoundError,
   WorkspaceArtifactOperationError,
@@ -63,10 +61,10 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
+import { changeSiteAudience } from "../site-audience-change";
 import { userContentDispositionHeaders } from "../http/user-content";
 import {
   afterSiteArtifactMutation,
-  notifySitePublicationChanged,
   requireSiteVersionPublishOpen,
 } from "../site-publishing/service";
 import {
@@ -764,28 +762,18 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
   });
 
   // Who can see the Site: the whole workspace, or only its owner. Only the
-  // owner changes it, like a chat's or a schedule's audience.
+  // owner changes it, or their agent (see changeSiteAudience).
   app.put(`${base}/:artifactId/visibility`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
     const request = await body(context, UpdateWorkspaceArtifactVisibilityRequest);
     const id = artifactId(context);
     try {
-      const viewer = await siteViewerForGrant(deps.db, grant);
-      const visibility = await resolveSiteAudienceChange({
-        db: deps.db,
-        settings: deps.settings,
+      const artifact = await changeSiteAudience(deps, {
         grant,
-        viewer,
-        requested: request.visibility,
-      });
-      const artifact = await updateWorkspaceArtifactVisibility(deps.db, {
-        workspaceId,
         artifactId: id,
-        viewer,
-        visibility,
+        visibility: request.visibility,
       });
-      await notifySitePublicationChanged(deps, { accountId: grant.accountId, workspaceId }, id);
       const projected = await projectWorkspaceArtifactDetailProvenance(
         { artifact, versions: [], events: [], versionsTruncated: false, eventsTruncated: false },
         (sessionId) => canReadProvenanceSession(deps, grant, sessionId),

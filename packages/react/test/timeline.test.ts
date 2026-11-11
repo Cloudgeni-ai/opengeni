@@ -2209,6 +2209,25 @@ describe("buildTimeline", () => {
     expect((items[0] as AgentMessageItem).text).toBe('Done. "half');
   });
 
+  test("shows source links without hosted-search tracking, outside code only", () => {
+    reset();
+    const text = [
+      "The café opens at nine ([example.com](https://example.com/hours?_t_q=cafe+hours&utm_source=openai)).",
+      "Watch https://example.com/watch?v=abc&utm_source=openai",
+      "`https://example.com/code?utm_source=openai`",
+    ].join("\n");
+    const items = buildTimeline(englishText, [
+      event("agent.message.completed", { text, phase: "final_answer" }),
+    ]);
+    expect((items[0] as AgentMessageItem).text).toBe(
+      [
+        "The café opens at nine ([example.com](https://example.com/hours)).",
+        "Watch https://example.com/watch?v=abc",
+        "`https://example.com/code?utm_source=openai`",
+      ].join("\n"),
+    );
+  });
+
   test("keeps ordinary words that contain cite", () => {
     reset();
     const text = "Please cite turn 3 of the excited recital; citeturn4 stays.";

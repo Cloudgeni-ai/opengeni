@@ -47,6 +47,8 @@ Our [published SDK test matrix](https://github.com/Cloudgeni-ai/opengeni/blob/ma
 
 Every visible tool costs prompt tokens and widens what the agent can do. For an agent that should use only your tools, return this from the proxy's `createSession` hook:
 
+{/* doc-snippets: excerpt SessionProxyHandlerOptions from "@opengeni/sdk" */}
+
 ```ts
 createSession: ({ initialMessage, idempotencyKey }) => ({
   initialMessage,
