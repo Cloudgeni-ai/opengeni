@@ -520,6 +520,10 @@ const MICROSOFT_DYNAMICS_PROFILE: OAuthProviderProfile = {
   sendScopeOnRefresh: true,
   // Each person reaches Dynamics with their own security roles.
   defaultOwnership: "personal",
+  requiredOwnership: {
+    ownership: "personal",
+    message: "Microsoft Dynamics connects each person's own account",
+  },
 };
 
 const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [

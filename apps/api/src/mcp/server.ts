@@ -335,6 +335,22 @@ function microsoftDynamicsSetupProblem(
     return "Dynamics 365 Finance and Operations isn't available here yet; only Dynamics 365 Sales and other Dataverse environments can be connected. Nothing was posted; tell the person.";
   return null;
 }
+
+/**
+ * A Microsoft-hosted Dynamics or Power Platform page that is not itself an
+ * environment address (for example apps.powerapps.com or home.dynamics.com).
+ * Third-party Dynamics MCP servers live elsewhere and stay ordinary servers.
+ */
+function looksLikeMicrosoftDynamicsPage(address: string): boolean {
+  try {
+    const host = new URL(address).hostname.toLowerCase();
+    return /(^|\.)(dynamics\.com|powerapps\.com|microsoftdynamics\.us|microsoftdynamics\.de|dynamics\.cn|appsplatform\.us)$/.test(
+      host,
+    );
+  } catch {
+    return false;
+  }
+}
 import {
   changeWorkspaceFileVisibility,
   codemodeCallExecutionMachine,
@@ -8140,7 +8156,8 @@ function registerCapabilityDiscoveryTools(
       const dynamics = microsoftDynamicsMcpEndpoint(suppliedEndpointUrl);
       if (
         dynamics ||
-        name.trim().toLowerCase() === MICROSOFT_DYNAMICS_CONNECTION_NAME.toLowerCase()
+        (name.trim().toLowerCase() === MICROSOFT_DYNAMICS_CONNECTION_NAME.toLowerCase() &&
+          looksLikeMicrosoftDynamicsPage(suppliedEndpointUrl))
       ) {
         const unavailable = microsoftDynamicsSetupProblem(deps.settings, dynamics?.product ?? null);
         if (unavailable) return json({ status: "unavailable", message: unavailable });

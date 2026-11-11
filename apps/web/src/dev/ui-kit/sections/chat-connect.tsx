@@ -474,7 +474,8 @@ function SignInCard({ entry }: { entry: (typeof SIGN_IN)[number] }) {
 const DYNAMICS_APPROVAL_URL =
   "https://login.microsoftonline.com/organizations/v2.0/adminconsent?client_id=2b52f1a0-3c32-4103-a554-e6e3f3d483ff&scope=https%3A%2F%2Fcontoso.crm4.dynamics.com%2Fuser_impersonation&redirect_uri=https%3A%2F%2Fapp.opengeni.ai%2Fv1%2Fintegrations%2Foauth%2Fcallback&state=microsoft_admin_consent";
 
-type DynamicsState = "ready" | "required" | "possible" | "connected";
+/** "live" runs the real sign-in path: the window opens and Microsoft refuses. */
+type DynamicsState = "ready" | "required" | "possible" | "connected" | "live";
 
 function dynamicsClient(state: DynamicsState) {
   const ended =
@@ -483,7 +484,7 @@ function dynamicsClient(state: DynamicsState) {
           state: "failed",
           error: {
             code: "admin_consent_required",
-            message: `Your organization requires a Microsoft administrator to approve Opengeni first. Send your administrator this approval link: ${DYNAMICS_APPROVAL_URL} After they approve, connect again.`,
+            message: `Your organization requires a Microsoft administrator to approve this app first. Send your administrator this approval link: ${DYNAMICS_APPROVAL_URL} After they approve, connect again.`,
             retryable: true,
           },
         }
@@ -509,8 +510,28 @@ function dynamicsClient(state: DynamicsState) {
     ...ended,
   };
   const connected = state === "connected";
+  // The attempt sign-in starts, before Microsoft answers.
+  const started = {
+    ...attempt,
+    revision: 1,
+    state: "requires_user_action",
+    nextAction: {
+      type: "authorize",
+      url: "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize?client_id=2b52f1a0-3c32-4103-a554-e6e3f3d483ff",
+    },
+  };
+  delete (started as { error?: unknown }).error;
   const transport = new Proxy(
-    { recover: async () => structuredClone(attempt), get: async () => structuredClone(attempt) },
+    {
+      recover: async () => structuredClone(attempt),
+      get: async () => structuredClone(attempt),
+      ...(state === "live"
+        ? {
+            begin: async () => structuredClone(started),
+            advance: async () => structuredClone(started),
+          }
+        : {}),
+    },
     {
       get(target, key) {
         if (typeof key !== "string") return undefined;
@@ -595,6 +616,7 @@ const DYNAMICS_STATES: { label: string; state: DynamicsState }[] = [
   { label: "Back from Microsoft's \u201cNeed admin approval\u201d page", state: "possible" },
   { label: "Microsoft says only an admin can approve", state: "required" },
   { label: "Connected", state: "connected" },
+  { label: "Live: press Connect; Microsoft refuses in the window", state: "live" },
 ];
 
 export default function ChatConnectSection() {
@@ -634,7 +656,7 @@ export default function ChatConnectSection() {
                 <Card item={dynamics.item} />
               </ChatFrame>
             </StateCell>
-            {/* One dialog at a time: add &dialog=ready|possible|required|connected. */}
+            {/* One dialog at a time: add &dialog=ready|possible|required|connected|live. */}
             {DYNAMICS_STATES.filter(
               (entry) =>
                 typeof window !== "undefined" &&

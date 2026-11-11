@@ -571,10 +571,19 @@ export function useMcpCapabilityConnect({
         signal: pending.signal,
       });
       if (!active() || !result) return;
+      // The controller's view only learns the finished attempt (and the
+      // provider's error, which carries any admin approval link) through recover.
+      const finished = (await controller.recover(result.id).catch(() => null)) ?? result;
+      if (!active()) return;
       setWaiting(false);
       setReconciling(true);
       await reconcile(result, active);
       if (!active()) return;
+      if (finished.state !== "complete" && organizationApprovalFor(finished)) {
+        // The approval panel explains what happened and offers the retry.
+        setRetryFresh(true);
+        return;
+      }
       if (result.state === "cancelled") {
         setNotice(t("sessionMcpCapabilityCard.signInWasCancelledYou"));
         setRetryFresh(true);
@@ -711,7 +720,8 @@ export function useMcpCapabilityConnect({
     waiting,
     reconciling,
     busy,
-    error,
+    /** The approval panel replaces a generic failure message. */
+    error: approval ? null : error,
     notice,
     ownership,
     setOwnership,

@@ -61,7 +61,7 @@ export function microsoftAuthorizationNotGranted(input: {
       state: "failed",
       error: {
         code: "admin_consent_required",
-        message: `Your organization requires a Microsoft administrator to approve Opengeni first. Send your administrator this approval link: ${input.adminConsentUrl} After they approve, connect again.`,
+        message: `Your organization requires a Microsoft administrator to approve this app first. Send your administrator this approval link: ${input.adminConsentUrl} After they approve, connect again.`,
         retryable: true,
       },
     };
