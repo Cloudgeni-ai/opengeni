@@ -444,6 +444,9 @@ import {
   ModalRouterProviderCommand,
   readSkillCatalogContext,
   skillCatalogContextItem,
+  REPOSITORY_SKILLS_CONTEXT_PREFIX,
+  readRepositorySkillsContext,
+  repositorySkillsContextItem,
   WORKSPACE_GOVERNANCE_CONTEXT_PREFIX,
   WORKSPACE_GOVERNANCE_NONE,
   readWorkspaceGovernanceContext,
@@ -44605,6 +44608,14 @@ const SKILL_CATALOG_CHANNEL: SessionContextChannel = {
   item: skillCatalogContextItem,
 };
 
+const REPOSITORY_SKILLS_CHANNEL: SessionContextChannel = {
+  label: "Repository skills",
+  metadataKey: "opengeniRepositorySkillsHistoryId",
+  contentPrefix: REPOSITORY_SKILLS_CONTEXT_PREFIX,
+  read: readRepositorySkillsContext,
+  item: repositorySkillsContextItem,
+};
+
 const WORKSPACE_GOVERNANCE_CHANNEL: SessionContextChannel = {
   label: "Workspace governance",
   metadataKey: "opengeniWorkspaceGovernanceHistoryId",
@@ -44647,6 +44658,41 @@ export async function ensureSessionSkillCatalog(
       { ...scope, text: catalog, ...(omitWhenEmpty ? { omitWhenAbsent: true } : {}) },
       SKILL_CATALOG_CHANNEL,
     )) ?? ""
+  );
+}
+
+/**
+ * Persist the repository Skill index the run discovered in the live
+ * workspace, once per logical turn, as a history item before the turn's first
+ * history item (with that turn's id). Retries reuse the turn's snapshot even
+ * when the workspace changed meanwhile. Nothing is written while the newest
+ * item already shows the same index. Null means this run did not index the
+ * workspace (a deferred run): nothing is written, and the turn keeps what the
+ * model already reads, so a later attempt of the turn cannot add an item
+ * between its requests. Returns the model-visible index, or null when there
+ * is none.
+ *
+ * Discovery runs inside the model run, after this turn's history was loaded,
+ * so the run shows the returned item at the same place itself (see the
+ * runtime's `publishRepositorySkills`).
+ */
+export async function ensureSessionRepositorySkills(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    expectedExecutionGeneration: number;
+    expectedAttemptId: string;
+    index: string | null;
+  },
+): Promise<string | null> {
+  const { index, ...scope } = input;
+  return await ensureSessionContextSnapshot(
+    db,
+    { ...scope, text: index },
+    REPOSITORY_SKILLS_CHANNEL,
   );
 }
 
